@@ -5,6 +5,7 @@ mod estimator;
 mod gate;
 mod pe;
 mod simulator;
+mod world;
 
 // pub enum ConstraintsKind {
 //     // 모든 방향에 영향을 줄 수 있음

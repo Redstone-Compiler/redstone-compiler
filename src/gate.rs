@@ -1,6 +1,7 @@
 use crate::{
     block::Block,
     common::{DimSize, Position, Verifier},
+    world::World,
 };
 
 // 게이트의 종류
@@ -30,5 +31,14 @@ pub struct Gate {
 impl Verifier for Gate {
     fn verify(&self) -> bool {
         todo!()
+    }
+}
+
+impl From<Gate> for World {
+    fn from(value: Gate) -> Self {
+        Self {
+            size: value.size,
+            blocks: value.blocks,
+        }
     }
 }

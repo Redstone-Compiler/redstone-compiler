@@ -1,8 +1,8 @@
 // 위치
-pub struct Position(usize, usize, usize);
+pub struct Position(pub usize, pub usize, pub usize);
 
 // 사이즈
-pub struct DimSize(usize, usize, usize);
+pub struct DimSize(pub usize, pub usize, pub usize);
 
 pub trait Verifier {
     fn verify(&self) -> bool;
