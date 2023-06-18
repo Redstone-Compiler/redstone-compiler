@@ -5,12 +5,12 @@ pub mod gate;
 pub mod world;
 
 // 위치
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct Position(pub usize, pub usize, pub usize);
 
 impl Position {
     pub fn index(&self, size: &DimSize) -> usize {
-        self.0 * size.0 + self.1 * size.1 + self.2 * size.2
+        self.0 + self.1 * size.0 + self.2 * size.0 * size.1
     }
 
     pub fn forwards(&self) -> Vec<Position> {
@@ -35,6 +35,18 @@ impl Position {
         result
     }
 
+    pub fn forwards_except(&self, dir: &Direction) -> Vec<Position> {
+        if let Some(pos) = self.walk(dir) {
+            return self
+                .forwards()
+                .into_iter()
+                .filter(|pos_src| *pos_src != pos)
+                .collect();
+        }
+
+        self.forwards()
+    }
+
     pub fn cardinal(&self) -> Vec<Position> {
         let mut result = vec![
             Position(self.0 + 1, self.1, self.2),
@@ -43,10 +55,6 @@ impl Position {
 
         if self.0 > 0 {
             result.push(Position(self.0 - 1, self.1, self.2));
-        }
-
-        if self.1 > 0 {
-            result.push(Position(self.0, self.1 - 1, self.2));
         }
 
         if self.1 > 0 {

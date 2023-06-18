@@ -20,16 +20,16 @@ impl Direction {
     }
 }
 
+pub type RedstoneStateType = usize;
+
 #[derive(Default, Clone, Debug, Copy)]
 pub enum RedstoneState {
     #[default]
-    None,
-    EastWest,
-    SouthNorth,
-    EastNorth,
-    EastSouth,
-    WestNorth,
-    WestSouth,
+    None = 0,
+    East = 1,
+    West = 2,
+    South = 4,
+    North = 8,
 }
 
 // 블럭의 종류
@@ -38,14 +38,17 @@ pub enum BlockKind {
     #[default]
     Air,
     Cobble {
+        // redstone
         on_count: usize,
+        // repeater, redstone
+        on_base_count: usize,
     },
     Switch {
         is_on: bool,
     },
     Redstone {
         on_count: usize,
-        state: RedstoneState,
+        state: RedstoneStateType,
         strength: usize,
     },
     Torch {
@@ -66,14 +69,26 @@ pub struct Block {
 }
 
 impl Block {
-    pub fn count_up(&mut self) -> eyre::Result<usize> {
+    pub fn count_up(&mut self, is_base: bool) -> eyre::Result<usize> {
         let cnt;
 
         self.kind = match self.kind {
-            BlockKind::Cobble { on_count } => {
+            BlockKind::Cobble {
+                on_count,
+                on_base_count,
+            } => {
                 cnt = on_count + 1;
 
-                BlockKind::Cobble { on_count: cnt }
+                let on_base_count = if is_base {
+                    on_base_count + 1
+                } else {
+                    on_base_count
+                };
+
+                BlockKind::Cobble {
+                    on_count: cnt,
+                    on_base_count,
+                }
             }
             BlockKind::Redstone {
                 on_count,
@@ -94,16 +109,28 @@ impl Block {
         Ok(cnt)
     }
 
-    pub fn count_down(&mut self) -> eyre::Result<usize> {
+    pub fn count_down(&mut self, is_base: bool) -> eyre::Result<usize> {
         let cnt;
 
         self.kind = match self.kind {
-            BlockKind::Cobble { on_count } => {
+            BlockKind::Cobble {
+                on_count,
+                on_base_count,
+            } => {
                 eyre::ensure!(on_count > 0, "On count must higher than zero");
 
                 cnt = on_count - 1;
 
-                BlockKind::Cobble { on_count: cnt }
+                let on_base_count = if is_base {
+                    on_base_count + 1
+                } else {
+                    on_base_count
+                };
+
+                BlockKind::Cobble {
+                    on_count: cnt,
+                    on_base_count,
+                }
             }
             BlockKind::Redstone {
                 on_count,

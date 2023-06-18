@@ -1,6 +1,8 @@
 pub mod circuit;
 pub mod common;
 pub mod estimator;
+pub mod graph;
+pub mod logic;
 pub mod option;
 pub mod simulator;
 pub mod verilog;
@@ -25,6 +27,7 @@ impl CompilerOption {
 }
 
 fn main() {
+    tracing_subscriber::fmt::init();
     let opt = CompilerOption::from_args();
     // println!("{opt:?}");
 }
