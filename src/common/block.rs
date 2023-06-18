@@ -1,8 +1,8 @@
-use crate::{
-    common::{DimSize, Position},
-    world::World,
-};
+use crate::common::{DimSize, Position};
 
+use super::world::World;
+
+#[derive(Debug, Copy, Clone)]
 pub enum Direction {
     None,
     Bottom,
@@ -13,9 +13,16 @@ pub enum Direction {
     North,
 }
 
+impl Direction {
+    pub fn is_cardinal(&self) -> bool {
+        matches!(self, Self::East | Self::West | Self::South | Self::North)
+    }
+}
+
 // 블럭의 종류
 #[derive(Clone, Debug, Copy)]
 pub enum BlockKind {
+    Air,
     Cobble {
         is_on: bool,
     },
@@ -38,9 +45,19 @@ pub enum BlockKind {
 }
 
 // 모든 물리적 소자의 최소 단위
+#[derive(Debug, Copy, Clone)]
 pub struct Block {
     pub kind: BlockKind,
     pub direction: Direction,
+}
+
+impl Default for Block {
+    fn default() -> Self {
+        Self {
+            kind: BlockKind::Air,
+            direction: Direction::None,
+        }
+    }
 }
 
 impl From<Block> for World {

@@ -1,8 +1,4 @@
-use crate::{
-    block::Block,
-    common::{DimSize, Position, Verifier},
-    world::World,
-};
+use super::{block::Block, world::World, DimSize, Position, Verifier};
 
 // 게이트의 종류
 pub enum GateKind {
