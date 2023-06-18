@@ -1,6 +1,12 @@
-use std::{collections::BTreeMap, ops::Index};
+use std::{
+    collections::BTreeMap,
+    ops::{Index, IndexMut},
+};
 
-use crate::common::{DimSize, Position};
+use crate::{
+    common::{DimSize, Position},
+    graph::Graph,
+};
 
 use super::block::Block;
 
@@ -31,9 +37,7 @@ impl<'a> From<&'a World> for World3D {
                     .map(|x| {
                         (0..value.size.1)
                             .map(|y| {
-                                // how to this?
-                                // let pos = (x, y, z) * value.size;
-                                let pos = x * value.size.0 + y * value.size.1 + z * value.size.2;
+                                let pos = x + y * value.size.0 + z * value.size.0 * value.size.1;
 
                                 block_map
                                     .get(&pos)
@@ -58,5 +62,17 @@ impl Index<&Position> for World3D {
 
     fn index(&self, index: &Position) -> &Self::Output {
         &self.map[index.2][index.0][index.1]
+    }
+}
+
+impl IndexMut<&Position> for World3D {
+    fn index_mut(&mut self, index: &Position) -> &mut Self::Output {
+        &mut self.map[index.2][index.0][index.1]
+    }
+}
+
+impl<'a> From<&'a World3D> for Graph {
+    fn from(value: &'a World3D) -> Self {
+        todo!()
     }
 }
