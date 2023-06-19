@@ -1,4 +1,4 @@
-use self::block::Direction;
+use self::block::{Direction, RedstoneState, RedstoneStateType};
 
 pub mod block;
 pub mod gate;
@@ -58,6 +58,29 @@ impl Position {
         }
 
         if self.1 > 0 {
+            result.push(Position(self.0, self.1 - 1, self.2));
+        }
+
+        result
+    }
+
+    pub fn cardinal_redstone(&self, state: RedstoneStateType) -> Vec<Position> {
+        let mut result = Vec::new();
+        let all = state == 0;
+
+        if all || (state & RedstoneState::East as usize) > 0 {
+            result.push(Position(self.0 + 1, self.1, self.2));
+        }
+
+        if all || (self.0 > 0 && (state & RedstoneState::West as usize) > 0) {
+            result.push(Position(self.0 - 1, self.1, self.2));
+        }
+
+        if all || ((state & RedstoneState::North as usize) > 0) {
+            result.push(Position(self.0, self.1 + 1, self.2));
+        }
+
+        if all || (self.1 > 0 && (state & RedstoneState::South as usize) > 0) {
             result.push(Position(self.0, self.1 - 1, self.2));
         }
 

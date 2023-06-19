@@ -15,7 +15,7 @@ enum EventType {
     HardOn,
     HardOff,
     RedstoneOn { strength: usize },
-    RedstoneOff { strength: usize },
+    RedstoneOff,
 }
 
 #[derive(Clone, Debug)]
@@ -27,7 +27,7 @@ struct Event {
 
 #[derive(Clone, Debug)]
 pub struct Simulator {
-    queue: VecDeque<Vec<Event>>,
+    queue: VecDeque<Event>,
     world: World3D,
 }
 
@@ -93,14 +93,34 @@ impl Simulator {
 
             let mut state = 0;
 
+            let has_up_block = matches!(self.world[&pos.up()].kind, BlockKind::Cobble { .. });
+
             pos.cardinal().iter().for_each(|pos_src| {
-                if !matches!(
+                let flat_check = matches!(
                     self.world[pos_src].kind,
                     BlockKind::Redstone { .. }
                         | BlockKind::Repeater { .. }
                         | BlockKind::Switch { .. }
                         | BlockKind::Torch { .. }
-                ) {
+                );
+
+                let up_check = if !has_up_block {
+                    matches!(self.world[&pos_src.up()].kind, BlockKind::Redstone { .. })
+                } else {
+                    false
+                };
+
+                let down_check = if !matches!(self.world[pos_src].kind, BlockKind::Cobble { .. }) {
+                    if let Some(pos) = pos_src.down() {
+                        matches!(self.world[&pos].kind, BlockKind::Redstone { .. })
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+
+                if !flat_check || !(up_check || down_check) {
                     return;
                 }
 
@@ -132,7 +152,7 @@ impl Simulator {
     fn init_torch_event(&mut self, dir: &Direction, pos: &Position) {
         tracing::debug!("produce torch event: {:?}, {:?}", dir, pos);
 
-        self.queue.push_back(
+        self.queue.extend(
             match dir {
                 Direction::Bottom => pos.cardinal(),
                 Direction::East | Direction::West | Direction::South | Direction::North => {
@@ -152,15 +172,14 @@ impl Simulator {
                 event_type: EventType::HardOn,
                 target_position: pos.up(),
                 direction: Direction::None,
-            }))
-            .collect(),
+            })),
         )
     }
 
     fn init_switch_event(&mut self, dir: &Direction, pos: &Position) {
         tracing::debug!("produce switch event: {:?}, {:?}", dir, pos);
 
-        self.queue.push_back(
+        self.queue.extend(
             pos.forwards_except(dir)
                 .into_iter()
                 .map(|pos_src| Event {
@@ -170,52 +189,45 @@ impl Simulator {
                 })
                 .chain(|| -> Option<Event> {
                     let Some(pos) = pos.walk(dir) else {
-                    return None;
-                };
+                        return None;
+                    };
 
                     Some(Event {
                         event_type: EventType::HardOn,
                         target_position: pos,
                         direction: Direction::None,
                     })
-                }())
-                .collect(),
+                }()),
         )
     }
 
     fn init_redstone_block_event(&mut self, pos: &Position) {
         tracing::debug!("produce redstone block event: {:?}", pos);
 
-        self.queue.push_back(
-            pos.forwards()
-                .into_iter()
-                .map(|pos_src| Event {
-                    event_type: EventType::SoftOn,
-                    target_position: pos_src,
-                    direction: pos_src.diff(pos),
-                })
-                .collect(),
-        )
+        self.queue
+            .extend(pos.forwards().into_iter().map(|pos_src| Event {
+                event_type: EventType::SoftOn,
+                target_position: pos_src,
+                direction: pos_src.diff(pos),
+            }))
     }
 
     fn consume_events(&mut self) -> eyre::Result<()> {
-        while let Some(events) = self.queue.pop_front() {
-            for event in &events {
-                tracing::debug!("consume event: {:?}", event);
+        while let Some(event) = self.queue.pop_front() {
+            tracing::debug!("consume event: {:?}", event);
 
-                let mut block = self.world[&event.target_position];
+            let mut block = self.world[&event.target_position];
 
-                match block.kind {
-                    BlockKind::Air | BlockKind::Switch { .. } | BlockKind::RedstoneBlock => (),
-                    BlockKind::Cobble { .. } => {
-                        self.propgate_cobble_event(&mut block, &event)?;
-                    }
-                    BlockKind::Redstone { .. } => {
-                        self.propagate_redstone_event(&mut block, &event)?;
-                    }
-                    BlockKind::Torch { is_on } => todo!(),
-                    BlockKind::Repeater { is_on, is_locked } => todo!(),
+            match block.kind {
+                BlockKind::Air | BlockKind::Switch { .. } | BlockKind::RedstoneBlock => (),
+                BlockKind::Cobble { .. } => {
+                    self.propgate_cobble_event(&mut block, &event)?;
                 }
+                BlockKind::Redstone { .. } => {
+                    self.propagate_redstone_event(&mut block, &event)?;
+                }
+                BlockKind::Torch { is_on } => todo!(),
+                BlockKind::Repeater { is_on, is_locked } => todo!(),
             }
         }
 
@@ -240,12 +252,9 @@ impl Simulator {
                 };
 
                 if (is_hard && on_base_count == 1) || on_count == 1 {
-                    self.queue.push_back(
-                        event
-                            .target_position
-                            .forwards()
-                            .into_iter()
-                            .map(|pos_src| Event {
+                    self.queue
+                        .extend(event.target_position.forwards().into_iter().map(|pos_src| {
+                            Event {
                                 event_type: if is_hard && on_base_count == 1 {
                                     EventType::HardOn
                                 } else {
@@ -253,9 +262,8 @@ impl Simulator {
                                 },
                                 target_position: pos_src,
                                 direction: pos_src.diff(&event.target_position),
-                            })
-                            .collect(),
-                    );
+                            }
+                        }));
 
                     tracing::debug!("produce events: {:?}", self.queue.back());
                 }
@@ -274,23 +282,19 @@ impl Simulator {
                 };
 
                 // propagate event
-                if (is_hard && on_base_count == 1) || on_count == 1 {
-                    self.queue.push_back(
-                        event
-                            .target_position
-                            .forwards()
-                            .into_iter()
-                            .map(|pos_src| Event {
-                                event_type: if is_hard && on_base_count == 1 {
+                if (is_hard && on_base_count == 0) || on_count == 0 {
+                    self.queue
+                        .extend(event.target_position.forwards().into_iter().map(|pos_src| {
+                            Event {
+                                event_type: if is_hard && on_base_count == 0 {
                                     EventType::HardOff
                                 } else {
                                     EventType::SoftOff
                                 },
                                 target_position: pos_src,
                                 direction: pos_src.diff(&event.target_position),
-                            })
-                            .collect(),
-                    );
+                            }
+                        }));
 
                     tracing::debug!("produce events: {:?}", self.queue.back());
                 }
@@ -313,10 +317,42 @@ impl Simulator {
                 let BlockKind::Redstone {
                     on_count,
                     state,
-                    strength,
+                    ..
                 } = block.kind else {
                     unreachable!()
                 };
+
+                if on_count == 1 {
+                    block.kind = BlockKind::Redstone {
+                        on_count,
+                        state,
+                        strength: 15,
+                    };
+
+                    self.queue.extend(
+                        event
+                            .target_position
+                            .cardinal_redstone(state)
+                            .into_iter()
+                            .map(|pos_src| Event {
+                                event_type: EventType::SoftOn,
+                                target_position: pos_src,
+                                direction: pos_src.diff(&event.target_position),
+                            }),
+                    );
+
+                    self.queue.extend(
+                        event
+                            .target_position
+                            .cardinal_redstone(state)
+                            .into_iter()
+                            .map(|pos_src| Event {
+                                event_type: EventType::RedstoneOn { strength: 15 },
+                                target_position: pos_src,
+                                direction: Direction::None,
+                            }),
+                    );
+                }
             }
             EventType::SoftOff | EventType::HardOff => {
                 let is_hard = matches!(event.event_type, EventType::HardOff);
@@ -326,12 +362,94 @@ impl Simulator {
                 let BlockKind::Redstone {
                     on_count,
                     state,
-                    strength,
+                    ..
                 } = block.kind else {
                     unreachable!()
                 };
+
+                if on_count == 0 {
+                    block.kind = BlockKind::Redstone {
+                        on_count,
+                        state,
+                        strength: 0,
+                    };
+
+                    self.queue.extend(
+                        event
+                            .target_position
+                            .cardinal_redstone(state)
+                            .into_iter()
+                            .map(|pos_src| Event {
+                                event_type: EventType::SoftOff,
+                                target_position: pos_src,
+                                direction: pos_src.diff(&event.target_position),
+                            }),
+                    );
+
+                    self.queue.extend(
+                        event
+                            .target_position
+                            .cardinal_redstone(state)
+                            .into_iter()
+                            .map(|pos_src| Event {
+                                event_type: EventType::RedstoneOff,
+                                target_position: pos_src,
+                                direction: Direction::None,
+                            }),
+                    );
+                }
             }
-            EventType::RedstoneOn { strength } | EventType::RedstoneOff { strength } => todo!(),
+            EventType::RedstoneOn { strength } => {
+                block.count_up(false)?;
+
+                let event_strength = strength;
+
+                let BlockKind::Redstone {
+                    on_count,
+                    state,
+                    strength,
+                    ..
+                } = block.kind else {
+                    unreachable!()
+                };
+
+                block.kind = BlockKind::Redstone {
+                    on_count,
+                    state,
+                    strength: strength.max(event_strength - 1),
+                };
+
+                if on_count == 1 {
+                    self.queue.extend(
+                        event
+                            .target_position
+                            .cardinal_redstone(state)
+                            .into_iter()
+                            .map(|pos_src| Event {
+                                event_type: EventType::SoftOn,
+                                target_position: pos_src,
+                                direction: pos_src.diff(&event.target_position),
+                            }),
+                    );
+                }
+
+                if strength != event_strength - 1 {
+                    self.queue.extend(
+                        event
+                            .target_position
+                            .cardinal_redstone(state)
+                            .into_iter()
+                            .map(|pos_src| Event {
+                                event_type: EventType::RedstoneOn {
+                                    strength: strength.max(event_strength - 1) - 1,
+                                },
+                                target_position: pos_src,
+                                direction: Direction::None,
+                            }),
+                    );
+                }
+            }
+            EventType::RedstoneOff => todo!(),
         };
 
         Ok(())
