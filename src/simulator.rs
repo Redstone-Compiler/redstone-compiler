@@ -18,6 +18,20 @@ enum EventType {
     RedstoneOff,
 }
 
+impl EventType {
+    fn is_hard(&self) -> bool {
+        matches!(self, EventType::HardOn | EventType::HardOff)
+    }
+
+    fn is_on(&self) -> bool {
+        matches!(self, EventType::SoftOn | EventType::HardOn)
+    }
+
+    fn is_redstone(&self) -> bool {
+        matches!(self, EventType::RedstoneOn { .. } | EventType::RedstoneOff)
+    }
+}
+
 #[derive(Clone, Debug)]
 struct Event {
     event_type: EventType,
@@ -38,7 +52,7 @@ impl Simulator {
             world: world.into(),
         };
 
-        sim.init_states(world);
+        sim.init_redstone_states(world);
         sim.init(world);
 
         tracing::debug!("queue: {:?}", sim.queue);
@@ -59,18 +73,10 @@ impl Simulator {
     fn init(&mut self, world: &World) {
         for (pos, block) in &world.blocks {
             match block.kind {
-                BlockKind::Torch { is_on } => {
-                    if !is_on {
-                        continue;
-                    }
-
+                BlockKind::Torch { is_on } if is_on => {
                     self.init_torch_event(&block.direction, pos);
                 }
-                BlockKind::Switch { is_on } => {
-                    if !is_on {
-                        continue;
-                    }
-
+                BlockKind::Switch { is_on } if is_on => {
                     self.init_switch_event(&block.direction, pos);
                 }
                 BlockKind::RedstoneBlock => {
@@ -81,7 +87,7 @@ impl Simulator {
         }
     }
 
-    fn init_states(&mut self, world: &World) {
+    fn init_redstone_states(&mut self, world: &World) {
         for (pos, block) in &world.blocks {
             let BlockKind::Redstone {
                 on_count,
@@ -93,34 +99,17 @@ impl Simulator {
 
             let mut state = 0;
 
-            let has_up_block = matches!(self.world[&pos.up()].kind, BlockKind::Cobble { .. });
+            let has_up_block = self.world[&pos.up()].kind.is_cobble();
 
             pos.cardinal().iter().for_each(|pos_src| {
-                let flat_check = matches!(
-                    self.world[pos_src].kind,
-                    BlockKind::Redstone { .. }
-                        | BlockKind::Repeater { .. }
-                        | BlockKind::Switch { .. }
-                        | BlockKind::Torch { .. }
-                );
+                let flat_check = self.world[pos_src].kind.is_stick_to_redstone();
+                let up_check = !has_up_block && self.world[&pos_src.up()].kind.is_redstone();
+                let down_check = !self.world[pos_src].kind.is_cobble()
+                    && pos_src
+                        .down()
+                        .map_or(false, |pos| self.world[&pos].kind.is_redstone());
 
-                let up_check = if !has_up_block {
-                    matches!(self.world[&pos_src.up()].kind, BlockKind::Redstone { .. })
-                } else {
-                    false
-                };
-
-                let down_check = if !matches!(self.world[pos_src].kind, BlockKind::Cobble { .. }) {
-                    if let Some(pos) = pos_src.down() {
-                        matches!(self.world[&pos].kind, BlockKind::Redstone { .. })
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                };
-
-                if !flat_check || !(up_check || down_check) {
+                if !flat_check && !(up_check || down_check) {
                     return;
                 }
 
@@ -134,10 +123,10 @@ impl Simulator {
             });
 
             if state.count_ones() == 1 {
-                if state & (RedstoneState::East as usize | RedstoneState::West as usize) > 0 {
-                    state |= RedstoneState::East as usize | RedstoneState::West as usize;
+                if state & RedstoneState::Horizontal as usize > 0 {
+                    state |= RedstoneState::Horizontal as usize;
                 } else {
-                    state |= RedstoneState::South as usize | RedstoneState::North as usize;
+                    state |= RedstoneState::Vertical as usize;
                 }
             }
 
@@ -152,64 +141,66 @@ impl Simulator {
     fn init_torch_event(&mut self, dir: &Direction, pos: &Position) {
         tracing::debug!("produce torch event: {:?}, {:?}", dir, pos);
 
-        self.queue.extend(
-            match dir {
-                Direction::Bottom => pos.cardinal(),
-                Direction::East | Direction::West | Direction::South | Direction::North => {
-                    let mut positions = pos.cardinal_except(dir);
-                    positions.extend(pos.down());
-                    positions
-                }
-                _ => unreachable!(),
+        let events = match dir {
+            Direction::Bottom => pos.cardinal(),
+            Direction::East | Direction::West | Direction::South | Direction::North => {
+                let mut positions = pos.cardinal_except(dir);
+                positions.extend(pos.down());
+                positions
             }
+            _ => unreachable!(),
+        }
+        .into_iter()
+        .map(|pos_src| Event {
+            event_type: EventType::SoftOn,
+            target_position: pos_src,
+            direction: pos_src.diff(pos),
+        })
+        .chain(Some(Event {
+            event_type: EventType::HardOn,
+            target_position: pos.up(),
+            direction: Direction::None,
+        }));
+
+        self.queue.extend(events);
+    }
+
+    fn init_switch_event(&mut self, dir: &Direction, pos: &Position) {
+        tracing::debug!("produce switch event: {:?}, {:?}", dir, pos);
+
+        let events = pos
+            .forwards_except(dir)
             .into_iter()
             .map(|pos_src| Event {
                 event_type: EventType::SoftOn,
                 target_position: pos_src,
                 direction: pos_src.diff(pos),
             })
-            .chain(Some(Event {
-                event_type: EventType::HardOn,
-                target_position: pos.up(),
-                direction: Direction::None,
-            })),
-        )
-    }
-
-    fn init_switch_event(&mut self, dir: &Direction, pos: &Position) {
-        tracing::debug!("produce switch event: {:?}, {:?}", dir, pos);
-
-        self.queue.extend(
-            pos.forwards_except(dir)
-                .into_iter()
-                .map(|pos_src| Event {
-                    event_type: EventType::SoftOn,
-                    target_position: pos_src,
-                    direction: pos_src.diff(pos),
-                })
-                .chain(|| -> Option<Event> {
-                    let Some(pos) = pos.walk(dir) else {
+            .chain(|| -> Option<Event> {
+                let Some(pos) = pos.walk(dir) else {
                         return None;
                     };
 
-                    Some(Event {
-                        event_type: EventType::HardOn,
-                        target_position: pos,
-                        direction: Direction::None,
-                    })
-                }()),
-        )
+                Some(Event {
+                    event_type: EventType::HardOn,
+                    target_position: pos,
+                    direction: Direction::None,
+                })
+            }());
+
+        self.queue.extend(events);
     }
 
     fn init_redstone_block_event(&mut self, pos: &Position) {
         tracing::debug!("produce redstone block event: {:?}", pos);
 
-        self.queue
-            .extend(pos.forwards().into_iter().map(|pos_src| Event {
-                event_type: EventType::SoftOn,
-                target_position: pos_src,
-                direction: pos_src.diff(pos),
-            }))
+        let events = pos.forwards().into_iter().map(|pos_src| Event {
+            event_type: EventType::SoftOn,
+            target_position: pos_src,
+            direction: pos_src.diff(pos),
+        });
+
+        self.queue.extend(events)
     }
 
     fn consume_events(&mut self) -> eyre::Result<()> {
@@ -237,70 +228,57 @@ impl Simulator {
     fn propgate_cobble_event(&mut self, block: &mut Block, event: &Event) -> eyre::Result<()> {
         tracing::debug!("consume cobble event: {:?}", block);
 
-        match event.event_type {
-            EventType::SoftOn | EventType::HardOn => {
-                let is_hard = matches!(event.event_type, EventType::HardOn);
+        if event.event_type.is_redstone() {
+            return Ok(());
+        }
 
-                block.count_up(is_hard)?;
+        let is_hard = matches!(event.event_type, EventType::HardOn | EventType::HardOff);
 
-                let BlockKind::Cobble {
-                    on_count,
-                    on_base_count,
-                    ..
-                } = block.kind else {
-                    unreachable!()
-                };
+        if event.event_type.is_on() {
+            block.count_up(event.event_type.is_hard())?;
+        } else {
+            block.count_down(event.event_type.is_hard())?;
+        }
 
-                if (is_hard && on_base_count == 1) || on_count == 1 {
-                    self.queue
-                        .extend(event.target_position.forwards().into_iter().map(|pos_src| {
-                            Event {
-                                event_type: if is_hard && on_base_count == 1 {
-                                    EventType::HardOn
-                                } else {
-                                    EventType::SoftOn
-                                },
-                                target_position: pos_src,
-                                direction: pos_src.diff(&event.target_position),
-                            }
-                        }));
-
-                    tracing::debug!("produce events: {:?}", self.queue.back());
-                }
-            }
-            EventType::SoftOff | EventType::HardOff => {
-                let is_hard = matches!(event.event_type, EventType::HardOff);
-
-                block.count_down(is_hard)?;
-
-                let BlockKind::Cobble {
-                    on_count,
-                    on_base_count,
-                    ..
-                } = block.kind else {
-                    unreachable!()
-                };
-
-                // propagate event
-                if (is_hard && on_base_count == 0) || on_count == 0 {
-                    self.queue
-                        .extend(event.target_position.forwards().into_iter().map(|pos_src| {
-                            Event {
-                                event_type: if is_hard && on_base_count == 0 {
-                                    EventType::HardOff
-                                } else {
-                                    EventType::SoftOff
-                                },
-                                target_position: pos_src,
-                                direction: pos_src.diff(&event.target_position),
-                            }
-                        }));
-
-                    tracing::debug!("produce events: {:?}", self.queue.back());
-                }
-            }
-            _ => (),
+        let BlockKind::Cobble {
+            on_count,
+            on_base_count,
+            ..
+        } = block.kind else {
+            unreachable!()
         };
+
+        let count_condition = if event.event_type.is_on() { 1 } else { 0 };
+
+        if !((is_hard && on_base_count == count_condition) || on_count == count_condition) {
+            return Ok(());
+        }
+
+        let events = event
+            .target_position
+            .forwards()
+            .into_iter()
+            .map(|pos_src| Event {
+                event_type: if is_hard && on_base_count == count_condition {
+                    if event.event_type.is_on() {
+                        EventType::HardOn
+                    } else {
+                        EventType::HardOff
+                    }
+                } else {
+                    if event.event_type.is_on() {
+                        EventType::SoftOn
+                    } else {
+                        EventType::SoftOff
+                    }
+                },
+                target_position: pos_src,
+                direction: pos_src.diff(&event.target_position),
+            });
+
+        self.queue.extend(events);
+
+        tracing::debug!("produce events: {:?}", self.queue.back());
 
         Ok(())
     }
@@ -496,7 +474,7 @@ mod test {
             world: (&mock_world).into(),
         };
 
-        sim.init_states(&mock_world);
+        sim.init_redstone_states(&mock_world);
 
         let BlockKind::Redstone { state, .. } = sim.world.map[0][1][1].kind else {
             unreachable!();

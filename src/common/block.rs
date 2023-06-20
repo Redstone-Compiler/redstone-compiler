@@ -30,6 +30,8 @@ pub enum RedstoneState {
     West = 2,
     South = 4,
     North = 8,
+    Horizontal = 1 | 2,
+    Vertical = 4 | 8,
 }
 
 // 블럭의 종류
@@ -59,6 +61,27 @@ pub enum BlockKind {
         is_locked: bool,
     },
     RedstoneBlock,
+}
+
+impl BlockKind {
+    pub fn is_stick_to_redstone(&self) -> bool {
+        matches!(
+            self,
+            BlockKind::Redstone { .. }
+                | BlockKind::Repeater { .. }
+                | BlockKind::Switch { .. }
+                | BlockKind::Torch { .. }
+                | BlockKind::RedstoneBlock
+        )
+    }
+
+    pub fn is_redstone(&self) -> bool {
+        matches!(self, BlockKind::Redstone { .. })
+    }
+
+    pub fn is_cobble(&self) -> bool {
+        matches!(self, BlockKind::Cobble { .. })
+    }
 }
 
 // 모든 물리적 소자의 최소 단위
