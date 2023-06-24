@@ -302,7 +302,7 @@ impl Simulator {
 
         tracing::info!("trigger cobble event: {event:?}, {block:?}");
 
-        let events = event
+        event
             .target_position
             .forwards()
             .into_iter()
@@ -322,14 +322,10 @@ impl Simulator {
                 },
                 target_position: pos_src,
                 direction: pos_src.diff(&event.target_position),
+            })
+            .for_each(|event| {
+                self.push_event_to_current_tick(event);
             });
-
-        self.queue
-            .back_mut()
-            .unwrap()
-            .extend(events.borrow().clone().collect::<VecDeque<_>>());
-
-        tracing::debug!("produce events: {:?}", events.collect::<Vec<_>>());
 
         Ok(())
     }
@@ -386,7 +382,7 @@ impl Simulator {
                     tracing::info!("trigger redstone event: {event:?}, {block:?}");
 
                     propagate_targets.into_iter().for_each(|pos| {
-                        self.push_event_to_next_tick(Event {
+                        self.push_event_to_current_tick(Event {
                             event_type: EventType::SoftOn,
                             target_position: pos,
                             direction: pos.diff(&event.target_position),
@@ -417,7 +413,7 @@ impl Simulator {
                     tracing::info!("trigger redstone event: {event:?}, {block:?}");
 
                     propagate_targets.into_iter().for_each(|pos| {
-                        self.push_event_to_next_tick(Event {
+                        self.push_event_to_current_tick(Event {
                             event_type: EventType::SoftOff,
                             target_position: pos,
                             direction: pos.diff(&event.target_position),
@@ -446,7 +442,7 @@ impl Simulator {
 
                     propagate_targets.into_iter().for_each(|pos| {
                         if !self.world[&pos].kind.is_redstone() {
-                            self.push_event_to_next_tick(Event {
+                            self.push_event_to_current_tick(Event {
                                 event_type: EventType::SoftOn,
                                 target_position: pos,
                                 direction: pos.diff(&event.target_position),
@@ -479,7 +475,7 @@ impl Simulator {
 
                     propagate_targets.into_iter().for_each(|pos| {
                         if !self.world[&pos].kind.is_redstone() {
-                            self.push_event_to_next_tick(Event {
+                            self.push_event_to_current_tick(Event {
                                 event_type: EventType::SoftOff,
                                 target_position: pos,
                                 direction: pos.diff(&event.target_position),
@@ -495,7 +491,7 @@ impl Simulator {
                 } else {
                     propagate_targets.into_iter().for_each(|pos| {
                         if !self.world[&pos].kind.is_redstone() {
-                            self.push_event_to_next_tick(Event {
+                            self.push_event_to_current_tick(Event {
                                 event_type: EventType::SoftOn,
                                 target_position: pos,
                                 direction: pos.diff(&event.target_position),
@@ -970,6 +966,36 @@ mod test {
             unreachable!();
         };
 
-        assert_eq!(strength, 0)
+        assert_eq!(strength, 0);
+
+        sim.queue.push_back(VecDeque::new());
+
+        let pos = Position(0, 0, 0);
+        let dir = &Direction::North;
+
+        pos.forwards_except(dir)
+            .into_iter()
+            .map(|pos_src| Event {
+                event_type: EventType::TorchOff,
+                target_position: pos_src,
+                direction: pos_src.diff(&pos),
+            })
+            .chain(|| -> Option<Event> {
+                let Some(pos) = pos.walk(dir) else {
+                    return None;
+                };
+
+                Some(Event {
+                    event_type: EventType::HardOff,
+                    target_position: pos,
+                    direction: Direction::None,
+                })
+            }())
+            .for_each(|event| {
+                sim.push_event_to_next_tick(event);
+            });
+
+        sim.change_state(Vec::new());
+        sim.run().unwrap();
     }
 }
