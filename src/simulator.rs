@@ -14,6 +14,8 @@ enum EventType {
     // targeting block
     HardOn,
     HardOff,
+    TorchOn,
+    TorchOff,
     RedstoneOn { strength: usize },
     RedstoneOff,
     RepeaterOn { delay: usize },
@@ -55,6 +57,8 @@ impl Simulator {
             world: world.into(),
             cycle: 0,
         };
+
+        tracing::info!("Simulation target\n{:?}", sim.world);
 
         sim.queue.push_back(VecDeque::new());
         sim.init_redstone_states(world);
@@ -174,11 +178,14 @@ impl Simulator {
             _ => unreachable!(),
         }
         .into_iter()
-        .map(|pos_src| Event {
-            event_type: EventType::SoftOn,
-            target_position: pos_src,
-            direction: pos_src.diff(pos),
+        .map(|pos_src| {
+            vec![Event {
+                event_type: EventType::TorchOn,
+                target_position: pos_src,
+                direction: pos_src.diff(pos),
+            }]
         })
+        .flatten()
         .chain(Some(Event {
             event_type: EventType::HardOn,
             target_position: pos.up(),
@@ -244,7 +251,9 @@ impl Simulator {
                 BlockKind::Redstone { .. } => {
                     self.propagate_redstone_event(&mut block, &event)?;
                 }
-                BlockKind::Torch { is_on } => todo!(),
+                BlockKind::Torch { .. } => {
+                    self.propgate_torch_event(&mut block, &event)?;
+                }
                 BlockKind::Repeater { .. } => {
                     self.propgate_repeater_event(&mut block, &event)?;
                 }
@@ -356,11 +365,11 @@ impl Simulator {
         }
 
         match event.event_type {
-            EventType::SoftOff
-            | EventType::SoftOn
+            EventType::SoftOn
+            | EventType::SoftOff
             | EventType::RepeaterOn { .. }
             | EventType::RepeaterOff { .. } => {}
-            EventType::HardOn => {
+            EventType::TorchOn | EventType::HardOn => {
                 let BlockKind::Redstone {
                     on_count,
                     strength,
@@ -391,7 +400,7 @@ impl Simulator {
                     });
                 }
             }
-            EventType::HardOff => {
+            EventType::TorchOff | EventType::HardOff => {
                 let BlockKind::Redstone {
                     on_count,
                     strength,
@@ -432,10 +441,18 @@ impl Simulator {
                     eyre::bail!("unreachable");
                 };
 
-                if event_strength > *strength {
+                if event_strength > *strength && *strength > 0 {
                     *strength = event_strength;
 
                     propagate_targets.into_iter().for_each(|pos| {
+                        if !self.world[&pos].kind.is_redstone() {
+                            self.push_event_to_next_tick(Event {
+                                event_type: EventType::SoftOn,
+                                target_position: pos,
+                                direction: pos.diff(&event.target_position),
+                            });
+                        }
+
                         self.push_event_to_current_tick(Event {
                             event_type: EventType::RedstoneOn {
                                 strength: *strength - 1,
@@ -461,6 +478,14 @@ impl Simulator {
                     *strength = 0;
 
                     propagate_targets.into_iter().for_each(|pos| {
+                        if !self.world[&pos].kind.is_redstone() {
+                            self.push_event_to_next_tick(Event {
+                                event_type: EventType::SoftOff,
+                                target_position: pos,
+                                direction: pos.diff(&event.target_position),
+                            });
+                        }
+
                         self.push_event_to_current_tick(Event {
                             event_type: EventType::RedstoneOff,
                             target_position: pos,
@@ -469,6 +494,14 @@ impl Simulator {
                     });
                 } else {
                     propagate_targets.into_iter().for_each(|pos| {
+                        if !self.world[&pos].kind.is_redstone() {
+                            self.push_event_to_next_tick(Event {
+                                event_type: EventType::SoftOn,
+                                target_position: pos,
+                                direction: pos.diff(&event.target_position),
+                            });
+                        }
+
                         self.push_event_to_current_tick(Event {
                             event_type: EventType::RedstoneOn { strength: 14 },
                             target_position: pos,
@@ -480,6 +513,65 @@ impl Simulator {
                 tracing::info!("trigger redstone event: {event:?}, {block:?}");
             }
         };
+
+        Ok(())
+    }
+
+    fn propgate_torch_event(&mut self, block: &mut Block, event: &Event) -> eyre::Result<()> {
+        tracing::debug!("consume torch event: {:?}", block);
+
+        // Cobble로부터 온 이벤트가 아닌 경우
+        if !self.world[&event.target_position.walk(&event.direction).unwrap()]
+            .kind
+            .is_cobble()
+        {
+            return Ok(());
+        }
+
+        // Cobble에 붙어있지 않은 경우
+        if event.direction != block.direction {
+            return Ok(());
+        }
+
+        let BlockKind::Torch { is_on } = &mut block.kind else {
+            eyre::bail!("unreachable");
+        };
+
+        *is_on = !event.event_type.is_on();
+
+        match block.direction {
+            Direction::Bottom => event.target_position.cardinal(),
+            Direction::East | Direction::West | Direction::South | Direction::North => {
+                let mut positions = event.target_position.cardinal_except(&block.direction);
+                positions.extend(event.target_position.down());
+                positions
+            }
+            _ => unreachable!(),
+        }
+        .into_iter()
+        .map(|pos_src| Event {
+            event_type: if *is_on {
+                EventType::TorchOn
+            } else {
+                EventType::TorchOff
+            },
+            target_position: pos_src,
+            direction: pos_src.diff(&event.target_position),
+        })
+        .chain(Some(Event {
+            event_type: if *is_on {
+                EventType::HardOn
+            } else {
+                EventType::HardOff
+            },
+            target_position: event.target_position.up(),
+            direction: Direction::None,
+        }))
+        .for_each(|event| {
+            self.push_event_to_next_tick(event);
+        });
+
+        tracing::info!("trigger torch event: {event:?}, {block:?}");
 
         Ok(())
     }
@@ -507,7 +599,10 @@ impl Simulator {
 
         loop {
             match event.event_type {
-                EventType::SoftOn | EventType::HardOn | EventType::RedstoneOn { .. } => {
+                EventType::SoftOn
+                | EventType::HardOn
+                | EventType::TorchOn
+                | EventType::RedstoneOn { .. } => {
                     if is_on {
                         break;
                     }
@@ -526,7 +621,10 @@ impl Simulator {
                         direction: event.direction,
                     });
                 }
-                EventType::SoftOff | EventType::HardOff | EventType::RedstoneOff => {
+                EventType::SoftOff
+                | EventType::HardOff
+                | EventType::TorchOff
+                | EventType::RedstoneOff => {
                     if !is_on {
                         break;
                     }
@@ -629,6 +727,8 @@ mod test {
 
     #[test]
     pub fn unittest_simulator_init_states() {
+        tracing_subscriber::fmt::init();
+
         let default_restone = Block {
             kind: BlockKind::Redstone {
                 on_count: 0,
@@ -807,5 +907,69 @@ mod test {
         };
 
         assert_eq!(strength, 14)
+    }
+
+    #[test]
+    pub fn unittest_simulator_torch() {
+        tracing_subscriber::fmt::init();
+
+        let default_restone = Block {
+            kind: BlockKind::Redstone {
+                on_count: 0,
+                state: 0,
+                strength: 0,
+            },
+            direction: Default::default(),
+        };
+
+        let default_cobble = Block {
+            kind: BlockKind::Cobble {
+                on_count: 0,
+                on_base_count: 0,
+            },
+            direction: Default::default(),
+        };
+
+        let mock_world = World {
+            size: DimSize(7, 4, 2),
+            blocks: vec![
+                (Position(0, 1, 0), default_restone.clone()),
+                (Position(0, 2, 0), default_cobble.clone()),
+                (
+                    Position(1, 2, 0),
+                    Block {
+                        kind: BlockKind::Torch { is_on: true },
+                        direction: Direction::West,
+                    },
+                ),
+                (Position(2, 2, 0), default_restone.clone()),
+                (Position(3, 2, 0), default_cobble.clone()),
+                (
+                    Position(4, 2, 0),
+                    Block {
+                        kind: BlockKind::Torch { is_on: true },
+                        direction: Direction::West,
+                    },
+                ),
+                (Position(5, 2, 0), default_restone.clone()),
+                (
+                    Position(0, 0, 0),
+                    Block {
+                        kind: BlockKind::Switch { is_on: true },
+                        direction: Direction::North,
+                    },
+                ),
+            ],
+        };
+
+        let mut sim = Simulator::from(&mock_world).unwrap();
+
+        sim.run().unwrap();
+
+        let BlockKind::Redstone { strength, .. } = sim.world.map[0][2][2].kind else {
+            unreachable!();
+        };
+
+        assert_eq!(strength, 0)
     }
 }
