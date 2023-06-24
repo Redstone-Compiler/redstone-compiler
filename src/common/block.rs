@@ -2,7 +2,7 @@ use crate::common::{DimSize, Position};
 
 use super::world::World;
 
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Direction {
     #[default]
     None,
@@ -17,6 +17,30 @@ pub enum Direction {
 impl Direction {
     pub fn is_cardinal(&self) -> bool {
         matches!(self, Self::East | Self::West | Self::South | Self::North)
+    }
+
+    pub fn is_othogonal_plane(&self, other: Direction) -> bool {
+        if matches!(self, Self::East | Self::West) {
+            return matches!(other, Self::South | Self::North);
+        }
+
+        if matches!(self, Self::South | Self::North) {
+            return matches!(other, Self::East | Self::West);
+        }
+
+        false
+    }
+
+    pub fn inverse(&self) -> Self {
+        match self {
+            Direction::None => Self::None,
+            Direction::Bottom => Self::Top,
+            Direction::Top => Self::Bottom,
+            Direction::East => Self::West,
+            Direction::West => Self::East,
+            Direction::South => Self::North,
+            Direction::North => Self::South,
+        }
     }
 }
 
@@ -59,6 +83,7 @@ pub enum BlockKind {
     Repeater {
         is_on: bool,
         is_locked: bool,
+        delay: usize,
     },
     RedstoneBlock,
 }
@@ -82,6 +107,44 @@ impl BlockKind {
     pub fn is_cobble(&self) -> bool {
         matches!(self, BlockKind::Cobble { .. })
     }
+
+    pub fn get_redstone_strength(&self) -> eyre::Result<usize> {
+        let BlockKind::Redstone { strength, .. } = self else {
+            eyre::bail!("unreachable");
+        };
+
+        Ok(*strength)
+    }
+
+    pub fn set_redstone_strength(&mut self, value: usize) -> eyre::Result<()> {
+        let BlockKind::Redstone { strength, .. } = self else {
+            eyre::bail!("unreachable");
+        };
+
+        *strength = value;
+
+        Ok(())
+    }
+
+    pub fn set_repeater_state(&mut self, value: bool) -> eyre::Result<()> {
+        let BlockKind::Repeater { is_on, .. } = self else {
+            eyre::bail!("unreachable");
+        };
+
+        *is_on = value;
+
+        Ok(())
+    }
+
+    pub fn set_repeater_lock(&mut self, value: bool) -> eyre::Result<()> {
+        let BlockKind::Repeater { is_locked, .. } = self else {
+            eyre::bail!("unreachable");
+        };
+
+        *is_locked = value;
+
+        Ok(())
+    }
 }
 
 // 모든 물리적 소자의 최소 단위
@@ -102,15 +165,13 @@ impl Block {
             } => {
                 cnt = on_count + 1;
 
-                let on_base_count = if is_base {
-                    on_base_count + 1
-                } else {
-                    on_base_count
-                };
-
                 BlockKind::Cobble {
                     on_count: cnt,
-                    on_base_count,
+                    on_base_count: if is_base {
+                        on_base_count + 1
+                    } else {
+                        on_base_count
+                    },
                 }
             }
             BlockKind::Redstone {
@@ -144,15 +205,13 @@ impl Block {
 
                 cnt = on_count - 1;
 
-                let on_base_count = if is_base {
-                    on_base_count + 1
-                } else {
-                    on_base_count
-                };
-
                 BlockKind::Cobble {
                     on_count: cnt,
-                    on_base_count,
+                    on_base_count: if is_base {
+                        on_base_count + 1
+                    } else {
+                        on_base_count
+                    },
                 }
             }
             BlockKind::Redstone {

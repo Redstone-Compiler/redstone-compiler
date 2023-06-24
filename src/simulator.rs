@@ -1,7 +1,7 @@
-use std::collections::VecDeque;
+use std::{borrow::Borrow, collections::VecDeque};
 
 use crate::common::{
-    block::{Block, BlockKind, Direction, RedstoneState, RedstoneStateType},
+    block::{Block, BlockKind, Direction, RedstoneState},
     world::{World, World3D},
     Position,
 };
@@ -16,6 +16,8 @@ enum EventType {
     HardOff,
     RedstoneOn { strength: usize },
     RedstoneOff,
+    RepeaterOn { delay: usize },
+    RepeaterOff { delay: usize },
 }
 
 impl EventType {
@@ -41,8 +43,9 @@ struct Event {
 
 #[derive(Clone, Debug)]
 pub struct Simulator {
-    queue: VecDeque<Event>,
+    queue: VecDeque<VecDeque<Event>>,
     world: World3D,
+    cycle: usize,
 }
 
 impl Simulator {
@@ -50,24 +53,44 @@ impl Simulator {
         let mut sim = Self {
             queue: VecDeque::new(),
             world: world.into(),
+            cycle: 0,
         };
 
+        sim.queue.push_back(VecDeque::new());
         sim.init_redstone_states(world);
         sim.init(world);
 
         tracing::debug!("queue: {:?}", sim.queue);
 
-        while !sim.is_empty() {
-            sim.consume_events()?;
-        }
+        sim.consume_events()?;
 
         Ok(sim)
     }
 
     pub fn change_state(&mut self, states: Vec<(Position, bool)>) {}
 
+    pub fn run(&mut self) -> eyre::Result<usize> {
+        let mut local_cycle = 0;
+
+        while !self.queue.is_empty() {
+            self.consume_events()?;
+            local_cycle += 1;
+            tracing::info!("simulator cycle: {local_cycle}/{}", self.cycle);
+        }
+
+        Ok(local_cycle)
+    }
+
     pub fn is_empty(&mut self) -> bool {
         self.queue.is_empty()
+    }
+
+    fn push_event_to_current_tick(&mut self, event: Event) {
+        self.queue.front_mut().unwrap().push_back(event);
+    }
+
+    fn push_event_to_next_tick(&mut self, event: Event) {
+        self.queue.back_mut().unwrap().push_back(event);
     }
 
     fn init(&mut self, world: &World) {
@@ -162,7 +185,7 @@ impl Simulator {
             direction: Direction::None,
         }));
 
-        self.queue.extend(events);
+        self.queue[0].extend(events);
     }
 
     fn init_switch_event(&mut self, dir: &Direction, pos: &Position) {
@@ -178,8 +201,8 @@ impl Simulator {
             })
             .chain(|| -> Option<Event> {
                 let Some(pos) = pos.walk(dir) else {
-                        return None;
-                    };
+                    return None;
+                };
 
                 Some(Event {
                     event_type: EventType::HardOn,
@@ -188,7 +211,7 @@ impl Simulator {
                 })
             }());
 
-        self.queue.extend(events);
+        self.queue[0].extend(events);
     }
 
     fn init_redstone_block_event(&mut self, pos: &Position) {
@@ -200,11 +223,15 @@ impl Simulator {
             direction: pos_src.diff(pos),
         });
 
-        self.queue.extend(events)
+        self.queue[0].extend(events)
     }
 
     fn consume_events(&mut self) -> eyre::Result<()> {
-        while let Some(event) = self.queue.pop_front() {
+        self.cycle += 1;
+
+        self.queue.push_back(VecDeque::new());
+
+        while let Some(event) = self.queue.front_mut().unwrap().pop_front() {
             tracing::debug!("consume event: {:?}", event);
 
             let mut block = self.world[&event.target_position];
@@ -215,11 +242,19 @@ impl Simulator {
                     self.propgate_cobble_event(&mut block, &event)?;
                 }
                 BlockKind::Redstone { .. } => {
-                    self.propagate_redstone_event(&mut block, &event)?;
+                    // self.propagate_redstone_event(&mut block, &event)?;
                 }
                 BlockKind::Torch { is_on } => todo!(),
-                BlockKind::Repeater { is_on, is_locked } => todo!(),
+                BlockKind::Repeater { .. } => {
+                    self.propgate_repeater_event(&mut block, &event)?;
+                }
             }
+        }
+
+        self.queue.pop_front();
+
+        if self.queue.back().unwrap().is_empty() {
+            self.queue.pop_back();
         }
 
         Ok(())
@@ -254,6 +289,8 @@ impl Simulator {
             return Ok(());
         }
 
+        tracing::info!("trigger cobble event: {:?}", block);
+
         let events = event
             .target_position
             .forwards()
@@ -276,9 +313,12 @@ impl Simulator {
                 direction: pos_src.diff(&event.target_position),
             });
 
-        self.queue.extend(events);
+        self.queue
+            .back_mut()
+            .unwrap()
+            .extend(events.borrow().clone().collect::<VecDeque<_>>());
 
-        tracing::debug!("produce events: {:?}", self.queue.back());
+        tracing::debug!("produce events: {:?}", events.collect::<Vec<_>>());
 
         Ok(())
     }
@@ -286,11 +326,91 @@ impl Simulator {
     fn propagate_redstone_event(&mut self, block: &mut Block, event: &Event) -> eyre::Result<()> {
         tracing::debug!("consume redstone event: {:?}", block);
 
-        match event.event_type {
-            EventType::SoftOn | EventType::HardOn => {
-                let is_hard = matches!(event.event_type, EventType::HardOn);
+        /*if !event.event_type.is_redstone() {
+            if event.event_type.is_on() {
+                block.count_up(event.event_type.is_hard())?;
+            } else {
+                block.count_down(event.event_type.is_hard())?;
+            }
+        } else {
+            block.count_up(false)?;
+        }
 
-                block.count_up(is_hard)?;
+        let BlockKind::Redstone {
+            on_count,
+            state,
+            strength,
+        } = block.kind else {
+            unreachable!()
+        };
+
+        let current_strength = strength;
+        let event_strength = match event.event_type {
+            EventType::RedstoneOn { strength } => strength,
+            _ => unreachable!(),
+        };
+
+        let count_condition = if event.event_type.is_on() { 1 } else { 0 };
+
+        if on_count == count_condition {
+            let next_strength = match event.event_type {
+                EventType::SoftOff | EventType::HardOn => 15,
+                EventType::SoftOn | EventType::HardOff => 0,
+                EventType::RedstoneOn { strength } => current_strength.max(strength - 1),
+                EventType::RedstoneOff => todo!(),
+            };
+
+            match block.kind {
+                BlockKind::Redstone {
+                    ref mut strength, ..
+                } => *strength = next_strength,
+                _ => unreachable!(),
+            };
+
+            self.queue.extend(
+                event
+                    .target_position
+                    .cardinal_redstone(state)
+                    .into_iter()
+                    .map(|pos_src| Event {
+                        event_type: if event.event_type.is_on() {
+                            EventType::SoftOn
+                        } else {
+                            EventType::SoftOff
+                        },
+                        target_position: pos_src,
+                        direction: pos_src.diff(&event.target_position),
+                    }),
+            );
+        }
+
+        if !event.event_type.is_redstone() || strength != event_strength - 1 {
+            self.queue.extend(
+                event
+                    .target_position
+                    .cardinal_redstone(state)
+                    .into_iter()
+                    .map(|pos_src| Event {
+                        event_type: if event.event_type.is_on() {
+                            EventType::RedstoneOn {
+                                strength: if event.event_type.is_redstone() {
+                                    strength.max(event_strength - 1) - 1
+                                } else {
+                                    15
+                                },
+                            }
+                        } else {
+                            EventType::RedstoneOff
+                        },
+                        target_position: pos_src,
+                        direction: Direction::None,
+                    }),
+            );
+        }*/
+
+        /*match event.event_type {
+            EventType::SoftOn | EventType::HardOn => {
+                block.count_up(event.event_type.is_hard())?;
 
                 let BlockKind::Redstone {
                     on_count,
@@ -301,13 +421,9 @@ impl Simulator {
                 };
 
                 if on_count == 1 {
-                    block.kind = BlockKind::Redstone {
-                        on_count,
-                        state,
-                        strength: 15,
-                    };
+                    block.kind.set_redstone_strength(15)?;
 
-                    self.queue.extend(
+                    self.queue.back().unwrap().extend(
                         event
                             .target_position
                             .cardinal_redstone(state)
@@ -319,7 +435,7 @@ impl Simulator {
                             }),
                     );
 
-                    self.queue.extend(
+                    self.queue.back().unwrap().extend(
                         event
                             .target_position
                             .cardinal_redstone(state)
@@ -333,9 +449,7 @@ impl Simulator {
                 }
             }
             EventType::SoftOff | EventType::HardOff => {
-                let is_hard = matches!(event.event_type, EventType::HardOff);
-
-                block.count_down(is_hard)?;
+                block.count_down(event.event_type.is_hard())?;
 
                 let BlockKind::Redstone {
                     on_count,
@@ -346,13 +460,9 @@ impl Simulator {
                 };
 
                 if on_count == 0 {
-                    block.kind = BlockKind::Redstone {
-                        on_count,
-                        state,
-                        strength: 0,
-                    };
+                    block.kind.set_redstone_strength(0)?;
 
-                    self.queue.extend(
+                    self.queue.back().unwrap().extend(
                         event
                             .target_position
                             .cardinal_redstone(state)
@@ -364,7 +474,7 @@ impl Simulator {
                             }),
                     );
 
-                    self.queue.extend(
+                    self.queue.back().unwrap().extend(
                         event
                             .target_position
                             .cardinal_redstone(state)
@@ -391,14 +501,12 @@ impl Simulator {
                     unreachable!()
                 };
 
-                block.kind = BlockKind::Redstone {
-                    on_count,
-                    state,
-                    strength: strength.max(event_strength - 1),
-                };
+                block
+                    .kind
+                    .set_redstone_strength(strength.max(event_strength - 1))?;
 
                 if on_count == 1 {
-                    self.queue.extend(
+                    self.queue.back().unwrap().extend(
                         event
                             .target_position
                             .cardinal_redstone(state)
@@ -412,7 +520,7 @@ impl Simulator {
                 }
 
                 if strength != event_strength - 1 {
-                    self.queue.extend(
+                    self.queue.back().unwrap().extend(
                         event
                             .target_position
                             .cardinal_redstone(state)
@@ -427,8 +535,142 @@ impl Simulator {
                     );
                 }
             }
-            EventType::RedstoneOff => todo!(),
+            _ => todo!(),
+        };*/
+
+        Ok(())
+    }
+
+    fn propgate_repeater_event(&mut self, block: &mut Block, event: &Event) -> eyre::Result<()> {
+        tracing::debug!("consume repeater event: {:?}", block);
+
+        let BlockKind::Repeater {
+            is_on,
+            is_locked,
+            delay
+        } = block.kind else {
+            unreachable!()
         };
+
+        let lock_signal = event.direction.is_othogonal_plane(block.direction);
+
+        if event.direction != block.direction && !lock_signal {
+            return Ok(());
+        }
+
+        if event.direction == block.direction && is_locked {
+            return Ok(());
+        }
+
+        loop {
+            match event.event_type {
+                EventType::SoftOn | EventType::HardOn | EventType::RedstoneOn { .. } => {
+                    if is_on {
+                        break;
+                    }
+
+                    if lock_signal {
+                        block.kind.set_repeater_lock(true)?;
+
+                        tracing::info!("trigger repeater event: {:?}", block);
+
+                        break;
+                    }
+
+                    self.push_event_to_next_tick(Event {
+                        event_type: EventType::RepeaterOn { delay: delay },
+                        target_position: event.target_position,
+                        direction: event.direction,
+                    });
+                }
+                EventType::SoftOff | EventType::HardOff | EventType::RedstoneOff => {
+                    if !is_on {
+                        break;
+                    }
+
+                    if lock_signal {
+                        block.kind.set_repeater_lock(false)?;
+
+                        tracing::info!("trigger repeater event: {:?}", block);
+
+                        break;
+                    }
+
+                    self.push_event_to_next_tick(Event {
+                        event_type: EventType::RepeaterOff { delay: delay },
+                        target_position: event.target_position,
+                        direction: event.direction,
+                    });
+                }
+                EventType::RepeaterOn { delay } => {
+                    if delay != 0 {
+                        self.push_event_to_next_tick(Event {
+                            event_type: EventType::RepeaterOn { delay: delay - 1 },
+                            target_position: event.target_position,
+                            direction: event.direction,
+                        });
+                        break;
+                    }
+
+                    block.kind.set_repeater_state(true)?;
+
+                    // propagate
+                    let walk = event.target_position.walk(&event.direction.inverse());
+
+                    if let Some(pos) = walk {
+                        self.push_event_to_next_tick(Event {
+                            event_type: EventType::HardOn,
+                            target_position: pos,
+                            direction: pos.diff(&event.target_position),
+                        });
+                    }
+
+                    if let Some(pos) = walk.map(|pos| pos.down()).flatten() {
+                        self.push_event_to_next_tick(Event {
+                            event_type: EventType::SoftOn,
+                            target_position: pos,
+                            direction: Direction::Bottom,
+                        });
+                    }
+
+                    tracing::info!("trigger repeater event: {:?}", block);
+                }
+                EventType::RepeaterOff { delay } => {
+                    if delay != 0 {
+                        self.push_event_to_next_tick(Event {
+                            event_type: EventType::RepeaterOff { delay: delay - 1 },
+                            target_position: event.target_position,
+                            direction: event.direction,
+                        });
+                        break;
+                    }
+
+                    block.kind.set_repeater_state(false)?;
+
+                    let walk = event.target_position.walk(&event.direction.inverse());
+
+                    if let Some(pos) = walk {
+                        self.push_event_to_next_tick(Event {
+                            event_type: EventType::HardOff,
+                            target_position: pos,
+                            direction: pos.diff(&event.target_position),
+                        });
+                    }
+
+                    if let Some(pos) = walk.map(|pos| pos.down()).flatten() {
+                        self.push_event_to_next_tick(Event {
+                            event_type: EventType::SoftOff,
+                            target_position: pos,
+                            direction: Direction::Bottom,
+                        });
+                    }
+
+                    tracing::info!("trigger repeater event: {:?}", block);
+                }
+            }
+
+            break;
+        }
 
         Ok(())
     }
@@ -472,6 +714,7 @@ mod test {
         let mut sim = Simulator {
             queue: VecDeque::new(),
             world: (&mock_world).into(),
+            cycle: 0,
         };
 
         sim.init_redstone_states(&mock_world);
@@ -524,5 +767,95 @@ mod test {
         };
 
         assert_eq!(on_count, 1);
+    }
+
+    #[test]
+    fn unittest_simulator_cobble() {
+        tracing_subscriber::fmt::init();
+
+        let default_restone = Block {
+            kind: BlockKind::Redstone {
+                on_count: 0,
+                state: 0,
+                strength: 0,
+            },
+            direction: Default::default(),
+        };
+
+        let default_cobble = Block {
+            kind: BlockKind::Cobble {
+                on_count: 0,
+                on_base_count: 0,
+            },
+            direction: Default::default(),
+        };
+
+        let mock_world = World {
+            size: DimSize(3, 4, 2),
+            blocks: vec![
+                (Position(1, 1, 0), default_cobble.clone()),
+                (Position(0, 1, 0), default_restone.clone()),
+                (Position(1, 0, 0), default_restone.clone()),
+                (
+                    Position(1, 2, 0),
+                    Block {
+                        kind: BlockKind::Switch { is_on: true },
+                        direction: Direction::Top,
+                    },
+                ),
+            ],
+        };
+
+        let sim = Simulator::from(&mock_world).unwrap();
+
+        let BlockKind::Cobble { on_count, on_base_count  } = sim.world.map[0][1][1].kind else {
+            unreachable!();
+        };
+
+        assert_eq!(on_count, 1);
+        assert_eq!(on_base_count, 0);
+    }
+
+    #[test]
+    fn unittest_simulator_repeater() {
+        tracing_subscriber::fmt::init();
+
+        let default_restone = Block {
+            kind: BlockKind::Redstone {
+                on_count: 0,
+                state: 0,
+                strength: 0,
+            },
+            direction: Default::default(),
+        };
+
+        let default_repeater = Block {
+            kind: BlockKind::Repeater {
+                is_on: false,
+                is_locked: false,
+                delay: 2,
+            },
+            direction: Direction::South,
+        };
+
+        let mock_world = World {
+            size: DimSize(3, 4, 2),
+            blocks: vec![
+                (Position(1, 2, 0), default_restone.clone()),
+                (Position(1, 1, 0), default_repeater.clone()),
+                (Position(0, 2, 0), default_restone.clone()),
+                (
+                    Position(1, 0, 0),
+                    Block {
+                        kind: BlockKind::Switch { is_on: true },
+                        direction: Direction::Top,
+                    },
+                ),
+            ],
+        };
+
+        let mut sim = Simulator::from(&mock_world).unwrap();
+
+        sim.run().unwrap();
     }
 }

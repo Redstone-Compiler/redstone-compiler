@@ -72,7 +72,7 @@ impl Position {
             result.push(Position(self.0 + 1, self.1, self.2));
         }
 
-        if all || (self.0 > 0 && (state & RedstoneState::West as usize) > 0) {
+        if self.0 > 0 && (all || (state & RedstoneState::West as usize) > 0) {
             result.push(Position(self.0 - 1, self.1, self.2));
         }
 
@@ -80,7 +80,7 @@ impl Position {
             result.push(Position(self.0, self.1 + 1, self.2));
         }
 
-        if all || (self.1 > 0 && (state & RedstoneState::South as usize) > 0) {
+        if self.1 > 0 && (all || (state & RedstoneState::South as usize) > 0) {
             result.push(Position(self.0, self.1 - 1, self.2));
         }
 
