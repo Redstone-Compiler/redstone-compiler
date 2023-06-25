@@ -38,6 +38,8 @@ impl EventType {
 
 #[derive(Clone, Debug)]
 struct Event {
+    id: Option<usize>,
+    from_id: Option<usize>,
     event_type: EventType,
     target_position: Position,
     direction: Direction,
@@ -48,6 +50,7 @@ pub struct Simulator {
     queue: VecDeque<VecDeque<Event>>,
     world: World3D,
     cycle: usize,
+    event_id_count: usize,
 }
 
 impl Simulator {
@@ -56,6 +59,7 @@ impl Simulator {
             queue: VecDeque::new(),
             world: world.into(),
             cycle: 0,
+            event_id_count: 0,
         };
 
         tracing::info!("Simulation target\n{:?}", sim.world);
@@ -66,12 +70,82 @@ impl Simulator {
 
         tracing::debug!("queue: {:?}", sim.queue);
 
+        sim.fill_event_id();
         sim.run()?;
 
         Ok(sim)
     }
 
-    pub fn change_state(&mut self, states: Vec<(Position, bool)>) {}
+    fn fill_event_id(&mut self) {
+        let mut event_id = self.event_id_count;
+        for events in &mut self.queue {
+            for event in events {
+                if event.id.is_none() {
+                    event.id = Some(event_id);
+                    event_id += 1;
+                }
+            }
+        }
+        self.event_id_count = event_id;
+    }
+
+    pub fn change_state(&mut self, states: Vec<(Position, bool)>) -> eyre::Result<()> {
+        self.queue.push_back(VecDeque::new());
+
+        for (pos, value) in states {
+            let BlockKind::Switch { is_on } = &mut self.world[&pos].kind else {
+                eyre::bail!("you can change only switch state!");
+            };
+
+            if value == *is_on {
+                continue;
+            }
+
+            *is_on = value;
+
+            pos.forwards_except(&self.world[&pos].direction)
+                .into_iter()
+                .map(|pos_src| Event {
+                    id: None,
+                    from_id: None,
+                    event_type: if value {
+                        EventType::TorchOn
+                    } else {
+                        EventType::TorchOff
+                    },
+                    target_position: pos_src,
+                    direction: pos_src.diff(&pos),
+                })
+                .chain(|| -> Option<Event> {
+                    let Some(pos) = pos.walk(&self.world[&pos].direction) else {
+                        return None;
+                    };
+
+                    Some(Event {
+                        id: None,
+                        from_id: None,
+                        event_type: if value {
+                            EventType::HardOn
+                        } else {
+                            EventType::HardOff
+                        },
+                        target_position: pos,
+                        direction: Direction::None,
+                    })
+                }())
+                .for_each(|event| self.push_event_to_current_tick(event));
+        }
+
+        if self.queue.back().unwrap().is_empty() {
+            self.queue.pop_back();
+        }
+
+        self.fill_event_id();
+
+        self.run()?;
+
+        Ok(())
+    }
 
     pub fn run(&mut self) -> eyre::Result<usize> {
         let mut local_cycle = 0;
@@ -180,6 +254,8 @@ impl Simulator {
         .into_iter()
         .map(|pos_src| {
             vec![Event {
+                id: None,
+                from_id: None,
                 event_type: EventType::TorchOn,
                 target_position: pos_src,
                 direction: pos_src.diff(pos),
@@ -187,6 +263,8 @@ impl Simulator {
         })
         .flatten()
         .chain(Some(Event {
+            id: None,
+            from_id: None,
             event_type: EventType::HardOn,
             target_position: pos.up(),
             direction: Direction::None,
@@ -202,7 +280,9 @@ impl Simulator {
             .forwards_except(dir)
             .into_iter()
             .map(|pos_src| Event {
-                event_type: EventType::SoftOn,
+                id: None,
+                from_id: None,
+                event_type: EventType::TorchOn,
                 target_position: pos_src,
                 direction: pos_src.diff(pos),
             })
@@ -212,6 +292,8 @@ impl Simulator {
                 };
 
                 Some(Event {
+                    id: None,
+                    from_id: None,
                     event_type: EventType::HardOn,
                     target_position: pos,
                     direction: Direction::None,
@@ -225,6 +307,8 @@ impl Simulator {
         tracing::debug!("produce redstone block event: {:?}", pos);
 
         let events = pos.forwards().into_iter().map(|pos_src| Event {
+            id: None,
+            from_id: None,
             event_type: EventType::SoftOn,
             target_position: pos_src,
             direction: pos_src.diff(pos),
@@ -260,6 +344,8 @@ impl Simulator {
             }
 
             self.world[&event.target_position] = block;
+
+            self.fill_event_id();
         }
 
         self.queue.pop_front();
@@ -302,11 +388,14 @@ impl Simulator {
 
         tracing::info!("trigger cobble event: {event:?}, {block:?}");
 
-        event
+        let events = event
             .target_position
             .forwards()
             .into_iter()
+            .filter(|pos| !self.world[pos].kind.is_cobble())
             .map(|pos_src| Event {
+                id: None,
+                from_id: event.id,
                 event_type: if is_hard && on_base_count == count_condition {
                     if event.event_type.is_on() {
                         EventType::HardOn
@@ -323,9 +412,11 @@ impl Simulator {
                 target_position: pos_src,
                 direction: pos_src.diff(&event.target_position),
             })
-            .for_each(|event| {
-                self.push_event_to_current_tick(event);
-            });
+            .collect::<Vec<_>>();
+
+        events.into_iter().for_each(|event| {
+            self.push_event_to_current_tick(event);
+        });
 
         Ok(())
     }
@@ -350,13 +441,20 @@ impl Simulator {
         }
 
         if let Some(down_pos) = event.target_position.down() {
+            if !self.world[&down_pos].kind.is_cobble() {
+                eyre::bail!("unreachable");
+            }
+
+            propagate_targets.push(down_pos);
+
             propagate_targets.extend(
                 event
                     .target_position
                     .cardinal_redstone(*state)
                     .into_iter()
                     .filter(|pos| !self.world[&pos].kind.is_cobble())
-                    .filter_map(|pos| down_pos.walk(&down_pos.diff(&pos))),
+                    .filter_map(|pos| pos.walk(&Direction::Bottom))
+                    .filter(|pos| !self.world[&pos].kind.is_cobble()),
             );
         }
 
@@ -383,12 +481,16 @@ impl Simulator {
 
                     propagate_targets.into_iter().for_each(|pos| {
                         self.push_event_to_current_tick(Event {
+                            id: None,
+                            from_id: event.id,
                             event_type: EventType::SoftOn,
                             target_position: pos,
                             direction: pos.diff(&event.target_position),
                         });
 
                         self.push_event_to_current_tick(Event {
+                            id: None,
+                            from_id: event.id,
                             event_type: EventType::RedstoneOn { strength: 14 },
                             target_position: pos,
                             direction: Direction::None,
@@ -414,12 +516,16 @@ impl Simulator {
 
                     propagate_targets.into_iter().for_each(|pos| {
                         self.push_event_to_current_tick(Event {
+                            id: None,
+                            from_id: event.id,
                             event_type: EventType::SoftOff,
                             target_position: pos,
                             direction: pos.diff(&event.target_position),
                         });
 
                         self.push_event_to_current_tick(Event {
+                            id: None,
+                            from_id: event.id,
                             event_type: EventType::RedstoneOff,
                             target_position: pos,
                             direction: Direction::None,
@@ -443,6 +549,8 @@ impl Simulator {
                     propagate_targets.into_iter().for_each(|pos| {
                         if !self.world[&pos].kind.is_redstone() {
                             self.push_event_to_current_tick(Event {
+                                id: None,
+                                from_id: event.id,
                                 event_type: EventType::SoftOn,
                                 target_position: pos,
                                 direction: pos.diff(&event.target_position),
@@ -450,6 +558,8 @@ impl Simulator {
                         }
 
                         self.push_event_to_current_tick(Event {
+                            id: None,
+                            from_id: event.id,
                             event_type: EventType::RedstoneOn {
                                 strength: *strength - 1,
                             },
@@ -476,6 +586,8 @@ impl Simulator {
                     propagate_targets.into_iter().for_each(|pos| {
                         if !self.world[&pos].kind.is_redstone() {
                             self.push_event_to_current_tick(Event {
+                                id: None,
+                                from_id: event.id,
                                 event_type: EventType::SoftOff,
                                 target_position: pos,
                                 direction: pos.diff(&event.target_position),
@@ -483,6 +595,8 @@ impl Simulator {
                         }
 
                         self.push_event_to_current_tick(Event {
+                            id: None,
+                            from_id: event.id,
                             event_type: EventType::RedstoneOff,
                             target_position: pos,
                             direction: pos.diff(&event.target_position),
@@ -492,6 +606,8 @@ impl Simulator {
                     propagate_targets.into_iter().for_each(|pos| {
                         if !self.world[&pos].kind.is_redstone() {
                             self.push_event_to_current_tick(Event {
+                                id: None,
+                                from_id: event.id,
                                 event_type: EventType::SoftOn,
                                 target_position: pos,
                                 direction: pos.diff(&event.target_position),
@@ -499,6 +615,8 @@ impl Simulator {
                         }
 
                         self.push_event_to_current_tick(Event {
+                            id: None,
+                            from_id: event.id,
                             event_type: EventType::RedstoneOn { strength: 14 },
                             target_position: pos,
                             direction: pos.diff(&event.target_position),
@@ -546,6 +664,8 @@ impl Simulator {
         }
         .into_iter()
         .map(|pos_src| Event {
+            id: None,
+            from_id: event.id,
             event_type: if *is_on {
                 EventType::TorchOn
             } else {
@@ -555,6 +675,8 @@ impl Simulator {
             direction: pos_src.diff(&event.target_position),
         })
         .chain(Some(Event {
+            id: None,
+            from_id: event.id,
             event_type: if *is_on {
                 EventType::HardOn
             } else {
@@ -612,6 +734,8 @@ impl Simulator {
                     }
 
                     self.push_event_to_next_tick(Event {
+                        id: None,
+                        from_id: event.id,
                         event_type: EventType::RepeaterOn { delay: delay },
                         target_position: event.target_position,
                         direction: event.direction,
@@ -634,6 +758,8 @@ impl Simulator {
                     }
 
                     self.push_event_to_next_tick(Event {
+                        id: None,
+                        from_id: event.id,
                         event_type: EventType::RepeaterOff { delay: delay },
                         target_position: event.target_position,
                         direction: event.direction,
@@ -642,6 +768,8 @@ impl Simulator {
                 EventType::RepeaterOn { delay } => {
                     if delay != 0 {
                         self.push_event_to_next_tick(Event {
+                            id: None,
+                            from_id: event.id,
                             event_type: EventType::RepeaterOn { delay: delay - 1 },
                             target_position: event.target_position,
                             direction: event.direction,
@@ -656,6 +784,8 @@ impl Simulator {
 
                     if let Some(pos) = walk {
                         self.push_event_to_next_tick(Event {
+                            id: None,
+                            from_id: event.id,
                             event_type: EventType::HardOn,
                             target_position: pos,
                             direction: pos.diff(&event.target_position),
@@ -664,6 +794,8 @@ impl Simulator {
 
                     if let Some(pos) = walk.map(|pos| pos.down()).flatten() {
                         self.push_event_to_next_tick(Event {
+                            id: None,
+                            from_id: event.id,
                             event_type: EventType::SoftOn,
                             target_position: pos,
                             direction: Direction::Bottom,
@@ -675,6 +807,8 @@ impl Simulator {
                 EventType::RepeaterOff { delay } => {
                     if delay != 0 {
                         self.push_event_to_next_tick(Event {
+                            id: None,
+                            from_id: event.id,
                             event_type: EventType::RepeaterOff { delay: delay - 1 },
                             target_position: event.target_position,
                             direction: event.direction,
@@ -688,6 +822,8 @@ impl Simulator {
 
                     if let Some(pos) = walk {
                         self.push_event_to_next_tick(Event {
+                            id: None,
+                            from_id: event.id,
                             event_type: EventType::HardOff,
                             target_position: pos,
                             direction: pos.diff(&event.target_position),
@@ -696,6 +832,8 @@ impl Simulator {
 
                     if let Some(pos) = walk.map(|pos| pos.down()).flatten() {
                         self.push_event_to_next_tick(Event {
+                            id: None,
+                            from_id: event.id,
                             event_type: EventType::SoftOff,
                             target_position: pos,
                             direction: Direction::Bottom,
@@ -754,6 +892,7 @@ mod test {
             queue: VecDeque::new(),
             world: (&mock_world).into(),
             cycle: 0,
+            event_id_count: 0,
         };
 
         sim.init_redstone_states(&mock_world);
@@ -952,7 +1091,7 @@ mod test {
                     Position(0, 0, 0),
                     Block {
                         kind: BlockKind::Switch { is_on: true },
-                        direction: Direction::North,
+                        direction: Direction::Bottom,
                     },
                 ),
             ],
@@ -968,34 +1107,101 @@ mod test {
 
         assert_eq!(strength, 0);
 
-        sim.queue.push_back(VecDeque::new());
+        sim.change_state(vec![(Position(0, 0, 0), false)]).unwrap();
 
-        let pos = Position(0, 0, 0);
-        let dir = &Direction::North;
+        let BlockKind::Redstone { strength, .. } = sim.world.map[0][2][2].kind else {
+            unreachable!();
+        };
 
-        pos.forwards_except(dir)
-            .into_iter()
-            .map(|pos_src| Event {
-                event_type: EventType::TorchOff,
-                target_position: pos_src,
-                direction: pos_src.diff(&pos),
-            })
-            .chain(|| -> Option<Event> {
-                let Some(pos) = pos.walk(dir) else {
-                    return None;
-                };
+        assert!(strength > 0);
+    }
 
-                Some(Event {
-                    event_type: EventType::HardOff,
-                    target_position: pos,
-                    direction: Direction::None,
-                })
-            }())
-            .for_each(|event| {
-                sim.push_event_to_next_tick(event);
-            });
+    #[test]
+    pub fn unittest_simulator_and_gate() {
+        tracing_subscriber::fmt::init();
 
-        sim.change_state(Vec::new());
+        let default_restone = Block {
+            kind: BlockKind::Redstone {
+                on_count: 0,
+                state: 0,
+                strength: 0,
+            },
+            direction: Default::default(),
+        };
+
+        let default_cobble = Block {
+            kind: BlockKind::Cobble {
+                on_count: 0,
+                on_base_count: 0,
+            },
+            direction: Default::default(),
+        };
+
+        let mock_world = World {
+            size: DimSize(4, 6, 3),
+            blocks: vec![
+                (Position(0, 1, 0), default_restone.clone()),
+                (Position(2, 1, 0), default_restone.clone()),
+                (Position(0, 2, 0), default_cobble.clone()),
+                (Position(1, 2, 0), default_cobble.clone()),
+                (Position(2, 2, 0), default_cobble.clone()),
+                (Position(1, 2, 1), default_restone.clone()),
+                (Position(1, 4, 0), default_restone.clone()),
+                (
+                    Position(0, 2, 1),
+                    Block {
+                        kind: BlockKind::Torch { is_on: true },
+                        direction: Direction::Bottom,
+                    },
+                ),
+                (
+                    Position(2, 2, 1),
+                    Block {
+                        kind: BlockKind::Torch { is_on: true },
+                        direction: Direction::Bottom,
+                    },
+                ),
+                (
+                    Position(1, 3, 0),
+                    Block {
+                        kind: BlockKind::Torch { is_on: true },
+                        direction: Direction::South,
+                    },
+                ),
+                (
+                    Position(0, 0, 0),
+                    Block {
+                        kind: BlockKind::Switch { is_on: false },
+                        direction: Direction::Bottom,
+                    },
+                ),
+                (
+                    Position(2, 0, 0),
+                    Block {
+                        kind: BlockKind::Switch { is_on: false },
+                        direction: Direction::Bottom,
+                    },
+                ),
+            ],
+        };
+
+        let mut sim = Simulator::from(&mock_world).unwrap();
+
         sim.run().unwrap();
+
+        let BlockKind::Redstone { strength, .. } = sim.world.map[0][4][1].kind else {
+            unreachable!();
+        };
+
+        assert_eq!(strength, 0);
+
+        sim.change_state(vec![(Position(0, 0, 0), true), (Position(2, 0, 0), true)])
+            .unwrap();
+
+        let BlockKind::Redstone { strength, .. } = sim.world.map[0][4][1].kind else {
+            unreachable!();
+        };
+
+        assert!(strength > 0);
     }
 }
