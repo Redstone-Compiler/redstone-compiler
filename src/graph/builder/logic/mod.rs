@@ -1,0 +1,251 @@
+use std::collections::HashMap;
+
+use crate::{
+    graph::{Graph, GraphNode, GraphNodeId, GraphNodeKind},
+    logic::{Logic, LogicType},
+};
+
+#[derive(Debug, Clone)]
+pub struct LogicGraph {
+    pub graph: Graph,
+}
+
+#[derive(Default)]
+pub struct LogicGraphBuilder {
+    stmt: String,
+    node_id: usize,
+    ptr: usize,
+    nodes: Vec<GraphNode>,
+    inputs: HashMap<String, GraphNodeId>,
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum LogicStringTokenType {
+    Ident(String),
+    And,
+    Or,
+    Xor,
+    Not,
+    ParStart,
+    ParEnd,
+    Eof,
+}
+
+impl LogicGraphBuilder {
+    pub fn new(stmt: String) -> Self {
+        LogicGraphBuilder {
+            stmt,
+            ..Default::default()
+        }
+    }
+
+    pub fn build(mut self, output_name: String) -> eyre::Result<LogicGraph> {
+        self.do_parse(output_name);
+
+        let mut graph = Graph {
+            nodes: self.nodes.clone(),
+            ..Default::default()
+        };
+        graph.build_outputs();
+
+        Ok(LogicGraph { graph })
+    }
+
+    fn next_id(&mut self) -> usize {
+        let id = self.node_id;
+        self.node_id += 1;
+        id
+    }
+
+    fn next_ptr(&mut self) -> usize {
+        let ptr = self.ptr;
+        self.ptr += 1;
+        ptr
+    }
+
+    fn new_node(&mut self, kind: GraphNodeKind, inputs: Vec<GraphNodeId>) -> GraphNodeId {
+        let node = GraphNode {
+            id: self.next_id(),
+            kind,
+            inputs,
+            ..Default::default()
+        };
+        self.nodes.push(node);
+        self.nodes.last().unwrap().clone().id
+    }
+
+    fn new_input_node(&mut self, name: String) -> GraphNodeId {
+        if self.inputs.contains_key(&name) {
+            return self.inputs[&name];
+        }
+
+        let id = self.new_node(GraphNodeKind::Input(name.clone()), vec![]);
+        self.inputs.insert(name, id);
+        id
+    }
+
+    fn new_output_node(&mut self, name: String, input: GraphNodeId) -> GraphNodeId {
+        self.new_node(GraphNodeKind::Output(name), vec![input])
+    }
+
+    fn new_logic_node(&mut self, logic_type: LogicType, inputs: Vec<GraphNodeId>) -> GraphNodeId {
+        self.new_node(GraphNodeKind::Logic(Logic { logic_type }), inputs)
+    }
+
+    fn skip_ws(&mut self) {
+        let mut ptr = self.ptr;
+
+        while self.stmt.len() != ptr && matches!(self.stmt.chars().nth(ptr).unwrap(), ' ' | '\n') {
+            ptr = self.next_ptr();
+        }
+    }
+
+    fn next(&mut self) -> LogicStringTokenType {
+        self.skip_ws();
+
+        if self.ptr == self.stmt.len() {
+            return LogicStringTokenType::Eof;
+        }
+
+        let mut next_ptr = self.next_ptr();
+
+        match self.stmt.chars().nth(next_ptr).unwrap() {
+            '&' => LogicStringTokenType::And,
+            '^' => LogicStringTokenType::Xor,
+            '|' => LogicStringTokenType::Or,
+            '(' => LogicStringTokenType::ParStart,
+            ')' => LogicStringTokenType::ParEnd,
+            '~' => LogicStringTokenType::Not,
+            'a'..='z' => {
+                let mut result = String::new();
+
+                while self.stmt.len() != next_ptr
+                    && matches!(self.stmt.chars().nth(next_ptr).unwrap(), 'a'..='z')
+                {
+                    result.push(self.stmt.chars().nth(next_ptr).unwrap());
+                    next_ptr = self.next_ptr();
+                }
+
+                self.ptr -= 1;
+
+                LogicStringTokenType::Ident(result)
+            }
+            _ => unimplemented!(),
+        }
+    }
+
+    fn lookup(&mut self) -> LogicStringTokenType {
+        let cur_ptr = self.ptr;
+        let lookup = self.next();
+        self.ptr = cur_ptr;
+        lookup
+    }
+
+    fn do_parse(&mut self, output_name: String) {
+        let node = self.parse_or();
+        self.new_output_node(output_name, node);
+    }
+
+    fn parse_or(&mut self) -> GraphNodeId {
+        let mut outputs = Vec::new();
+
+        let parse_and = self.parse_and();
+        outputs.push(parse_and);
+        while let LogicStringTokenType::Or = self.lookup() {
+            self.next();
+            outputs.push(self.parse_and());
+        }
+
+        if outputs.len() == 1 {
+            return parse_and;
+        }
+
+        self.new_logic_node(LogicType::Or, outputs)
+    }
+
+    fn parse_and(&mut self) -> GraphNodeId {
+        let mut outputs = Vec::new();
+
+        let parse_xor = self.parse_xor();
+        outputs.push(parse_xor);
+        while let LogicStringTokenType::And = self.lookup() {
+            self.next();
+            outputs.push(self.parse_xor());
+        }
+
+        if outputs.len() == 1 {
+            return parse_xor;
+        }
+
+        self.new_logic_node(LogicType::And, outputs)
+    }
+
+    fn parse_xor(&mut self) -> GraphNodeId {
+        let mut outputs = Vec::new();
+
+        let parse_par = self.parse_par();
+        outputs.push(parse_par);
+        while let LogicStringTokenType::Xor = self.lookup() {
+            self.next();
+            outputs.push(self.parse_par());
+        }
+
+        if outputs.len() == 1 {
+            return parse_par;
+        }
+
+        self.new_logic_node(LogicType::Xor, outputs)
+    }
+
+    fn parse_par(&mut self) -> GraphNodeId {
+        match self.lookup() {
+            LogicStringTokenType::Ident(ident) => {
+                self.next();
+                self.new_input_node(ident)
+            }
+            LogicStringTokenType::Not => {
+                self.next();
+                let node = self.parse_or();
+                self.new_logic_node(LogicType::Not, vec![node])
+            }
+            LogicStringTokenType::ParStart => {
+                self.next();
+                let node = self.parse_or();
+
+                if self.next() != LogicStringTokenType::ParEnd {
+                    panic!();
+                }
+
+                node
+            }
+            _ => panic!("{:?}", self.lookup()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::graph::graphviz::ToGraphviz;
+
+    use super::{LogicGraph, LogicGraphBuilder};
+
+    fn build_graph_from_stmt(stmt: &str, output: &str) -> eyre::Result<LogicGraph> {
+        LogicGraphBuilder::new(stmt.to_string()).build(output.to_string())
+    }
+
+    #[test]
+    fn unittest_logicgraph_full_adder() -> eyre::Result<()> {
+        // s = (a ^ b) ^ cin;
+        // cout = (a & b) | (s & cin);
+        let mut logic_graph1 = build_graph_from_stmt("(a^b)^cin", "s")?;
+        let logic_graph2 = build_graph_from_stmt("(a&b)|(s&cin)", "cout")?;
+        logic_graph1.graph.concat(logic_graph2.graph);
+
+        let graphviz = logic_graph1.to_graphviz();
+
+        println!("{logic_graph1:?}");
+        println!("{graphviz}");
+
+        Ok(())
+    }
+}

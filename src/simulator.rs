@@ -1,4 +1,4 @@
-use std::{borrow::Borrow, collections::VecDeque};
+use std::collections::VecDeque;
 
 use crate::common::{
     block::{Block, BlockKind, Direction, RedstoneState},

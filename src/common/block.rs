@@ -89,6 +89,19 @@ pub enum BlockKind {
 }
 
 impl BlockKind {
+    pub fn name(&self) -> String {
+        match self {
+            BlockKind::Air => "Air",
+            BlockKind::Cobble { .. } => "Cobble",
+            BlockKind::Switch { .. } => "Switch",
+            BlockKind::Redstone { .. } => "Redstone",
+            BlockKind::Torch { .. } => "Torch",
+            BlockKind::Repeater { .. } => "Repeater",
+            BlockKind::RedstoneBlock => "RedstoneBlock",
+        }
+        .to_string()
+    }
+
     pub fn is_stick_to_redstone(&self) -> bool {
         matches!(
             self,

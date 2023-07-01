@@ -1,12 +1,7 @@
-module full_addder (
-  input x,
-  input y,
-  input c_in,
-  output s,
-  output c_out,
-);
+module fulladdder (a, b, cin, sum, cout);
+  input a, b, cin;
+  output sum, cout;
 
-  assign s = (x ^ y) ^ c_in
-  assign c_out = (a & b) | (s & c_in)
-
+  s = (a ^ b) ^ cin;
+  cout = (a & b) | (s & cin);
 endmodule

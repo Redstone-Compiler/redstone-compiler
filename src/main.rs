@@ -20,14 +20,12 @@ pub struct CompilerOption {
     pub output: Option<PathBuf>,
 }
 
-impl CompilerOption {
-    pub fn run(self) -> eyre::Result<()> {
-        Ok(())
-    }
-}
-
-fn main() {
+fn main() -> eyre::Result<()> {
     tracing_subscriber::fmt::init();
     let opt = CompilerOption::from_args();
-    // println!("{opt:?}");
+    let syntax = verilog::load(&opt.input)?;
+
+    println!("{syntax:?}");
+
+    Ok(())
 }

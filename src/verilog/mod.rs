@@ -8,7 +8,7 @@ pub fn load(path: &PathBuf) -> eyre::Result<SyntaxTree> {
 
     let result = parse_sv(path, &defines, &includes, false, false);
     let Ok((syntax_tree, _)) = result else {
-        eyre::bail!("System-verilog input parse err!");
+        eyre::bail!("System-verilog input parse err! {}", result.err().unwrap());
     };
 
     Ok(syntax_tree)
