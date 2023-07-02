@@ -120,7 +120,7 @@ impl LogicGraphBuilder {
                 let mut result = String::new();
 
                 while self.stmt.len() != next_ptr
-                    && matches!(self.stmt.chars().nth(next_ptr).unwrap(), 'a'..='z')
+                    && matches!(self.stmt.chars().nth(next_ptr).unwrap(), 'a'..='z' | '0'..='9')
                 {
                     result.push(self.stmt.chars().nth(next_ptr).unwrap());
                     next_ptr = self.next_ptr();
@@ -237,13 +237,24 @@ mod tests {
     fn unittest_logicgraph_full_adder() -> eyre::Result<()> {
         // s = (a ^ b) ^ cin;
         // cout = (a & b) | (s & cin);
-        let mut logic_graph1 = build_graph_from_stmt("(a^b)^cin", "s")?;
-        let logic_graph2 = build_graph_from_stmt("(a&b)|(s&cin)", "cout")?;
-        logic_graph1.graph.concat(logic_graph2.graph);
+        let logic_graph1 = build_graph_from_stmt("(a1^b1)^cin1", "s1")?;
+        let logic_graph2 = build_graph_from_stmt("(a1&b1)|(s1&cin1)", "cout1")?;
 
-        let graphviz = logic_graph1.to_graphviz();
+        let mut fa1 = logic_graph1.clone();
+        fa1.graph.merge(logic_graph2.graph);
 
-        println!("{logic_graph1:?}");
+        let logic_graph3 = build_graph_from_stmt("(a2^b2)^cout1", "s2")?;
+        let logic_graph4 = build_graph_from_stmt("(a2&b2)|(s2&cout1)", "cout2")?;
+
+        let mut fa2 = logic_graph3.clone();
+        fa2.graph.merge(logic_graph4.graph);
+
+        let mut fa = fa1.clone();
+        fa.graph.merge(fa2.graph);
+
+        let graphviz = fa.to_graphviz();
+
+        println!("{fa:?}");
         println!("{graphviz}");
 
         Ok(())
