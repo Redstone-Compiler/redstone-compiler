@@ -3,9 +3,9 @@ use itertools::Itertools;
 use crate::{
     graph::{
         builder::logic::{LogicGraph, LogicGraphBuilder},
-        Graph, GraphNodeId, GraphNodeKind,
+        Graph, GraphNode, GraphNodeId, GraphNodeKind,
     },
-    logic::LogicType,
+    logic::{Logic, LogicType},
 };
 
 pub struct LogicGraphTransformer {
@@ -152,6 +152,135 @@ impl LogicGraphTransformer {
         tar.remove_by_node_id_lazy(tar_output);
 
         g.nodes.extend(tar.nodes);
+
+        Ok(())
+    }
+
+    pub fn optimize(&mut self) -> eyre::Result<()> {
+        if self.graph.graph.outputs().len() != 1 {
+            eyre::bail!("You must split by outputs before run optimizing!");
+        }
+
+        // optimize logic graph using quine mccluskey
+        fn make_qmc_form(
+            graph: &Graph,
+            node_id: GraphNodeId,
+        ) -> eyre::Result<quine_mc_cluskey::Bool> {
+            let node = graph.find_node_by_id(node_id).unwrap();
+            match &node.kind {
+                GraphNodeKind::Input(_) => Ok(quine_mc_cluskey::Bool::Term(node_id as u8)),
+                GraphNodeKind::Output(_) => make_qmc_form(graph, node.inputs[0]),
+                GraphNodeKind::Logic(logic) => Ok(match &logic.logic_type {
+                    LogicType::Not => {
+                        quine_mc_cluskey::Bool::Not(Box::new(make_qmc_form(graph, node.inputs[0])?))
+                    }
+                    LogicType::And => quine_mc_cluskey::Bool::And(
+                        node.inputs
+                            .iter()
+                            .map(|input| make_qmc_form(graph, *input).unwrap())
+                            .collect(),
+                    ),
+                    LogicType::Or => quine_mc_cluskey::Bool::Or(
+                        node.inputs
+                            .iter()
+                            .map(|input| make_qmc_form(graph, *input).unwrap())
+                            .collect(),
+                    ),
+                    LogicType::Xor => unimplemented!(),
+                }),
+                _ => unreachable!(),
+            }
+        }
+
+        let results = make_qmc_form(&self.graph.graph, self.graph.graph.outputs()[0])?.simplify();
+
+        let mut nodes = Vec::new();
+
+        fn make_rc_form(
+            nodes: &mut Vec<GraphNode>,
+            id: &mut usize,
+            lookup: &Vec<GraphNode>,
+            node: &quine_mc_cluskey::Bool,
+        ) -> GraphNodeId {
+            let tid = *id;
+            *id += 1;
+
+            let node = match node {
+                quine_mc_cluskey::Bool::Term(v) => GraphNode {
+                    id: tid,
+                    kind: GraphNodeKind::Input(lookup[*v as usize].kind.as_input().to_owned()),
+                    ..Default::default()
+                },
+                quine_mc_cluskey::Bool::And(op) => GraphNode {
+                    id: tid,
+                    kind: GraphNodeKind::Logic(Logic {
+                        logic_type: LogicType::And,
+                    }),
+                    inputs: op
+                        .iter()
+                        .map(|v| make_rc_form(nodes, id, lookup, v))
+                        .collect_vec(),
+                    ..Default::default()
+                },
+                quine_mc_cluskey::Bool::Or(op) => GraphNode {
+                    id: tid,
+                    kind: GraphNodeKind::Logic(Logic {
+                        logic_type: LogicType::Or,
+                    }),
+                    inputs: op
+                        .iter()
+                        .map(|v| make_rc_form(nodes, id, lookup, v))
+                        .collect_vec(),
+                    ..Default::default()
+                },
+                quine_mc_cluskey::Bool::Not(v) => GraphNode {
+                    id: tid,
+                    kind: GraphNodeKind::Logic(Logic {
+                        logic_type: LogicType::Not,
+                    }),
+                    inputs: vec![make_rc_form(nodes, id, lookup, v)],
+                    ..Default::default()
+                },
+                _ => unreachable!(),
+            };
+
+            if let GraphNodeKind::Input(name) = &node.kind {
+                if let Some(node) = nodes
+                    .iter()
+                    .find(|node| matches!(&node.kind, GraphNodeKind::Input(other) if name == other))
+                {
+                    *id -= 1;
+                    return node.id;
+                }
+            }
+
+            nodes.push(node);
+            tid
+        }
+
+        let mut id = 0;
+        let node = make_rc_form(&mut nodes, &mut id, &self.graph.graph.nodes, &results[0]);
+        let output_node = GraphNode {
+            id: nodes.len(),
+            kind: GraphNodeKind::Output(
+                self.graph
+                    .graph
+                    .find_node_by_id(self.graph.graph.outputs()[0])
+                    .unwrap()
+                    .kind
+                    .as_output()
+                    .to_owned(),
+            ),
+            inputs: vec![node],
+            ..Default::default()
+        };
+        nodes.push(output_node);
+        nodes.sort_by_key(|node| node.id);
+
+        self.graph.graph.nodes = nodes;
+        self.graph.graph.build_outputs();
+        self.graph.graph.build_producers();
+        self.graph.graph.build_consumers();
 
         Ok(())
     }

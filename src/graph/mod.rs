@@ -382,7 +382,9 @@ impl Graph {
         self.build_consumers();
     }
 
-    pub fn rebuild_node_ids(self) -> Self {
+    pub fn rebuild_node_ids_deprecated(self) -> Self {
+        // toposort가 기존에 없는 새로운 index를 창조함
+        // ???
         let index_map = petgraph::algo::toposort(&self.to_petgraph(), None)
             .unwrap()
             .iter()
@@ -401,6 +403,37 @@ impl Graph {
             })
             .collect::<Vec<_>>();
         nodes.sort_by_key(|node| node.id);
+
+        let mut result = Self { nodes, ..self };
+        result.build_producers();
+        result.build_consumers();
+        result
+    }
+
+    pub fn rebuild_node_ids(mut self) -> Self {
+        self.nodes.sort_by_key(|node| match node.kind {
+            GraphNodeKind::Input(_) => 0,
+            GraphNodeKind::Output(_) => 1,
+            _ => 2,
+        });
+
+        let indexs: HashMap<_, _> = self
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(index, node)| (node.id, index))
+            .collect();
+
+        let nodes = self
+            .nodes
+            .into_iter()
+            .map(|node| GraphNode {
+                id: indexs[&node.id],
+                inputs: node.inputs.iter().map(|index| indexs[index]).collect(),
+                outputs: node.outputs.iter().map(|index| indexs[index]).collect(),
+                kind: node.kind,
+            })
+            .collect::<Vec<_>>();
 
         let mut result = Self { nodes, ..self };
         result.build_producers();
@@ -531,6 +564,52 @@ impl Graph {
             .iter()
             .map(|output| self.extract_subgraph_by_node_id(*output))
             .collect_vec()
+    }
+
+    pub fn critical_path(&self) -> Vec<GraphNodeId> {
+        fn find_longest_path(graph: &petgraph::Graph<(), ()>) -> Option<Vec<NodeIndex>> {
+            let topo_order = petgraph::algo::toposort(&graph, None).unwrap();
+
+            let mut max_distances: Vec<Option<usize>> = vec![None; graph.node_count()];
+            let mut max_path: Vec<Option<Vec<NodeIndex>>> = vec![None; graph.node_count()];
+
+            for node in topo_order {
+                let mut current_max_distance = None;
+                let mut current_max_path = None;
+
+                for pred in graph.neighbors_directed(node, petgraph::Direction::Incoming) {
+                    let pred_distance = max_distances[pred.index()].unwrap_or(0);
+
+                    if current_max_distance.is_none()
+                        || pred_distance + 1 > current_max_distance.unwrap()
+                    {
+                        current_max_distance = Some(pred_distance + 1);
+                        current_max_path =
+                            Some(max_path[pred.index()].clone().unwrap_or_else(|| vec![pred]));
+                    }
+                }
+
+                max_distances[node.index()] = current_max_distance;
+                max_path[node.index()] = current_max_path.map(|mut path| {
+                    path.push(node);
+                    path
+                });
+            }
+
+            let longest_path = max_path
+                .iter()
+                .max_by_key(|path| path.as_ref().map_or(0, |p| p.len()));
+
+            longest_path.cloned().flatten()
+        }
+
+        let mut path = find_longest_path(&self.into())
+            .unwrap()
+            .iter()
+            .map(|id| id.index())
+            .collect_vec();
+        path.sort();
+        path
     }
 }
 

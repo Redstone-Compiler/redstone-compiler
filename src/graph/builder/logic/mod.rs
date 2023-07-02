@@ -205,7 +205,15 @@ impl LogicGraphBuilder {
             }
             LogicStringTokenType::Not => {
                 self.next();
-                let node = self.parse_or();
+
+                let node = match self.lookup() {
+                    LogicStringTokenType::Ident(ident) => {
+                        self.next();
+                        self.new_input_node(ident)
+                    }
+                    LogicStringTokenType::ParStart => self.parse_or(),
+                    _ => panic!(),
+                };
                 self.new_logic_node(LogicType::Not, vec![node])
             }
             LogicStringTokenType::ParStart => {
@@ -260,13 +268,21 @@ mod tests {
         transform.decompose_and()?;
 
         let finish = transform.finish();
-        let graphviz = finish.to_graphviz();
+        println!("{}", finish.to_graphviz());
+        println!("{:?}", finish.graph.critical_path());
 
-        // println!("{fa:?}");
-        println!("{graphviz}");
+        let g: Graph = finish.graph.split_with_outputs().into();
+        println!("{}", g.to_graphviz());
 
-        let subgraphs: Graph = finish.graph.split_with_outputs().into();
-        println!("{}", subgraphs.to_graphviz());
+        let mut graph: Graph = (&finish.graph.split_with_outputs()[2]).into();
+        graph = graph.rebuild_node_ids();
+        println!("{}", graph.to_graphviz());
+
+        let mut transform = LogicGraphTransformer::new(LogicGraph { graph });
+        transform.optimize()?;
+
+        let finish = transform.finish();
+        println!("{}", finish.to_graphviz());
 
         Ok(())
     }
