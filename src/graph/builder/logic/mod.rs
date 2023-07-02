@@ -225,7 +225,10 @@ impl LogicGraphBuilder {
 
 #[cfg(test)]
 mod tests {
-    use crate::graph::{graphviz::ToGraphviz, Graph};
+    use crate::{
+        graph::{graphviz::ToGraphviz, Graph},
+        transform::logic::LogicGraphTransformer,
+    };
 
     use super::{LogicGraph, LogicGraphBuilder};
 
@@ -252,12 +255,17 @@ mod tests {
         let mut fa = fa1.clone();
         fa.graph.merge(fa2.graph);
 
-        let graphviz = fa.to_graphviz();
+        let mut transform = LogicGraphTransformer::new(fa);
+        transform.decompose_xor()?;
+        transform.decompose_and()?;
 
-        println!("{fa:?}");
+        let finish = transform.finish();
+        let graphviz = finish.to_graphviz();
+
+        // println!("{fa:?}");
         println!("{graphviz}");
 
-        let subgraphs: Graph = fa.graph.split_with_outputs().into();
+        let subgraphs: Graph = finish.graph.split_with_outputs().into();
         println!("{}", subgraphs.to_graphviz());
 
         Ok(())

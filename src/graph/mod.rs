@@ -370,7 +370,7 @@ impl Graph {
             .ok()
     }
 
-    fn rebuild_node_id_base(&mut self, base_index: usize) {
+    pub fn rebuild_node_id_base(&mut self, base_index: usize) {
         for node in &mut self.nodes {
             node.id += base_index;
             for index in itertools::chain!(&mut node.inputs, &mut node.outputs) {
@@ -406,6 +406,41 @@ impl Graph {
         result.build_producers();
         result.build_consumers();
         result
+    }
+
+    pub fn remove_by_node_id_lazy(&mut self, node_id: GraphNodeId) {
+        let Ok(index) = self.nodes.binary_search_by_key(&node_id, |node| node.id) else {
+            return;
+        };
+
+        self.nodes.remove(index);
+    }
+
+    pub fn replace_node_id_lazy(&mut self, from: GraphNodeId, to: GraphNodeId) {
+        self.nodes
+            .iter_mut()
+            .map(|node| itertools::chain!(&mut node.inputs, &mut node.outputs))
+            .flatten()
+            .filter(|node_id| **node_id == from)
+            .for_each(|node_id| *node_id = to);
+    }
+
+    pub fn replace_input_node_id_lazy(&mut self, from: GraphNodeId, to: GraphNodeId) {
+        self.nodes
+            .iter_mut()
+            .map(|node| &mut node.inputs)
+            .flatten()
+            .filter(|node_id| **node_id == from)
+            .for_each(|node_id| *node_id = to);
+    }
+
+    pub fn replace_output_node_id_lazy(&mut self, from: GraphNodeId, to: GraphNodeId) {
+        self.nodes
+            .iter_mut()
+            .map(|node| &mut node.outputs)
+            .flatten()
+            .filter(|node_id| **node_id == from)
+            .for_each(|node_id| *node_id = to);
     }
 
     // outputs이 반드시 determine 되어야함
