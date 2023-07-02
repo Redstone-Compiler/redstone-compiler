@@ -225,7 +225,7 @@ impl LogicGraphBuilder {
 
 #[cfg(test)]
 mod tests {
-    use crate::graph::graphviz::ToGraphviz;
+    use crate::graph::{graphviz::ToGraphviz, Graph};
 
     use super::{LogicGraph, LogicGraphBuilder};
 
@@ -256,6 +256,9 @@ mod tests {
 
         println!("{fa:?}");
         println!("{graphviz}");
+
+        let subgraphs: Graph = fa.graph.split_with_outputs().into();
+        println!("{}", subgraphs.to_graphviz());
 
         Ok(())
     }

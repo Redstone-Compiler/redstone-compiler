@@ -5,6 +5,7 @@ pub mod graph;
 pub mod logic;
 pub mod option;
 pub mod simulator;
+pub mod transform;
 pub mod verilog;
 
 use std::path::PathBuf;

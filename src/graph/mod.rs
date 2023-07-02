@@ -1,5 +1,6 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
+use itertools::Itertools;
 use petgraph::stable_graph::NodeIndex;
 
 use crate::{common::block::Block, logic::Logic};
@@ -61,17 +62,17 @@ impl GraphNodeKind {
 
 #[derive(Default, Debug, Clone)]
 pub struct GraphNode {
-    id: GraphNodeId,
-    kind: GraphNodeKind,
-    inputs: Vec<GraphNodeId>,
-    outputs: Vec<GraphNodeId>,
+    pub id: GraphNodeId,
+    pub kind: GraphNodeKind,
+    pub inputs: Vec<GraphNodeId>,
+    pub outputs: Vec<GraphNodeId>,
 }
 
 #[derive(Default, Debug, Clone)]
 pub struct Graph {
-    nodes: Vec<GraphNode>,
-    producers: HashMap<GraphNodeId, Vec<GraphNodeId>>,
-    consumers: HashMap<GraphNodeId, Vec<GraphNodeId>>,
+    pub nodes: Vec<GraphNode>,
+    pub producers: HashMap<GraphNodeId, Vec<GraphNodeId>>,
+    pub consumers: HashMap<GraphNodeId, Vec<GraphNodeId>>,
 }
 
 impl Graph {
@@ -134,7 +135,7 @@ impl Graph {
         for (from, to) in replace_targets {
             let mut node = other.nodes.iter_mut().find(|node| node.id == from).unwrap();
 
-            self.get_node_by_id(to)
+            self.find_node_by_id_mut(to)
                 .unwrap()
                 .outputs
                 .extend(node.outputs.clone());
@@ -149,8 +150,9 @@ impl Graph {
                 GraphNodeKind::Input(name) if src_inputs.contains_key(name) => false,
                 _ => true,
             }));
-        self.producers.extend(other.producers);
-        self.consumers.extend(other.consumers);
+        self.build_inputs();
+        self.build_producers();
+        self.build_consumers();
     }
 
     // src의 output을 target의 input과 연결하여 merge함
@@ -188,10 +190,10 @@ impl Graph {
             let out_node = src_outputs[output];
             let in_node = target_inputs[input].clone();
 
-            self.get_node_by_id(out_node).unwrap().outputs = in_node.clone();
+            self.find_node_by_id_mut(out_node).unwrap().outputs = in_node.clone();
 
             for input in in_node {
-                target.get_node_by_id(input).unwrap().inputs = vec![out_node];
+                target.find_node_by_id_mut(input).unwrap().inputs = vec![out_node];
             }
         }
 
@@ -207,8 +209,9 @@ impl Graph {
                 GraphNodeKind::Input(name) if target_inputs.contains_key(name.as_str()) => false,
                 _ => true,
             }));
-        self.producers.extend(target.producers);
-        self.consumers.extend(target.consumers);
+        self.build_inputs();
+        self.build_producers();
+        self.build_consumers();
     }
 
     // self의 input, output들을 target의 input과 연결함
@@ -273,15 +276,18 @@ impl Graph {
             let tar_in = target_inputs[name].clone();
 
             if let Some(src_in) = src_inputs.get(name) {
-                self.get_node_by_id(*src_in).unwrap().outputs.extend(tar_in);
+                self.find_node_by_id_mut(*src_in)
+                    .unwrap()
+                    .outputs
+                    .extend(tar_in);
             } else if let Some(src_out) = src_outputs.get(name) {
-                self.get_node_by_id(*src_out)
+                self.find_node_by_id_mut(*src_out)
                     .unwrap()
                     .outputs
                     .extend(tar_in.clone());
 
                 for input in tar_in {
-                    target.get_node_by_id(input).unwrap().inputs = vec![*src_out];
+                    target.find_node_by_id_mut(input).unwrap().inputs = vec![*src_out];
                 }
             }
         }
@@ -294,8 +300,9 @@ impl Graph {
                 GraphNodeKind::Input(name) if target_inputs.contains_key(name.as_str()) => false,
                 _ => true,
             }));
-        self.producers.extend(target.producers);
-        self.consumers.extend(target.consumers);
+        self.build_inputs();
+        self.build_producers();
+        self.build_consumers();
     }
 
     pub fn replace_input_name(&mut self, from: &str, to: String) -> bool {
@@ -335,31 +342,39 @@ impl Graph {
             .map(|node| node.id)
     }
 
-    pub fn get_node_by_input_name(&mut self, input_name: &str) -> Option<&mut GraphNode> {
+    pub fn find_node_by_input_name(&mut self, input_name: &str) -> Option<&mut GraphNode> {
         self.nodes
             .iter_mut()
             .find(|node| matches!(&node.kind, GraphNodeKind::Input(name) if name == input_name))
     }
 
-    pub fn get_node_by_output_name(&mut self, input_name: &str) -> Option<&mut GraphNode> {
+    pub fn find_node_by_output_name(&mut self, input_name: &str) -> Option<&mut GraphNode> {
         self.nodes
             .iter_mut()
             .find(|node| matches!(&node.kind, GraphNodeKind::Output(name) if name == input_name))
     }
 
-    pub fn get_node_by_id(&mut self, node_id: GraphNodeId) -> Option<&mut GraphNode> {
-        // self.nodes.binary_search_by_key(&node_id, |node| node.id)
-        self.nodes.iter_mut().find(|node| node.id == node_id)
+    pub fn find_node_by_id(&self, node_id: GraphNodeId) -> Option<&GraphNode> {
+        // TODO: nodes is always sorted by id?
+        self.nodes
+            .binary_search_by_key(&node_id, |node| node.id)
+            .map(|index| &self.nodes[index])
+            .ok()
+    }
+
+    pub fn find_node_by_id_mut(&mut self, node_id: GraphNodeId) -> Option<&mut GraphNode> {
+        // TODO: nodes is always sorted by id?
+        self.nodes
+            .binary_search_by_key(&node_id, |node| node.id)
+            .map(|index| &mut self.nodes[index])
+            .ok()
     }
 
     fn rebuild_node_id_base(&mut self, base_index: usize) {
         for node in &mut self.nodes {
             node.id += base_index;
-            for input in &mut node.inputs {
-                *input += base_index;
-            }
-            for output in &mut node.outputs {
-                *output += base_index;
+            for index in itertools::chain!(&mut node.inputs, &mut node.outputs) {
+                *index += base_index;
             }
         }
 
@@ -450,6 +465,38 @@ impl Graph {
         });
         self.consumers = consumers;
     }
+
+    pub fn extract_subgraph_by_node_id(&self, node_id: GraphNodeId) -> SubGraph {
+        let mut nodes: HashSet<GraphNodeId> = HashSet::new();
+
+        let mut queue: VecDeque<GraphNodeId> = VecDeque::new();
+        queue.push_back(node_id);
+
+        while let Some(node_id) = queue.pop_front() {
+            if nodes.contains(&node_id) {
+                continue;
+            }
+
+            nodes.insert(node_id);
+
+            self.producers
+                .get(&node_id)
+                .iter()
+                .for_each(|node_ids| queue.extend(node_ids.iter()));
+        }
+
+        let mut nodes = nodes.into_iter().collect_vec();
+        nodes.sort();
+
+        SubGraph { graph: self, nodes }
+    }
+
+    pub fn split_with_outputs(&self) -> Vec<SubGraph> {
+        self.outputs()
+            .iter()
+            .map(|output| self.extract_subgraph_by_node_id(*output))
+            .collect_vec()
+    }
 }
 
 impl From<&Graph> for petgraph::Graph<(), ()> {
@@ -462,9 +509,64 @@ impl From<&Graph> for petgraph::Graph<(), ()> {
                     node.outputs
                         .iter()
                         .map(|&id| (NodeIndex::new(node.id), NodeIndex::new(id.into())))
-                        .collect::<Vec<_>>()
+                        .collect_vec()
                 })
                 .flatten(),
         )
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SubGraph<'a> {
+    pub graph: &'a Graph,
+    pub nodes: Vec<GraphNodeId>,
+}
+
+impl<'a> SubGraph<'a> {
+    pub fn from(graph: &'a Graph, nodes: Vec<GraphNodeId>) -> Self {
+        Self { graph, nodes }
+    }
+}
+
+impl<'a> From<&SubGraph<'a>> for Graph {
+    fn from(value: &SubGraph) -> Self {
+        let node_ids: HashSet<_> = value.nodes.iter().collect();
+
+        let mut nodes = value
+            .graph
+            .nodes
+            .iter()
+            .filter(|node| node_ids.contains(&node.id))
+            .map(|node| node.clone())
+            .collect_vec();
+
+        for node in &mut nodes {
+            node.inputs.retain(|input| node_ids.contains(input));
+            node.outputs.retain(|output| node_ids.contains(output));
+        }
+
+        let mut graph = Graph {
+            nodes,
+            ..Default::default()
+        };
+        graph.rebuild_node_id_base(0);
+
+        graph
+    }
+}
+
+impl<'a> From<Vec<SubGraph<'a>>> for Graph {
+    fn from(value: Vec<SubGraph<'a>>) -> Self {
+        if value.is_empty() {
+            return Default::default();
+        }
+
+        let mut graph: Graph = (&value[0]).into();
+
+        for subgraph in value.iter().skip(1) {
+            graph.concat(subgraph.into());
+        }
+
+        graph
     }
 }
