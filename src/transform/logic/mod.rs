@@ -1,9 +1,11 @@
+use std::collections::HashSet;
+
 use itertools::Itertools;
 
 use crate::{
     graph::{
         builder::logic::{LogicGraph, LogicGraphBuilder},
-        Graph, GraphNode, GraphNodeId, GraphNodeKind,
+        Graph, GraphNode, GraphNodeId, GraphNodeKind, SubGraph,
     },
     logic::{Logic, LogicType},
 };
@@ -52,7 +54,7 @@ impl LogicGraphTransformer {
             .map(|node| node.id)
             .collect_vec();
 
-        let and_gate = LogicGraphBuilder::new("~(x|y)".to_string())
+        let and_gate = LogicGraphBuilder::new("~(~x|~y)".to_string())
             .build("z".to_string())
             .unwrap();
 
@@ -111,8 +113,70 @@ impl LogicGraphTransformer {
     }
 
     // (a | b) | (c | d) => |(a, b, c, d)
-    pub fn fusion_ops(&mut self) {
+    pub fn fusion_orops(&mut self) {
         todo!()
+    }
+
+    // (a & b) & (c & d) => &(a, b, c, d)
+    pub fn fusion_andops(&mut self) {
+        todo!()
+    }
+
+    // ~(~a) => a
+    pub fn remove_double_neg_expression(&mut self) {
+        let neg_nodes = self
+            .graph
+            .graph
+            .nodes
+            .iter()
+            .filter(|node| matches!(&node.kind, GraphNodeKind::Logic(Logic { logic_type }) if *logic_type == LogicType::Not))
+            .collect_vec();
+
+        let mut remove_target_ops = Vec::new();
+        let mut remove_targets = HashSet::new();
+
+        for node in neg_nodes {
+            if remove_targets.contains(&node.id) {
+                continue;
+            }
+
+            if node.outputs.len() != 1 {
+                continue;
+            }
+
+            let output = self.graph.graph.find_node_by_id(node.outputs[0]).unwrap();
+
+            if matches!(&output.kind, GraphNodeKind::Logic(Logic { logic_type }) if *logic_type == LogicType::Not)
+            {
+                remove_targets.insert(node.id);
+                remove_targets.insert(output.id);
+                remove_target_ops.push((node.id, output.id));
+            }
+        }
+
+        for (t1, t2) in remove_target_ops {
+            let t1_node = self.graph.graph.find_node_by_id(t1).unwrap();
+            let t2_node = self.graph.graph.find_node_by_id(t2).unwrap();
+
+            let input = t1_node.inputs[0];
+            let outputs = t2_node.outputs.clone();
+
+            self.graph
+                .graph
+                .replace_target_output_node_ids(input, t1, outputs.clone());
+
+            for output in outputs {
+                self.graph
+                    .graph
+                    .replace_target_input_node_ids(output, t2, vec![input]);
+            }
+
+            self.graph.graph.remove_by_node_id_lazy(t1);
+            self.graph.graph.remove_by_node_id_lazy(t2);
+        }
+
+        self.graph.graph.build_producers();
+        self.graph.graph.build_consumers();
     }
 
     // replacable only (x, y) => (z)
@@ -283,5 +347,9 @@ impl LogicGraphTransformer {
         self.graph.graph.build_consumers();
 
         Ok(())
+    }
+
+    pub fn optimize_cse(&mut self) -> eyre::Result<()> {
+        todo!()
     }
 }

@@ -266,6 +266,7 @@ mod tests {
         let mut transform = LogicGraphTransformer::new(fa);
         transform.decompose_xor()?;
         transform.decompose_and()?;
+        transform.remove_double_neg_expression();
 
         let finish = transform.finish();
         println!("{}", finish.to_graphviz());
@@ -274,14 +275,31 @@ mod tests {
         let g: Graph = finish.graph.split_with_outputs().into();
         println!("{}", g.to_graphviz());
 
-        let mut graph: Graph = (&finish.graph.split_with_outputs()[2]).into();
+        let splits = finish.graph.split_with_outputs();
+
+        let mut graph: Graph = (&finish.graph.split_with_outputs()[0]).into();
         graph = graph.rebuild_node_ids();
         println!("{}", graph.to_graphviz());
 
         let mut transform = LogicGraphTransformer::new(LogicGraph { graph });
         transform.optimize()?;
 
-        let finish = transform.finish();
+        let mut finish = transform.finish();
+        println!("{}", finish.to_graphviz());
+
+        for index in 1..2 {
+            let mut graph: Graph = (&splits[index]).into();
+            graph = graph.rebuild_node_ids();
+            println!("{}", graph.to_graphviz());
+
+            let mut transform = LogicGraphTransformer::new(LogicGraph { graph });
+            transform.optimize()?;
+
+            let finish2 = transform.finish();
+            println!("{}", finish2.to_graphviz());
+            finish.graph.concat(finish2.graph);
+        }
+
         println!("{}", finish.to_graphviz());
 
         Ok(())

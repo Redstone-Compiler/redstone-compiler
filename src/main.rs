@@ -30,3 +30,5 @@ fn main() -> eyre::Result<()> {
 
     Ok(())
 }
+
+fn test_egg() {}

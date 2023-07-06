@@ -476,6 +476,28 @@ impl Graph {
             .for_each(|node_id| *node_id = to);
     }
 
+    pub fn replace_target_input_node_ids(
+        &mut self,
+        target: GraphNodeId,
+        from: GraphNodeId,
+        to: Vec<GraphNodeId>,
+    ) {
+        let node = self.find_node_by_id_mut(target).unwrap();
+        node.inputs.retain(|id| *id != from);
+        node.inputs.extend(to);
+    }
+
+    pub fn replace_target_output_node_ids(
+        &mut self,
+        target: GraphNodeId,
+        from: GraphNodeId,
+        to: Vec<GraphNodeId>,
+    ) {
+        let node = self.find_node_by_id_mut(target).unwrap();
+        node.outputs.retain(|id| *id != from);
+        node.outputs.extend(to);
+    }
+
     // outputs이 반드시 determine 되어야함
     pub fn build_inputs(&mut self) {
         let mut input_map: HashMap<usize, Vec<usize>> = HashMap::new();
