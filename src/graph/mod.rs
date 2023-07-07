@@ -66,6 +66,7 @@ pub struct GraphNode {
     pub kind: GraphNodeKind,
     pub inputs: Vec<GraphNodeId>,
     pub outputs: Vec<GraphNodeId>,
+    pub tag: String,
 }
 
 #[derive(Default, Debug, Clone)]
@@ -78,6 +79,16 @@ pub struct Graph {
 impl Graph {
     pub fn to_petgraph(&self) -> petgraph::Graph<(), ()> {
         self.into()
+    }
+
+    pub fn topological_order(&self) -> Vec<GraphNodeId> {
+        let nodes: HashSet<GraphNodeId> = self.nodes.iter().map(|node| node.id).collect();
+        petgraph::algo::toposort(&self.to_petgraph(), None)
+            .unwrap()
+            .iter()
+            .map(|index| index.index())
+            .filter(|id| nodes.contains(id))
+            .collect_vec()
     }
 
     pub fn inputs(&self) -> Vec<GraphNodeId> {
@@ -400,6 +411,7 @@ impl Graph {
                 inputs: node.inputs.iter().map(|index| index_map[index]).collect(),
                 outputs: node.outputs.iter().map(|index| index_map[index]).collect(),
                 kind: node.kind,
+                ..Default::default()
             })
             .collect::<Vec<_>>();
         nodes.sort_by_key(|node| node.id);
@@ -432,6 +444,7 @@ impl Graph {
                 inputs: node.inputs.iter().map(|index| indexs[index]).collect(),
                 outputs: node.outputs.iter().map(|index| indexs[index]).collect(),
                 kind: node.kind,
+                ..Default::default()
             })
             .collect::<Vec<_>>();
 

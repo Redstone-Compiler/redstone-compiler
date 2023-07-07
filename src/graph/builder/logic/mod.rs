@@ -233,6 +233,8 @@ impl LogicGraphBuilder {
 
 #[cfg(test)]
 mod tests {
+    use itertools::Itertools;
+
     use crate::{
         graph::{graphviz::ToGraphviz, Graph},
         transform::logic::LogicGraphTransformer,
@@ -267,10 +269,12 @@ mod tests {
         transform.decompose_xor()?;
         transform.decompose_and()?;
         transform.remove_double_neg_expression();
+        let clusters = transform.cluster(false);
+        println!("{}", transform.graph.to_graphviz_with_clusters(&clusters));
 
         let finish = transform.finish();
-        println!("{}", finish.to_graphviz());
         println!("{:?}", finish.graph.critical_path());
+        println!("{:?}", finish.graph.clone().topological_order());
 
         let g: Graph = finish.graph.split_with_outputs().into();
         println!("{}", g.to_graphviz());
