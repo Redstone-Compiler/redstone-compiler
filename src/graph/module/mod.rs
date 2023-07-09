@@ -5,7 +5,7 @@ use super::{Graph, GraphNodeId};
 pub type GraphModuleId = usize;
 pub type GraphModulePortId = usize;
 
-#[derive(Default, PartialEq, Eq, Clone, Copy)]
+#[derive(Default, Debug, PartialEq, Eq, Clone, Copy)]
 pub enum GraphModulePortType {
     #[default]
     InputNet,
@@ -15,35 +15,47 @@ pub enum GraphModulePortType {
     InOut,
 }
 
-#[derive(Default, Clone)]
+#[derive(Clone, Debug)]
+pub enum GraphModulePortTarget {
+    Node(GraphNodeId),
+    Module(GraphModuleId, GraphModulePortId),
+}
+
+impl Default for GraphModulePortTarget {
+    fn default() -> Self {
+        Self::Node(0)
+    }
+}
+
+#[derive(Default, Clone, Debug)]
 pub struct GraphModulePort {
     pub id: GraphModulePortId,
     pub port_type: GraphModulePortType,
-    pub target: (GraphModuleId, GraphNodeId),
+    pub target: GraphModulePortTarget,
 }
 
-#[derive(Default, PartialEq, Eq, Clone, Copy)]
+#[derive(Default, Debug, PartialEq, Eq, Clone, Copy)]
 pub enum GraphModuleVariableType {
     #[default]
     Wire,
     Reg,
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug)]
 pub struct GraphModuleVariable {
     pub var_type: GraphModulePortType,
     pub source: GraphModulePortId,
     pub targe: GraphModulePortId,
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug)]
 enum GraphModuleState {
     #[default]
     UnInitialized,
     Initialized,
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug)]
 pub struct GraphModule {
     state: GraphModuleState,
     pub id: GraphModuleId,
@@ -54,6 +66,13 @@ pub struct GraphModule {
 }
 
 impl GraphModule {
+    pub fn from_instances(instances: Vec<Box<GraphModule>>) -> Self {
+        Self {
+            instances,
+            ..Default::default()
+        }
+    }
+
     pub fn numbering_ports(&mut self, base: usize) -> usize {
         self.ports
             .iter_mut()
@@ -65,7 +84,7 @@ impl GraphModule {
         base + self.ports.len()
     }
 
-    fn check_init(&self) -> eyre::Result<()> {
+    pub fn check_init(&self) -> eyre::Result<()> {
         match self.state {
             GraphModuleState::UnInitialized => {
                 eyre::bail!("You cannot use unitialized graph module!")
@@ -90,12 +109,12 @@ impl From<Graph> for GraphModule {
                 .iter()
                 .map(|input| GraphModulePort {
                     port_type: GraphModulePortType::InputNet,
-                    target: (0, *input),
+                    target: GraphModulePortTarget::Node(*input),
                     ..Default::default()
                 })
                 .chain(value.outputs().iter().map(|output| GraphModulePort {
                     port_type: GraphModulePortType::OutputNet,
-                    target: (0, *output),
+                    target: GraphModulePortTarget::Node(*output),
                     ..Default::default()
                 }))
                 .collect_vec(),
