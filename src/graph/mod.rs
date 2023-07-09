@@ -7,6 +7,7 @@ use crate::{common::block::Block, logic::Logic};
 
 pub mod builder;
 pub mod graphviz;
+pub mod module;
 
 pub type GraphNodeId = usize;
 
