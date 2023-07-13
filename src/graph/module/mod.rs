@@ -1,3 +1,6 @@
+use std::collections::HashMap;
+
+use eyre::ContextCompat;
 use itertools::Itertools;
 
 use super::{Graph, GraphNodeId};
@@ -30,6 +33,7 @@ impl Default for GraphModulePortTarget {
 #[derive(Default, Clone, Debug)]
 pub struct GraphModulePort {
     pub id: GraphModulePortId,
+    pub name: String,
     pub port_type: GraphModulePortType,
     pub target: GraphModulePortTarget,
 }
@@ -58,19 +62,31 @@ enum GraphModuleState {
 #[derive(Default, Clone, Debug)]
 pub struct GraphModule {
     state: GraphModuleState,
+    // only root GraphModule have context
+    context: Option<GraphModuleContext>,
     pub id: GraphModuleId,
-    pub graph: Option<Graph>,
-    pub instances: Vec<Box<GraphModule>>,
+    pub graph: Option<GraphId>,
+    pub instances: Vec<GraphModuleId>,
     pub vars: Vec<GraphModuleVariable>,
     pub ports: Vec<GraphModulePort>,
 }
 
+pub type GraphId = usize;
+
+#[derive(Default, Clone, Debug)]
+pub struct UniqueGraph(GraphId, Graph);
+
+#[derive(Default, Clone, Debug)]
+struct GraphModuleContext {
+    pub modules: Vec<Box<GraphModule>>,
+    pub module_index: HashMap<GraphModuleId, usize>,
+    pub graphs: Vec<Box<UniqueGraph>>,
+    pub graph_index: HashMap<GraphId, usize>,
+}
+
 impl GraphModule {
     pub fn from_instances(instances: Vec<Box<GraphModule>>) -> Self {
-        Self {
-            instances,
-            ..Default::default()
-        }
+        todo!()
     }
 
     pub fn numbering_ports(&mut self, base: usize) -> usize {
@@ -92,6 +108,14 @@ impl GraphModule {
             GraphModuleState::Initialized => Ok(()),
         }
     }
+
+    pub fn port_by_name(&self, name: &str) -> eyre::Result<&GraphModulePort> {
+        // TODO: makes this fast
+        self.ports
+            .iter()
+            .find(|port| port.name == name)
+            .context("Port not found!")
+    }
 }
 
 impl From<&Graph> for GraphModule {
@@ -110,15 +134,34 @@ impl From<Graph> for GraphModule {
                 .map(|input| GraphModulePort {
                     port_type: GraphModulePortType::InputNet,
                     target: GraphModulePortTarget::Node(*input),
+                    name: value
+                        .find_node_by_id(*input)
+                        .unwrap()
+                        .kind
+                        .as_input()
+                        .clone(),
                     ..Default::default()
                 })
-                .chain(value.outputs().iter().map(|output| GraphModulePort {
-                    port_type: GraphModulePortType::OutputNet,
-                    target: GraphModulePortTarget::Node(*output),
-                    ..Default::default()
+                .chain(value.outputs().iter().map(|output| {
+                    GraphModulePort {
+                        port_type: GraphModulePortType::OutputNet,
+                        target: GraphModulePortTarget::Node(*output),
+                        name: value
+                            .find_node_by_id(*output)
+                            .unwrap()
+                            .kind
+                            .as_output()
+                            .clone(),
+                        ..Default::default()
+                    }
                 }))
                 .collect_vec(),
-            graph: Some(value),
+            graph: Some(0),
+            context: Some(GraphModuleContext {
+                graphs: vec![Box::new(UniqueGraph(0, value))],
+                graph_index: HashMap::from_iter(vec![(0, 0)]),
+                ..Default::default()
+            }),
             ..Default::default()
         }
     }
