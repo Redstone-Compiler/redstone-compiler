@@ -4,12 +4,8 @@ use std::{
     ops::{Index, IndexMut},
 };
 
-use crate::{
-    common::{DimSize, Position},
-    graph::Graph,
-};
-
 use super::block::{Block, BlockKind};
+use super::position::{DimSize, Position, PositionIndex};
 
 #[derive(Debug, Clone)]
 pub struct World {
@@ -26,7 +22,7 @@ pub struct World3D {
 
 impl<'a> From<&'a World> for World3D {
     fn from(value: &'a World) -> Self {
-        let mut block_map: BTreeMap<usize, &Block> = BTreeMap::default();
+        let mut block_map: BTreeMap<PositionIndex, &Block> = BTreeMap::default();
 
         for block in &value.blocks {
             block_map.insert(block.0.index(&value.size), &block.1);
@@ -38,7 +34,9 @@ impl<'a> From<&'a World> for World3D {
                     .map(|y| {
                         (0..value.size.0)
                             .map(|x| {
-                                let pos = x + y * value.size.0 + z * value.size.0 * value.size.1;
+                                let pos = PositionIndex(
+                                    x + y * value.size.0 + z * value.size.0 * value.size.1,
+                                );
 
                                 block_map
                                     .get(&pos)
@@ -72,12 +70,6 @@ impl IndexMut<&Position> for World3D {
     }
 }
 
-impl<'a> From<&'a World3D> for Graph {
-    fn from(value: &'a World3D) -> Self {
-        todo!()
-    }
-}
-
 impl Debug for World3D {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for (height, plane) in self.map.iter().enumerate().rev() {
@@ -96,6 +88,7 @@ impl Debug for World3D {
                             BlockKind::Torch { .. } => "t",
                             BlockKind::Repeater { .. } => "t",
                             BlockKind::RedstoneBlock => "b",
+                            BlockKind::Piston { .. } => "p",
                         })
                         .collect::<Vec<_>>()
                         .join("")

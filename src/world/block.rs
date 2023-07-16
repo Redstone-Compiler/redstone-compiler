@@ -1,6 +1,9 @@
-use crate::common::{DimSize, Position};
+use crate::graph::GraphNodeId;
 
-use super::world::World;
+use super::{
+    position::{DimSize, Position},
+    world::World,
+};
 
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Direction {
@@ -84,8 +87,16 @@ pub enum BlockKind {
         is_on: bool,
         is_locked: bool,
         delay: usize,
+        // for using copy trait
+        lock_input1: Option<GraphNodeId>,
+        lock_input2: Option<GraphNodeId>,
     },
     RedstoneBlock,
+    Piston {
+        is_on: bool,
+        is_stickly: bool,
+        target_block: Option<GraphNodeId>,
+    },
 }
 
 impl BlockKind {
@@ -98,6 +109,7 @@ impl BlockKind {
             BlockKind::Torch { .. } => "Torch",
             BlockKind::Repeater { .. } => "Repeater",
             BlockKind::RedstoneBlock => "RedstoneBlock",
+            BlockKind::Piston { .. } => "Piston",
         }
         .to_string()
     }

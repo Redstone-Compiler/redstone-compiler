@@ -1,9 +1,9 @@
 use std::collections::VecDeque;
 
-use crate::common::{
+use super::{
     block::{Block, BlockKind, Direction, RedstoneState},
+    position::Position,
     world::{World, World3D},
-    Position,
 };
 
 #[derive(Clone, Debug)]
@@ -39,6 +39,7 @@ impl EventType {
 #[derive(Clone, Debug)]
 struct Event {
     id: Option<usize>,
+    #[allow(dead_code)]
     from_id: Option<usize>,
     event_type: EventType,
     target_position: Position,
@@ -341,6 +342,7 @@ impl Simulator {
                 BlockKind::Repeater { .. } => {
                     self.propgate_repeater_event(&mut block, &event)?;
                 }
+                BlockKind::Piston { .. } => todo!(),
             }
 
             self.world[&event.target_position] = block;
@@ -700,7 +702,8 @@ impl Simulator {
         let BlockKind::Repeater {
             is_on,
             is_locked,
-            delay
+            delay,
+            ..
         } = block.kind else {
             unreachable!()
         };
@@ -715,6 +718,7 @@ impl Simulator {
             return Ok(());
         }
 
+        // TODO: Consider block off-pulse input lower by setting delay
         loop {
             match event.event_type {
                 EventType::SoftOn
@@ -855,7 +859,7 @@ impl Simulator {
 mod test {
     use std::collections::VecDeque;
 
-    use crate::common::DimSize;
+    use crate::world::position::DimSize;
 
     use super::*;
 
@@ -1012,6 +1016,8 @@ mod test {
                 is_on: false,
                 is_locked: false,
                 delay: 2,
+                lock_input1: None,
+                lock_input2: None,
             },
             direction: Direction::South,
         };

@@ -1,4 +1,9 @@
-use super::{block::Block, world::World, DimSize, Position, Verifier};
+use super::{
+    block::Block,
+    position::{DimSize, Position},
+    world::World,
+    Verifier,
+};
 
 // 게이트의 종류
 pub enum GateKind {

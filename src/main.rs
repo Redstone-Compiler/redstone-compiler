@@ -1,12 +1,11 @@
 pub mod circuit;
-pub mod common;
 pub mod estimator;
 pub mod graph;
 pub mod logic;
 pub mod option;
-pub mod simulator;
 pub mod transform;
 pub mod verilog;
+pub mod world;
 
 use std::path::PathBuf;
 use structopt::StructOpt;
@@ -30,5 +29,3 @@ fn main() -> eyre::Result<()> {
 
     Ok(())
 }
-
-fn test_egg() {}

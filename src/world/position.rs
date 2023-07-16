@@ -1,16 +1,15 @@
-use self::block::{Direction, RedstoneState, RedstoneStateType};
-
-pub mod block;
-pub mod gate;
-pub mod world;
+use super::block::{Direction, RedstoneState, RedstoneStateType};
 
 // 위치
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub struct Position(pub usize, pub usize, pub usize);
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq, PartialOrd, Ord, Hash)]
+pub struct PositionIndex(pub usize);
+
 impl Position {
-    pub fn index(&self, size: &DimSize) -> usize {
-        self.0 + self.1 * size.0 + self.2 * size.0 * size.1
+    pub fn index(&self, size: &DimSize) -> PositionIndex {
+        PositionIndex(self.0 + self.1 * size.0 + self.2 * size.0 * size.1)
     }
 
     pub fn forwards(&self) -> Vec<Position> {
@@ -174,7 +173,3 @@ impl Position {
 
 #[derive(Debug, Copy, Clone)]
 pub struct DimSize(pub usize, pub usize, pub usize);
-
-pub trait Verifier {
-    fn verify(&self) -> bool;
-}
