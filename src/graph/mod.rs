@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use itertools::Itertools;
 use petgraph::stable_graph::NodeIndex;
 
-use crate::{common::block::Block, logic::Logic};
+use crate::{logic::Logic, world::block::Block};
 
 pub mod builder;
 pub mod graphviz;
