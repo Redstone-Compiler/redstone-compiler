@@ -66,7 +66,7 @@ impl<'a> GraphvizBuilder<'a> {
             r#"
 digraph {graph_name} {{
     rankdir={}
-    graph [label="Line edges", nodesep={}, splines=ortho]
+    graph [label="Line edges", nodesep={}]
     node [shape={}]
 {}
 {}

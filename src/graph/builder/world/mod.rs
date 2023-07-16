@@ -197,7 +197,7 @@ impl WorldGraphBuilder {
         let mut result: Vec<(Direction, Position)> = Vec::new();
 
         if let Some(pos) = walk {
-            result.extend(self.propagate(PropagateType::Repeater, pos, block.direction.inverse()));
+            result.extend(self.propagate(PropagateType::Repeater, pos, block.direction));
         }
 
         if let Some(pos) = walk.map(|pos| pos.down()).flatten() {
@@ -232,24 +232,21 @@ impl WorldGraphBuilder {
             BlockKind::Cobble { .. } => pos
                 .cardinal_except(&dir)
                 .iter()
-                .filter_map(|pos_src| {
-                    let block_src = &self.world[pos_src];
-                    let dir = pos_src.diff(&pos);
-
-                    if dir != block_src.direction {
-                        return None;
-                    }
-
-                    match block_src.kind {
-                        BlockKind::Torch { .. } => Some((Direction::None, *pos_src)),
-                        BlockKind::Repeater { .. } => match propagate_type {
-                            PropagateType::Soft => None,
-                            PropagateType::Hard
-                            | PropagateType::Torch
-                            | PropagateType::Repeater => Some((Direction::None, *pos_src)),
-                        },
-                        _ => None,
-                    }
+                .filter_map(|pos_src| match &self.world[pos_src].kind {
+                    BlockKind::Torch { .. } => Some((Direction::None, *pos_src)),
+                    BlockKind::Repeater { .. } => match propagate_type {
+                        PropagateType::Soft => None,
+                        PropagateType::Hard | PropagateType::Torch | PropagateType::Repeater => {
+                            Some((Direction::None, *pos_src))
+                        }
+                    },
+                    BlockKind::Redstone { .. } => match propagate_type {
+                        PropagateType::Soft => None,
+                        PropagateType::Hard | PropagateType::Torch | PropagateType::Repeater => {
+                            Some((Direction::None, *pos_src))
+                        }
+                    },
+                    _ => None,
                 })
                 .chain(|| -> Vec<(Direction, Position)> {
                     let up_pos = pos.up();
@@ -429,6 +426,60 @@ mod test {
             ],
         };
 
+        let g = WorldGraphBuilder::new(&mock_world).build();
+        println!("{}", g.to_graphviz());
+    }
+
+    #[test]
+    fn unittest_worldgraph_cobble() {
+        tracing_subscriber::fmt::init();
+
+        let default_restone = Block {
+            kind: BlockKind::Redstone {
+                on_count: 0,
+                state: 0,
+                strength: 0,
+            },
+            direction: Default::default(),
+        };
+
+        let default_cobble = Block {
+            kind: BlockKind::Cobble {
+                on_count: 0,
+                on_base_count: 0,
+            },
+            direction: Default::default(),
+        };
+
+        let input_repeater = Block {
+            kind: BlockKind::Repeater {
+                delay: 1,
+                is_on: false,
+                is_locked: false,
+                lock_input1: None,
+                lock_input2: None,
+            },
+            direction: Direction::South,
+        };
+
+        let output_torch = Block {
+            kind: BlockKind::Torch { is_on: false },
+            direction: Direction::West,
+        };
+
+        let mock_world = World {
+            size: DimSize(4, 4, 2),
+            blocks: vec![
+                (Position(1, 1, 0), default_cobble.clone()),
+                (Position(1, 0, 0), input_repeater),
+                (Position(0, 1, 0), default_restone.clone()),
+                (Position(1, 2, 0), default_restone.clone()),
+                (Position(2, 1, 0), output_torch),
+            ],
+        };
+
+        let _3d: crate::world::world::World3D = (&mock_world).into();
+        println!("{:?}", _3d);
         let g = WorldGraphBuilder::new(&mock_world).build();
         println!("{}", g.to_graphviz());
     }
