@@ -1,3 +1,5 @@
+use std::fmt::Display;
+
 use super::block::{Direction, RedstoneState, RedstoneStateType};
 
 // 위치

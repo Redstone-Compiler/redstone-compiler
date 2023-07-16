@@ -14,6 +14,7 @@ use crate::{
 #[derive(Debug, Clone)]
 pub struct WorldGraph {
     pub graph: Graph,
+    pub positions: HashMap<GraphNodeId, Position>,
 }
 
 #[derive(Debug, Clone)]
@@ -51,13 +52,14 @@ impl WorldGraphBuilder {
     pub fn build(mut self) -> WorldGraph {
         self.visit_blocks();
 
+        let (nodes, positions) = self.build_nodes();
         let mut graph = Graph {
-            nodes: self.build_nodes(),
+            nodes: nodes,
             ..Default::default()
         };
         graph.build_inputs();
 
-        WorldGraph { graph }
+        WorldGraph { graph, positions }
     }
 
     fn visit_blocks(&mut self) {
@@ -280,7 +282,7 @@ impl WorldGraphBuilder {
         }
     }
 
-    fn build_nodes(&mut self) -> Vec<GraphNode> {
+    fn build_nodes(&mut self) -> (Vec<GraphNode>, HashMap<GraphNodeId, Position>) {
         let mut graph_id: HashMap<Position, GraphNodeId> = HashMap::new();
         let mut nodes: HashMap<Position, GraphNode> = HashMap::new();
 
@@ -332,7 +334,10 @@ impl WorldGraphBuilder {
             }
         }
 
-        nodes.into_iter().map(|(_, node)| node).collect_vec()
+        let positions = nodes.iter().map(|(pos, node)| (node.id, *pos)).collect();
+        let nodes = nodes.into_iter().map(|(_, node)| node).collect_vec();
+
+        (nodes, positions)
     }
 }
 
@@ -425,6 +430,6 @@ mod test {
         };
 
         let g = WorldGraphBuilder::new(&mock_world).build();
-        println!("{}", g.graph.to_graphviz());
+        println!("{}", g.to_graphviz());
     }
 }
