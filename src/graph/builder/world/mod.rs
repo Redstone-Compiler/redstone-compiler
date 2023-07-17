@@ -229,41 +229,38 @@ impl WorldGraphBuilder {
             | BlockKind::RedstoneBlock
             | BlockKind::Torch { .. } => Vec::new(),
             // 코블에 붙어있는 레드스톤 토치, 리피터만 반응함
-            BlockKind::Cobble { .. } => pos
-                .cardinal_except(&dir)
-                .iter()
-                .filter_map(|pos_src| match &self.world[pos_src].kind {
-                    BlockKind::Torch { .. } => Some((Direction::None, *pos_src)),
-                    BlockKind::Repeater { .. } => match propagate_type {
-                        PropagateType::Soft => None,
-                        PropagateType::Hard | PropagateType::Torch | PropagateType::Repeater => {
-                            Some((Direction::None, *pos_src))
-                        }
-                    },
-                    BlockKind::Redstone { .. } => match propagate_type {
-                        PropagateType::Soft => None,
-                        PropagateType::Hard | PropagateType::Torch | PropagateType::Repeater => {
-                            Some((Direction::None, *pos_src))
-                        }
-                    },
-                    _ => None,
-                })
-                .chain(|| -> Vec<(Direction, Position)> {
-                    let up_pos = pos.up();
-                    let up_block = &self.world[&up_pos];
+            BlockKind::Cobble { .. } => {
+                let mut cardinal_propagation = pos
+                    .cardinal_except(&dir)
+                    .iter()
+                    .filter_map(|pos_src| match &self.world[pos_src].kind {
+                        BlockKind::Torch { .. } => Some((Direction::None, *pos_src)),
+                        BlockKind::Repeater { .. } => match propagate_type {
+                            PropagateType::Soft => None,
+                            PropagateType::Hard
+                            | PropagateType::Torch
+                            | PropagateType::Repeater => Some((Direction::None, *pos_src)),
+                        },
+                        BlockKind::Redstone { .. } => match propagate_type {
+                            PropagateType::Soft => None,
+                            PropagateType::Hard
+                            | PropagateType::Torch
+                            | PropagateType::Repeater => Some((Direction::None, *pos_src)),
+                        },
+                        _ => None,
+                    })
+                    .collect_vec();
 
-                    if up_block.direction != Direction::Bottom {
-                        return Vec::new();
-                    }
+                let up_pos = pos.up();
+                let up_block = &self.world[&up_pos];
+                if up_block.direction == Direction::Bottom
+                    && matches!(up_block.kind, BlockKind::Torch { .. })
+                {
+                    cardinal_propagation.push((Direction::None, up_pos));
+                }
 
-                    match up_block.kind {
-                        BlockKind::Torch { .. } => {
-                            vec![(Direction::None, up_pos)]
-                        }
-                        _ => Vec::new(),
-                    }
-                }())
-                .collect_vec(),
+                cardinal_propagation
+            }
             BlockKind::Redstone { .. } => vec![(Direction::None, pos)],
             BlockKind::Repeater { .. } => {
                 if block.direction == dir {
@@ -283,51 +280,50 @@ impl WorldGraphBuilder {
         let mut graph_id: HashMap<Position, GraphNodeId> = HashMap::new();
         let mut nodes: HashMap<Position, GraphNode> = HashMap::new();
 
-        for (index, pos) in self.queue.iter().enumerate() {
-            let block = self.world[pos];
-            if block.kind.is_cobble() {
-                continue;
-            }
-
+        for (index, pos) in self
+            .queue
+            .iter()
+            .filter(|pos| !self.world[*pos].kind.is_cobble())
+            .enumerate()
+        {
             graph_id.insert(*pos, index);
             nodes.insert(
                 *pos,
-                GraphNode {
-                    id: index,
-                    kind: GraphNodeKind::Block(block),
-                    ..Default::default()
-                },
+                GraphNode::new(index, GraphNodeKind::Block(self.world[pos])),
             );
         }
 
-        for pos in self.queue.iter() {
-            let mut block = self.world[pos];
-            if block.kind.is_cobble() {
+        for pos in self
+            .queue
+            .iter()
+            .filter(|pos| !self.world[pos].kind.is_cobble())
+        {
+            let Some(outputs) = self.outputs.get(pos) else {
                 continue;
-            }
+            };
 
-            if let Some(outputs) = self.outputs.get(pos) {
-                let node = nodes.get_mut(pos).unwrap();
-                for (dir, pos) in outputs {
-                    let id = graph_id[&pos];
+            let node = nodes.get_mut(pos).unwrap();
+            let mut block = self.world[pos];
 
-                    if let BlockKind::Repeater {
-                        lock_input1,
-                        lock_input2,
-                        ..
-                    } = &mut block.kind
-                    {
-                        if block.direction.is_othogonal_plane(*dir) {
-                            match (&lock_input1, &lock_input2) {
-                                (None, _) => *lock_input1 = Some(id),
-                                (_, None) => *lock_input2 = Some(id),
-                                _ => panic!(),
-                            }
+            for (dir, pos) in outputs {
+                let id = graph_id[&pos];
+
+                if let BlockKind::Repeater {
+                    lock_input1,
+                    lock_input2,
+                    ..
+                } = &mut block.kind
+                {
+                    if block.direction.is_othogonal_plane(*dir) {
+                        match (&lock_input1, &lock_input2) {
+                            (None, _) => *lock_input1 = Some(id),
+                            (_, None) => *lock_input2 = Some(id),
+                            _ => panic!(),
                         }
                     }
-
-                    node.outputs.push(id);
                 }
+
+                node.outputs.push(id);
             }
         }
 
@@ -474,6 +470,7 @@ mod test {
                 (Position(1, 0, 0), input_repeater),
                 (Position(0, 1, 0), default_restone.clone()),
                 (Position(1, 2, 0), default_restone.clone()),
+                (Position(2, 2, 0), default_restone.clone()),
                 (Position(2, 1, 0), output_torch),
             ],
         };

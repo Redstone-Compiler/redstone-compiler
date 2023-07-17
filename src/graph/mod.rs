@@ -69,6 +69,16 @@ pub struct GraphNode {
     pub tag: String,
 }
 
+impl GraphNode {
+    pub fn new(id: GraphNodeId, kind: GraphNodeKind) -> Self {
+        Self {
+            id,
+            kind,
+            ..Default::default()
+        }
+    }
+}
+
 #[derive(Default, Debug, Clone)]
 pub struct Graph {
     pub nodes: Vec<GraphNode>,
