@@ -480,4 +480,60 @@ mod test {
         let g = WorldGraphBuilder::new(&mock_world).build();
         println!("{}", g.to_graphviz());
     }
+
+    #[test]
+    fn unittest_worldgraph_recursive() {
+        tracing_subscriber::fmt::init();
+
+        let default_restone = Block {
+            kind: BlockKind::Redstone {
+                on_count: 0,
+                state: 0,
+                strength: 0,
+            },
+            direction: Default::default(),
+        };
+
+        let default_cobble = Block {
+            kind: BlockKind::Cobble {
+                on_count: 0,
+                on_base_count: 0,
+            },
+            direction: Default::default(),
+        };
+
+        let input_repeater = Block {
+            kind: BlockKind::Repeater {
+                delay: 1,
+                is_on: false,
+                is_locked: false,
+                lock_input1: None,
+                lock_input2: None,
+            },
+            direction: Direction::North,
+        };
+
+        let output_torch = Block {
+            kind: BlockKind::Torch { is_on: false },
+            direction: Direction::South,
+        };
+
+        let mock_world = World {
+            size: DimSize(5, 5, 3),
+            blocks: vec![
+                (Position(1, 1, 0), default_cobble.clone()),
+                (Position(1, 0, 1), default_cobble.clone()),
+                (Position(1, 2, 1), default_cobble.clone()),
+                (Position(1, 1, 1), input_repeater),
+                (Position(1, 2, 0), output_torch),
+                (Position(1, 0, 0), default_restone.clone()),
+                (Position(1, 3, 0), default_restone.clone()),
+            ],
+        };
+
+        let _3d: crate::world::world::World3D = (&mock_world).into();
+        println!("{:?}", _3d);
+        let g = WorldGraphBuilder::new(&mock_world).build();
+        println!("{}", g.to_graphviz());
+    }
 }
