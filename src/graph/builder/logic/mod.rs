@@ -233,7 +233,6 @@ impl LogicGraphBuilder {
 
 #[cfg(test)]
 mod tests {
-    use itertools::Itertools;
 
     use crate::{
         graph::{graphviz::ToGraphviz, Graph},

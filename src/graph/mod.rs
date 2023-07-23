@@ -3,10 +3,13 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use itertools::Itertools;
 use petgraph::stable_graph::NodeIndex;
 
-use crate::{common::block::Block, logic::Logic};
+use crate::{logic::Logic, world::block::Block};
+
+use self::{builder::module::GraphModuleBuilder, module::GraphModule};
 
 pub mod builder;
 pub mod graphviz;
+pub mod module;
 
 pub type GraphNodeId = usize;
 
@@ -655,6 +658,10 @@ impl Graph {
             .collect_vec();
         path.sort();
         path
+    }
+
+    pub fn to_module(self, builder: &mut GraphModuleBuilder, name: &str) -> GraphModule {
+        builder.to_graph_module(self, name)
     }
 }
 
