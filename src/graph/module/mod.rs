@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use eyre::ContextCompat;
 use itertools::Itertools;
 
-use super::{Graph, GraphNodeId};
+use super::Graph;
 
 #[derive(Default, Debug, PartialEq, Eq, Clone, Copy)]
 pub enum GraphModulePortType {
@@ -84,16 +84,36 @@ pub struct GraphModule {
 }
 
 impl GraphModule {
-    pub fn from_instances(instances: Vec<Box<GraphModule>>) -> Self {
-        todo!()
-    }
-
     pub fn port_by_name(&self, name: &str) -> eyre::Result<&GraphModulePort> {
         // TODO: makes this fast
         self.ports
             .iter()
             .find(|port| port.name == name)
             .context("Port not found!")
+    }
+
+    pub fn wrap(&self, name: &str) -> eyre::Result<GraphModule> {
+        if self.graph.is_none() {
+            eyre::bail!("You can wrap only graph module!");
+        }
+
+        Ok(GraphModule {
+            name: name.to_string(),
+            instances: vec![self.name.clone()],
+            ports: self
+                .ports
+                .iter()
+                .map(|port| GraphModulePort {
+                    name: port.name.to_string(),
+                    port_type: port.port_type,
+                    target: GraphModulePortTarget::Module(
+                        self.name.to_string(),
+                        port.name.to_string(),
+                    ),
+                })
+                .collect(),
+            ..Default::default()
+        })
     }
 }
 
@@ -148,18 +168,20 @@ impl From<&GraphModule> for Graph {
 
 #[derive(Default, Clone, Debug)]
 pub struct GraphModuleContext {
-    pub modules: Vec<Box<GraphModule>>,
-    pub module_index: HashMap<String, usize>,
+    modules: Vec<GraphModule>,
+    module_index: HashMap<String, usize>,
 }
 
 impl GraphModuleContext {
-    pub fn merge(self, other: GraphModuleContext) -> GraphModuleContext {
-        // do not merge context
-        // use graph module builder
-        panic!()
+    pub fn append(&mut self, module: GraphModule) {
+        *self.module_index.entry(module.name.clone()).or_default() = self.modules.len() - 1;
+        self.modules.push(module);
     }
 
-    pub fn append(&mut self, module: GraphModule) {
-        if module.graph.is_some() {}
+    pub fn extend<I>(&mut self, modules: I)
+    where
+        I: Iterator<Item = GraphModule>,
+    {
+        modules.for_each(|module| self.append(module));
     }
 }

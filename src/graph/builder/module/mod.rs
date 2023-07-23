@@ -10,27 +10,38 @@ use crate::graph::{
     Graph,
 };
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct GraphModuleBuilder {
     context: GraphModuleContext,
 }
 
 impl GraphModuleBuilder {
-    pub fn append(
-        &mut self,
-        module: GraphModule,
-        port_to: Vec<(String, String)>,
-        port_from: Vec<(String, String)>,
-    ) -> eyre::Result<&mut Self> {
-        Ok(self)
+    pub fn new() -> Self {
+        Self {
+            context: GraphModuleContext::default(),
+        }
+    }
+
+    pub fn complete(self) -> GraphModuleContext {
+        self.context
+    }
+
+    pub fn to_graph_module(&mut self, graph: Graph, name: &str) -> GraphModule {
+        let mut module: GraphModule = graph.into();
+        module.name = format!("{name}#inner");
+        let wrap = module.wrap(name).unwrap();
+        self.context.append(module);
+        self.context.append(wrap.clone());
+        wrap
     }
 
     pub fn generate_parallel(
+        &mut self,
         name: &str,
         gm: GraphModule,
         conn: &[(String, String)],
         count: usize,
-        wire: bool,
+        wiring: bool,
     ) -> GraphModule {
         let modules = (0..count)
             .map(|index| {
@@ -43,7 +54,7 @@ impl GraphModuleBuilder {
         let var_inputs: HashSet<String> = conn.iter().map(|(src, _)| src.to_string()).collect();
         let var_outputs: HashSet<String> = conn.iter().map(|(_, tar)| tar.to_string()).collect();
 
-        let ports = if !wire {
+        let ports = if !wiring {
             let mut ports = vec![];
 
             for index in 0..count {
@@ -122,21 +133,26 @@ impl GraphModuleBuilder {
                 .collect()
         };
 
+        let instances = modules.iter().map(|mo| mo.name.clone()).collect_vec();
+        let vars = (0..count - 1)
+            .flat_map(|index| {
+                conn.iter()
+                    .map(|(src, tar)| GraphModuleVariable {
+                        var_type: GraphModulePortType::InputNet,
+                        source: (format!("{}#{index}", gm.name), src.to_owned()),
+                        target: (format!("{}#{}", gm.name, index + 1), tar.to_owned()),
+                    })
+                    .collect_vec()
+            })
+            .collect_vec();
+
+        self.context.extend(modules.into_iter());
+
         GraphModule {
             name: name.to_string(),
             graph: None,
-            instances: modules.iter().map(|mo| mo.name.clone()).collect_vec(),
-            vars: (0..count - 1)
-                .flat_map(|index| {
-                    conn.iter()
-                        .map(|(src, tar)| GraphModuleVariable {
-                            var_type: GraphModulePortType::InputNet,
-                            source: (format!("{}#{index}", gm.name), src.to_owned()),
-                            target: (format!("{}#{}", gm.name, index + 1), tar.to_owned()),
-                        })
-                        .collect_vec()
-                })
-                .collect_vec(),
+            instances,
+            vars,
             ports,
         }
     }
@@ -155,18 +171,25 @@ mod tests {
         LogicGraphBuilder::new(stmt.to_string()).build(output.to_string())
     }
 
-    #[test]
-    fn unittest_module_full_adder_parallel() -> eyre::Result<()> {
+    fn get_full_adder_graph() -> eyre::Result<LogicGraph> {
         let out_s = build_graph_from_stmt("(a^b)^cin", "s")?;
         let out_cout = build_graph_from_stmt("(a&b)|(s&cin)", "cout")?;
 
         let mut fa = out_s.clone();
         fa.graph.merge(out_cout.graph);
 
-        let gm: GraphModule = fa.graph.to_module("full_adder");
+        Ok(fa)
+    }
+
+    #[test]
+    fn unittest_module_full_adder_parallel() -> eyre::Result<()> {
+        let mut builder = GraphModuleBuilder::new();
+
+        let fa = get_full_adder_graph()?;
+        let gm: GraphModule = fa.graph.to_module(&mut builder, "full_adder");
         println!("{:?}", gm);
 
-        let gm = GraphModuleBuilder::generate_parallel(
+        let gm = builder.generate_parallel(
             "full_adder32",
             gm,
             vec![("cin".to_string(), "cout".to_string())].as_slice(),

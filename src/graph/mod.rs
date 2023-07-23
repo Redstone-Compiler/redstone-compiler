@@ -5,7 +5,7 @@ use petgraph::stable_graph::NodeIndex;
 
 use crate::{logic::Logic, world::block::Block};
 
-use self::module::GraphModule;
+use self::{builder::module::GraphModuleBuilder, module::GraphModule};
 
 pub mod builder;
 pub mod graphviz;
@@ -660,10 +660,8 @@ impl Graph {
         path
     }
 
-    pub fn to_module(self, name: &str) -> GraphModule {
-        let mut module: GraphModule = self.into();
-        module.name = name.to_string();
-        module
+    pub fn to_module(self, builder: &mut GraphModuleBuilder, name: &str) -> GraphModule {
+        builder.to_graph_module(self, name)
     }
 }
 
