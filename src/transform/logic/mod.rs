@@ -358,6 +358,7 @@ impl LogicGraphTransformer {
         let mut tags: HashMap<GraphNodeId, HashSet<GraphNodeId>> = HashMap::new();
         let mut queue = VecDeque::from(self.graph.graph.inputs());
 
+        // TODO: Apply memoization
         while let Some(node_id) = queue.pop_front() {
             let mut inputs: HashSet<GraphNodeId> = HashSet::new();
             let node = self.graph.graph.find_node_by_id(node_id).unwrap();

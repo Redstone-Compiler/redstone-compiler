@@ -372,10 +372,10 @@ impl Graph {
             .find(|node| matches!(&node.kind, GraphNodeKind::Input(name) if name == input_name))
     }
 
-    pub fn find_node_by_output_name(&mut self, input_name: &str) -> Option<&mut GraphNode> {
+    pub fn find_node_by_output_name(&mut self, output_name: &str) -> Option<&mut GraphNode> {
         self.nodes
             .iter_mut()
-            .find(|node| matches!(&node.kind, GraphNodeKind::Output(name) if name == input_name))
+            .find(|node| matches!(&node.kind, GraphNodeKind::Output(name) if name == output_name))
     }
 
     pub fn find_node_by_id(&self, node_id: GraphNodeId) -> Option<&GraphNode> {
@@ -662,6 +662,32 @@ impl Graph {
 
     pub fn to_module(self, builder: &mut GraphModuleBuilder, name: &str) -> GraphModule {
         builder.to_graph_module(self, name)
+    }
+
+    pub fn remove_input(&mut self, input_name: &str) {
+        let Some((index, _)) = self.nodes.iter().find_position(
+            |node| matches!(&node.kind, GraphNodeKind::Output(name) if name == input_name),
+        ) else {
+            return;
+        };
+
+        self.nodes.remove(index);
+        self.build_inputs();
+        self.build_producers();
+        self.build_consumers();
+    }
+
+    pub fn remove_output(&mut self, output_name: &str) {
+        let Some((index, _)) = self.nodes.iter().find_position(
+            |node| matches!(&node.kind, GraphNodeKind::Output(name) if name == output_name),
+        ) else {
+            return;
+        };
+
+        self.nodes.remove(index);
+        self.build_outputs();
+        self.build_producers();
+        self.build_consumers();
     }
 }
 

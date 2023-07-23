@@ -22,7 +22,7 @@ impl GraphModuleBuilder {
         }
     }
 
-    pub fn complete(self) -> GraphModuleContext {
+    pub fn finish(self) -> GraphModuleContext {
         self.context
     }
 
@@ -51,8 +51,8 @@ impl GraphModuleBuilder {
             })
             .collect_vec();
 
-        let var_inputs: HashSet<String> = conn.iter().map(|(src, _)| src.to_string()).collect();
-        let var_outputs: HashSet<String> = conn.iter().map(|(_, tar)| tar.to_string()).collect();
+        let var_outputs: HashSet<String> = conn.iter().map(|(src, _)| src.to_string()).collect();
+        let var_inputs: HashSet<String> = conn.iter().map(|(_, tar)| tar.to_string()).collect();
 
         let ports = if !wiring {
             let mut ports = vec![];
@@ -160,9 +160,14 @@ impl GraphModuleBuilder {
 
 #[cfg(test)]
 mod tests {
-    use crate::graph::{
-        builder::logic::{LogicGraph, LogicGraphBuilder},
-        module::GraphModule,
+    use crate::{
+        graph::{
+            builder::logic::{LogicGraph, LogicGraphBuilder},
+            graphviz::ToGraphviz,
+            module::GraphModule,
+            Graph, SubGraph,
+        },
+        transform::logic::LogicGraphTransformer,
     };
 
     use super::GraphModuleBuilder;
@@ -187,16 +192,23 @@ mod tests {
 
         let fa = get_full_adder_graph()?;
         let gm: GraphModule = fa.graph.to_module(&mut builder, "full_adder");
-        println!("{:?}", gm);
 
         let gm = builder.generate_parallel(
             "full_adder32",
             gm,
-            vec![("cin".to_string(), "cout".to_string())].as_slice(),
+            vec![("cout".to_string(), "cin".to_string())].as_slice(),
             32,
             true,
         );
-        println!("{:#?}", gm.ports);
+
+        let context = builder.finish();
+        let graph: Graph = (&context, &gm).into();
+
+        let mut transform = LogicGraphTransformer::new(LogicGraph { graph });
+        transform.decompose_xor()?;
+        transform.decompose_and()?;
+        let graph = transform.finish();
+        println!("{}", graph.to_graphviz());
 
         Ok(())
     }

@@ -1,7 +1,9 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, ops::Index};
 
 use eyre::ContextCompat;
 use itertools::Itertools;
+
+use crate::graph::GraphNodeKind;
 
 use super::Graph;
 
@@ -160,12 +162,6 @@ impl From<Graph> for GraphModule {
     }
 }
 
-impl From<&GraphModule> for Graph {
-    fn from(value: &GraphModule) -> Self {
-        todo!()
-    }
-}
-
 #[derive(Default, Clone, Debug)]
 pub struct GraphModuleContext {
     modules: Vec<GraphModule>,
@@ -174,7 +170,7 @@ pub struct GraphModuleContext {
 
 impl GraphModuleContext {
     pub fn append(&mut self, module: GraphModule) {
-        *self.module_index.entry(module.name.clone()).or_default() = self.modules.len() - 1;
+        *self.module_index.entry(module.name.clone()).or_default() = self.modules.len();
         self.modules.push(module);
     }
 
@@ -183,5 +179,91 @@ impl GraphModuleContext {
         I: Iterator<Item = GraphModule>,
     {
         modules.for_each(|module| self.append(module));
+    }
+}
+
+impl Index<&str> for GraphModuleContext {
+    type Output = GraphModule;
+
+    fn index(&self, index: &str) -> &Self::Output {
+        &self.modules[self.module_index[index]]
+    }
+}
+
+impl From<(&GraphModuleContext, &GraphModule)> for Graph {
+    fn from(value: (&GraphModuleContext, &GraphModule)) -> Self {
+        let context = value.0;
+        let module = value.1;
+
+        if let Some(graph) = &module.graph {
+            return graph.clone();
+        }
+
+        // (module, (port, port))
+        let mut module_port_name: HashMap<String, HashMap<String, String>> = HashMap::new();
+        for port in &module.ports {
+            match &port.target {
+                GraphModulePortTarget::Node(_) => unreachable!(),
+                GraphModulePortTarget::Module(instance_name, port_name) => {
+                    module_port_name
+                        .entry(instance_name.clone())
+                        .or_default()
+                        .insert(port.name.clone(), port_name.clone());
+                }
+                GraphModulePortTarget::Wire(wire) => {
+                    for (instance_name, port_name) in wire {
+                        module_port_name
+                            .entry(instance_name.clone())
+                            .or_default()
+                            .insert(port.name.clone(), port_name.clone());
+                    }
+                }
+            }
+        }
+
+        for (index, var) in module.vars.iter().enumerate() {
+            module_port_name
+                .entry(var.source.0.clone())
+                .or_default()
+                .insert(var.source.1.clone(), format!("tmp#{index}"));
+            module_port_name
+                .entry(var.target.0.clone())
+                .or_default()
+                .insert(var.target.1.clone(), format!("tmp#{index}"));
+        }
+
+        let mut graph = module
+            .instances
+            .iter()
+            .map(|instance| {
+                let mut graph: Graph = (context, &context[instance]).into();
+                graph
+                    .nodes
+                    .iter_mut()
+                    .for_each(|node| match &mut node.kind {
+                        GraphNodeKind::Input(name) | GraphNodeKind::Output(name) => {
+                            if let Some(port_name) = module_port_name
+                                .get_mut(instance)
+                                .map(|ports| ports.get_mut(name))
+                                .flatten()
+                            {
+                                *name = port_name.clone();
+                            }
+                        }
+                        _ => (),
+                    });
+                graph
+            })
+            .reduce(|mut p, g| {
+                p.merge(g);
+                p
+            })
+            .unwrap();
+
+        for (index, _) in module.vars.iter().enumerate() {
+            graph.remove_output(format!("tmp#{index}").as_str());
+        }
+
+        graph
     }
 }
