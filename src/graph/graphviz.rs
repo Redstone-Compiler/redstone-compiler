@@ -2,13 +2,19 @@ use std::collections::HashMap;
 
 use itertools::Itertools;
 
+use crate::graph::module::GraphModulePortTarget;
+
 use super::{
     builder::{logic::LogicGraph, world::WorldGraph},
+    module::{GraphModule, GraphWithSubGraphs},
     Graph, GraphNode, GraphNodeId, SubGraph,
 };
 
+#[derive(Default)]
 pub struct GraphvizBuilder<'a> {
     graph: Option<&'a Graph>,
+    module: Option<&'a GraphModule>,
+    depth: Option<usize>,
     clusters: Option<Vec<(String, Vec<GraphNodeId>)>>,
     show_node_id: bool,
     table_style: bool,
@@ -17,19 +23,18 @@ pub struct GraphvizBuilder<'a> {
 }
 
 impl<'a> GraphvizBuilder<'a> {
-    pub fn new() -> Self {
-        Self {
-            graph: None,
-            clusters: None,
-            show_node_id: false,
-            table_style: false,
-            named_inputs: None,
-            subname: None,
-        }
-    }
-
     pub fn with_graph(&mut self, graph: &'a Graph) -> &mut Self {
         self.graph = Some(graph);
+        self
+    }
+
+    pub fn with_module(&mut self, module: &'a GraphModule) -> &mut Self {
+        self.module = Some(module);
+        self
+    }
+
+    pub fn with_depth(&mut self, depth: usize) -> &mut Self {
+        self.depth = Some(depth);
         self
     }
 
@@ -78,7 +83,15 @@ digraph {graph_name} {{
 {}
 }}
         "#,
-            if self.table_style { "TB" } else { "LR" },
+            if self.table_style {
+                "TB"
+            } else {
+                if self.module.is_some() {
+                    "TB"
+                } else {
+                    "LR"
+                }
+            },
             if self.table_style { "auto" } else { "0.8" },
             if self.table_style {
                 "plaintext"
@@ -99,8 +112,10 @@ digraph {graph_name} {{
                 .map(|node| self.print_node(node))
                 .collect::<Vec<_>>()
                 .join("\n")
+        } else if let Some(module) = self.module {
+            self.print_module(module)
         } else {
-            todo!()
+            unreachable!()
         }
     }
 
@@ -182,6 +197,46 @@ digraph {graph_name} {{
         }
     }
 
+    fn print_module(&self, module: &GraphModule) -> String {
+        let inputs = module
+            .ports
+            .iter()
+            .filter(|port| port.port_type.is_input())
+            .map(|port| {
+                let name = match &port.target {
+                    GraphModulePortTarget::Node(_) => port.name.clone(),
+                    GraphModulePortTarget::Module(_, _) => port.name.clone(),
+                    GraphModulePortTarget::Wire(wire) => {
+                        format!("{}[{}..0]", port.name, wire.len())
+                    }
+                };
+
+                format!("<{}> {}", port.name.to_lowercase().replace(" ", "_"), name)
+            })
+            .join("|");
+        let outputs = module
+            .ports
+            .iter()
+            .filter(|port| port.port_type.is_output())
+            .map(|port| {
+                let name = match &port.target {
+                    GraphModulePortTarget::Node(_) => port.name.clone(),
+                    GraphModulePortTarget::Module(_, _) => port.name.clone(),
+                    GraphModulePortTarget::Wire(wire) => {
+                        format!("{}[{}..0]", port.name, wire.len())
+                    }
+                };
+
+                format!("<{}> {}", port.name.to_lowercase().replace(" ", "_"), name)
+            })
+            .join("|");
+
+        format!(
+            "    module1 [label=\"{{{}}}|{}|{{{}}}\"]",
+            inputs, module.name, outputs
+        )
+    }
+
     fn print_edges(&self) -> String {
         if let Some(graph) = self.graph {
             if self.table_style {
@@ -220,7 +275,7 @@ digraph {graph_name} {{
                     .join("\n")
             }
         } else {
-            todo!()
+            "".to_string()
         }
     }
 
@@ -247,21 +302,21 @@ digraph {graph_name} {{
     }
 }
 
-pub trait ToGraphviz {
+pub trait ToGraphvizGraph {
     fn to_graphviz(&self) -> String;
 
     fn to_graphviz_with_clusters(&self, clusters: &Vec<SubGraph>) -> String;
 }
 
-impl ToGraphviz for Graph {
+impl ToGraphvizGraph for Graph {
     fn to_graphviz(&self) -> String {
-        GraphvizBuilder::new()
+        GraphvizBuilder::default()
             .with_graph(self)
             .build("DefaultGraph")
     }
 
     fn to_graphviz_with_clusters(&self, clusters: &Vec<SubGraph>) -> String {
-        GraphvizBuilder::new()
+        GraphvizBuilder::default()
             .with_graph(self)
             .with_cluster(
                 clusters
@@ -274,15 +329,15 @@ impl ToGraphviz for Graph {
     }
 }
 
-impl ToGraphviz for LogicGraph {
+impl ToGraphvizGraph for LogicGraph {
     fn to_graphviz(&self) -> String {
-        GraphvizBuilder::new()
+        GraphvizBuilder::default()
             .with_graph(&self.graph)
             .build("LogicGraph")
     }
 
     fn to_graphviz_with_clusters(&self, clusters: &Vec<SubGraph>) -> String {
-        GraphvizBuilder::new()
+        GraphvizBuilder::default()
             .with_graph(&self.graph)
             .with_cluster(
                 clusters
@@ -295,9 +350,9 @@ impl ToGraphviz for LogicGraph {
     }
 }
 
-impl ToGraphviz for WorldGraph {
+impl ToGraphvizGraph for WorldGraph {
     fn to_graphviz(&self) -> String {
-        GraphvizBuilder::new()
+        GraphvizBuilder::default()
             .with_graph(&self.graph)
             .with_table()
             .with_show_node_id()
@@ -311,7 +366,7 @@ impl ToGraphviz for WorldGraph {
     }
 
     fn to_graphviz_with_clusters(&self, clusters: &Vec<SubGraph>) -> String {
-        GraphvizBuilder::new()
+        GraphvizBuilder::default()
             .with_graph(&self.graph)
             .with_cluster(
                 clusters
@@ -321,5 +376,51 @@ impl ToGraphviz for WorldGraph {
                     .collect_vec(),
             )
             .build("WorldGraph")
+    }
+}
+
+impl ToGraphvizGraph for GraphWithSubGraphs {
+    fn to_graphviz(&self) -> String {
+        GraphvizBuilder::default()
+            .with_graph(&self.0)
+            .with_cluster(
+                self.1
+                    .iter()
+                    .enumerate()
+                    .map(|(index, g)| (format!("Cluster {}", index), g.clone()))
+                    .collect_vec(),
+            )
+            .build("LogicGraph")
+    }
+
+    fn to_graphviz_with_clusters(&self, clusters: &Vec<SubGraph>) -> String {
+        GraphvizBuilder::default()
+            .with_graph(&self.0)
+            .with_cluster(
+                self.1
+                    .iter()
+                    .enumerate()
+                    .map(|(index, g)| (format!("Cluster {}", index), g.clone()))
+                    .chain(
+                        clusters
+                            .iter()
+                            .enumerate()
+                            .map(|(index, g)| (format!("Cluster {}", index), g.nodes.clone())),
+                    )
+                    .collect_vec(),
+            )
+            .build("LogicGraph")
+    }
+}
+
+pub trait ToGraphvizModule {
+    fn to_graphviz(&self) -> String;
+}
+
+impl ToGraphvizModule for GraphModule {
+    fn to_graphviz(&self) -> String {
+        GraphvizBuilder::default()
+            .with_module(self)
+            .build("GraphModule")
     }
 }

@@ -163,9 +163,8 @@ mod tests {
     use crate::{
         graph::{
             builder::logic::{LogicGraph, LogicGraphBuilder},
-            graphviz::ToGraphviz,
+            graphviz::{ToGraphvizGraph, ToGraphvizModule},
             module::{GraphModule, GraphWithSubGraphs},
-            Graph,
         },
         transform::logic::LogicGraphTransformer,
     };
@@ -197,17 +196,18 @@ mod tests {
             "full_adder32",
             gm,
             vec![("cout".to_string(), "cin".to_string())].as_slice(),
-            32,
+            4,
             true,
         );
+        println!("{}", gm.to_graphviz());
 
         let context = builder.finish();
         let graph: GraphWithSubGraphs = (&context, &gm).into();
 
-        // let mut transform = LogicGraphTransformer::new(LogicGraph { graph });
-        // transform.decompose_xor()?;
-        // transform.decompose_and()?;
-        // let graph = transform.finish();
+        let mut transform = LogicGraphTransformer::new(LogicGraph { graph: graph.0 });
+        transform.decompose_xor()?;
+        transform.decompose_and()?;
+        let graph = transform.finish();
         println!("{}", graph.to_graphviz());
 
         Ok(())

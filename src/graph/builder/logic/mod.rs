@@ -235,7 +235,7 @@ impl LogicGraphBuilder {
 mod tests {
 
     use crate::{
-        graph::{graphviz::ToGraphviz, Graph},
+        graph::{graphviz::ToGraphvizGraph, Graph},
         transform::logic::LogicGraphTransformer,
     };
 

@@ -9,7 +9,7 @@ use itertools::Itertools;
 use crate::graph::GraphNodeKind;
 
 use super::{
-    graphviz::{GraphvizBuilder, ToGraphviz},
+    graphviz::{GraphvizBuilder, ToGraphvizGraph},
     Graph, GraphNode, GraphNodeId, SubGraph,
 };
 
@@ -197,7 +197,7 @@ impl Index<&str> for GraphModuleContext {
 }
 
 #[derive(Clone, Debug)]
-pub struct GraphWithSubGraphs(Graph, Vec<Vec<GraphNodeId>>);
+pub struct GraphWithSubGraphs(pub Graph, pub Vec<Vec<GraphNodeId>>);
 
 impl From<(&GraphModuleContext, &GraphModule)> for GraphWithSubGraphs {
     fn from(value: (&GraphModuleContext, &GraphModule)) -> Self {
@@ -292,39 +292,5 @@ impl From<(&GraphModuleContext, &GraphModule)> for GraphWithSubGraphs {
             .collect_vec();
 
         GraphWithSubGraphs(graph, subgraph)
-    }
-}
-
-impl ToGraphviz for GraphWithSubGraphs {
-    fn to_graphviz(&self) -> String {
-        GraphvizBuilder::new()
-            .with_graph(&self.0)
-            .with_cluster(
-                self.1
-                    .iter()
-                    .enumerate()
-                    .map(|(index, g)| (format!("Cluster {}", index), g.clone()))
-                    .collect_vec(),
-            )
-            .build("LogicGraph")
-    }
-
-    fn to_graphviz_with_clusters(&self, clusters: &Vec<SubGraph>) -> String {
-        GraphvizBuilder::new()
-            .with_graph(&self.0)
-            .with_cluster(
-                self.1
-                    .iter()
-                    .enumerate()
-                    .map(|(index, g)| (format!("Cluster {}", index), g.clone()))
-                    .chain(
-                        clusters
-                            .iter()
-                            .enumerate()
-                            .map(|(index, g)| (format!("Cluster {}", index), g.nodes.clone())),
-                    )
-                    .collect_vec(),
-            )
-            .build("LogicGraph")
     }
 }

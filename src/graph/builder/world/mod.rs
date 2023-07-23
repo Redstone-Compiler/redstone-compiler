@@ -343,7 +343,7 @@ impl<'a> From<&'a World> for WorldGraph {
 #[cfg(test)]
 mod test {
     use crate::{
-        graph::graphviz::ToGraphviz,
+        graph::graphviz::ToGraphvizGraph,
         world::{
             block::{Block, BlockKind, Direction},
             position::{DimSize, Position},
