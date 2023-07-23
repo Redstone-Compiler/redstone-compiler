@@ -677,17 +677,19 @@ impl Graph {
         self.build_consumers();
     }
 
-    pub fn remove_output(&mut self, output_name: &str) {
+    pub fn remove_output(&mut self, output_name: &str) -> Option<GraphNodeId> {
         let Some((index, _)) = self.nodes.iter().find_position(
             |node| matches!(&node.kind, GraphNodeKind::Output(name) if name == output_name),
         ) else {
-            return;
+            return None;
         };
 
-        self.nodes.remove(index);
+        let id = self.nodes.remove(index).id;
         self.build_outputs();
         self.build_producers();
         self.build_consumers();
+
+        Some(id)
     }
 }
 

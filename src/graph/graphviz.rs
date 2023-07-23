@@ -8,7 +8,7 @@ use super::{
 };
 
 pub struct GraphvizBuilder<'a> {
-    graph: &'a Graph,
+    graph: Option<&'a Graph>,
     clusters: Option<Vec<(String, Vec<GraphNodeId>)>>,
     show_node_id: bool,
     table_style: bool,
@@ -17,15 +17,20 @@ pub struct GraphvizBuilder<'a> {
 }
 
 impl<'a> GraphvizBuilder<'a> {
-    pub fn new(g: &'a Graph) -> Self {
+    pub fn new() -> Self {
         Self {
-            graph: g,
+            graph: None,
             clusters: None,
             show_node_id: false,
             table_style: false,
             named_inputs: None,
             subname: None,
         }
+    }
+
+    pub fn with_graph(&mut self, graph: &'a Graph) -> &mut Self {
+        self.graph = Some(graph);
+        self
     }
 
     pub fn with_cluster(&mut self, clusters: Vec<(String, Vec<GraphNodeId>)>) -> &mut Self {
@@ -87,12 +92,16 @@ digraph {graph_name} {{
     }
 
     fn print_nodes(&self) -> String {
-        self.graph
-            .nodes
-            .iter()
-            .map(|node| self.print_node(node))
-            .collect::<Vec<_>>()
-            .join("\n")
+        if let Some(graph) = self.graph {
+            graph
+                .nodes
+                .iter()
+                .map(|node| self.print_node(node))
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            todo!()
+        }
     }
 
     fn print_node(&self, node: &GraphNode) -> String {
@@ -174,40 +183,44 @@ digraph {graph_name} {{
     }
 
     fn print_edges(&self) -> String {
-        if self.table_style {
-            self.graph
-                .nodes
-                .iter()
-                .map(|node| {
-                    node.inputs.iter().map(|input| {
+        if let Some(graph) = self.graph {
+            if self.table_style {
+                graph
+                    .nodes
+                    .iter()
+                    .map(|node| {
+                        node.inputs.iter().map(|input| {
+                            format!(
+                                "    node{}:out->node{}:{}\n",
+                                input,
+                                node.id,
+                                format!("in{}_{}", input, node.id),
+                            )
+                        })
+                    })
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join("")
+            } else {
+                graph
+                    .nodes
+                    .iter()
+                    .map(|node| {
                         format!(
-                            "    node{}:out->node{}:{}\n",
-                            input,
+                            "    node{}->{{{}}}",
                             node.id,
-                            format!("in{}_{}", input, node.id),
+                            node.outputs
+                                .iter()
+                                .map(|id| format!("node{id}"))
+                                .collect::<Vec<_>>()
+                                .join(" ")
                         )
                     })
-                })
-                .flatten()
-                .collect::<Vec<_>>()
-                .join("")
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
         } else {
-            self.graph
-                .nodes
-                .iter()
-                .map(|node| {
-                    format!(
-                        "    node{}->{{{}}}",
-                        node.id,
-                        node.outputs
-                            .iter()
-                            .map(|id| format!("node{id}"))
-                            .collect::<Vec<_>>()
-                            .join(" ")
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
+            todo!()
         }
     }
 
@@ -242,11 +255,14 @@ pub trait ToGraphviz {
 
 impl ToGraphviz for Graph {
     fn to_graphviz(&self) -> String {
-        GraphvizBuilder::new(self).build("DefaultGraph")
+        GraphvizBuilder::new()
+            .with_graph(self)
+            .build("DefaultGraph")
     }
 
     fn to_graphviz_with_clusters(&self, clusters: &Vec<SubGraph>) -> String {
-        GraphvizBuilder::new(self)
+        GraphvizBuilder::new()
+            .with_graph(self)
             .with_cluster(
                 clusters
                     .iter()
@@ -260,11 +276,14 @@ impl ToGraphviz for Graph {
 
 impl ToGraphviz for LogicGraph {
     fn to_graphviz(&self) -> String {
-        GraphvizBuilder::new(&self.graph).build("LogicGraph")
+        GraphvizBuilder::new()
+            .with_graph(&self.graph)
+            .build("LogicGraph")
     }
 
     fn to_graphviz_with_clusters(&self, clusters: &Vec<SubGraph>) -> String {
-        GraphvizBuilder::new(&self.graph)
+        GraphvizBuilder::new()
+            .with_graph(&self.graph)
             .with_cluster(
                 clusters
                     .iter()
@@ -278,7 +297,8 @@ impl ToGraphviz for LogicGraph {
 
 impl ToGraphviz for WorldGraph {
     fn to_graphviz(&self) -> String {
-        GraphvizBuilder::new(&self.graph)
+        GraphvizBuilder::new()
+            .with_graph(&self.graph)
             .with_table()
             .with_show_node_id()
             .with_subname(
@@ -291,7 +311,8 @@ impl ToGraphviz for WorldGraph {
     }
 
     fn to_graphviz_with_clusters(&self, clusters: &Vec<SubGraph>) -> String {
-        GraphvizBuilder::new(&self.graph)
+        GraphvizBuilder::new()
+            .with_graph(&self.graph)
             .with_cluster(
                 clusters
                     .iter()

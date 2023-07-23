@@ -1,11 +1,17 @@
-use std::{collections::HashMap, ops::Index};
+use std::{
+    collections::{HashMap, HashSet},
+    ops::Index,
+};
 
 use eyre::ContextCompat;
 use itertools::Itertools;
 
 use crate::graph::GraphNodeKind;
 
-use super::Graph;
+use super::{
+    graphviz::{GraphvizBuilder, ToGraphviz},
+    Graph, GraphNode, GraphNodeId, SubGraph,
+};
 
 #[derive(Default, Debug, PartialEq, Eq, Clone, Copy)]
 pub enum GraphModulePortType {
@@ -190,13 +196,16 @@ impl Index<&str> for GraphModuleContext {
     }
 }
 
-impl From<(&GraphModuleContext, &GraphModule)> for Graph {
+#[derive(Clone, Debug)]
+pub struct GraphWithSubGraphs(Graph, Vec<Vec<GraphNodeId>>);
+
+impl From<(&GraphModuleContext, &GraphModule)> for GraphWithSubGraphs {
     fn from(value: (&GraphModuleContext, &GraphModule)) -> Self {
         let context = value.0;
         let module = value.1;
 
         if let Some(graph) = &module.graph {
-            return graph.clone();
+            return GraphWithSubGraphs(graph.clone(), Vec::new());
         }
 
         // (module, (port, port))
@@ -232,11 +241,13 @@ impl From<(&GraphModuleContext, &GraphModule)> for Graph {
                 .insert(var.target.1.clone(), format!("tmp#{index}"));
         }
 
+        let mut graph_ids: Vec<HashSet<GraphNodeId>> = vec![HashSet::new()];
         let mut graph = module
             .instances
             .iter()
             .map(|instance| {
-                let mut graph: Graph = (context, &context[instance]).into();
+                let graph: GraphWithSubGraphs = (context, &context[instance]).into();
+                let mut graph = graph.0;
                 graph
                     .nodes
                     .iter_mut()
@@ -255,15 +266,65 @@ impl From<(&GraphModuleContext, &GraphModule)> for Graph {
                 graph
             })
             .reduce(|mut p, g| {
+                graph_ids.push(p.nodes.iter().map(|node| node.id).collect());
                 p.merge(g);
                 p
             })
             .unwrap();
 
+        let mut removed_id: HashSet<GraphNodeId> = HashSet::new();
         for (index, _) in module.vars.iter().enumerate() {
-            graph.remove_output(format!("tmp#{index}").as_str());
+            let id = graph
+                .remove_output(format!("tmp#{index}").as_str())
+                .unwrap();
+            removed_id.insert(id);
         }
 
-        graph
+        let subgraph = graph_ids
+            .windows(2)
+            .map(|w| {
+                w[1].difference(&w[0])
+                    .into_iter()
+                    .filter(|p| !removed_id.contains(p))
+                    .map(|p| *p)
+                    .collect_vec()
+            })
+            .collect_vec();
+
+        GraphWithSubGraphs(graph, subgraph)
+    }
+}
+
+impl ToGraphviz for GraphWithSubGraphs {
+    fn to_graphviz(&self) -> String {
+        GraphvizBuilder::new()
+            .with_graph(&self.0)
+            .with_cluster(
+                self.1
+                    .iter()
+                    .enumerate()
+                    .map(|(index, g)| (format!("Cluster {}", index), g.clone()))
+                    .collect_vec(),
+            )
+            .build("LogicGraph")
+    }
+
+    fn to_graphviz_with_clusters(&self, clusters: &Vec<SubGraph>) -> String {
+        GraphvizBuilder::new()
+            .with_graph(&self.0)
+            .with_cluster(
+                self.1
+                    .iter()
+                    .enumerate()
+                    .map(|(index, g)| (format!("Cluster {}", index), g.clone()))
+                    .chain(
+                        clusters
+                            .iter()
+                            .enumerate()
+                            .map(|(index, g)| (format!("Cluster {}", index), g.nodes.clone())),
+                    )
+                    .collect_vec(),
+            )
+            .build("LogicGraph")
     }
 }
