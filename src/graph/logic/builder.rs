@@ -5,10 +5,7 @@ use crate::{
     logic::{Logic, LogicType},
 };
 
-#[derive(Debug, Clone)]
-pub struct LogicGraph {
-    pub graph: Graph,
-}
+use super::LogicGraph;
 
 #[derive(Default)]
 pub struct LogicGraphBuilder {
@@ -233,13 +230,12 @@ impl LogicGraphBuilder {
 
 #[cfg(test)]
 mod tests {
-
     use crate::{
-        graph::{graphviz::ToGraphvizGraph, Graph},
+        graph::{graphviz::ToGraphvizGraph, logic::LogicGraph, Graph},
         transform::logic::LogicGraphTransformer,
     };
 
-    use super::{LogicGraph, LogicGraphBuilder};
+    use super::LogicGraphBuilder;
 
     fn build_graph_from_stmt(stmt: &str, output: &str) -> eyre::Result<LogicGraph> {
         LogicGraphBuilder::new(stmt.to_string()).build(output.to_string())

@@ -5,7 +5,7 @@ use itertools::Itertools;
 
 use crate::{
     graph::{
-        builder::logic::{LogicGraph, LogicGraphBuilder},
+        logic::{builder::LogicGraphBuilder, LogicGraph},
         Graph, GraphNode, GraphNodeId, GraphNodeKind, SubGraph,
     },
     logic::{Logic, LogicType},

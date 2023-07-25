@@ -12,12 +12,6 @@ use crate::{
 };
 
 #[derive(Debug, Clone)]
-pub struct WorldGraph {
-    pub graph: Graph,
-    pub positions: HashMap<GraphNodeId, Position>,
-}
-
-#[derive(Debug, Clone)]
 pub struct WorldGraphBuilder {
     world: World3D,
     queue: Vec<Position>,

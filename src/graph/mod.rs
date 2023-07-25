@@ -5,11 +5,12 @@ use petgraph::stable_graph::NodeIndex;
 
 use crate::{logic::Logic, world::block::Block};
 
-use self::{builder::module::GraphModuleBuilder, module::GraphModule};
+use self::module::{builder::GraphModuleBuilder, GraphModule};
 
-pub mod builder;
 pub mod graphviz;
+pub mod logic;
 pub mod module;
+pub mod world;
 
 pub type GraphNodeId = usize;
 
@@ -118,6 +119,13 @@ impl Graph {
             .filter(|node| node.outputs.is_empty())
             .map(|node| node.id)
             .collect()
+    }
+
+    pub fn ids<T>(&self) -> T
+    where
+        T: FromIterator<GraphNodeId>,
+    {
+        self.nodes.iter().map(|node| node.id).collect()
     }
 
     pub fn concat(&mut self, mut other: Self) {

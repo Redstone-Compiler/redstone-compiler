@@ -5,8 +5,9 @@ use itertools::Itertools;
 use crate::graph::module::GraphModulePortTarget;
 
 use super::{
-    builder::{logic::LogicGraph, world::WorldGraph},
+    logic::LogicGraph,
     module::{GraphModule, GraphWithSubGraphs},
+    world::WorldGraph,
     Graph, GraphNode, GraphNodeId, SubGraph,
 };
 

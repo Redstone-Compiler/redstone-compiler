@@ -8,10 +8,9 @@ use itertools::Itertools;
 
 use crate::graph::GraphNodeKind;
 
-use super::{
-    graphviz::{GraphvizBuilder, ToGraphvizGraph},
-    Graph, GraphNode, GraphNodeId, SubGraph,
-};
+use super::{ Graph, GraphNodeId};
+
+pub mod builder;
 
 #[derive(Default, Debug, PartialEq, Eq, Clone, Copy)]
 pub enum GraphModulePortType {
@@ -133,35 +132,34 @@ impl From<&Graph> for GraphModule {
 
 impl From<Graph> for GraphModule {
     fn from(value: Graph) -> Self {
+        let input_ports = value
+            .inputs()
+            .iter()
+            .map(|input| {
+                let input_name = value.find_node_by_id(*input).unwrap().kind.as_input();
+                GraphModulePort {
+                    port_type: GraphModulePortType::InputNet,
+                    target: GraphModulePortTarget::Node(input_name.clone()),
+                    name: input_name.clone(),
+                }
+            })
+            .collect_vec();
+        let output_ports = value
+            .outputs()
+            .iter()
+            .map(|output| {
+                let output_name = value.find_node_by_id(*output).unwrap().kind.as_output();
+                GraphModulePort {
+                    port_type: GraphModulePortType::OutputNet,
+                    target: GraphModulePortTarget::Node(output_name.clone()),
+                    name: output_name.clone(),
+                }
+            })
+            .collect_vec();
+
         Self {
             name: "DefaultGraphModule".to_string(),
-            ports: value
-                .inputs()
-                .iter()
-                .map(|input| {
-                    let input_name = value.find_node_by_id(*input).unwrap().kind.as_input();
-                    GraphModulePort {
-                        port_type: GraphModulePortType::InputNet,
-                        target: GraphModulePortTarget::Node(input_name.clone()),
-                        name: input_name.clone(),
-                        ..Default::default()
-                    }
-                })
-                .chain(value.outputs().iter().map(|output| {
-                    let output_name = value
-                        .find_node_by_id(*output)
-                        .unwrap()
-                        .kind
-                        .as_output()
-                        .clone();
-                    GraphModulePort {
-                        port_type: GraphModulePortType::OutputNet,
-                        target: GraphModulePortTarget::Node(output_name.clone()),
-                        name: output_name,
-                        ..Default::default()
-                    }
-                }))
-                .collect_vec(),
+            ports: input_ports.into_iter().chain(output_ports).collect_vec(),
             graph: Some(value),
             ..Default::default()
         }
@@ -266,11 +264,12 @@ impl From<(&GraphModuleContext, &GraphModule)> for GraphWithSubGraphs {
                 graph
             })
             .reduce(|mut p, g| {
-                graph_ids.push(p.nodes.iter().map(|node| node.id).collect());
+                graph_ids.push(p.ids());
                 p.merge(g);
                 p
             })
             .unwrap();
+        graph_ids.push(graph.ids());
 
         let mut removed_id: HashSet<GraphNodeId> = HashSet::new();
         for (index, _) in module.vars.iter().enumerate() {
