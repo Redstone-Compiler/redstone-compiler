@@ -21,5 +21,7 @@ impl Verify for WorldGraph {
 // Calculate the number of cases of all possible combinations of
 // graph nodes in which a block can be located
 fn calculate_block_place_cases(graph: &WorldGraph) -> Vec<Vec<HashSet<GraphNodeId>>> {
+    //
+
     todo!()
 }
