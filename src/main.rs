@@ -4,6 +4,7 @@ pub mod graph;
 pub mod logic;
 pub mod option;
 pub mod transform;
+pub mod utils;
 pub mod verilog;
 pub mod world;
 

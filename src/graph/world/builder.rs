@@ -11,6 +11,8 @@ use crate::{
     },
 };
 
+use super::WorldGraph;
+
 #[derive(Debug, Clone)]
 pub struct WorldGraphBuilder {
     world: World3D,

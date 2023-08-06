@@ -2,7 +2,6 @@ use super::{
     block::Block,
     position::{DimSize, Position},
     world::World,
-    Verifier,
 };
 
 // 게이트의 종류
@@ -27,12 +26,6 @@ pub struct Gate {
     pub outputs: Vec<usize>,
     // 게이트 종류
     pub kind: GateKind,
-}
-
-impl Verifier for Gate {
-    fn verify(&self) -> bool {
-        todo!()
-    }
 }
 
 impl From<Gate> for World {
