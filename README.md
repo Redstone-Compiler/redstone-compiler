@@ -8,6 +8,8 @@ From the left side...
 - NOT := ¬ A
 - NOR := ¬ (A ∧ B) := NOT(OR)
 
+https://www.notion.so/redstone-compiler/cdb890c3984a4bb780ba8d30feca029b?v=990dff724b0c414daafb6d459ab4a400&pvs=4
+
 ## Block Optimizer
 
 ## HDL
