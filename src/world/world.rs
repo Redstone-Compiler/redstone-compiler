@@ -1,10 +1,13 @@
+use std::collections::HashMap;
 use std::fmt::Debug;
 use std::{
     collections::BTreeMap,
     ops::{Index, IndexMut},
 };
 
-use super::block::{Block, BlockKind};
+use itertools::Itertools;
+
+use super::block::{Block, BlockKind, Direction, RedstoneState};
 use super::position::{DimSize, Position, PositionIndex};
 
 #[derive(Debug, Clone)]
@@ -16,8 +19,83 @@ pub struct World {
 #[derive(Clone)]
 pub struct World3D {
     pub size: DimSize,
-    // z, x, y
+    // z, y, z
     pub map: Vec<Vec<Vec<Block>>>,
+}
+
+impl World3D {
+    pub fn iter_pos(&self) -> Vec<Position> {
+        let mut result = Vec::new();
+        let (z, y, x) = (self.map.len(), self.map[0].len(), self.map[0][1].len());
+
+        for z in 0..z {
+            for y in 0..y {
+                for x in 0..x {
+                    result.push(Position(x, y, z));
+                }
+            }
+        }
+
+        result
+    }
+
+    pub fn iter_block(&self) -> Vec<(Position, &Block)> {
+        self.iter_pos()
+            .into_iter()
+            .map(|pos| (pos, &self[&pos]))
+            .collect_vec()
+    }
+
+    pub fn initialize_redstone_states(&mut self) {
+        for pos in self.iter_pos() {
+            let BlockKind::Redstone {
+                on_count,
+                strength,
+                ..
+            } = self[&pos].kind else {
+                continue;
+            };
+
+            let mut state = 0;
+
+            let has_up_block = self[&pos.up()].kind.is_cobble();
+
+            pos.cardinal().iter().for_each(|pos_src| {
+                let flat_check = self[pos_src].kind.is_stick_to_redstone();
+                let up_check = !has_up_block && self[&pos_src.up()].kind.is_redstone();
+                let down_check = !self[pos_src].kind.is_cobble()
+                    && pos_src
+                        .down()
+                        .map_or(false, |pos| self[&pos].kind.is_redstone());
+
+                if !flat_check && !(up_check || down_check) {
+                    return;
+                }
+
+                state |= match pos.diff(pos_src) {
+                    Direction::East => RedstoneState::East,
+                    Direction::West => RedstoneState::West,
+                    Direction::South => RedstoneState::South,
+                    Direction::North => RedstoneState::North,
+                    _ => unreachable!(),
+                } as usize;
+            });
+
+            if state.count_ones() == 1 {
+                if state & RedstoneState::Horizontal as usize > 0 {
+                    state |= RedstoneState::Horizontal as usize;
+                } else {
+                    state |= RedstoneState::Vertical as usize;
+                }
+            }
+
+            self[&pos].kind = BlockKind::Redstone {
+                on_count,
+                state,
+                strength,
+            };
+        }
+    }
 }
 
 impl<'a> From<&'a World> for World3D {
