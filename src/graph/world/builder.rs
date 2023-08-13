@@ -163,7 +163,12 @@ impl WorldGraphBuilder {
         propagate_targets.extend(pos.cardinal_redstone(state));
 
         if !has_up_block {
-            propagate_targets.extend(pos.up().cardinal_redstone(state));
+            propagate_targets.extend(
+                pos.up()
+                    .cardinal_redstone(state)
+                    .into_iter()
+                    .filter(|up_cardinal| self.world[up_cardinal].kind.is_redstone()),
+            );
         }
 
         if let Some(down_pos) = pos.down() {
@@ -177,9 +182,10 @@ impl WorldGraphBuilder {
                     .into_iter()
                     .filter(|pos| !self.world[&pos].kind.is_cobble())
                     .filter_map(|pos| pos.walk(&Direction::Bottom))
-                    .filter(|pos| !self.world[&pos].kind.is_cobble()),
+                    .filter(|pos| self.world[&pos].kind.is_redstone()),
             );
         }
+
         propagate_targets
             .iter()
             .map(|pos_src| self.propagate(PropagateType::Soft, *pos_src, pos_src.diff(&pos)))
@@ -283,7 +289,10 @@ impl WorldGraphBuilder {
                     vec![(Direction::None, pos)]
                 } else if block.direction.is_othogonal_plane(dir) {
                     // lock
-                    vec![(dir, pos)]
+                    match propagate_type {
+                        PropagateType::Repeater => vec![(dir, pos)],
+                        _ => vec![],
+                    }
                 } else {
                     vec![]
                 }
