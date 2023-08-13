@@ -18,6 +18,7 @@ use crate::world::{
 #[derive(Serialize, Deserialize, Debug)]
 pub struct NBTRoot {
     #[serde(rename = "size")]
+    // (y, z, x)
     size: (i32, i32, i32),
 
     blocks: Vec<NBTBlock>,
@@ -27,6 +28,7 @@ pub struct NBTRoot {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct NBTBlock {
     state: i32,
+    // (y, z, x)
     pos: (i32, i32, i32),
 }
 
@@ -120,10 +122,10 @@ fn nbt_block_name(block: &Block) -> (String, String, Option<NBTPaletteProperty>)
                 },
                 facing: match block.direction {
                     Direction::Bottom | Direction::Top => None,
-                    Direction::East => Some("east".to_owned()),
-                    Direction::West => Some("west".to_owned()),
-                    Direction::South => Some("south".to_owned()),
-                    Direction::North => Some("north".to_owned()),
+                    Direction::East => Some("south".to_owned()),
+                    Direction::West => Some("north".to_owned()),
+                    Direction::South => Some("west".to_owned()),
+                    Direction::North => Some("east".to_owned()),
                     _ => unreachable!(),
                 },
                 powered: is_on.then(|| "true".to_owned()),
@@ -137,10 +139,10 @@ fn nbt_block_name(block: &Block) -> (String, String, Option<NBTPaletteProperty>)
             format!("redstone_wire_{}_{}", strength, state),
             Some(NBTPaletteProperty {
                 power: Some(strength.to_string()),
-                east: ((state & RedstoneState::East as usize) > 0).then(|| "side".to_owned()),
-                west: ((state & RedstoneState::West as usize) > 0).then(|| "side".to_owned()),
-                south: ((state & RedstoneState::South as usize) > 0).then(|| "side".to_owned()),
-                north: ((state & RedstoneState::North as usize) > 0).then(|| "side".to_owned()),
+                east: ((state & RedstoneState::South as usize) > 0).then(|| "side".to_owned()),
+                west: ((state & RedstoneState::North as usize) > 0).then(|| "side".to_owned()),
+                south: ((state & RedstoneState::West as usize) > 0).then(|| "side".to_owned()),
+                north: ((state & RedstoneState::East as usize) > 0).then(|| "side".to_owned()),
                 ..Default::default()
             }),
         ),
@@ -149,10 +151,10 @@ fn nbt_block_name(block: &Block) -> (String, String, Option<NBTPaletteProperty>)
                 ("redstone_torch", "redstone_torch".to_owned(), None)
             } else {
                 let facing = match block.direction {
-                    Direction::East => "east",
-                    Direction::West => "west",
-                    Direction::South => "south",
-                    Direction::North => "north",
+                    Direction::East => "south",
+                    Direction::West => "north",
+                    Direction::South => "west",
+                    Direction::North => "east",
                     _ => unreachable!(),
                 }
                 .to_owned();
@@ -174,10 +176,10 @@ fn nbt_block_name(block: &Block) -> (String, String, Option<NBTPaletteProperty>)
             ..
         } => {
             let facing = match block.direction {
-                Direction::East => "east",
-                Direction::West => "west",
-                Direction::South => "south",
-                Direction::North => "north",
+                Direction::East => "north",
+                Direction::West => "south",
+                Direction::South => "east",
+                Direction::North => "west",
                 _ => unreachable!(),
             }
             .to_owned();
@@ -222,14 +224,14 @@ fn world3d_to_nbt(world: &World3D) -> NBTRoot {
 
         blocks.push(NBTBlock {
             state: palette_index[&specify_name] as i32,
-            pos: (pos.0 as i32, pos.2 as i32, pos.1 as i32),
+            pos: (pos.2 as i32, pos.0 as i32, pos.1 as i32),
         });
     }
 
     NBTRoot {
         size: (
-            world.size.0 as i32,
             world.size.2 as i32,
+            world.size.0 as i32,
             world.size.1 as i32,
         ),
         blocks,
@@ -267,10 +269,10 @@ fn nbt_palette_to_block(palette: &NBTPalette) -> (BlockKind, Direction) {
                         if let Some(facing) = &palette.properties.as_ref().unwrap().facing {
                             match &facing[..] {
                                 "none" => Direction::None,
-                                "east" => Direction::East,
-                                "west" => Direction::West,
-                                "south" => Direction::South,
-                                "north" => Direction::North,
+                                "east" => Direction::South,
+                                "west" => Direction::North,
+                                "south" => Direction::West,
+                                "north" => Direction::East,
                                 _ => unreachable!(),
                             }
                         } else {
@@ -289,25 +291,25 @@ fn nbt_palette_to_block(palette: &NBTPalette) -> (BlockKind, Direction) {
             if let Some(properties) = &palette.properties {
                 if let Some(east) = &properties.east {
                     if east != "none" {
-                        state |= RedstoneState::East as usize;
+                        state |= RedstoneState::South as usize;
                     }
                 }
 
                 if let Some(west) = &properties.west {
                     if west != "none" {
-                        state |= RedstoneState::West as usize;
+                        state |= RedstoneState::North as usize;
                     }
                 }
 
                 if let Some(south) = &properties.south {
                     if south != "none" {
-                        state |= RedstoneState::South as usize;
+                        state |= RedstoneState::West as usize;
                     }
                 }
 
                 if let Some(north) = &properties.north {
                     if north != "none" {
-                        state |= RedstoneState::North as usize;
+                        state |= RedstoneState::East as usize;
                     }
                 }
             }
@@ -339,10 +341,10 @@ fn nbt_palette_to_block(palette: &NBTPalette) -> (BlockKind, Direction) {
                 .unwrap()[..]
             {
                 "none" => Direction::None,
-                "east" => Direction::East,
-                "west" => Direction::West,
-                "south" => Direction::South,
-                "north" => Direction::North,
+                "east" => Direction::South,
+                "west" => Direction::North,
+                "south" => Direction::West,
+                "north" => Direction::East,
                 _ => unreachable!(),
             },
         ),
@@ -371,10 +373,10 @@ fn nbt_palette_to_block(palette: &NBTPalette) -> (BlockKind, Direction) {
                 .unwrap()[..]
             {
                 "none" => Direction::None,
-                "east" => Direction::East,
-                "west" => Direction::West,
-                "south" => Direction::South,
-                "north" => Direction::North,
+                "east" => Direction::North,
+                "west" => Direction::South,
+                "south" => Direction::East,
+                "north" => Direction::West,
                 _ => unreachable!(),
             },
         ),
@@ -401,8 +403,8 @@ fn nbt_to_world(nbt: &NBTRoot) -> World {
 
         blocks.push((
             Position(
-                block.pos.0 as usize,
                 block.pos.2 as usize,
+                block.pos.0 as usize,
                 block.pos.1 as usize,
             ),
             Block {
@@ -414,8 +416,8 @@ fn nbt_to_world(nbt: &NBTRoot) -> World {
 
     World {
         size: DimSize(
-            nbt.size.0 as usize + 1,
             nbt.size.2 as usize + 1,
+            nbt.size.0 as usize + 1,
             nbt.size.1 as usize + 1,
         ),
         blocks,
@@ -584,7 +586,7 @@ mod tests {
 
     #[test]
     fn unittest_import_nbt_as_world() -> eyre::Result<()> {
-        let nbt = NBTRoot::load(&"test/xor.nbt".into())?;
+        let nbt = NBTRoot::load(&"test/alu.nbt".into())?;
         nbt.save(&"test/alu-export.nbt".into());
         let g = WorldGraphBuilder::new(&nbt.to_world()).build();
         println!("{}", g.to_graphviz());
