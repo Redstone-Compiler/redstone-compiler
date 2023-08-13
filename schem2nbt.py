@@ -82,7 +82,7 @@ def initiate_schema(worldedit: File) -> CompoundSchema:
 
     size: dict[str, int] = get_schematic_size(worldedit)
 
-    nbt_schematic["size"] = [size["x"], size["y"], size["z"]]
+    nbt_schematic["size"] = [size["z"], size["y"], size["x"]]
     return nbt_schematic
 
 
@@ -240,7 +240,7 @@ def process_file(
             )
 
         logging.info(f"Saving {output_file}...")
-        File({"": Compound(nbt_schematic)}, gzipped=True).save(output_file)
+        File(Compound(nbt_schematic), gzipped=True).save(output_file)
     except Exception as e:
         logging.error(
             f"An error occurred while processing {input_file}: {repr(e)}")
