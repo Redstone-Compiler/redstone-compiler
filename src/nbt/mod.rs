@@ -1,10 +1,18 @@
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    fs::File,
+    io::{Read, Write},
+    path::PathBuf,
+};
 
+use flate2::{read::GzDecoder, write::GzEncoder, Compression};
+use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 
 use crate::world::{
     block::{Block, BlockKind, Direction, RedstoneState},
-    world::World3D,
+    position::{DimSize, Position},
+    world::{World, World3D},
 };
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -55,9 +63,42 @@ pub struct NBTPaletteProperty {
     waterlogged: Option<String>,
 }
 
+pub trait ToNBT {
+    fn to_nbt(&self) -> NBTRoot;
+}
+
+impl ToNBT for World3D {
+    fn to_nbt(&self) -> NBTRoot {
+        self.into()
+    }
+}
+
 impl From<&World3D> for NBTRoot {
     fn from(value: &World3D) -> Self {
         world3d_to_nbt(value)
+    }
+}
+
+impl NBTRoot {
+    pub fn load(path: &PathBuf) -> eyre::Result<NBTRoot> {
+        let file = File::open(path).unwrap();
+        let mut decoder = GzDecoder::new(file);
+
+        let mut bytes = vec![];
+        decoder.read_to_end(&mut bytes).unwrap();
+
+        Ok(fastnbt::from_bytes(&bytes).unwrap())
+    }
+
+    pub fn save(&self, path: &PathBuf) {
+        let new_bytes = fastnbt::to_bytes(&self).unwrap();
+        let outfile = File::create(path).unwrap();
+        let mut encoder = GzEncoder::new(outfile, Compression::best());
+        encoder.write_all(&new_bytes).unwrap();
+    }
+
+    pub fn to_world(&self) -> World {
+        nbt_to_world(self)
     }
 }
 
@@ -72,7 +113,9 @@ fn nbt_block_name(block: &Block) -> (String, String, Option<NBTPaletteProperty>)
                 face: match block.direction {
                     Direction::Bottom => Some("floor".to_owned()),
                     Direction::Top => Some("ceiling".to_owned()),
-                    Direction::East | Direction::West | Direction::South | Direction::North => None,
+                    Direction::East | Direction::West | Direction::South | Direction::North => {
+                        Some("wall".to_owned())
+                    }
                     _ => unreachable!(),
                 },
                 facing: match block.direction {
@@ -194,6 +237,191 @@ fn world3d_to_nbt(world: &World3D) -> NBTRoot {
     }
 }
 
+fn nbt_palette_to_block(palette: &NBTPalette) -> (BlockKind, Direction) {
+    match &palette.name[..] {
+        "minecraft:air" => (BlockKind::Air, Direction::None),
+        "minecraft:stone_bricks"
+        | "minecraft:mossy_cobblestone"
+        | "minecraft:cobblestone"
+        | "minecraft:oak_planks" => (
+            BlockKind::Cobble {
+                on_count: 0,
+                on_base_count: 0,
+            },
+            Direction::None,
+        ),
+        "minecraft:lever" => (
+            BlockKind::Switch {
+                is_on: palette
+                    .properties
+                    .as_ref()
+                    .map(|p| p.powered.as_ref().map(|p| p.eq("true").then(|| 0)))
+                    .flatten()
+                    .is_some(),
+            },
+            if let Some(face) = &palette.properties.as_ref().unwrap().face {
+                match &face[..] {
+                    "floor" => Direction::Bottom,
+                    "ceiling" => Direction::Top,
+                    "wall" => {
+                        if let Some(facing) = &palette.properties.as_ref().unwrap().facing {
+                            match &facing[..] {
+                                "none" => Direction::None,
+                                "east" => Direction::East,
+                                "west" => Direction::West,
+                                "south" => Direction::South,
+                                "north" => Direction::North,
+                                _ => unreachable!(),
+                            }
+                        } else {
+                            unimplemented!()
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+            } else {
+                Direction::None
+            },
+        ),
+        "minecraft:redstone_wire" => {
+            let mut state = 0;
+
+            if let Some(properties) = &palette.properties {
+                if let Some(east) = &properties.east {
+                    if east != "none" {
+                        state |= RedstoneState::East as usize;
+                    }
+                }
+
+                if let Some(west) = &properties.west {
+                    if west != "none" {
+                        state |= RedstoneState::West as usize;
+                    }
+                }
+
+                if let Some(south) = &properties.south {
+                    if south != "none" {
+                        state |= RedstoneState::South as usize;
+                    }
+                }
+
+                if let Some(north) = &properties.north {
+                    if north != "none" {
+                        state |= RedstoneState::North as usize;
+                    }
+                }
+            }
+
+            (
+                BlockKind::Redstone {
+                    on_count: 0,
+                    strength: if let Some(power) =
+                        palette.properties.as_ref().unwrap().power.as_ref()
+                    {
+                        power.parse().unwrap()
+                    } else {
+                        0
+                    },
+                    state,
+                },
+                Direction::None,
+            )
+        }
+        "minecraft:redstone_torch" => (BlockKind::Torch { is_on: false }, Direction::Bottom),
+        "minecraft:redstone_wall_torch" => (
+            BlockKind::Torch { is_on: false },
+            match &palette
+                .properties
+                .as_ref()
+                .unwrap()
+                .facing
+                .as_ref()
+                .unwrap()[..]
+            {
+                "none" => Direction::None,
+                "east" => Direction::East,
+                "west" => Direction::West,
+                "south" => Direction::South,
+                "north" => Direction::North,
+                _ => unreachable!(),
+            },
+        ),
+        "minecraft:repeater" => (
+            BlockKind::Repeater {
+                is_on: false,
+                is_locked: false,
+                delay: palette
+                    .properties
+                    .as_ref()
+                    .unwrap()
+                    .delay
+                    .as_ref()
+                    .unwrap()
+                    .parse()
+                    .unwrap(),
+                lock_input1: None,
+                lock_input2: None,
+            },
+            match &palette
+                .properties
+                .as_ref()
+                .unwrap()
+                .facing
+                .as_ref()
+                .unwrap()[..]
+            {
+                "none" => Direction::None,
+                "east" => Direction::East,
+                "west" => Direction::West,
+                "south" => Direction::South,
+                "north" => Direction::North,
+                _ => unreachable!(),
+            },
+        ),
+        "minecraft:redstone_block" => (BlockKind::RedstoneBlock, Direction::None),
+        remain => {
+            eprintln!("{remain}");
+            unimplemented!()
+        }
+    }
+}
+
+fn nbt_to_world(nbt: &NBTRoot) -> World {
+    let palette = nbt
+        .palette
+        .iter()
+        .map(|palette| nbt_palette_to_block(palette))
+        .collect_vec();
+
+    let mut blocks = Vec::new();
+    for block in &nbt.blocks {
+        if matches!(palette[block.state as usize].0, BlockKind::Air) {
+            continue;
+        }
+
+        blocks.push((
+            Position(
+                block.pos.0 as usize,
+                block.pos.2 as usize,
+                block.pos.1 as usize,
+            ),
+            Block {
+                kind: palette[block.state as usize].0,
+                direction: palette[block.state as usize].1,
+            },
+        ));
+    }
+
+    World {
+        size: DimSize(
+            nbt.size.0 as usize + 1,
+            nbt.size.2 as usize + 1,
+            nbt.size.1 as usize + 1,
+        ),
+        blocks,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::{Read, Write};
@@ -201,10 +429,13 @@ mod tests {
     use fastnbt::stream::{Parser, Value};
     use flate2::{read::GzDecoder, write::GzEncoder, Compression};
 
-    use crate::world::{
-        block::Direction,
-        position::{DimSize, Position},
-        world::World,
+    use crate::{
+        graph::{graphviz::ToGraphvizGraph, world::builder::WorldGraphBuilder},
+        world::{
+            block::Direction,
+            position::{DimSize, Position},
+            world::World,
+        },
     };
 
     use super::*;
@@ -344,10 +575,20 @@ mod tests {
         let mut world3d: World3D = (&mock_world).into();
         world3d.initialize_redstone_states();
 
-        let nbt: NBTRoot = (&world3d).into();
+        let nbt: NBTRoot = world3d.to_nbt();
         let new_bytes = fastnbt::to_bytes(&nbt).unwrap();
         let outfile = std::fs::File::create("test/and-gate.nbt").unwrap();
         let mut encoder = GzEncoder::new(outfile, Compression::best());
         encoder.write_all(&new_bytes).unwrap();
+    }
+
+    #[test]
+    fn unittest_import_nbt_as_world() -> eyre::Result<()> {
+        let nbt = NBTRoot::load(&"test/xor.nbt".into())?;
+        nbt.save(&"test/alu-export.nbt".into());
+        let g = WorldGraphBuilder::new(&nbt.to_world()).build();
+        println!("{}", g.to_graphviz());
+
+        Ok(())
     }
 }
