@@ -162,7 +162,7 @@ impl WorldGraphBuilder {
         let mut propagate_targets = Vec::new();
         propagate_targets.extend(pos.cardinal_redstone(state));
 
-        if has_up_block {
+        if !has_up_block {
             propagate_targets.extend(pos.up().cardinal_redstone(state));
         }
 
@@ -180,11 +180,12 @@ impl WorldGraphBuilder {
                     .filter(|pos| !self.world[&pos].kind.is_cobble()),
             );
         }
-
         propagate_targets
             .iter()
             .map(|pos_src| self.propagate(PropagateType::Soft, *pos_src, pos_src.diff(&pos)))
             .flatten()
+            // Redstone => Bottom Cobble => Up Redstone Propagation 때문에 재귀가 발생함
+            .filter(|(_, propagate_pos)| propagate_pos != pos)
             .collect_vec()
     }
 
@@ -226,6 +227,10 @@ impl WorldGraphBuilder {
             | BlockKind::Torch { .. } => Vec::new(),
             // 코블에 붙어있는 레드스톤 토치, 리피터만 반응함
             BlockKind::Cobble { .. } => {
+                if matches!(propagate_type, PropagateType::Torch) {
+                    return Vec::new();
+                }
+
                 let mut cardinal_propagation = pos
                     .cardinal_except(&dir)
                     .iter()
@@ -241,11 +246,9 @@ impl WorldGraphBuilder {
                             }
                         },
                         BlockKind::Repeater { .. } => match propagate_type {
-                            PropagateType::Soft => None,
-                            PropagateType::Hard
-                            | PropagateType::Torch
-                            | PropagateType::Repeater => {
-                                if pos_src.diff(&pos) == self.world[pos_src].direction {
+                            PropagateType::Torch => None,
+                            PropagateType::Soft | PropagateType::Hard | PropagateType::Repeater => {
+                                if pos_src.walk(&self.world[pos_src].direction).unwrap() == pos {
                                     Some((Direction::None, *pos_src))
                                 } else {
                                     None
@@ -253,10 +256,10 @@ impl WorldGraphBuilder {
                             }
                         },
                         BlockKind::Redstone { .. } => match propagate_type {
-                            PropagateType::Soft => None,
-                            PropagateType::Hard
-                            | PropagateType::Torch
-                            | PropagateType::Repeater => Some((Direction::None, *pos_src)),
+                            PropagateType::Soft | PropagateType::Torch => None,
+                            PropagateType::Hard | PropagateType::Repeater => {
+                                Some((Direction::None, *pos_src))
+                            }
                         },
                         _ => None,
                     })
@@ -264,8 +267,10 @@ impl WorldGraphBuilder {
 
                 let up_pos = pos.up();
                 let up_block = &self.world[&up_pos];
-                if up_block.direction == Direction::Bottom
-                    && matches!(up_block.kind, BlockKind::Torch { .. })
+                if (up_block.direction == Direction::Bottom
+                    && matches!(up_block.kind, BlockKind::Torch { .. }))
+                    || (!matches!(propagate_type, PropagateType::Soft)
+                        && matches!(up_block.kind, BlockKind::Redstone { .. }))
                 {
                     cardinal_propagation.push((Direction::None, up_pos));
                 }
