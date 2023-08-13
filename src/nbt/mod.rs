@@ -245,7 +245,10 @@ fn nbt_palette_to_block(palette: &NBTPalette) -> (BlockKind, Direction) {
         "minecraft:stone_bricks"
         | "minecraft:mossy_cobblestone"
         | "minecraft:cobblestone"
-        | "minecraft:oak_planks" => (
+        | "minecraft:oak_planks"
+        | "minecraft:dirt"
+        | "minecraft:grass_block"
+        | "minecraft:sandstone" => (
             BlockKind::Cobble {
                 on_count: 0,
                 on_base_count: 0,
