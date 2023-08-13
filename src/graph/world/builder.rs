@@ -230,12 +230,24 @@ impl WorldGraphBuilder {
                     .cardinal_except(&dir)
                     .iter()
                     .filter_map(|pos_src| match &self.world[pos_src].kind {
-                        BlockKind::Torch { .. } => Some((Direction::None, *pos_src)),
+                        BlockKind::Torch { .. } => {
+                            if pos_src.diff(&pos) == self.world[pos_src].direction {
+                                Some((Direction::None, *pos_src))
+                            } else {
+                                None
+                            }
+                        }
                         BlockKind::Repeater { .. } => match propagate_type {
                             PropagateType::Soft => None,
                             PropagateType::Hard
                             | PropagateType::Torch
-                            | PropagateType::Repeater => Some((Direction::None, *pos_src)),
+                            | PropagateType::Repeater => {
+                                if pos_src.diff(&pos) == self.world[pos_src].direction {
+                                    Some((Direction::None, *pos_src))
+                                } else {
+                                    None
+                                }
+                            }
                         },
                         BlockKind::Redstone { .. } => match propagate_type {
                             PropagateType::Soft => None,
