@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 
 use super::{
-    block::{Block, BlockKind, Direction, RedstoneState},
+    block::{Block, BlockKind, Direction},
     position::Position,
     world::{World, World3D},
 };
@@ -66,7 +66,7 @@ impl Simulator {
         tracing::info!("Simulation target\n{:?}", sim.world);
 
         sim.queue.push_back(VecDeque::new());
-        sim.init_redstone_states(world);
+        sim.world.initialize_redstone_states();
         sim.init(world);
 
         tracing::debug!("queue: {:?}", sim.queue);
@@ -185,57 +185,6 @@ impl Simulator {
                     self.init_redstone_block_event(pos);
                 }
                 _ => (),
-            };
-        }
-    }
-
-    fn init_redstone_states(&mut self, world: &World) {
-        for (pos, block) in &world.blocks {
-            let BlockKind::Redstone {
-                on_count,
-                strength,
-                ..
-            } = block.kind else {
-                continue;
-            };
-
-            let mut state = 0;
-
-            let has_up_block = self.world[&pos.up()].kind.is_cobble();
-
-            pos.cardinal().iter().for_each(|pos_src| {
-                let flat_check = self.world[pos_src].kind.is_stick_to_redstone();
-                let up_check = !has_up_block && self.world[&pos_src.up()].kind.is_redstone();
-                let down_check = !self.world[pos_src].kind.is_cobble()
-                    && pos_src
-                        .down()
-                        .map_or(false, |pos| self.world[&pos].kind.is_redstone());
-
-                if !flat_check && !(up_check || down_check) {
-                    return;
-                }
-
-                state |= match pos.diff(pos_src) {
-                    Direction::East => RedstoneState::East,
-                    Direction::West => RedstoneState::West,
-                    Direction::South => RedstoneState::South,
-                    Direction::North => RedstoneState::North,
-                    _ => unreachable!(),
-                } as usize;
-            });
-
-            if state.count_ones() == 1 {
-                if state & RedstoneState::Horizontal as usize > 0 {
-                    state |= RedstoneState::Horizontal as usize;
-                } else {
-                    state |= RedstoneState::Vertical as usize;
-                }
-            }
-
-            self.world[pos].kind = BlockKind::Redstone {
-                on_count,
-                state,
-                strength,
             };
         }
     }
@@ -859,7 +808,7 @@ impl Simulator {
 mod test {
     use std::collections::VecDeque;
 
-    use crate::world::position::DimSize;
+    use crate::world::{block::RedstoneState, position::DimSize};
 
     use super::*;
 
@@ -892,14 +841,12 @@ mod test {
             ],
         };
 
-        let mut sim = Simulator {
+        let sim = Simulator {
             queue: VecDeque::new(),
             world: (&mock_world).into(),
             cycle: 0,
             event_id_count: 0,
         };
-
-        sim.init_redstone_states(&mock_world);
 
         let BlockKind::Redstone { state, .. } = sim.world.map[0][1][1].kind else {
             unreachable!();

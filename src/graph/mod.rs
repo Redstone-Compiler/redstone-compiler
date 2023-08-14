@@ -539,6 +539,7 @@ impl Graph {
         self.nodes.iter().for_each(|node| {
             node.outputs
                 .iter()
+                .filter(|&&id| self.find_node_by_id(id).is_some())
                 .for_each(|&id| input_map.entry(id).or_default().push(node.id));
         });
 
@@ -557,6 +558,7 @@ impl Graph {
         self.nodes.iter().for_each(|node| {
             node.inputs
                 .iter()
+                .filter(|&&id| self.find_node_by_id(id).is_some())
                 .for_each(|&id| output_map.entry(id).or_default().push(node.id));
         });
 

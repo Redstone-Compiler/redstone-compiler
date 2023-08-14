@@ -1,11 +1,11 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use disjoint_set::DisjointSet;
 use itertools::Itertools;
 
 use crate::{
-    graph::{world::WorldGraph, GraphNodeKind},
-    world::block::BlockKind,
+    graph::{world::WorldGraph, GraphNode, GraphNodeId, GraphNodeKind},
+    world::block::{Block, BlockKind, Direction},
 };
 
 pub struct WorldGraphTransformer {
@@ -22,7 +22,7 @@ impl WorldGraphTransformer {
     }
 
     pub fn fold_redstone(&mut self) {
-        let nodes = self
+        let mut nodes = self
             .graph
             .graph
             .nodes
@@ -30,24 +30,130 @@ impl WorldGraphTransformer {
             .filter(|node| matches!(&node.kind, GraphNodeKind::Block(block) if matches!(block.kind, BlockKind::Redstone { .. })))
             .collect_vec();
 
+        nodes.sort_by(|a, b| a.id.cmp(&b.id));
+
         // clustering
         let mut cluster = DisjointSet::new();
+
         for node in &nodes {
             cluster.make_set(node.id);
+        }
 
-            let prodcuers = &self.graph.graph.producers[&node.id];
+        for node in &nodes {
+            let producers = &self.graph.graph.producers[&node.id];
             let consumers = &self.graph.graph.consumers[&node.id];
 
-            for candidate in prodcuers.iter().chain(consumers) {
-                let node = self.graph.graph.find_node_by_id(*candidate).unwrap();
+            for candidate in producers.iter().chain(consumers) {
+                let Some(candidate_node) = self.graph.graph.find_node_by_id(*candidate) else {
+                    unreachable!();
+                };
 
-                if matches!(&node.kind, GraphNodeKind::Block(block) if matches!(block.kind, BlockKind::Redstone { .. }))
+                if matches!(&candidate_node.kind, GraphNodeKind::Block(block) if matches!(block.kind, BlockKind::Redstone { .. }))
                 {
                     cluster.union(node.id, *candidate).unwrap();
                 }
             }
         }
 
-        let ids: HashSet<usize> = nodes.iter().map(|node| node.id).collect();
+        let ids: HashSet<GraphNodeId> = nodes.iter().map(|node| node.id).collect();
+        let mut group_inputs: HashMap<usize, HashSet<GraphNodeId>> = HashMap::new();
+        let mut group_outputs: HashMap<usize, HashSet<GraphNodeId>> = HashMap::new();
+
+        let mut group_ids: HashSet<usize> = HashSet::new();
+
+        for id in &ids {
+            // make clustered id group
+            let group_id = cluster.find(*id).unwrap();
+            group_ids.insert(group_id);
+
+            // collect group input outputs
+            group_inputs.entry(group_id).or_default().extend(
+                self.graph.graph.producers[id]
+                    .clone()
+                    .into_iter()
+                    .filter(|id| !ids.contains(id)),
+            );
+            group_outputs.entry(group_id).or_default().extend(
+                self.graph.graph.consumers[id]
+                    .clone()
+                    .into_iter()
+                    .filter(|id| !ids.contains(id)),
+            );
+        }
+
+        // make clustered node
+        let mut next_id = self.graph.graph.max_node_id().unwrap();
+
+        // remove redstone node
+        for id in &ids {
+            self.graph.graph.remove_by_node_id_lazy(*id);
+        }
+
+        for group_id in &group_ids {
+            next_id += 1;
+
+            let node = GraphNode {
+                id: next_id,
+                kind: GraphNodeKind::Block(Block {
+                    kind: BlockKind::Redstone {
+                        on_count: 0,
+                        state: 0,
+                        strength: 0,
+                    },
+                    direction: Direction::None,
+                }),
+                // TODO: optimize this
+                inputs: group_inputs[group_id].clone().into_iter().collect_vec(),
+                outputs: group_outputs[group_id].clone().into_iter().collect_vec(),
+                ..Default::default()
+            };
+
+            group_inputs[group_id].iter().for_each(|&conn| {
+                self.graph
+                    .graph
+                    .find_node_by_id_mut(conn)
+                    .unwrap()
+                    .outputs
+                    .push(next_id);
+            });
+            group_outputs[group_id].iter().for_each(|&conn| {
+                self.graph
+                    .graph
+                    .find_node_by_id_mut(conn)
+                    .unwrap()
+                    .inputs
+                    .push(next_id);
+            });
+
+            self.graph.routings.insert(node.id);
+            self.graph.graph.nodes.push(node);
+        }
+
+        self.graph.graph.build_inputs();
+        self.graph.graph.build_outputs();
+        self.graph.graph.build_producers();
+        self.graph.graph.build_consumers();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        graph::{graphviz::ToGraphvizGraph, world::builder::WorldGraphBuilder},
+        nbt::NBTRoot,
+    };
+
+    use super::WorldGraphTransformer;
+
+    #[test]
+    fn unittest_fold_redstone() -> eyre::Result<()> {
+        let nbt = NBTRoot::load(&"test/alu.nbt".into())?;
+        let g = WorldGraphBuilder::new(&nbt.to_world()).build();
+
+        let mut transform = WorldGraphTransformer::new(g);
+        transform.fold_redstone();
+        println!("{}", transform.finish().to_graphviz());
+
+        Ok(())
     }
 }

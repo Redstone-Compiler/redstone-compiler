@@ -66,8 +66,10 @@ impl World3D {
                     && pos_src
                         .down()
                         .map_or(false, |pos| self[&pos].kind.is_redstone());
+                let flat_repeater_check = matches!(self[pos_src].kind, BlockKind::Repeater { .. })
+                    && pos == pos_src.walk(&self[pos_src].direction).unwrap();
 
-                if !flat_check && !(up_check || down_check) {
+                if !(flat_check || flat_repeater_check) && !(up_check || down_check) {
                     return;
                 }
 

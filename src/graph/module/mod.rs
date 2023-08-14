@@ -8,7 +8,7 @@ use itertools::Itertools;
 
 use crate::graph::GraphNodeKind;
 
-use super::{ Graph, GraphNodeId};
+use super::{Graph, GraphNodeId};
 
 pub mod builder;
 

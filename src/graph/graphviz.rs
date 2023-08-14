@@ -53,7 +53,7 @@ impl<'a> GraphvizBuilder<'a> {
         self
     }
 
-    pub fn with_colors(&mut self, colors: HashMap<GraphNodeId, String>) -> &mut Self {
+    pub fn with_colors(&mut self, _colors: HashMap<GraphNodeId, String>) -> &mut Self {
         self
     }
 
@@ -353,16 +353,19 @@ impl ToGraphvizGraph for LogicGraph {
 
 impl ToGraphvizGraph for WorldGraph {
     fn to_graphviz(&self) -> String {
+        let mut subnames = HashMap::new();
+        subnames.extend(
+            self.positions
+                .iter()
+                .map(|(id, pos)| (*id, format!("{pos:?}"))),
+        );
+        subnames.extend(self.routings.iter().map(|id| (*id, format!("Routings"))));
+
         GraphvizBuilder::default()
             .with_graph(&self.graph)
             .with_table()
             .with_show_node_id()
-            .with_subname(
-                self.positions
-                    .iter()
-                    .map(|(id, pos)| (*id, format!("{pos:?}")))
-                    .collect(),
-            )
+            .with_subname(subnames)
             .build("WorldGraph")
     }
 

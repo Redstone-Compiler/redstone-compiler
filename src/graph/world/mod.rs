@@ -1,15 +1,22 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::{utils::Verify, world::position::Position};
+use itertools::Itertools;
+
+use crate::{
+    graph::GraphNodeKind,
+    utils::Verify,
+    world::{block::BlockKind, position::Position},
+};
 
 use super::{Graph, GraphNodeId};
 
 pub mod builder;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct WorldGraph {
     pub graph: Graph,
     pub positions: HashMap<GraphNodeId, Position>,
+    pub routings: HashSet<GraphNodeId>,
 }
 
 impl Verify for WorldGraph {
@@ -20,8 +27,16 @@ impl Verify for WorldGraph {
 
 // Calculate the number of cases of all possible combinations of
 // graph nodes in which a block can be located
-fn calculate_block_place_cases(graph: &WorldGraph) -> Vec<Vec<HashSet<GraphNodeId>>> {
-    // Find torches
+fn _calculate_block_place_cases(graph: &WorldGraph) -> Vec<Vec<HashSet<GraphNodeId>>> {
+    // torch must be required block
 
-    todo!()
+    // Find torches
+    let _torches = graph.graph.nodes.iter().filter(|node| matches!(node.kind, GraphNodeKind::Block(block) if matches!(block.kind, BlockKind::Torch{..}))).collect_vec();
+
+    // Can place between repeater and redstone
+
+    Vec::new()
 }
+
+// place torch and block, route redstone
+//

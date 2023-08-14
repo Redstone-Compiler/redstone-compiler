@@ -118,7 +118,6 @@ impl BlockKind {
         matches!(
             self,
             BlockKind::Redstone { .. }
-                | BlockKind::Repeater { .. }
                 | BlockKind::Switch { .. }
                 | BlockKind::Torch { .. }
                 | BlockKind::RedstoneBlock

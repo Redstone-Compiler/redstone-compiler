@@ -5,7 +5,7 @@ use itertools::Itertools;
 use crate::{
     graph::{Graph, GraphNode, GraphNodeId, GraphNodeKind},
     world::{
-        block::{Block, BlockKind, Direction, RedstoneState},
+        block::{Block, BlockKind, Direction, RedstoneStateType},
         position::Position,
         world::{World, World3D},
     },
@@ -36,7 +36,8 @@ impl WorldGraphBuilder {
             .filter(|(_, block)| !block.kind.is_cobble())
             .map(|(pos, _)| pos.clone())
             .collect();
-        let world: World3D = world.into();
+        let mut world: World3D = world.into();
+        world.initialize_redstone_states();
 
         Self {
             world,
@@ -50,12 +51,19 @@ impl WorldGraphBuilder {
 
         let (nodes, positions) = self.build_nodes();
         let mut graph = Graph {
-            nodes: nodes,
+            nodes,
             ..Default::default()
         };
         graph.build_inputs();
 
-        WorldGraph { graph, positions }
+        graph.build_producers();
+        graph.build_consumers();
+
+        WorldGraph {
+            graph,
+            positions,
+            ..Default::default()
+        }
     }
 
     fn visit_blocks(&mut self) {
@@ -71,7 +79,7 @@ impl WorldGraphBuilder {
             let block = &self.world[&pos];
             let visits = match block.kind {
                 BlockKind::Switch { .. } => self.visit_switch(pos, block),
-                BlockKind::Redstone { .. } => self.visit_redstone(pos),
+                BlockKind::Redstone { state, .. } => self.visit_redstone(pos, state),
                 BlockKind::Torch { .. } => self.visit_torch(pos, block),
                 BlockKind::Repeater { .. } => self.visit_repeater(pos, block),
                 BlockKind::RedstoneBlock => self.visit_redstone_block(pos),
@@ -126,38 +134,12 @@ impl WorldGraphBuilder {
         .collect_vec()
     }
 
-    fn visit_redstone(&self, pos: &Position) -> Vec<(Direction, Position)> {
-        let mut state = 0;
+    fn visit_redstone(
+        &self,
+        pos: &Position,
+        state: RedstoneStateType,
+    ) -> Vec<(Direction, Position)> {
         let has_up_block = self.world[&pos.up()].kind.is_cobble();
-
-        pos.cardinal().iter().for_each(|pos_src| {
-            let flat_check = self.world[pos_src].kind.is_stick_to_redstone();
-            let up_check = !has_up_block && self.world[&pos_src.up()].kind.is_redstone();
-            let down_check = !self.world[pos_src].kind.is_cobble()
-                && pos_src
-                    .down()
-                    .map_or(false, |pos| self.world[&pos].kind.is_redstone());
-
-            if !flat_check && !(up_check || down_check) {
-                return;
-            }
-
-            state |= match pos.diff(pos_src) {
-                Direction::East => RedstoneState::East,
-                Direction::West => RedstoneState::West,
-                Direction::South => RedstoneState::South,
-                Direction::North => RedstoneState::North,
-                _ => unreachable!(),
-            } as usize;
-        });
-
-        if state.count_ones() == 1 {
-            if state & RedstoneState::Horizontal as usize > 0 {
-                state |= RedstoneState::Horizontal as usize;
-            } else {
-                state |= RedstoneState::Vertical as usize;
-            }
-        }
 
         let mut propagate_targets = Vec::new();
         propagate_targets.extend(pos.cardinal_redstone(state));
@@ -353,7 +335,9 @@ impl WorldGraphBuilder {
         }
 
         let positions = nodes.iter().map(|(pos, node)| (node.id, *pos)).collect();
-        let nodes = nodes.into_iter().map(|(_, node)| node).collect_vec();
+        let mut nodes = nodes.into_iter().map(|(_, node)| node).collect_vec();
+
+        nodes.sort_by(|a, b| a.id.cmp(&b.id));
 
         (nodes, positions)
     }
