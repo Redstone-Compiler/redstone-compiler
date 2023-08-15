@@ -136,12 +136,23 @@ impl WorldGraphTransformer {
     }
 
     pub fn remove_redstone(&mut self) {
+        self.remove_specific_kind_of_block(|kind| matches!(&kind, BlockKind::Redstone { .. }));
+    }
+
+    pub fn remove_repeater(&mut self) {
+        self.remove_specific_kind_of_block(|kind| matches!(&kind, BlockKind::Repeater { .. }));
+    }
+
+    fn remove_specific_kind_of_block<F>(&mut self, filter: F)
+    where
+        F: Fn(&BlockKind) -> bool,
+    {
         let nodes = self
             .graph
             .graph
             .nodes
             .iter()
-            .filter(|node| matches!(&node.kind, GraphNodeKind::Block(block) if matches!(block.kind, BlockKind::Redstone { .. })))
+            .filter(|node| matches!(&node.kind, GraphNodeKind::Block(block) if filter(&block.kind)))
             .map(|node| node.id)
             .collect_vec();
 
@@ -172,6 +183,7 @@ mod tests {
 
         let mut transform = WorldGraphTransformer::new(g);
         transform.remove_redstone();
+        transform.remove_repeater();
         println!("{}", transform.finish().to_graphviz());
 
         Ok(())
