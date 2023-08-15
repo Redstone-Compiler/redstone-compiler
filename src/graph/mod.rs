@@ -483,6 +483,27 @@ impl Graph {
         self.nodes.remove(index);
     }
 
+    // 노드 삭제하고 삭제한 노드의 Input Output끼리 연결함
+    pub fn remove_and_reconnect_by_node_id_lazy(&mut self, node_id: GraphNodeId) {
+        let Ok(index) = self.nodes.binary_search_by_key(&node_id, |node| node.id) else {
+            return;
+        };
+
+        let node = self.nodes.remove(index);
+
+        for input in &node.inputs {
+            if let Some(input) = self.find_node_by_id_mut(*input) {
+                input.outputs.extend(&node.outputs);
+            }
+        }
+
+        for output in &node.outputs {
+            if let Some(output) = self.find_node_by_id_mut(*output) {
+                output.inputs.extend(&node.inputs);
+            }
+        }
+    }
+
     pub fn replace_node_id_lazy(&mut self, from: GraphNodeId, to: GraphNodeId) {
         self.nodes
             .iter_mut()
@@ -534,38 +555,42 @@ impl Graph {
 
     // outputs이 반드시 determine 되어야함
     pub fn build_inputs(&mut self) {
-        let mut input_map: HashMap<usize, Vec<usize>> = HashMap::new();
+        let mut input_map: HashMap<usize, HashSet<usize>> = HashMap::new();
 
         self.nodes.iter().for_each(|node| {
             node.outputs
                 .iter()
                 .filter(|&&id| self.find_node_by_id(id).is_some())
-                .for_each(|&id| input_map.entry(id).or_default().push(node.id));
+                .for_each(|&id| {
+                    input_map.entry(id).or_default().insert(node.id);
+                });
         });
 
         for node in self.nodes.iter_mut() {
             node.inputs = input_map
                 .get(&node.id)
-                .map(|ids| ids.clone())
+                .map(|ids| ids.clone().into_iter().collect_vec())
                 .unwrap_or_default();
         }
     }
 
     // inputs이 반드시 determine 되어야함
     pub fn build_outputs(&mut self) {
-        let mut output_map: HashMap<usize, Vec<usize>> = HashMap::new();
+        let mut output_map: HashMap<usize, HashSet<usize>> = HashMap::new();
 
         self.nodes.iter().for_each(|node| {
             node.inputs
                 .iter()
                 .filter(|&&id| self.find_node_by_id(id).is_some())
-                .for_each(|&id| output_map.entry(id).or_default().push(node.id));
+                .for_each(|&id| {
+                    output_map.entry(id).or_default().insert(node.id);
+                });
         });
 
         for node in self.nodes.iter_mut() {
             node.outputs = output_map
                 .get(&node.id)
-                .map(|ids| ids.clone())
+                .map(|ids| ids.clone().into_iter().collect())
                 .unwrap_or_default();
         }
     }

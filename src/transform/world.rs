@@ -134,6 +134,26 @@ impl WorldGraphTransformer {
         self.graph.graph.build_producers();
         self.graph.graph.build_consumers();
     }
+
+    pub fn remove_redstone(&mut self) {
+        let nodes = self
+            .graph
+            .graph
+            .nodes
+            .iter()
+            .filter(|node| matches!(&node.kind, GraphNodeKind::Block(block) if matches!(block.kind, BlockKind::Redstone { .. })))
+            .map(|node| node.id)
+            .collect_vec();
+
+        for node in nodes {
+            self.graph.graph.remove_and_reconnect_by_node_id_lazy(node);
+        }
+
+        self.graph.graph.build_inputs();
+        self.graph.graph.build_outputs();
+        self.graph.graph.build_producers();
+        self.graph.graph.build_consumers();
+    }
 }
 
 #[cfg(test)]
@@ -151,7 +171,7 @@ mod tests {
         let g = WorldGraphBuilder::new(&nbt.to_world()).build();
 
         let mut transform = WorldGraphTransformer::new(g);
-        transform.fold_redstone();
+        transform.remove_redstone();
         println!("{}", transform.finish().to_graphviz());
 
         Ok(())
