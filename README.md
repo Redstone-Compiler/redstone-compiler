@@ -10,11 +10,17 @@ From the left side...
 
 https://www.notion.so/redstone-compiler/cdb890c3984a4bb780ba8d30feca029b?v=990dff724b0c414daafb6d459ab4a400&pvs=4
 
-## Block Optimizer
+## Compiler Stack
 
-## HDL
+```
+HDL -> Logic Graph -> WorldGraph -> Placed WorldGraph -> World -> NBT -> Minecraft
+```
 
-### Layering
+## Place And Routing
+
+### Place
+
+There are several placing strategy for minecraft.
 
 ### Routing
 
