@@ -155,7 +155,8 @@ impl WorldGraphBuilder {
 
         if let Some(down_pos) = pos.down() {
             if !self.world[&down_pos].kind.is_cobble() {
-                unimplemented!();
+                // Ensure redstone floors must have a block
+                unreachable!();
             }
 
             propagate_targets.push(down_pos);
@@ -272,7 +273,7 @@ impl WorldGraphBuilder {
                 } else if block.direction.is_othogonal_plane(dir) {
                     // lock
                     match propagate_type {
-                        PropagateType::Repeater => vec![(dir, pos)],
+                        PropagateType::Repeater => vec![(block.direction, pos)],
                         _ => vec![],
                     }
                 } else {
