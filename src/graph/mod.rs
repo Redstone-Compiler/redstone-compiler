@@ -105,6 +105,13 @@ impl Graph {
             .collect_vec()
     }
 
+    pub fn dominators(
+        &self,
+        target_root: GraphNodeId,
+    ) -> petgraph::algo::dominators::Dominators<NodeIndex> {
+        petgraph::algo::dominators::simple_fast(&self.to_petgraph(), NodeIndex::new(target_root))
+    }
+
     pub fn inputs(&self) -> Vec<GraphNodeId> {
         self.nodes
             .iter()
@@ -639,7 +646,7 @@ impl Graph {
         let mut nodes = nodes.into_iter().collect_vec();
         nodes.sort();
 
-        SubGraph { graph: self, nodes }
+        SubGraph::from(self, nodes)
     }
 
     pub fn split_with_outputs(&self) -> Vec<SubGraph> {
@@ -749,11 +756,71 @@ impl From<&Graph> for petgraph::Graph<(), ()> {
 pub struct SubGraph<'a> {
     pub graph: &'a Graph,
     pub nodes: Vec<GraphNodeId>,
+    pub producers: HashMap<GraphNodeId, Vec<GraphNodeId>>,
+    pub consumers: HashMap<GraphNodeId, Vec<GraphNodeId>>,
 }
 
 impl<'a> SubGraph<'a> {
     pub fn from(graph: &'a Graph, nodes: Vec<GraphNodeId>) -> Self {
-        Self { graph, nodes }
+        let node_ids: HashSet<_> = nodes.iter().collect();
+        let mut producers = HashMap::new();
+        let mut consumers = HashMap::new();
+
+        for id in &nodes {
+            producers.insert(
+                *id,
+                graph.producers[id]
+                    .iter()
+                    .filter(|&id| node_ids.contains(id))
+                    .copied()
+                    .collect_vec(),
+            );
+            consumers.insert(
+                *id,
+                graph.consumers[id]
+                    .iter()
+                    .filter(|&id| node_ids.contains(id))
+                    .copied()
+                    .collect_vec(),
+            );
+        }
+
+        Self {
+            graph,
+            nodes,
+            producers,
+            consumers,
+        }
+    }
+
+    pub fn topological_order(&self) -> Vec<GraphNodeId> {
+        let contains: HashSet<&usize> = self.nodes.iter().collect();
+        let order = self.graph.topological_order();
+
+        order
+            .into_iter()
+            .filter(|id| contains.contains(id))
+            .collect_vec()
+    }
+
+    pub fn has_cycle(&self) -> bool {
+        self.graph.has_cycle()
+    }
+
+    pub fn inputs(&self) -> Vec<GraphNodeId> {
+        self.nodes
+            .iter()
+            .filter(|&id| self.producers[id].is_empty())
+            .copied()
+            .collect()
+    }
+
+    pub fn outputs(&self) -> Vec<GraphNodeId> {
+        self.nodes
+            .iter()
+            .filter(|&id| self.consumers[id].is_empty())
+            .copied()
+            .collect()
     }
 }
 
@@ -766,7 +833,7 @@ impl<'a> From<&SubGraph<'a>> for Graph {
             .nodes
             .iter()
             .filter(|node| node_ids.contains(&node.id))
-            .map(|node| node.clone())
+            .cloned()
             .collect_vec();
 
         for node in &mut nodes {

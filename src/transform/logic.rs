@@ -418,10 +418,7 @@ impl LogicGraphTransformer {
 
         clusters
             .into_iter()
-            .map(|(_, nodes)| SubGraph {
-                graph: &self.graph.graph,
-                nodes: nodes,
-            })
+            .map(|(_, nodes)| SubGraph::from(&self.graph.graph, nodes))
             .collect_vec()
     }
 }
