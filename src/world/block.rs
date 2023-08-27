@@ -5,7 +5,7 @@ use super::{
     world::World,
 };
 
-#[derive(Debug, Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Direction {
     #[default]
     None,
@@ -62,7 +62,7 @@ pub enum RedstoneState {
 }
 
 // 블럭의 종류
-#[derive(Default, Clone, Debug, Copy)]
+#[derive(Default, Clone, Debug, Copy, PartialEq, Eq, Hash)]
 pub enum BlockKind {
     #[default]
     Air,
@@ -124,6 +124,10 @@ impl BlockKind {
         )
     }
 
+    pub fn is_repeater(&self) -> bool {
+        matches!(self, BlockKind::Repeater { .. })
+    }
+
     pub fn is_redstone(&self) -> bool {
         matches!(self, BlockKind::Redstone { .. })
     }
@@ -172,7 +176,7 @@ impl BlockKind {
 }
 
 // 모든 물리적 소자의 최소 단위
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct Block {
     pub kind: BlockKind,
     pub direction: Direction,

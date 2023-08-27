@@ -46,56 +46,60 @@ impl World3D {
     }
 
     pub fn initialize_redstone_states(&mut self) {
-        for pos in self.iter_pos() {
-            let BlockKind::Redstone {
-                on_count,
-                strength,
-                ..
-            } = self[&pos].kind else {
-                continue;
-            };
+        self.iter_pos()
+            .iter()
+            .for_each(|pos| self.update_redstone_states(*pos));
+    }
 
-            let mut state = 0;
+    pub fn update_redstone_states(&mut self, pos: Position) {
+        let BlockKind::Redstone {
+            on_count,
+            strength,
+            ..
+        } = self[&pos].kind else {
+            return;
+        };
 
-            let has_up_block = self[&pos.up()].kind.is_cobble();
+        let mut state = 0;
 
-            pos.cardinal().iter().for_each(|pos_src| {
-                let flat_check = self[pos_src].kind.is_stick_to_redstone();
-                let up_check = !has_up_block && self[&pos_src.up()].kind.is_redstone();
-                let down_check = !self[pos_src].kind.is_cobble()
-                    && pos_src
-                        .down()
-                        .map_or(false, |pos| self[&pos].kind.is_redstone());
-                let flat_repeater_check = matches!(self[pos_src].kind, BlockKind::Repeater { .. })
-                    && pos == pos_src.walk(&self[pos_src].direction).unwrap();
+        let has_up_block = self[&pos.up()].kind.is_cobble();
 
-                if !(flat_check || flat_repeater_check) && !(up_check || down_check) {
-                    return;
-                }
+        pos.cardinal().iter().for_each(|pos_src| {
+            let flat_check = self[pos_src].kind.is_stick_to_redstone();
+            let up_check = !has_up_block && self[&pos_src.up()].kind.is_redstone();
+            let down_check = !self[pos_src].kind.is_cobble()
+                && pos_src
+                    .down()
+                    .map_or(false, |pos| self[&pos].kind.is_redstone());
+            let flat_repeater_check = matches!(self[pos_src].kind, BlockKind::Repeater { .. })
+                && pos == pos_src.walk(&self[pos_src].direction).unwrap();
 
-                state |= match pos.diff(pos_src) {
-                    Direction::East => RedstoneState::East,
-                    Direction::West => RedstoneState::West,
-                    Direction::South => RedstoneState::South,
-                    Direction::North => RedstoneState::North,
-                    _ => unreachable!(),
-                } as usize;
-            });
-
-            if state.count_ones() == 1 {
-                if state & RedstoneState::Horizontal as usize > 0 {
-                    state |= RedstoneState::Horizontal as usize;
-                } else {
-                    state |= RedstoneState::Vertical as usize;
-                }
+            if !(flat_check || flat_repeater_check) && !(up_check || down_check) {
+                return;
             }
 
-            self[&pos].kind = BlockKind::Redstone {
-                on_count,
-                state,
-                strength,
-            };
+            state |= match pos.diff(pos_src) {
+                Direction::East => RedstoneState::East,
+                Direction::West => RedstoneState::West,
+                Direction::South => RedstoneState::South,
+                Direction::North => RedstoneState::North,
+                _ => unreachable!(),
+            } as usize;
+        });
+
+        if state.count_ones() == 1 {
+            if state & RedstoneState::Horizontal as usize > 0 {
+                state |= RedstoneState::Horizontal as usize;
+            } else {
+                state |= RedstoneState::Vertical as usize;
+            }
         }
+
+        self[&pos].kind = BlockKind::Redstone {
+            on_count,
+            state,
+            strength,
+        };
     }
 }
 
