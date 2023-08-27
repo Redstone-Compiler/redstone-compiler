@@ -242,10 +242,15 @@ fn world3d_to_nbt(world: &World3D) -> NBTRoot {
 fn nbt_palette_to_block(palette: &NBTPalette) -> (BlockKind, Direction) {
     match &palette.name[..] {
         "minecraft:air" => (BlockKind::Air, Direction::None),
-        "minecraft:stone_bricks"
+        "minecraft:stone"
+        | "minecraft:stone_bricks"
         | "minecraft:mossy_cobblestone"
+        | "minecraft:red_wool"
+        | "minecraft:green_wool"
+        | "minecraft:blue_wool"
         | "minecraft:cobblestone"
         | "minecraft:oak_planks"
+        | "minecraft:oak_wall_sign"
         | "minecraft:dirt"
         | "minecraft:grass_block"
         | "minecraft:sandstone" => (
