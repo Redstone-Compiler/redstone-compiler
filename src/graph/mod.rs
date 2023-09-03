@@ -409,6 +409,14 @@ impl Graph {
             .ok()
     }
 
+    pub fn find_and_remove_node_by_id(&mut self, node_id: GraphNodeId) -> Option<GraphNode> {
+        // TODO: nodes is always sorted by id?
+        self.nodes
+            .binary_search_by_key(&node_id, |node| node.id)
+            .map(|index| self.nodes.remove(index))
+            .ok()
+    }
+
     pub fn rebuild_node_id_base(&mut self, base_index: usize) {
         for node in &mut self.nodes {
             node.id += base_index;
@@ -732,6 +740,26 @@ impl Graph {
         self.build_consumers();
 
         Some(id)
+    }
+
+    pub fn verify(&self) -> eyre::Result<()> {
+        if !self.nodes.windows(2).all(|w| w[0].id <= w[1].id) {
+            eyre::bail!("Nodes must be sorted by id!");
+        }
+
+        let valid_ids: HashSet<GraphNodeId> = self.nodes.iter().map(|node| node.id).collect();
+
+        for node in &self.nodes {
+            if node.inputs.iter().any(|id| !valid_ids.contains(id)) {
+                eyre::bail!("This is not valid graph! Invalid node id contains on inputs index!");
+            }
+
+            if node.outputs.iter().any(|id| !valid_ids.contains(id)) {
+                eyre::bail!("This is not valid graph! Invalid node id contains on outputs index!");
+            }
+        }
+
+        Ok(())
     }
 }
 
