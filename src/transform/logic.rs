@@ -141,7 +141,7 @@ impl LogicGraphTransformer {
                 continue;
             }
 
-            if node.outputs.len() != 1 {
+            if node.outputs.len() == 0 {
                 continue;
             }
 
@@ -159,20 +159,51 @@ impl LogicGraphTransformer {
             let t1_node = self.graph.graph.find_node_by_id(t1).unwrap();
             let t2_node = self.graph.graph.find_node_by_id(t2).unwrap();
 
+            assert_eq!(t1_node.inputs.len(), 1);
             let input = t1_node.inputs[0];
+
             let outputs = t2_node.outputs.clone();
 
-            self.graph
-                .graph
-                .replace_target_output_node_ids(input, t1, outputs.clone());
+            //   in                   in
+            //   |                    | \
+            // not(t1)                |  not(t1)
+            //   | \       =>         |    \
+            //   |  \                out1   out2
+            //   |   \
+            // not(t2)\
+            //   |     \
+            //  out1   out2
+            let reserve_t1 = t1_node.outputs.len() > 1;
 
-            for output in outputs {
+            if reserve_t1 {
+                self.graph
+                    .graph
+                    .find_node_by_id_mut(input)
+                    .unwrap()
+                    .outputs
+                    .extend(outputs.clone());
+            } else {
+                self.graph
+                    .graph
+                    .replace_target_output_node_ids(input, t1, outputs.clone());
+            }
+
+            for &output in &outputs {
                 self.graph
                     .graph
                     .replace_target_input_node_ids(output, t2, vec![input]);
             }
 
-            self.graph.graph.remove_by_node_id_lazy(t1);
+            if reserve_t1 {
+                self.graph
+                    .graph
+                    .find_node_by_id_mut(t1)
+                    .unwrap()
+                    .outputs
+                    .retain(|id| *id != t2);
+            } else {
+                self.graph.graph.remove_by_node_id_lazy(t1);
+            }
             self.graph.graph.remove_by_node_id_lazy(t2);
         }
 
