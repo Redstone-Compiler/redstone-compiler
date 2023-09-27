@@ -8,7 +8,7 @@ use crate::{
             builder::{PlaceBound, PropagateType},
             WorldGraph,
         },
-        GraphNodeId, GraphNodeKind, SubGraph,
+        GraphNodeId, GraphNodeKind, SubGraphWithGraph,
     },
     world::{block::Block, position::Position, world::World3D},
 };
@@ -38,7 +38,7 @@ impl PlacedNode {
 }
 
 pub struct LocalPlacer<'a> {
-    graph: SubGraph<'a>,
+    graph: SubGraphWithGraph<'a>,
     try_count: usize,
     max_width_size: usize,
     max_height_size: usize,
@@ -49,7 +49,7 @@ pub const K_MAX_LOCAL_PLACE_NODE_COUNT: usize = 25;
 impl<'a> LocalPlacer<'a> {
     // you should not pass side effected sub-graph
     pub fn new(
-        graph: SubGraph<'a>,
+        graph: SubGraphWithGraph<'a>,
         try_count: usize,
         max_width_size: Option<usize>,
         max_height_size: Option<usize>,
@@ -66,7 +66,7 @@ impl<'a> LocalPlacer<'a> {
         })
     }
 
-    pub fn verify(graph: &SubGraph<'a>) {
+    pub fn verify(graph: &SubGraphWithGraph<'a>) {
         assert!(graph.nodes.len() > 0);
         assert!(graph.nodes.len() <= K_MAX_LOCAL_PLACE_NODE_COUNT);
 

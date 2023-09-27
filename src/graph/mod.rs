@@ -22,6 +22,7 @@ pub enum GraphNodeKind {
     Block(Block),
     Logic(Logic),
     Output(String),
+    Clustered(Vec<GraphNodeId>),
 }
 
 impl GraphNodeKind {
@@ -32,6 +33,7 @@ impl GraphNodeKind {
             GraphNodeKind::Block(block) => block.kind.name(),
             GraphNodeKind::Logic(logic) => logic.logic_type.name(),
             GraphNodeKind::Output(output) => format!("Output {output}"),
+            GraphNodeKind::Clustered(node_ids) => format!("Cluster {node_ids:?}"),
         }
     }
 
@@ -632,7 +634,7 @@ impl Graph {
         self.consumers = consumers;
     }
 
-    pub fn extract_subgraph_by_node_id(&self, node_id: GraphNodeId) -> SubGraph {
+    pub fn extract_subgraph_by_node_id(&self, node_id: GraphNodeId) -> SubGraphWithGraph {
         let mut nodes: HashSet<GraphNodeId> = HashSet::new();
 
         let mut queue: VecDeque<GraphNodeId> = VecDeque::new();
@@ -654,10 +656,10 @@ impl Graph {
         let mut nodes = nodes.into_iter().collect_vec();
         nodes.sort();
 
-        SubGraph::from(self, nodes)
+        SubGraphWithGraph::from(self, nodes)
     }
 
-    pub fn split_with_outputs(&self) -> Vec<SubGraph> {
+    pub fn split_with_outputs(&self) -> Vec<SubGraphWithGraph> {
         self.outputs()
             .iter()
             .map(|output| self.extract_subgraph_by_node_id(*output))
@@ -781,14 +783,21 @@ impl From<&Graph> for petgraph::Graph<(), ()> {
 }
 
 #[derive(Debug, Clone)]
-pub struct SubGraph<'a> {
+pub struct SubGraphWithGraph<'a> {
     pub graph: &'a Graph,
     pub nodes: Vec<GraphNodeId>,
     pub producers: HashMap<GraphNodeId, Vec<GraphNodeId>>,
     pub consumers: HashMap<GraphNodeId, Vec<GraphNodeId>>,
 }
 
-impl<'a> SubGraph<'a> {
+#[derive(Debug, Clone)]
+pub struct SubGraph {
+    pub nodes: Vec<GraphNodeId>,
+    pub producers: HashMap<GraphNodeId, Vec<GraphNodeId>>,
+    pub consumers: HashMap<GraphNodeId, Vec<GraphNodeId>>,
+}
+
+impl<'a> SubGraphWithGraph<'a> {
     pub fn from(graph: &'a Graph, nodes: Vec<GraphNodeId>) -> Self {
         let node_ids: HashSet<_> = nodes.iter().collect();
         let mut producers = HashMap::new();
@@ -850,10 +859,18 @@ impl<'a> SubGraph<'a> {
             .copied()
             .collect()
     }
+
+    pub fn to_subgraph(&self) -> SubGraph {
+        SubGraph {
+            nodes: self.nodes.clone(),
+            producers: self.producers.clone(),
+            consumers: self.consumers.clone(),
+        }
+    }
 }
 
-impl<'a> From<&SubGraph<'a>> for Graph {
-    fn from(value: &SubGraph) -> Self {
+impl<'a> From<&SubGraphWithGraph<'a>> for Graph {
+    fn from(value: &SubGraphWithGraph) -> Self {
         let node_ids: HashSet<_> = value.nodes.iter().collect();
 
         let mut nodes = value
@@ -879,8 +896,8 @@ impl<'a> From<&SubGraph<'a>> for Graph {
     }
 }
 
-impl<'a> From<Vec<SubGraph<'a>>> for Graph {
-    fn from(value: Vec<SubGraph<'a>>) -> Self {
+impl<'a> From<Vec<SubGraphWithGraph<'a>>> for Graph {
+    fn from(value: Vec<SubGraphWithGraph<'a>>) -> Self {
         if value.is_empty() {
             return Default::default();
         }
@@ -892,5 +909,23 @@ impl<'a> From<Vec<SubGraph<'a>>> for Graph {
         }
 
         graph
+    }
+}
+
+impl From<Vec<SubGraph>> for Graph {
+    fn from(value: Vec<SubGraph>) -> Self {
+        // GraphNodeId, Cluster Index
+        let mut cluster_index: HashMap<GraphNodeId, usize> = value
+            .iter()
+            .enumerate()
+            .map(|(index, sg)| sg.nodes.iter().map(|&id| (id, index)).collect())
+            .flatten()
+            .collect();
+
+        let mut nodes = value.iter().enumerate().map(|(index, sg)| GraphNode {
+            id: index,
+            kind: GraphNodeKind::Clustered(sg.nodes.clone()),
+            ..Default::default()
+        });
     }
 }
