@@ -5,6 +5,7 @@ use itertools::Itertools;
 use crate::graph::module::GraphModulePortTarget;
 
 use super::{
+    cluster::ClusteredGraph,
     logic::LogicGraph,
     module::{GraphModule, GraphWithSubGraphs},
     world::WorldGraph,
@@ -414,6 +415,18 @@ impl ToGraphvizGraph for GraphWithSubGraphs {
                     .collect_vec(),
             )
             .build("LogicGraph")
+    }
+}
+
+impl ToGraphvizGraph for ClusteredGraph {
+    fn to_graphviz(&self) -> String {
+        GraphvizBuilder::default()
+            .with_graph(&self.graph)
+            .build("ClusteredGraph")
+    }
+
+    fn to_graphviz_with_clusters(&self, _: &Vec<SubGraph>) -> String {
+        unimplemented!()
     }
 }
 

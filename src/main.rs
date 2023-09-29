@@ -1,4 +1,5 @@
 pub mod circuit;
+pub mod cluster;
 pub mod estimator;
 pub mod graph;
 pub mod logic;

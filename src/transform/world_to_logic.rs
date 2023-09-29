@@ -141,8 +141,13 @@ impl WorldToLogicTransformer {
 
 #[cfg(test)]
 mod tests {
+    use itertools::Itertools;
+
     use crate::{
-        graph::{graphviz::ToGraphvizGraph, world::builder::WorldGraphBuilder},
+        graph::{
+            graphviz::ToGraphvizGraph, subgraphs_to_clustered_graph,
+            world::builder::WorldGraphBuilder,
+        },
         nbt::NBTRoot,
         transform::{logic::LogicGraphTransformer, world_to_logic::WorldToLogicTransformer},
     };
@@ -159,8 +164,17 @@ mod tests {
 
         let mut transform = LogicGraphTransformer::new(g);
         transform.remove_double_neg_expression();
+        let sub_graphs = transform
+            .cluster(true)
+            .iter()
+            .map(|x| x.to_subgraph())
+            .collect_vec();
+        let g = transform.finish();
 
-        println!("{}", transform.finish().to_graphviz());
+        println!("{}", g.to_graphviz_with_clusters(&sub_graphs));
+
+        let clustered_g = subgraphs_to_clustered_graph(&g.graph, &sub_graphs);
+        println!("{}", clustered_g.to_graphviz());
 
         Ok(())
     }

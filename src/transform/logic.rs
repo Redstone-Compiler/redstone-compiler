@@ -6,7 +6,7 @@ use itertools::Itertools;
 use crate::{
     graph::{
         logic::{builder::LogicGraphBuilder, LogicGraph},
-        Graph, GraphNode, GraphNodeId, GraphNodeKind, SubGraph,
+        Graph, GraphNode, GraphNodeId, GraphNodeKind, SubGraphWithGraph,
     },
     logic::{Logic, LogicType},
 };
@@ -385,7 +385,7 @@ impl LogicGraphTransformer {
         todo!()
     }
 
-    pub fn cluster(&self, include_ouput_node: bool) -> Vec<SubGraph> {
+    pub fn cluster(&self, include_ouput_node: bool) -> Vec<SubGraphWithGraph> {
         let mut tags: HashMap<GraphNodeId, HashSet<GraphNodeId>> = HashMap::new();
         let mut queue = VecDeque::from(self.graph.graph.inputs());
 
@@ -449,7 +449,7 @@ impl LogicGraphTransformer {
 
         clusters
             .into_iter()
-            .map(|(_, nodes)| SubGraph::from(&self.graph.graph, nodes))
+            .map(|(_, nodes)| SubGraphWithGraph::from(&self.graph.graph, nodes))
             .collect_vec()
     }
 }

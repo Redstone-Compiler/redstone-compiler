@@ -1,12 +1,20 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use itertools::Itertools;
-use petgraph::stable_graph::NodeIndex;
+use petgraph::{stable_graph::NodeIndex, visit::NodeRef};
 
-use crate::{logic::Logic, world::block::Block};
+use crate::{
+    cluster::{Clustered, ClusteredType},
+    logic::Logic,
+    world::block::Block,
+};
 
-use self::module::{builder::GraphModuleBuilder, GraphModule};
+use self::{
+    cluster::ClusteredGraph,
+    module::{builder::GraphModuleBuilder, GraphModule},
+};
 
+mod cluster;
 pub mod graphviz;
 pub mod logic;
 pub mod module;
@@ -22,6 +30,7 @@ pub enum GraphNodeKind {
     Block(Block),
     Logic(Logic),
     Output(String),
+    Clustered(Clustered),
 }
 
 impl GraphNodeKind {
@@ -32,6 +41,7 @@ impl GraphNodeKind {
             GraphNodeKind::Block(block) => block.kind.name(),
             GraphNodeKind::Logic(logic) => logic.logic_type.name(),
             GraphNodeKind::Output(output) => format!("Output {output}"),
+            GraphNodeKind::Clustered(clustered) => clustered.clustered_type.name(),
         }
     }
 
@@ -632,7 +642,7 @@ impl Graph {
         self.consumers = consumers;
     }
 
-    pub fn extract_subgraph_by_node_id(&self, node_id: GraphNodeId) -> SubGraph {
+    pub fn extract_subgraph_by_node_id(&self, node_id: GraphNodeId) -> SubGraphWithGraph {
         let mut nodes: HashSet<GraphNodeId> = HashSet::new();
 
         let mut queue: VecDeque<GraphNodeId> = VecDeque::new();
@@ -654,10 +664,10 @@ impl Graph {
         let mut nodes = nodes.into_iter().collect_vec();
         nodes.sort();
 
-        SubGraph::from(self, nodes)
+        SubGraphWithGraph::from(self, nodes)
     }
 
-    pub fn split_with_outputs(&self) -> Vec<SubGraph> {
+    pub fn split_with_outputs(&self) -> Vec<SubGraphWithGraph> {
         self.outputs()
             .iter()
             .map(|output| self.extract_subgraph_by_node_id(*output))
@@ -781,14 +791,21 @@ impl From<&Graph> for petgraph::Graph<(), ()> {
 }
 
 #[derive(Debug, Clone)]
-pub struct SubGraph<'a> {
+pub struct SubGraphWithGraph<'a> {
     pub graph: &'a Graph,
     pub nodes: Vec<GraphNodeId>,
     pub producers: HashMap<GraphNodeId, Vec<GraphNodeId>>,
     pub consumers: HashMap<GraphNodeId, Vec<GraphNodeId>>,
 }
 
-impl<'a> SubGraph<'a> {
+#[derive(Debug, Clone)]
+pub struct SubGraph {
+    pub nodes: Vec<GraphNodeId>,
+    pub producers: HashMap<GraphNodeId, Vec<GraphNodeId>>,
+    pub consumers: HashMap<GraphNodeId, Vec<GraphNodeId>>,
+}
+
+impl<'a> SubGraphWithGraph<'a> {
     pub fn from(graph: &'a Graph, nodes: Vec<GraphNodeId>) -> Self {
         let node_ids: HashSet<_> = nodes.iter().collect();
         let mut producers = HashMap::new();
@@ -850,10 +867,18 @@ impl<'a> SubGraph<'a> {
             .copied()
             .collect()
     }
+
+    pub fn to_subgraph(&self) -> SubGraph {
+        SubGraph {
+            nodes: self.nodes.clone(),
+            producers: self.producers.clone(),
+            consumers: self.consumers.clone(),
+        }
+    }
 }
 
-impl<'a> From<&SubGraph<'a>> for Graph {
-    fn from(value: &SubGraph) -> Self {
+impl<'a> From<&SubGraphWithGraph<'a>> for Graph {
+    fn from(value: &SubGraphWithGraph) -> Self {
         let node_ids: HashSet<_> = value.nodes.iter().collect();
 
         let mut nodes = value
@@ -879,8 +904,8 @@ impl<'a> From<&SubGraph<'a>> for Graph {
     }
 }
 
-impl<'a> From<Vec<SubGraph<'a>>> for Graph {
-    fn from(value: Vec<SubGraph<'a>>) -> Self {
+impl<'a> From<Vec<SubGraphWithGraph<'a>>> for Graph {
+    fn from(value: Vec<SubGraphWithGraph<'a>>) -> Self {
         if value.is_empty() {
             return Default::default();
         }
@@ -893,4 +918,93 @@ impl<'a> From<Vec<SubGraph<'a>>> for Graph {
 
         graph
     }
+}
+
+pub fn subgraphs_to_clustered_graph(graph: &Graph, subgraphs: &Vec<SubGraph>) -> ClusteredGraph {
+    // GraphNodeId, Cluster Index
+    let cluster_index: HashMap<GraphNodeId, usize> = subgraphs
+        .iter()
+        .enumerate()
+        .map(|(index, sg)| sg.nodes.iter().map(|&id| (id, index)).collect_vec())
+        .flatten()
+        .collect();
+
+    let mut nodes = subgraphs
+        .iter()
+        .enumerate()
+        .map(|(index, sg)| {
+            let clustered = Clustered {
+                clustered_type: ClusteredType::Cluster(sg.nodes.clone()),
+            };
+
+            GraphNode {
+                id: index,
+                kind: GraphNodeKind::Clustered(clustered),
+                ..Default::default()
+            }
+        })
+        .collect_vec();
+
+    let mut weighted_node = subgraphs
+        .iter()
+        .enumerate()
+        .map(|(index, sg)| {
+            let consumers = sg
+                .nodes
+                .iter()
+                .map(|node| graph.consumers[&node.id()].clone())
+                .flatten()
+                .collect_vec();
+
+            // cluster_index, weight
+            let mut consumer_cluster_weights: HashMap<usize, usize> = HashMap::new();
+            for consumer in consumers {
+                if cluster_index[&consumer] != index {
+                    *consumer_cluster_weights
+                        .entry(cluster_index[&consumer])
+                        .or_default() += 1;
+                }
+            }
+
+            // weighed_node, consumer
+            let weighted_nodes = consumer_cluster_weights
+                .into_iter()
+                .map(|(cluster_id, w)| {
+                    let weighted = Clustered {
+                        clustered_type: ClusteredType::Weighted(w as isize),
+                    };
+
+                    GraphNode {
+                        kind: GraphNodeKind::Clustered(weighted),
+                        outputs: vec![cluster_id],
+                        ..Default::default()
+                    }
+                })
+                .collect_vec();
+
+            weighted_nodes
+        })
+        .collect_vec();
+
+    // Put id lazy
+    for (index, node) in weighted_node.iter_mut().flatten().enumerate() {
+        node.id = nodes.len() + index + 1;
+    }
+
+    // Set output weighted node
+    for (index, clustered_node) in nodes.iter_mut().enumerate() {
+        clustered_node.outputs = weighted_node[index].iter().map(|node| node.id).collect();
+    }
+
+    let mut graph = Graph {
+        nodes: vec![nodes, weighted_node.into_iter().flatten().collect_vec()].concat(),
+        ..Default::default()
+    };
+
+    graph.build_inputs();
+    graph.build_producers();
+    graph.build_consumers();
+    graph.verify().unwrap();
+
+    ClusteredGraph { graph }
 }
