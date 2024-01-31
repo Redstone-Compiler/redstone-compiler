@@ -164,6 +164,8 @@ mod tests {
 
         let mut transform = LogicGraphTransformer::new(g);
         transform.remove_double_neg_expression();
+        transform.remove_double_neg_expression();
+        transform.remove_double_neg_expression();
         let sub_graphs = transform
             .cluster(true)
             .iter()

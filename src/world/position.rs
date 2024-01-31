@@ -167,6 +167,10 @@ impl Position {
             unreachable!()
         }
     }
+
+    pub fn distance(&self, tar: &Position) -> usize {
+        self.0.abs_diff(tar.0) + self.1.abs_diff(tar.1) + self.2.abs_diff(tar.2)
+    }
 }
 
 // 사이즈
