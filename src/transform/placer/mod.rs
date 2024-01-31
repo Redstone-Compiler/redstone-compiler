@@ -1,6 +1,11 @@
-use std::{collections::HashSet, iter::repeat_with};
+use std::{
+    collections::{HashMap, HashSet},
+    default,
+    iter::repeat_with,
+};
 
-use petgraph::stable_graph::NodeIndex;
+use eyre::ensure;
+use itertools::Itertools;
 
 use crate::{
     graph::{
@@ -10,6 +15,7 @@ use crate::{
         },
         GraphNodeId, GraphNodeKind, SubGraphWithGraph,
     },
+    logic::LogicType,
     world::{block::Block, position::Position, world::World3D},
 };
 
@@ -45,9 +51,10 @@ pub struct LocalPlacer<'a> {
 }
 
 pub const K_MAX_LOCAL_PLACE_NODE_COUNT: usize = 25;
+pub const K_MAX_LOCAL_ROUTE_DISTANCE: usize = 5;
 
 impl<'a> LocalPlacer<'a> {
-    // you should not pass side effected sub-graph
+    // you should not pass side effected partitioned sub-graph
     pub fn new(
         graph: SubGraphWithGraph<'a>,
         try_count: usize,
@@ -89,8 +96,66 @@ impl<'a> LocalPlacer<'a> {
             .0
     }
 
-    fn next_place(&mut self) -> (WorldGraph, usize) {
+    fn populate_place_order(&self) -> Vec<Vec<GraphNodeId>> {
+        fn evaluate_place_order(order: Vec<GraphNodeId>) -> usize {
+            // TODO: calculate min-cut
+            todo!()
+        }
+
+        // TODO: order place order
+        vec![self.graph.topological_order()]
+    }
+
+    fn next_place(&self) -> (WorldGraph, usize) {
         todo!()
+    }
+
+    // if place fail, then return false
+    fn try_place(
+        &self,
+        nodes: &mut HashMap<GraphNodeId, Vec<PlacedNode>>,
+        inputs: Vec<GraphNodeId>,
+        target: GraphNodeKind,
+    ) -> eyre::Result<bool> {
+        ensure!(inputs.len() <= 2, "too many inputs");
+
+        let exists_pos: HashSet<Position> = nodes
+            .iter()
+            .map(|(_, nodes)| nodes.iter().map(|node| node.position).collect_vec())
+            .flatten()
+            .collect();
+
+        match target.as_logic().logic_type {
+            LogicType::Not => todo!(),
+            LogicType::Or => todo!(),
+            LogicType::And => eyre::bail!("currently, and placement not supports"),
+            LogicType::Xor => eyre::bail!("currently, xor placement not supports"),
+        }
+
+        Ok(true)
+    }
+
+    // route prev order output to next input
+    fn try_local_route(
+        &self,
+        nodes: &mut HashMap<GraphNodeId, Vec<PlacedNode>>,
+        outputs: Vec<GraphNodeId>,
+        input: GraphNodeId,
+    ) -> eyre::Result<bool> {
+        if outputs.len() == 1 {
+            return Ok(true);
+        }
+
+        let v = outputs
+            .iter()
+            .map(|id| nodes[id].last().unwrap().position)
+            .collect_vec();
+
+        if v[0].distance(&v[1]) > K_MAX_LOCAL_ROUTE_DISTANCE {
+            return Ok(false);
+        }
+
+        Ok(true)
     }
 }
 
@@ -108,4 +173,10 @@ impl<'a> LocalPlacerCostEstimator<'a> {
 
         todo!()
     }
+}
+
+#[derive(Default)]
+pub enum LocalRouteStrategy {
+    #[default]
+    MinimumDistance,
 }

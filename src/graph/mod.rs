@@ -72,6 +72,13 @@ impl GraphNodeKind {
             _ => unreachable!(),
         }
     }
+
+    pub fn as_logic(&self) -> &Logic {
+        match self {
+            GraphNodeKind::Logic(logic) => logic,
+            _ => unreachable!(),
+        }
+    }
 }
 
 #[derive(Default, Debug, Clone)]
