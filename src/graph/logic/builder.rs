@@ -261,6 +261,7 @@ mod tests {
 
         let mut fa = fa1.clone();
         fa.graph.merge(fa2.graph);
+        println!("{}", fa.to_graphviz());
 
         let mut transform = LogicGraphTransformer::new(fa);
         transform.decompose_xor()?;
