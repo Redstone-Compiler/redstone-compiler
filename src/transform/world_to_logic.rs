@@ -26,12 +26,17 @@ impl WorldToLogicTransformer {
     fn verify_input(graph: &WorldGraph) -> eyre::Result<()> {
         // verify no repeater lock
         let contains_lock_repeater = graph.graph.nodes.iter().any(|node| {
-            let GraphNodeKind::Block(block) = node.kind else  {
-              return false;
+            let GraphNodeKind::Block(block) = node.kind else {
+                return false;
             };
 
-            let BlockKind::Repeater { lock_input1, lock_input2 , ..} = block.kind else {
-              return false;
+            let BlockKind::Repeater {
+                lock_input1,
+                lock_input2,
+                ..
+            } = block.kind
+            else {
+                return false;
             };
 
             lock_input1.is_some() || lock_input2.is_some()
@@ -154,27 +159,32 @@ mod tests {
 
     #[test]
     fn unittest_world_to_logic_graph() -> eyre::Result<()> {
-        let nbt = NBTRoot::load(&"test/alu.nbt".into())?;
+        let nbt = NBTRoot::load(&"test/xor.nbt".into())?;
 
         let g = WorldGraphBuilder::new(&nbt.to_world()).build();
         g.graph.verify()?;
 
-        let g = WorldToLogicTransformer::new(g)?.transform()?;
-        g.graph.verify()?;
+        // let g = WorldToLogicTransformer::new(g)?.transform()?;
+        // g.graph.verify()?;
 
-        let mut transform = LogicGraphTransformer::new(g);
-        transform.remove_double_neg_expression();
-        let sub_graphs = transform
-            .cluster(true)
-            .iter()
-            .map(|x| x.to_subgraph())
-            .collect_vec();
-        let g = transform.finish();
+        // let mut transform = LogicGraphTransformer::new(g);
+        // transform.remove_double_neg_expression();
+        // transform.remove_double_neg_expression();
+        // transform.remove_double_neg_expression();
+        // let g = transform.finish();
 
-        println!("{}", g.to_graphviz_with_clusters(&sub_graphs));
+        println!("{}", g.to_graphviz());
+        // let sub_graphs = transform
+        //     .cluster(true)
+        //     .iter()
+        //     .map(|x| x.to_subgraph())
+        //     .collect_vec();
+        // let g = transform.finish();
 
-        let clustered_g = subgraphs_to_clustered_graph(&g.graph, &sub_graphs);
-        println!("{}", clustered_g.to_graphviz());
+        // println!("{}", g.to_graphviz_with_clusters(&sub_graphs));
+
+        // let clustered_g = subgraphs_to_clustered_graph(&g.graph, &sub_graphs);
+        // println!("{}", clustered_g.to_graphviz());
 
         Ok(())
     }
