@@ -44,6 +44,10 @@ impl PlaceBound {
         self.2
     }
 
+    pub fn is_bound_on(&self, world: &World3D) -> bool {
+        world.size.bound_on(self.position())
+    }
+
     pub fn propagation_bound(&self, kind: &BlockKind, world: Option<&World3D>) -> Vec<PlaceBound> {
         let dir = self.direction();
         let pos = self.position();
@@ -146,6 +150,87 @@ impl PlaceBound {
             BlockKind::Air | BlockKind::Cobble { .. } => unreachable!(),
         }
     }
+
+    pub fn propagate_to(&self, world: &World3D) -> Vec<(Direction, Position)> {
+        let propagate_type = self.propagation_type();
+        let pos = self.position();
+        let dir = self.direction();
+        let block = &world[pos];
+
+        match block.kind {
+            BlockKind::Air
+            | BlockKind::Switch { .. }
+            | BlockKind::RedstoneBlock
+            | BlockKind::Torch { .. } => Vec::new(),
+            // 코블에 붙어있는 레드스톤 토치, 리피터만 반응함
+            BlockKind::Cobble { .. } => {
+                if matches!(propagate_type, PropagateType::Torch) {
+                    return Vec::new();
+                }
+
+                let mut cardinal_propagation = pos
+                    .cardinal_except(dir)
+                    .iter()
+                    .filter_map(|&pos_src| match world[pos_src].kind {
+                        BlockKind::Torch { .. } => match propagate_type {
+                            PropagateType::Torch => None,
+                            PropagateType::Soft | PropagateType::Hard | PropagateType::Repeater => {
+                                if pos_src.walk(world[pos_src].direction).unwrap() == pos {
+                                    Some((Direction::None, pos_src))
+                                } else {
+                                    None
+                                }
+                            }
+                        },
+                        BlockKind::Repeater { .. } => match propagate_type {
+                            PropagateType::Torch => None,
+                            PropagateType::Soft | PropagateType::Hard | PropagateType::Repeater => {
+                                if pos_src.walk(world[pos_src].direction).unwrap() == pos {
+                                    Some((Direction::None, pos_src))
+                                } else {
+                                    None
+                                }
+                            }
+                        },
+                        BlockKind::Redstone { .. } => match propagate_type {
+                            PropagateType::Soft | PropagateType::Torch => None,
+                            PropagateType::Hard | PropagateType::Repeater => {
+                                Some((Direction::None, pos_src))
+                            }
+                        },
+                        _ => None,
+                    })
+                    .collect_vec();
+
+                let up_pos = pos.up();
+                let up_block = &world[up_pos];
+                if (up_block.direction == Direction::Bottom
+                    && matches!(up_block.kind, BlockKind::Torch { .. }))
+                    || (!matches!(propagate_type, PropagateType::Soft)
+                        && matches!(up_block.kind, BlockKind::Redstone { .. }))
+                {
+                    cardinal_propagation.push((Direction::None, up_pos));
+                }
+
+                cardinal_propagation
+            }
+            BlockKind::Redstone { .. } => vec![(Direction::None, pos)],
+            BlockKind::Repeater { .. } => {
+                if block.direction == dir {
+                    vec![(Direction::None, pos)]
+                } else if block.direction.is_othogonal_plane(dir) {
+                    // lock
+                    match propagate_type {
+                        PropagateType::Repeater => vec![(block.direction, pos)],
+                        _ => vec![],
+                    }
+                } else {
+                    vec![]
+                }
+            }
+            BlockKind::Piston { .. } => todo!(),
+        }
+    }
 }
 
 impl WorldGraphBuilder {
@@ -201,7 +286,7 @@ impl WorldGraphBuilder {
             let propagation_targets = bound.propagation_bound(&block.kind, Some(&self.world));
             let mut visits = propagation_targets
                 .into_iter()
-                .map(|bound| self.propagate(bound))
+                .map(|bound| bound.propagate_to(&self.world))
                 .flatten()
                 .collect_vec();
 
@@ -216,87 +301,6 @@ impl WorldGraphBuilder {
             if visits.len() > 0 {
                 self.outputs.insert(*pos, visits);
             }
-        }
-    }
-
-    fn propagate(&self, bound: PlaceBound) -> Vec<(Direction, Position)> {
-        let propagate_type = bound.propagation_type();
-        let pos = bound.position();
-        let dir = bound.direction();
-        let block = &self.world[pos];
-
-        match block.kind {
-            BlockKind::Air
-            | BlockKind::Switch { .. }
-            | BlockKind::RedstoneBlock
-            | BlockKind::Torch { .. } => Vec::new(),
-            // 코블에 붙어있는 레드스톤 토치, 리피터만 반응함
-            BlockKind::Cobble { .. } => {
-                if matches!(propagate_type, PropagateType::Torch) {
-                    return Vec::new();
-                }
-
-                let mut cardinal_propagation = pos
-                    .cardinal_except(dir)
-                    .iter()
-                    .filter_map(|&pos_src| match &self.world[pos_src].kind {
-                        BlockKind::Torch { .. } => match propagate_type {
-                            PropagateType::Torch => None,
-                            PropagateType::Soft | PropagateType::Hard | PropagateType::Repeater => {
-                                if pos_src.walk(self.world[pos_src].direction).unwrap() == pos {
-                                    Some((Direction::None, pos_src))
-                                } else {
-                                    None
-                                }
-                            }
-                        },
-                        BlockKind::Repeater { .. } => match propagate_type {
-                            PropagateType::Torch => None,
-                            PropagateType::Soft | PropagateType::Hard | PropagateType::Repeater => {
-                                if pos_src.walk(self.world[pos_src].direction).unwrap() == pos {
-                                    Some((Direction::None, pos_src))
-                                } else {
-                                    None
-                                }
-                            }
-                        },
-                        BlockKind::Redstone { .. } => match propagate_type {
-                            PropagateType::Soft | PropagateType::Torch => None,
-                            PropagateType::Hard | PropagateType::Repeater => {
-                                Some((Direction::None, pos_src))
-                            }
-                        },
-                        _ => None,
-                    })
-                    .collect_vec();
-
-                let up_pos = pos.up();
-                let up_block = &self.world[up_pos];
-                if (up_block.direction == Direction::Bottom
-                    && matches!(up_block.kind, BlockKind::Torch { .. }))
-                    || (!matches!(propagate_type, PropagateType::Soft)
-                        && matches!(up_block.kind, BlockKind::Redstone { .. }))
-                {
-                    cardinal_propagation.push((Direction::None, up_pos));
-                }
-
-                cardinal_propagation
-            }
-            BlockKind::Redstone { .. } => vec![(Direction::None, pos)],
-            BlockKind::Repeater { .. } => {
-                if block.direction == dir {
-                    vec![(Direction::None, pos)]
-                } else if block.direction.is_othogonal_plane(dir) {
-                    // lock
-                    match propagate_type {
-                        PropagateType::Repeater => vec![(block.direction, pos)],
-                        _ => vec![],
-                    }
-                } else {
-                    vec![]
-                }
-            }
-            BlockKind::Piston { .. } => todo!(),
         }
     }
 

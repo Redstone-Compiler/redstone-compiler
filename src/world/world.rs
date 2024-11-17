@@ -15,6 +15,15 @@ pub struct World {
     pub blocks: Vec<(Position, Block)>,
 }
 
+impl World {
+    pub fn new(size: DimSize) -> Self {
+        Self {
+            size,
+            blocks: Default::default(),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct World3D {
     pub size: DimSize,
@@ -23,6 +32,13 @@ pub struct World3D {
 }
 
 impl World3D {
+    pub fn new(size: DimSize) -> Self {
+        Self {
+            size,
+            map: vec![vec![vec![Block::default(); size.0]; size.1]; size.2],
+        }
+    }
+
     pub fn iter_pos(&self) -> Vec<Position> {
         let mut result = Vec::new();
         let (z, y, x) = (self.map.len(), self.map[0].len(), self.map[0][1].len());

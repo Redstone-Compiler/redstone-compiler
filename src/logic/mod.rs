@@ -1,4 +1,4 @@
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub enum LogicType {
     Not,
     And,
@@ -25,7 +25,7 @@ impl LogicType {
     }
 }
 
-#[derive(Debug, Clone, derive_more::Deref)]
+#[derive(Debug, Copy, Clone, derive_more::Deref)]
 pub struct Logic {
     #[deref]
     pub logic_type: LogicType,

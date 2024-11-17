@@ -124,6 +124,10 @@ impl BlockKind {
         )
     }
 
+    pub fn is_air(&self) -> bool {
+        matches!(self, BlockKind::Air)
+    }
+
     pub fn is_repeater(&self) -> bool {
         matches!(self, BlockKind::Repeater { .. })
     }

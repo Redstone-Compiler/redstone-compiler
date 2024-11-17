@@ -173,3 +173,9 @@ impl Position {
 
 #[derive(Debug, Copy, Clone)]
 pub struct DimSize(pub usize, pub usize, pub usize);
+
+impl DimSize {
+    pub fn bound_on(&self, pos: Position) -> bool {
+        pos.0 < self.0 && pos.1 < self.1 && pos.2 < self.2
+    }
+}
