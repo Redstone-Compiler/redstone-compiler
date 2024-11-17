@@ -108,30 +108,33 @@ fn nbt_block_name(block: &Block) -> (String, String, Option<NBTPaletteProperty>)
     let (palette_name, specify_name, property) = match block.kind {
         BlockKind::Air => ("air", "air".to_owned(), None),
         BlockKind::Cobble { .. } => ("stone_bricks", "stone_bricks".to_owned(), None),
-        BlockKind::Switch { is_on } => (
-            "lever",
-            "lever".to_owned(),
-            Some(NBTPaletteProperty {
-                face: match block.direction {
-                    Direction::Bottom => Some("floor".to_owned()),
-                    Direction::Top => Some("ceiling".to_owned()),
-                    Direction::East | Direction::West | Direction::South | Direction::North => {
-                        Some("wall".to_owned())
-                    }
-                    _ => unreachable!(),
-                },
-                facing: match block.direction {
-                    Direction::Bottom | Direction::Top => None,
-                    Direction::East => Some("south".to_owned()),
-                    Direction::West => Some("north".to_owned()),
-                    Direction::South => Some("west".to_owned()),
-                    Direction::North => Some("east".to_owned()),
-                    _ => unreachable!(),
-                },
-                powered: is_on.then(|| "true".to_owned()),
-                ..Default::default()
-            }),
-        ),
+        BlockKind::Switch { is_on } => {
+            let facing = match block.direction {
+                Direction::Bottom | Direction::Top => None,
+                Direction::East => Some("north".to_owned()),
+                Direction::West => Some("south".to_owned()),
+                Direction::South => Some("east".to_owned()),
+                Direction::North => Some("west".to_owned()),
+                _ => unreachable!(),
+            };
+            (
+                "lever",
+                format!("lever_{is_on}_{}", facing.clone().unwrap_or_default()),
+                Some(NBTPaletteProperty {
+                    face: match block.direction {
+                        Direction::Bottom => Some("floor".to_owned()),
+                        Direction::Top => Some("ceiling".to_owned()),
+                        Direction::East | Direction::West | Direction::South | Direction::North => {
+                            Some("wall".to_owned())
+                        }
+                        _ => unreachable!(),
+                    },
+                    facing,
+                    powered: is_on.then(|| "true".to_owned()),
+                    ..Default::default()
+                }),
+            )
+        }
         BlockKind::Redstone {
             state, strength, ..
         } => (
@@ -151,10 +154,10 @@ fn nbt_block_name(block: &Block) -> (String, String, Option<NBTPaletteProperty>)
                 ("redstone_torch", "redstone_torch".to_owned(), None)
             } else {
                 let facing = match block.direction {
-                    Direction::East => "south",
-                    Direction::West => "north",
-                    Direction::South => "west",
-                    Direction::North => "east",
+                    Direction::East => "north",
+                    Direction::West => "south",
+                    Direction::South => "east",
+                    Direction::North => "west",
                     _ => unreachable!(),
                 }
                 .to_owned();
@@ -176,17 +179,17 @@ fn nbt_block_name(block: &Block) -> (String, String, Option<NBTPaletteProperty>)
             ..
         } => {
             let facing = match block.direction {
-                Direction::East => "north",
-                Direction::West => "south",
-                Direction::South => "east",
-                Direction::North => "west",
+                Direction::East => "south",
+                Direction::West => "north",
+                Direction::South => "west",
+                Direction::North => "east",
                 _ => unreachable!(),
             }
             .to_owned();
 
             (
                 "repeater",
-                "repeater".to_owned(),
+                format!("repeater_{facing}_{is_on}_{is_locked}_{delay}"),
                 Some(NBTPaletteProperty {
                     facing: Some(facing),
                     delay: Some(delay.to_string()),
@@ -224,15 +227,15 @@ fn world3d_to_nbt(world: &World3D) -> NBTRoot {
 
         blocks.push(NBTBlock {
             state: palette_index[&specify_name] as i32,
-            pos: (pos.2 as i32, pos.0 as i32, pos.1 as i32),
+            pos: (pos.1 as i32, pos.2 as i32, pos.0 as i32),
         });
     }
 
     NBTRoot {
         size: (
+            world.size.1 as i32,
             world.size.2 as i32,
             world.size.0 as i32,
-            world.size.1 as i32,
         ),
         blocks,
         palette,
@@ -595,8 +598,11 @@ mod tests {
     #[test]
     fn unittest_import_nbt_as_world() -> eyre::Result<()> {
         let nbt = NBTRoot::load("test/alu.nbt")?;
-        nbt.save("test/alu-export.nbt");
-        let g = WorldGraphBuilder::new(&nbt.to_world()).build();
+        let world = nbt.to_world();
+        let world_3d = World3D::from(&world);
+        world_3d.to_nbt().save("test/alu-export.nbt");
+
+        let g = WorldGraphBuilder::new(&world).build();
         println!("{}", g.to_graphviz());
 
         Ok(())

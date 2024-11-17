@@ -1,6 +1,6 @@
 use super::block::{Direction, RedstoneState, RedstoneStateType};
 
-// 위치
+// 위치 (x, y, z)
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub struct Position(pub usize, pub usize, pub usize);
 
