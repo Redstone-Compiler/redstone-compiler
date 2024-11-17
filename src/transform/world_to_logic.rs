@@ -26,12 +26,17 @@ impl WorldToLogicTransformer {
     fn verify_input(graph: &WorldGraph) -> eyre::Result<()> {
         // verify no repeater lock
         let contains_lock_repeater = graph.graph.nodes.iter().any(|node| {
-            let GraphNodeKind::Block(block) = node.kind else  {
-              return false;
+            let GraphNodeKind::Block(block) = node.kind else {
+                return false;
             };
 
-            let BlockKind::Repeater { lock_input1, lock_input2 , ..} = block.kind else {
-              return false;
+            let BlockKind::Repeater {
+                lock_input1,
+                lock_input2,
+                ..
+            } = block.kind
+            else {
+                return false;
             };
 
             lock_input1.is_some() || lock_input2.is_some()
@@ -154,7 +159,7 @@ mod tests {
 
     #[test]
     fn unittest_world_to_logic_graph() -> eyre::Result<()> {
-        let nbt = NBTRoot::load(&"test/alu.nbt".into())?;
+        let nbt = NBTRoot::load("test/alu.nbt")?;
 
         let g = WorldGraphBuilder::new(&nbt.to_world()).build();
         g.graph.verify()?;

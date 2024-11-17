@@ -178,7 +178,7 @@ mod tests {
 
     #[test]
     fn unittest_fold_redstone() -> eyre::Result<()> {
-        let nbt = NBTRoot::load(&"test/alu.nbt".into())?;
+        let nbt = NBTRoot::load("test/alu.nbt")?;
         let g = WorldGraphBuilder::new(&nbt.to_world()).build();
 
         let mut transform = WorldGraphTransformer::new(g);

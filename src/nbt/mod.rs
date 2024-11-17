@@ -82,8 +82,8 @@ impl From<&World3D> for NBTRoot {
 }
 
 impl NBTRoot {
-    pub fn load(path: &PathBuf) -> eyre::Result<NBTRoot> {
-        let file = File::open(path).unwrap();
+    pub fn load(path: impl Into<PathBuf>) -> eyre::Result<NBTRoot> {
+        let file = File::open(path.into()).unwrap();
         let mut decoder = GzDecoder::new(file);
 
         let mut bytes = vec![];
@@ -92,9 +92,9 @@ impl NBTRoot {
         Ok(fastnbt::from_bytes(&bytes).unwrap())
     }
 
-    pub fn save(&self, path: &PathBuf) {
+    pub fn save(&self, path: impl Into<PathBuf>) {
         let new_bytes = fastnbt::to_bytes(&self).unwrap();
-        let outfile = File::create(path).unwrap();
+        let outfile = File::create(path.into()).unwrap();
         let mut encoder = GzEncoder::new(outfile, Compression::best());
         encoder.write_all(&new_bytes).unwrap();
     }
@@ -594,8 +594,8 @@ mod tests {
 
     #[test]
     fn unittest_import_nbt_as_world() -> eyre::Result<()> {
-        let nbt = NBTRoot::load(&"test/alu.nbt".into())?;
-        nbt.save(&"test/alu-export.nbt".into());
+        let nbt = NBTRoot::load("test/alu.nbt")?;
+        nbt.save("test/alu-export.nbt");
         let g = WorldGraphBuilder::new(&nbt.to_world()).build();
         println!("{}", g.to_graphviz());
 
