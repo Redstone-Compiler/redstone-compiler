@@ -1,4 +1,4 @@
-use std::{collections::HashSet, iter::repeat_with};
+use std::collections::HashSet;
 
 use eyre::ensure;
 
@@ -9,6 +9,7 @@ use crate::{
             builder::{PlaceBound, PropagateType},
             WorldGraph,
         },
+        GraphNodeId,
     },
     world::{block::Block, position::Position, world::World3D},
 };
@@ -78,15 +79,25 @@ impl LocalPlacer {
     }
 
     pub fn generate(&mut self) -> World3D {
-        repeat_with(|| self.next_place())
-            .min_by_key(|(_, c)| *c)
-            .unwrap()
-            .0
-    }
+        let order = self.graph.topological_order();
 
-    fn next_place(&mut self) -> (World3D, usize) {
         todo!()
     }
+
+    fn place_next_node(
+        &self,
+        node_id: GraphNodeId,
+        nodes: &Vec<PlacedNode>,
+        world: &World3D,
+    ) -> Option<Vec<PlacedNode>> {
+        todo!()
+    }
+}
+
+fn place_node(world: &World3D, node: PlacedNode) -> World3D {
+    let mut world = world.clone();
+    world[node.position] = node.block;
+    world
 }
 
 pub struct LocalPlacerCostEstimator<'a> {

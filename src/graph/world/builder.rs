@@ -51,11 +51,11 @@ impl PlaceBound {
         match kind {
             BlockKind::Switch { .. } => {
                 let result = pos
-                    .forwards_except(&dir)
+                    .forwards_except(dir)
                     .into_iter()
-                    .map(|pos_src| PlaceBound(PropagateType::Torch, pos_src, pos.diff(&pos_src)))
+                    .map(|pos_src| PlaceBound(PropagateType::Torch, pos_src, pos.diff(pos_src)))
                     .chain(|| -> Option<PlaceBound> {
-                        let Some(pos) = pos.walk(&dir) else {
+                        let Some(pos) = pos.walk(dir) else {
                             return None;
                         };
 
@@ -67,7 +67,7 @@ impl PlaceBound {
             }
             BlockKind::Redstone { state, .. } => {
                 let world = world.unwrap();
-                let has_up_block = world[&pos.up()].kind.is_cobble();
+                let has_up_block = world[pos.up()].kind.is_cobble();
 
                 let mut propagate_targets = Vec::new();
                 propagate_targets.extend(pos.cardinal_redstone(*state));
@@ -77,12 +77,12 @@ impl PlaceBound {
                         pos.up()
                             .cardinal_redstone(*state)
                             .into_iter()
-                            .filter(|up_cardinal| world[up_cardinal].kind.is_redstone()),
+                            .filter(|&up_cardinal| world[up_cardinal].kind.is_redstone()),
                     );
                 }
 
                 if let Some(down_pos) = pos.down() {
-                    if !world[&down_pos].kind.is_cobble() {
+                    if !world[down_pos].kind.is_cobble() {
                         // Ensure redstone floors must have a block
                         unreachable!();
                     }
@@ -91,29 +91,29 @@ impl PlaceBound {
                     propagate_targets.extend(
                         pos.cardinal_redstone(*state)
                             .into_iter()
-                            .filter(|pos| !world[&pos].kind.is_cobble())
-                            .filter_map(|pos| pos.walk(&Direction::Bottom))
-                            .filter(|pos| world[&pos].kind.is_redstone()),
+                            .filter(|&pos| !world[pos].kind.is_cobble())
+                            .filter_map(|pos| pos.walk(Direction::Bottom))
+                            .filter(|&pos| world[pos].kind.is_redstone()),
                     );
                 }
 
                 propagate_targets
                     .iter()
-                    .map(|pos_src| PlaceBound(PropagateType::Soft, *pos_src, pos_src.diff(&pos)))
+                    .map(|pos_src| PlaceBound(PropagateType::Soft, *pos_src, pos_src.diff(pos)))
                     .collect_vec()
             }
             BlockKind::Torch { .. } => {
                 let result = match dir {
                     Direction::Bottom => pos.cardinal(),
                     Direction::East | Direction::West | Direction::South | Direction::North => {
-                        let mut positions = pos.cardinal_except(&dir);
+                        let mut positions = pos.cardinal_except(dir);
                         positions.extend(pos.down());
                         positions
                     }
                     _ => unreachable!(),
                 }
                 .into_iter()
-                .map(|pos_src| PlaceBound(PropagateType::Torch, pos_src, pos_src.diff(&pos)))
+                .map(|pos_src| PlaceBound(PropagateType::Torch, pos_src, pos_src.diff(pos)))
                 .chain(Some(PlaceBound(
                     PropagateType::Hard,
                     pos.up(),
@@ -124,7 +124,7 @@ impl PlaceBound {
                 result
             }
             BlockKind::Repeater { .. } => {
-                let walk = pos.walk(&&dir.inverse());
+                let walk = pos.walk(dir.inverse());
                 let mut result: Vec<PlaceBound> = Vec::new();
 
                 if let Some(pos) = walk {
@@ -140,7 +140,7 @@ impl PlaceBound {
             BlockKind::RedstoneBlock => pos
                 .forwards()
                 .into_iter()
-                .map(|pos_src| PlaceBound(PropagateType::Soft, pos_src, pos_src.diff(&pos)))
+                .map(|pos_src| PlaceBound(PropagateType::Soft, pos_src, pos_src.diff(pos)))
                 .collect_vec(),
             BlockKind::Piston { .. } => unimplemented!(),
             BlockKind::Air | BlockKind::Cobble { .. } => unreachable!(),
@@ -196,7 +196,7 @@ impl WorldGraphBuilder {
             }
             visit.insert(*pos);
 
-            let block = &self.world[&pos];
+            let block = &self.world[*pos];
             let bound = PlaceBound(PropagateType::Soft, *pos, block.direction);
             let propagation_targets = bound.propagation_bound(&block.kind, Some(&self.world));
             let mut visits = propagation_targets
@@ -223,7 +223,7 @@ impl WorldGraphBuilder {
         let propagate_type = bound.propagation_type();
         let pos = bound.position();
         let dir = bound.direction();
-        let block = &self.world[&pos];
+        let block = &self.world[pos];
 
         match block.kind {
             BlockKind::Air
@@ -237,14 +237,14 @@ impl WorldGraphBuilder {
                 }
 
                 let mut cardinal_propagation = pos
-                    .cardinal_except(&dir)
+                    .cardinal_except(dir)
                     .iter()
-                    .filter_map(|pos_src| match &self.world[pos_src].kind {
+                    .filter_map(|&pos_src| match &self.world[pos_src].kind {
                         BlockKind::Torch { .. } => match propagate_type {
                             PropagateType::Torch => None,
                             PropagateType::Soft | PropagateType::Hard | PropagateType::Repeater => {
-                                if pos_src.walk(&self.world[pos_src].direction).unwrap() == pos {
-                                    Some((Direction::None, *pos_src))
+                                if pos_src.walk(self.world[pos_src].direction).unwrap() == pos {
+                                    Some((Direction::None, pos_src))
                                 } else {
                                     None
                                 }
@@ -253,8 +253,8 @@ impl WorldGraphBuilder {
                         BlockKind::Repeater { .. } => match propagate_type {
                             PropagateType::Torch => None,
                             PropagateType::Soft | PropagateType::Hard | PropagateType::Repeater => {
-                                if pos_src.walk(&self.world[pos_src].direction).unwrap() == pos {
-                                    Some((Direction::None, *pos_src))
+                                if pos_src.walk(self.world[pos_src].direction).unwrap() == pos {
+                                    Some((Direction::None, pos_src))
                                 } else {
                                     None
                                 }
@@ -263,7 +263,7 @@ impl WorldGraphBuilder {
                         BlockKind::Redstone { .. } => match propagate_type {
                             PropagateType::Soft | PropagateType::Torch => None,
                             PropagateType::Hard | PropagateType::Repeater => {
-                                Some((Direction::None, *pos_src))
+                                Some((Direction::None, pos_src))
                             }
                         },
                         _ => None,
@@ -271,7 +271,7 @@ impl WorldGraphBuilder {
                     .collect_vec();
 
                 let up_pos = pos.up();
-                let up_block = &self.world[&up_pos];
+                let up_block = &self.world[up_pos];
                 if (up_block.direction == Direction::Bottom
                     && matches!(up_block.kind, BlockKind::Torch { .. }))
                     || (!matches!(propagate_type, PropagateType::Soft)
@@ -307,27 +307,27 @@ impl WorldGraphBuilder {
         for (index, pos) in self
             .queue
             .iter()
-            .filter(|pos| !self.world[*pos].kind.is_cobble())
+            .filter(|&&pos| !self.world[pos].kind.is_cobble())
             .enumerate()
         {
             graph_id.insert(*pos, index);
             nodes.insert(
                 *pos,
-                GraphNode::new(index, GraphNodeKind::Block(self.world[pos])),
+                GraphNode::new(index, GraphNodeKind::Block(self.world[*pos])),
             );
         }
 
         for pos in self
             .queue
             .iter()
-            .filter(|pos| !self.world[pos].kind.is_cobble())
+            .filter(|&&pos| !self.world[pos].kind.is_cobble())
         {
             let Some(outputs) = self.outputs.get(pos) else {
                 continue;
             };
 
             let node = nodes.get_mut(pos).unwrap();
-            let mut block = self.world[pos];
+            let mut block = self.world[*pos];
 
             for (dir, pos) in outputs {
                 let id = graph_id[&pos];

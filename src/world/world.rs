@@ -41,7 +41,7 @@ impl World3D {
     pub fn iter_block(&self) -> Vec<(Position, &Block)> {
         self.iter_pos()
             .into_iter()
-            .map(|pos| (pos, &self[&pos]))
+            .map(|pos| (pos, &self[pos]))
             .collect_vec()
     }
 
@@ -53,25 +53,24 @@ impl World3D {
 
     pub fn update_redstone_states(&mut self, pos: Position) {
         let BlockKind::Redstone {
-            on_count,
-            strength,
-            ..
-        } = self[&pos].kind else {
+            on_count, strength, ..
+        } = self[pos].kind
+        else {
             return;
         };
 
         let mut state = 0;
 
-        let has_up_block = self[&pos.up()].kind.is_cobble();
+        let has_up_block = self[pos.up()].kind.is_cobble();
 
-        pos.cardinal().iter().for_each(|pos_src| {
+        pos.cardinal().iter().for_each(|&pos_src| {
             let flat_check = self[pos_src].kind.is_stick_to_redstone();
-            let up_check = !has_up_block && self[&pos_src.up()].kind.is_redstone();
+            let up_check = !has_up_block && self[pos_src.up()].kind.is_redstone();
             let down_check = !self[pos_src].kind.is_cobble()
                 && pos_src
                     .down()
-                    .map_or(false, |pos| self[&pos].kind.is_redstone());
-            let Some(walk) = pos_src.walk(&self[pos_src].direction) else {
+                    .map_or(false, |pos| self[pos].kind.is_redstone());
+            let Some(walk) = pos_src.walk(self[pos_src].direction) else {
                 return;
             };
             let flat_repeater_check =
@@ -98,7 +97,7 @@ impl World3D {
             }
         }
 
-        self[&pos].kind = BlockKind::Redstone {
+        self[pos].kind = BlockKind::Redstone {
             on_count,
             state,
             strength,
@@ -142,16 +141,16 @@ impl<'a> From<&'a World> for World3D {
     }
 }
 
-impl Index<&Position> for World3D {
+impl Index<Position> for World3D {
     type Output = Block;
 
-    fn index(&self, index: &Position) -> &Self::Output {
+    fn index(&self, index: Position) -> &Self::Output {
         &self.map[index.2][index.1][index.0]
     }
 }
 
-impl IndexMut<&Position> for World3D {
-    fn index_mut(&mut self, index: &Position) -> &mut Self::Output {
+impl IndexMut<Position> for World3D {
+    fn index_mut(&mut self, index: Position) -> &mut Self::Output {
         &mut self.map[index.2][index.1][index.0]
     }
 }

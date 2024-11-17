@@ -34,7 +34,7 @@ impl Position {
         result
     }
 
-    pub fn forwards_except(&self, dir: &Direction) -> Vec<Position> {
+    pub fn forwards_except(&self, dir: Direction) -> Vec<Position> {
         if let Some(pos) = self.walk(dir) {
             return self
                 .forwards()
@@ -86,7 +86,7 @@ impl Position {
         result
     }
 
-    pub fn cardinal_except(&self, dir: &Direction) -> Vec<Position> {
+    pub fn cardinal_except(&self, dir: Direction) -> Vec<Position> {
         let mut result = Vec::new();
 
         if !matches!(dir, Direction::East) {
@@ -120,7 +120,7 @@ impl Position {
         Some(Position(self.0, self.1, self.2 - 1))
     }
 
-    pub fn walk(&self, dir: &Direction) -> Option<Position> {
+    pub fn walk(&self, dir: Direction) -> Option<Position> {
         match dir {
             Direction::None => Some(*self),
             Direction::Bottom => {
@@ -150,7 +150,7 @@ impl Position {
         }
     }
 
-    pub fn diff(&self, tar: &Position) -> Direction {
+    pub fn diff(&self, tar: Position) -> Direction {
         if tar.0 > self.0 {
             Direction::East
         } else if tar.0 < self.0 {
