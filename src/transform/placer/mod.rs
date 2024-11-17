@@ -15,7 +15,7 @@ use crate::{
     logic::LogicType,
     world::{
         block::{Block, BlockKind, Direction, RedstoneState},
-        position::{DimSize, Position},
+        position::{self, DimSize, Position},
         world::World3D,
     },
 };
@@ -90,21 +90,23 @@ impl LocalPlacer {
         Ok(())
     }
 
-    pub fn generate(&mut self) -> Vec<World3D> {
+    pub fn generate(&mut self, finish_index: Option<usize>) -> Vec<World3D> {
         let orders = self.graph.topological_order();
         let mut queue: VecDeque<(usize, World3D, HashMap<GraphNodeId, Position>)> = VecDeque::new();
         queue.push_back((0, World3D::new(DimSize(10, 10, 10)), Default::default()));
 
-        while let Some((order_index, world, pos)) = queue.pop_front() {
-            if order_index == orders.len() {
+        while let Some((order_index, _, _)) = queue.front() {
+            if *order_index == orders.len() || Some(*order_index) == finish_index {
                 break;
             }
 
+            let (order_index, world, pos) = queue.pop_front().unwrap();
             let node_id = orders[order_index];
             for (world, place_position) in self.place_and_route_next_node(node_id, &world, &pos) {
                 let mut nodes_position = pos.clone();
                 nodes_position.insert(node_id, place_position);
                 queue.push_back((order_index + 1, world, nodes_position));
+                println!("{place_position:?}");
             }
         }
 
@@ -274,9 +276,11 @@ mod tests {
         println!("{}", logic_graph.to_graphviz());
 
         let mut placer = LocalPlacer::new(logic_graph)?;
-        let world3d = placer.generate();
+        let world3d = placer.generate(Some(1));
 
-        let nbt: NBTRoot = world3d[0].to_nbt();
+        dbg!(&world3d[2]);
+
+        let nbt: NBTRoot = world3d[2].to_nbt();
         nbt.save("test/and-gate-new.nbt");
 
         Ok(())
