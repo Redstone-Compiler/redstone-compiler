@@ -1,14 +1,14 @@
 use std::{collections::HashSet, iter::repeat_with};
 
-use petgraph::stable_graph::NodeIndex;
+use eyre::ensure;
 
 use crate::{
     graph::{
+        logic::LogicGraph,
         world::{
             builder::{PlaceBound, PropagateType},
             WorldGraph,
         },
-        GraphNodeId, GraphNodeKind, SubGraphWithGraph,
     },
     world::{block::Block, position::Position, world::World3D},
 };
@@ -35,61 +35,56 @@ impl PlacedNode {
             .into_iter()
             .collect()
     }
+
+    pub fn has_conflict_with(&self, other: &Self) -> bool {
+        todo!()
+    }
+
+    // pub fn
 }
 
-pub struct LocalPlacer<'a> {
-    graph: SubGraphWithGraph<'a>,
-    try_count: usize,
-    max_width_size: usize,
-    max_height_size: usize,
+pub struct LocalPlacer {
+    graph: LogicGraph,
 }
 
 pub const K_MAX_LOCAL_PLACE_NODE_COUNT: usize = 25;
 
-impl<'a> LocalPlacer<'a> {
-    // you should not pass side effected sub-graph
-    pub fn new(
-        graph: SubGraphWithGraph<'a>,
-        try_count: usize,
-        max_width_size: Option<usize>,
-        max_height_size: Option<usize>,
-    ) -> eyre::Result<Self> {
-        assert!(try_count > 0);
-
-        Self::verify(&graph);
-
-        Ok(Self {
-            graph,
-            try_count,
-            max_width_size: max_width_size.unwrap_or(usize::MAX),
-            max_height_size: max_height_size.unwrap_or(usize::MAX),
-        })
+impl LocalPlacer {
+    pub fn new(graph: LogicGraph) -> eyre::Result<Self> {
+        let result = Self { graph };
+        result.verify()?;
+        Ok(result)
     }
 
-    pub fn verify(graph: &SubGraphWithGraph<'a>) {
-        assert!(graph.nodes.len() > 0);
-        assert!(graph.nodes.len() <= K_MAX_LOCAL_PLACE_NODE_COUNT);
+    fn verify(&self) -> eyre::Result<()> {
+        ensure!(self.graph.nodes.len() > 0, "");
+        ensure!(
+            self.graph.nodes.len() <= K_MAX_LOCAL_PLACE_NODE_COUNT,
+            "too large graph"
+        );
 
-        for node_id in &graph.nodes {
-            assert!(matches!(
-                graph.graph.find_node_by_id(*node_id).unwrap().kind,
-                GraphNodeKind::Logic { .. }
-            ));
+        for node_id in &self.graph.nodes {
+            let kind = &self.graph.find_node_by_id(node_id.id).unwrap().kind;
+            ensure!(
+                kind.is_input() || kind.is_output() || kind.is_logic(),
+                "cannot place"
+            );
+            if let Some(logic) = kind.as_logic() {
+                ensure!(logic.is_not() || logic.is_or(), "cannot place");
+            }
         }
+
+        Ok(())
     }
 
-    pub fn generate(&mut self) -> WorldGraph {
-        let try_count = self.try_count;
-
-        // TODO: make parallel
+    pub fn generate(&mut self) -> World3D {
         repeat_with(|| self.next_place())
-            .take(try_count)
             .min_by_key(|(_, c)| *c)
             .unwrap()
             .0
     }
 
-    fn next_place(&mut self) -> (WorldGraph, usize) {
+    fn next_place(&mut self) -> (World3D, usize) {
         todo!()
     }
 }
@@ -107,5 +102,37 @@ impl<'a> LocalPlacerCostEstimator<'a> {
         let _buffer_depth = self.graph.graph.critical_path().len();
 
         todo!()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    use crate::{
+        graph::{
+            graphviz::ToGraphvizGraph,
+            logic::{builder::LogicGraphBuilder, LogicGraph},
+        },
+        nbt::{NBTRoot, ToNBT},
+        transform::placer::LocalPlacer,
+    };
+
+    fn build_graph_from_stmt(stmt: &str, output: &str) -> eyre::Result<LogicGraph> {
+        LogicGraphBuilder::new(stmt.to_string()).build(output.to_string())
+    }
+
+    #[test]
+    fn test_generate_component_and() -> eyre::Result<()> {
+        let logic_graph = build_graph_from_stmt("a&b", "c")?.prepare_place()?;
+        dbg!(&logic_graph);
+        println!("{}", logic_graph.to_graphviz());
+
+        let mut placer = LocalPlacer::new(logic_graph)?;
+        let world3d = placer.generate();
+
+        let nbt: NBTRoot = world3d.to_nbt();
+        nbt.save("test/and-gate-new.nbt");
+
+        Ok(())
     }
 }

@@ -1,4 +1,3 @@
-pub mod component;
 pub mod logic;
 pub mod placer;
 pub mod router;

@@ -15,9 +15,18 @@ impl LogicType {
             LogicType::Xor => "Xor".to_owned(),
         }
     }
+
+    pub fn is_not(&self) -> bool {
+        matches!(self, LogicType::Not)
+    }
+
+    pub fn is_or(&self) -> bool {
+        matches!(self, LogicType::Or)
+    }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, derive_more::Deref)]
 pub struct Logic {
+    #[deref]
     pub logic_type: LogicType,
 }
