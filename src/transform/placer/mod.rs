@@ -44,6 +44,10 @@ impl PlacedNode {
     }
 
     pub fn has_conflict(&self, world: &World3D) -> bool {
+        if !world[self.position].kind.is_air() {
+            return true;
+        }
+
         let bounds = self.propagation_bound(Some(world));
         bounds
             .into_iter()
@@ -201,10 +205,6 @@ fn generate_inputs(world: &World3D, kind: BlockKind) -> Vec<(World3D, Position)>
         let candidates = positions
             .filter_map(|(x, y, z)| {
                 let position = Position(x, y, z);
-                if !world[position].kind.is_air() {
-                    return None;
-                }
-
                 let placed_node = PlacedNode { position, block };
                 if placed_node.has_conflict(world) {
                     return None;
