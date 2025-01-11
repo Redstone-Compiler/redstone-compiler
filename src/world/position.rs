@@ -167,6 +167,10 @@ impl Position {
             unreachable!()
         }
     }
+
+    pub fn manhattan_distance(&self, other: &Self) -> usize {
+        self.0.abs_diff(other.0) + self.1.abs_diff(other.1) + self.2.abs_diff(other.2)
+    }
 }
 
 // 사이즈

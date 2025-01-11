@@ -10,12 +10,12 @@ use crate::{
             builder::{PlaceBound, PropagateType},
             WorldGraph,
         },
-        GraphNodeId, GraphNodeKind,
+        GraphNode, GraphNodeId, GraphNodeKind,
     },
     logic::LogicType,
     world::{
         block::{Block, BlockKind, Direction, RedstoneState},
-        position::{self, DimSize, Position},
+        position::{DimSize, Position},
         world::World3D,
     },
 };
@@ -31,6 +31,19 @@ impl PlacedNode {
         Self { position, block }
     }
 
+    pub fn new_cobble(position: Position) -> Self {
+        Self {
+            position,
+            block: Block {
+                kind: BlockKind::Cobble {
+                    on_count: 0,
+                    on_base_count: 0,
+                },
+                direction: Direction::None,
+            },
+        }
+    }
+
     pub fn is_propagation_target(&self) -> bool {
         self.block.kind.is_stick_to_redstone() || self.block.kind.is_repeater()
     }
@@ -44,6 +57,10 @@ impl PlacedNode {
     }
 
     pub fn has_conflict(&self, world: &World3D) -> bool {
+        if self.block.kind.is_cobble() {
+            return !(world[self.position].kind.is_air() || world[self.position].kind.is_cobble());
+        }
+
         if !world[self.position].kind.is_air() {
             return true;
         }
@@ -90,37 +107,39 @@ impl LocalPlacer {
         Ok(())
     }
 
-    pub fn generate(&mut self, finish_index: Option<usize>) -> Vec<World3D> {
+    pub fn generate(&mut self, finish_step: Option<usize>) -> Vec<World3D> {
         let orders = self.graph.topological_order();
-        let mut queue: VecDeque<(usize, World3D, HashMap<GraphNodeId, Position>)> = VecDeque::new();
-        queue.push_back((0, World3D::new(DimSize(10, 10, 10)), Default::default()));
+        let mut queue: VecDeque<(World3D, HashMap<GraphNodeId, Position>)> = VecDeque::new();
+        queue.push_back((World3D::new(DimSize(10, 10, 5)), Default::default()));
 
-        while let Some((order_index, _, _)) = queue.front() {
-            if *order_index == orders.len() || Some(*order_index) == finish_index {
-                break;
+        let mut step = 0;
+        while step < orders.len() && Some(step) != finish_step {
+            let node_id = orders[step];
+            let node = self.graph.find_node_by_id(node_id).unwrap();
+            println!("current node: {node:?}");
+            let prev_step_volume = queue.len();
+            let mut next_queue = VecDeque::new();
+            while let Some((world, pos)) = queue.pop_front() {
+                for (world, place_position) in self.place_and_route_next_node(node, &world, &pos) {
+                    let mut nodes_position = pos.clone();
+                    nodes_position.insert(node_id, place_position);
+                    next_queue.push_back((world, nodes_position));
+                }
             }
-
-            let (order_index, world, pos) = queue.pop_front().unwrap();
-            let node_id = orders[order_index];
-            for (world, place_position) in self.place_and_route_next_node(node_id, &world, &pos) {
-                let mut nodes_position = pos.clone();
-                nodes_position.insert(node_id, place_position);
-                queue.push_back((order_index + 1, world, nodes_position));
-                println!("{place_position:?}");
-            }
+            step += 1;
+            queue = next_queue;
+            println!("step - {step}: {prev_step_volume} -> {}", queue.len());
         }
 
-        queue.into_iter().map(|(_, world, _)| world).collect()
+        queue.into_iter().map(|(world, _)| world).collect()
     }
 
     fn place_and_route_next_node(
         &self,
-        node_id: GraphNodeId,
+        node: &GraphNode,
         world: &World3D,
         positions: &HashMap<GraphNodeId, Position>,
     ) -> Vec<(World3D, Position)> {
-        let node = self.graph.find_node_by_id(node_id).unwrap();
-
         match node.kind {
             GraphNodeKind::Input(_) => input_node_kind()
                 .into_iter()
@@ -180,13 +199,11 @@ fn not_node_kind() -> Vec<BlockKind> {
     vec![BlockKind::Torch { is_on: false }]
 }
 
-fn place_new_node(world: &World3D, node: PlacedNode) -> World3D {
-    let mut world = world.clone();
+fn place_node(world: &mut World3D, node: PlacedNode) {
     world[node.position] = node.block;
     if node.block.kind.is_redstone() {
         world.update_redstone_states(node.position);
     }
-    world
 }
 
 fn generate_inputs(world: &World3D, kind: BlockKind) -> Vec<(World3D, Position)> {
@@ -212,8 +229,9 @@ fn generate_inputs(world: &World3D, kind: BlockKind) -> Vec<(World3D, Position)>
                     return None;
                 }
 
-                let world = place_new_node(world, placed_node);
-                Some((world, position))
+                let mut new_world = world.clone();
+                place_node(&mut new_world, placed_node);
+                Some((new_world, position))
             })
             .collect_vec();
 
@@ -234,7 +252,64 @@ fn generate_place_and_routes(
     start: Position,
     kind: BlockKind,
 ) -> Vec<(World3D, Position)> {
-    todo!()
+    match kind {
+        BlockKind::Redstone { .. } => generate_torch_place_and_routes(world, start, kind),
+        _ => unimplemented!(),
+    }
+}
+
+fn generate_torch_place_and_routes(
+    world: &World3D,
+    start: Position,
+    kind: BlockKind,
+) -> Vec<(World3D, Position)> {
+    let torch_strategy = [
+        Direction::Bottom,
+        Direction::East,
+        Direction::West,
+        Direction::South,
+        Direction::North,
+    ]
+    .into_iter()
+    .map(|direction| Block { kind, direction })
+    .collect_vec();
+
+    // start에서 최소 두 칸 떨어진 곳에 위치시킨다.
+    let generate_strategy = torch_strategy
+        .into_iter()
+        .cartesian_product(
+            iproduct!(0..world.size.0, 0..world.size.1, 0..world.size.2)
+                .map(|(x, y, z)| Position(x, y, z))
+                .filter(|pos| start.manhattan_distance(pos) > 2),
+        )
+        .collect_vec();
+
+    println!("strategy count: {}", generate_strategy.len());
+
+    let mut candidates = Vec::new();
+    for (block, position) in generate_strategy {
+        let Some(cobble_position) = position.walk(block.direction) else {
+            continue;
+        };
+        let cobble_node = PlacedNode::new_cobble(cobble_position);
+        if !world.size.bound_on(cobble_position) || cobble_node.has_conflict(&world) {
+            continue;
+        }
+
+        let torch_node = PlacedNode::new(position, block);
+        if torch_node.has_conflict(world) {
+            continue;
+        }
+
+        let mut new_world = world.clone();
+        if new_world[cobble_position].kind.is_air() {
+            place_node(&mut new_world, cobble_node);
+        }
+        place_node(&mut new_world, torch_node);
+        candidates.push((new_world, position));
+    }
+
+    candidates
 }
 
 pub struct LocalPlacerCostEstimator<'a> {
@@ -272,15 +347,12 @@ mod tests {
     #[test]
     fn test_generate_component_and() -> eyre::Result<()> {
         let logic_graph = build_graph_from_stmt("a&b", "c")?.prepare_place()?;
-        dbg!(&logic_graph);
         println!("{}", logic_graph.to_graphviz());
 
         let mut placer = LocalPlacer::new(logic_graph)?;
-        let world3d = placer.generate(Some(1));
+        let world3d = placer.generate(Some(2));
 
-        dbg!(&world3d[2]);
-
-        let nbt: NBTRoot = world3d[2].to_nbt();
+        let nbt: NBTRoot = world3d[4].to_nbt();
         nbt.save("test/and-gate-new.nbt");
 
         Ok(())

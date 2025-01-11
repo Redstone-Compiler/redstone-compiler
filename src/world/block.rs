@@ -136,6 +136,10 @@ impl BlockKind {
         matches!(self, BlockKind::Redstone { .. })
     }
 
+    pub fn is_torch(&self) -> bool {
+        matches!(self, BlockKind::Torch { .. })
+    }
+
     pub fn is_cobble(&self) -> bool {
         matches!(self, BlockKind::Cobble { .. })
     }
