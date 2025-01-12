@@ -374,6 +374,7 @@ mod tests {
         },
         nbt::{NBTRoot, ToNBT},
         transform::placer::LocalPlacer,
+        world::world::World3D,
     };
 
     fn build_graph_from_stmt(stmt: &str, output: &str) -> eyre::Result<LogicGraph> {
@@ -386,9 +387,11 @@ mod tests {
         println!("{}", logic_graph.to_graphviz());
 
         let mut placer = LocalPlacer::new(logic_graph)?;
-        let world3d = placer.generate(Some(2));
+        let world3d = placer.generate(Some(4));
 
-        let nbt: NBTRoot = world3d[0].to_nbt();
+        let ww = World3D::concat_tiled(world3d);
+
+        let nbt: NBTRoot = ww.to_nbt();
         nbt.save("test/and-gate-new.nbt");
 
         Ok(())
