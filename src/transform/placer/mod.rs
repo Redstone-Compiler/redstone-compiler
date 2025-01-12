@@ -1,7 +1,8 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashMap;
 
 use eyre::ensure;
 use itertools::{iproduct, Itertools};
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
 use crate::{
     graph::{
@@ -106,29 +107,36 @@ impl LocalPlacer {
     }
 
     pub fn generate(&mut self, finish_step: Option<usize>) -> Vec<World3D> {
+        tracing::info!("generate starts");
         let orders = self.graph.topological_order();
-        let mut queue: VecDeque<(World3D, HashMap<GraphNodeId, Position>)> = VecDeque::new();
-        queue.push_back((World3D::new(DimSize(10, 10, 5)), Default::default()));
+        let mut queue: Vec<(World3D, HashMap<GraphNodeId, Position>)> = Vec::new();
+        queue.push((World3D::new(DimSize(10, 10, 5)), Default::default()));
 
         let mut step = 0;
         while step < orders.len() && Some(step) != finish_step {
             let node_id = orders[step];
             let node = self.graph.find_node_by_id(node_id).unwrap();
-            println!("current node: {node:?}");
+            tracing::info!("current node: {node:?}");
             let prev_step_volume = queue.len();
-            let mut next_queue = VecDeque::new();
-            while let Some((world, pos)) = queue.pop_front() {
-                for (world, place_position) in self.place_and_route_next_node(node, &world, &pos) {
-                    let mut nodes_position = pos.clone();
-                    nodes_position.insert(node_id, place_position);
-                    next_queue.push_back((world, nodes_position));
-                }
-            }
+            let next_queue = queue
+                .into_par_iter()
+                .flat_map(|(world, pos)| {
+                    self.place_and_route_next_node(node, &world, &pos)
+                        .into_iter()
+                        .map(|(world, place_position)| {
+                            let mut nodes_position = pos.clone();
+                            nodes_position.insert(node_id, place_position);
+                            (world, nodes_position)
+                        })
+                        .collect_vec()
+                })
+                .collect::<Vec<_>>();
             step += 1;
             queue = next_queue;
-            println!("step - {step}: {prev_step_volume} -> {}", queue.len());
+            tracing::info!("step - {step}: {prev_step_volume} -> {}", queue.len());
         }
 
+        tracing::info!("generate complete");
         queue.into_iter().map(|(world, _)| world).collect()
     }
 
@@ -277,7 +285,7 @@ fn generate_torch_place_and_routes(
         )
         .collect_vec();
 
-    println!("strategy count: {}", generate_strategy.len());
+    tracing::trace!("strategy count: {}", generate_strategy.len());
 
     // 1. Place Torch and Cobble
     let mut place_candidates = Vec::new();
@@ -367,6 +375,8 @@ impl<'a> LocalPlacerCostEstimator<'a> {
 #[cfg(test)]
 mod tests {
 
+    use rand::{seq::IteratorRandom, thread_rng};
+
     use crate::{
         graph::{
             graphviz::ToGraphvizGraph,
@@ -383,13 +393,18 @@ mod tests {
 
     #[test]
     fn test_generate_component_and() -> eyre::Result<()> {
+        tracing_subscriber::fmt::init();
+
         let logic_graph = build_graph_from_stmt("a&b", "c")?.prepare_place()?;
         println!("{}", logic_graph.to_graphviz());
 
         let mut placer = LocalPlacer::new(logic_graph)?;
-        let world3d = placer.generate(Some(4));
+        let worlds = placer.generate(Some(4));
 
-        let ww = World3D::concat_tiled(world3d);
+        let mut rng = thread_rng();
+        let sampled_worlds = worlds.into_iter().choose_multiple(&mut rng, 100);
+
+        let ww = World3D::concat_tiled(sampled_worlds);
 
         let nbt: NBTRoot = ww.to_nbt();
         nbt.save("test/and-gate-new.nbt");
