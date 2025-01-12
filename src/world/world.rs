@@ -58,6 +58,7 @@ impl World3D {
     pub fn iter_block(&self) -> Vec<(Position, &Block)> {
         self.iter_pos()
             .into_iter()
+            .filter(|&pos| !self[pos].kind.is_air())
             .map(|pos| (pos, &self[pos]))
             .collect_vec()
     }
