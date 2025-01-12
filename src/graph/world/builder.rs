@@ -204,13 +204,15 @@ impl PlaceBound {
                     .collect_vec();
 
                 let up_pos = pos.up();
-                let up_block = &world[up_pos];
-                if (up_block.direction == Direction::Bottom
-                    && matches!(up_block.kind, BlockKind::Torch { .. }))
-                    || (!matches!(propagate_type, PropagateType::Soft)
-                        && matches!(up_block.kind, BlockKind::Redstone { .. }))
-                {
-                    cardinal_propagation.push((Direction::None, up_pos));
+                if world.size.bound_on(up_pos) {
+                    let up_block = &world[up_pos];
+                    if (up_block.direction == Direction::Bottom
+                        && matches!(up_block.kind, BlockKind::Torch { .. }))
+                        || (!matches!(propagate_type, PropagateType::Soft)
+                            && matches!(up_block.kind, BlockKind::Redstone { .. }))
+                    {
+                        cardinal_propagation.push((Direction::None, up_pos));
+                    }
                 }
 
                 cardinal_propagation
