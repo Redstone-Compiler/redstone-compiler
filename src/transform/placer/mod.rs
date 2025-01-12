@@ -281,7 +281,8 @@ fn generate_torch_place_and_routes(
         .into_iter()
         .cartesian_product(
             iproduct!(0..world.size.0, 0..world.size.1, 0..world.size.2)
-                .map(|(x, y, z)| Position(x, y, z)), // .filter(|pos| source.manhattan_distance(pos) > 2),
+                .map(|(x, y, z)| Position(x, y, z))
+                .filter(|pos| source.manhattan_distance(pos) <= 2),
         )
         .collect_vec();
 
