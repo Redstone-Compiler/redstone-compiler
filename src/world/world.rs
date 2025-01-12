@@ -167,20 +167,22 @@ impl World3D {
     pub fn concat_tiled(worlds: Vec<World3D>) -> Self {
         let east_chunk_len = (worlds.len() as f32).sqrt() as usize + 1;
 
-        let east_worlds = worlds
+        let mut east_worlds = worlds
+            .into_iter()
             .chunks(east_chunk_len)
             .into_iter()
-            .map(|worlds| {
-                let mut world = worlds[0].clone();
-                for other in worlds.into_iter().skip(1) {
-                    world = world.concat(other, Direction::East);
+            .map(|chunk| chunk.collect_vec())
+            .map(|mut worlds| {
+                let mut world = worlds.remove(0);
+                for other in worlds {
+                    world = world.concat(&other, Direction::East);
                 }
                 world
             })
             .collect_vec();
 
-        let mut world = east_worlds[0].clone();
-        for other in east_worlds.into_iter().skip(1) {
+        let mut world = east_worlds.remove(0);
+        for other in east_worlds {
             world = world.concat(&other, Direction::North);
         }
         world
