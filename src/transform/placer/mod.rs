@@ -49,11 +49,9 @@ impl PlacedNode {
     }
 
     // signal을 보낼 수 있는 부분들의 위치를 반환합니다.
-    pub fn propagation_bound(&self, world: Option<&World3D>) -> HashSet<PlaceBound> {
+    pub fn propagation_bound(&self, world: Option<&World3D>) -> Vec<PlaceBound> {
         PlaceBound(PropagateType::Soft, self.position, self.block.direction)
             .propagation_bound(&self.block.kind, world)
-            .into_iter()
-            .collect()
     }
 
     pub fn has_conflict(&self, world: &World3D) -> bool {
@@ -243,24 +241,20 @@ fn generate_inputs(world: &World3D, kind: BlockKind) -> Vec<(World3D, Position)>
     Vec::default()
 }
 
-fn generate_routes(world: &World3D, first: Position, second: Position) -> Vec<(World3D, Position)> {
-    todo!()
-}
-
 fn generate_place_and_routes(
     world: &World3D,
     start: Position,
     kind: BlockKind,
 ) -> Vec<(World3D, Position)> {
     match kind {
-        BlockKind::Redstone { .. } => generate_torch_place_and_routes(world, start, kind),
+        BlockKind::Torch { .. } => generate_torch_place_and_routes(world, start, kind),
         _ => unimplemented!(),
     }
 }
 
 fn generate_torch_place_and_routes(
     world: &World3D,
-    start: Position,
+    source: Position,
     kind: BlockKind,
 ) -> Vec<(World3D, Position)> {
     let torch_strategy = [
@@ -279,37 +273,79 @@ fn generate_torch_place_and_routes(
         .into_iter()
         .cartesian_product(
             iproduct!(0..world.size.0, 0..world.size.1, 0..world.size.2)
-                .map(|(x, y, z)| Position(x, y, z))
-                .filter(|pos| start.manhattan_distance(pos) > 2),
+                .map(|(x, y, z)| Position(x, y, z)), // .filter(|pos| source.manhattan_distance(pos) > 2),
         )
         .collect_vec();
 
     println!("strategy count: {}", generate_strategy.len());
 
-    let mut candidates = Vec::new();
-    for (block, position) in generate_strategy {
-        let Some(cobble_position) = position.walk(block.direction) else {
+    // 1. Place Torch and Cobble
+    let mut place_candidates = Vec::new();
+    for (block, torch_pos) in generate_strategy {
+        let Some(cobble_pos) = torch_pos.walk(block.direction) else {
             continue;
         };
-        let cobble_node = PlacedNode::new_cobble(cobble_position);
-        if !world.size.bound_on(cobble_position) || cobble_node.has_conflict(&world) {
+        let cobble_node = PlacedNode::new_cobble(cobble_pos);
+        if !world.size.bound_on(cobble_pos) || cobble_node.has_conflict(&world) {
             continue;
         }
 
-        let torch_node = PlacedNode::new(position, block);
+        let torch_node = PlacedNode::new(torch_pos, block);
         if torch_node.has_conflict(world) {
             continue;
         }
 
         let mut new_world = world.clone();
-        if new_world[cobble_position].kind.is_air() {
+        if new_world[cobble_pos].kind.is_air() {
             place_node(&mut new_world, cobble_node);
         }
         place_node(&mut new_world, torch_node);
-        candidates.push((new_world, position));
+        place_candidates.push((new_world, torch_pos, cobble_pos));
     }
 
+    // 2. Route Source with Torch Place Target Position
+    let candidates = place_candidates
+        .into_iter()
+        .flat_map(|(world, torch_pos, cobble_pos)| {
+            generate_routes_to_cobble(&world, source, cobble_pos)
+                .into_iter()
+                .map(|(world, _)| (world, torch_pos))
+                .collect_vec()
+        })
+        .collect_vec();
+
     candidates
+}
+
+fn generate_routes_to_cobble(
+    world: &World3D,
+    source: Position,
+    cobble_pos: Position,
+) -> Vec<(World3D, Position)> {
+    let source_node = PlacedNode::new(source, world[source]);
+    assert!(source_node.is_propagation_target() && world[cobble_pos].kind.is_cobble());
+
+    // (world, pos, cost)
+    let mut route_candidates = Vec::new();
+    for start in source_node.propagation_bound(Some(world)) {
+        let directly_connected = start.position() == cobble_pos
+            && matches!(start.propagation_type(), PropagateType::Hard);
+
+        if directly_connected {
+            route_candidates.push((world.clone(), start.position(), 0));
+            continue;
+        }
+    }
+
+    route_candidates.sort_by_key(|(_, _, cost)| *cost);
+    route_candidates
+        .into_iter()
+        .map(|(world, pos, _)| (world, pos))
+        .collect()
+}
+
+fn generate_routes(world: &World3D, first: Position, second: Position) -> Vec<(World3D, Position)> {
+    todo!()
 }
 
 pub struct LocalPlacerCostEstimator<'a> {
@@ -352,7 +388,7 @@ mod tests {
         let mut placer = LocalPlacer::new(logic_graph)?;
         let world3d = placer.generate(Some(2));
 
-        let nbt: NBTRoot = world3d[4].to_nbt();
+        let nbt: NBTRoot = world3d[0].to_nbt();
         nbt.save("test/and-gate-new.nbt");
 
         Ok(())

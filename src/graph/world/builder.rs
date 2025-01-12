@@ -171,6 +171,7 @@ impl PlaceBound {
                 let mut cardinal_propagation = pos
                     .cardinal_except(dir)
                     .iter()
+                    .filter(|&&pos| world.size.bound_on(pos))
                     .filter_map(|&pos_src| match world[pos_src].kind {
                         BlockKind::Torch { .. } => match propagate_type {
                             PropagateType::Torch => None,
