@@ -1,6 +1,6 @@
 use super::block::{Direction, RedstoneState, RedstoneStateType};
 
-// 위치
+// 위치 (x, y, z)
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub struct Position(pub usize, pub usize, pub usize);
 
@@ -34,7 +34,7 @@ impl Position {
         result
     }
 
-    pub fn forwards_except(&self, dir: &Direction) -> Vec<Position> {
+    pub fn forwards_except(&self, dir: Direction) -> Vec<Position> {
         if let Some(pos) = self.walk(dir) {
             return self
                 .forwards()
@@ -86,7 +86,7 @@ impl Position {
         result
     }
 
-    pub fn cardinal_except(&self, dir: &Direction) -> Vec<Position> {
+    pub fn cardinal_except(&self, dir: Direction) -> Vec<Position> {
         let mut result = Vec::new();
 
         if !matches!(dir, Direction::East) {
@@ -120,7 +120,7 @@ impl Position {
         Some(Position(self.0, self.1, self.2 - 1))
     }
 
-    pub fn walk(&self, dir: &Direction) -> Option<Position> {
+    pub fn walk(&self, dir: Direction) -> Option<Position> {
         match dir {
             Direction::None => Some(*self),
             Direction::Bottom => {
@@ -150,7 +150,7 @@ impl Position {
         }
     }
 
-    pub fn diff(&self, tar: &Position) -> Direction {
+    pub fn diff(&self, tar: Position) -> Direction {
         if tar.0 > self.0 {
             Direction::East
         } else if tar.0 < self.0 {
@@ -167,9 +167,19 @@ impl Position {
             unreachable!()
         }
     }
+
+    pub fn manhattan_distance(&self, other: &Self) -> usize {
+        self.0.abs_diff(other.0) + self.1.abs_diff(other.1) + self.2.abs_diff(other.2)
+    }
 }
 
 // 사이즈
 
 #[derive(Debug, Copy, Clone)]
 pub struct DimSize(pub usize, pub usize, pub usize);
+
+impl DimSize {
+    pub fn bound_on(&self, pos: Position) -> bool {
+        pos.0 < self.0 && pos.1 < self.1 && pos.2 < self.2
+    }
+}

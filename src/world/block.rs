@@ -124,12 +124,20 @@ impl BlockKind {
         )
     }
 
+    pub fn is_air(&self) -> bool {
+        matches!(self, BlockKind::Air)
+    }
+
     pub fn is_repeater(&self) -> bool {
         matches!(self, BlockKind::Repeater { .. })
     }
 
     pub fn is_redstone(&self) -> bool {
         matches!(self, BlockKind::Redstone { .. })
+    }
+
+    pub fn is_torch(&self) -> bool {
+        matches!(self, BlockKind::Torch { .. })
     }
 
     pub fn is_cobble(&self) -> bool {

@@ -94,7 +94,7 @@ impl Simulator {
         self.queue.push_back(VecDeque::new());
 
         for (pos, value) in states {
-            let BlockKind::Switch { is_on } = &mut self.world[&pos].kind else {
+            let BlockKind::Switch { is_on } = &mut self.world[pos].kind else {
                 eyre::bail!("you can change only switch state!");
             };
 
@@ -104,7 +104,7 @@ impl Simulator {
 
             *is_on = value;
 
-            pos.forwards_except(&self.world[&pos].direction)
+            pos.forwards_except(self.world[pos].direction)
                 .into_iter()
                 .map(|pos_src| Event {
                     id: None,
@@ -115,10 +115,10 @@ impl Simulator {
                         EventType::TorchOff
                     },
                     target_position: pos_src,
-                    direction: pos_src.diff(&pos),
+                    direction: pos_src.diff(pos),
                 })
                 .chain(|| -> Option<Event> {
-                    let Some(pos) = pos.walk(&self.world[&pos].direction) else {
+                    let Some(pos) = pos.walk(self.world[pos].direction) else {
                         return None;
                     };
 
@@ -173,13 +173,13 @@ impl Simulator {
     }
 
     fn init(&mut self, world: &World) {
-        for (pos, block) in &world.blocks {
+        for (pos, block) in world.blocks.iter().copied() {
             match block.kind {
                 BlockKind::Torch { is_on } if is_on => {
-                    self.init_torch_event(&block.direction, pos);
+                    self.init_torch_event(block.direction, pos);
                 }
                 BlockKind::Switch { is_on } if is_on => {
-                    self.init_switch_event(&block.direction, pos);
+                    self.init_switch_event(block.direction, pos);
                 }
                 BlockKind::RedstoneBlock => {
                     self.init_redstone_block_event(pos);
@@ -189,7 +189,7 @@ impl Simulator {
         }
     }
 
-    fn init_torch_event(&mut self, dir: &Direction, pos: &Position) {
+    fn init_torch_event(&mut self, dir: Direction, pos: Position) {
         tracing::debug!("produce torch event: {:?}, {:?}", dir, pos);
 
         let events = match dir {
@@ -223,7 +223,7 @@ impl Simulator {
         self.queue[0].extend(events);
     }
 
-    fn init_switch_event(&mut self, dir: &Direction, pos: &Position) {
+    fn init_switch_event(&mut self, dir: Direction, pos: Position) {
         tracing::debug!("produce switch event: {:?}, {:?}", dir, pos);
 
         let events = pos
@@ -253,7 +253,7 @@ impl Simulator {
         self.queue[0].extend(events);
     }
 
-    fn init_redstone_block_event(&mut self, pos: &Position) {
+    fn init_redstone_block_event(&mut self, pos: Position) {
         tracing::debug!("produce redstone block event: {:?}", pos);
 
         let events = pos.forwards().into_iter().map(|pos_src| Event {
@@ -275,7 +275,7 @@ impl Simulator {
         while let Some(event) = self.queue.front_mut().unwrap().pop_front() {
             tracing::debug!("consume event: {:?}", event);
 
-            let mut block = self.world[&event.target_position];
+            let mut block = self.world[event.target_position];
 
             match block.kind {
                 BlockKind::Air | BlockKind::Switch { .. } | BlockKind::RedstoneBlock => (),
@@ -294,7 +294,7 @@ impl Simulator {
                 BlockKind::Piston { .. } => todo!(),
             }
 
-            self.world[&event.target_position] = block;
+            self.world[event.target_position] = block;
 
             self.fill_event_id();
         }
@@ -327,7 +327,8 @@ impl Simulator {
             on_count,
             on_base_count,
             ..
-        } = block.kind else {
+        } = block.kind
+        else {
             unreachable!()
         };
 
@@ -343,7 +344,7 @@ impl Simulator {
             .target_position
             .forwards()
             .into_iter()
-            .filter(|pos| !self.world[pos].kind.is_cobble())
+            .filter(|&pos| !self.world[pos].kind.is_cobble())
             .map(|pos_src| Event {
                 id: None,
                 from_id: event.id,
@@ -361,7 +362,7 @@ impl Simulator {
                     }
                 },
                 target_position: pos_src,
-                direction: pos_src.diff(&event.target_position),
+                direction: pos_src.diff(event.target_position),
             })
             .collect::<Vec<_>>();
 
@@ -375,10 +376,7 @@ impl Simulator {
     fn propagate_redstone_event(&mut self, block: &mut Block, event: &Event) -> eyre::Result<()> {
         tracing::debug!("consume redstone event: {:?}", block);
 
-        let BlockKind::Redstone {
-            state,
-            ..
-        } = &mut block.kind else {
+        let BlockKind::Redstone { state, .. } = &mut block.kind else {
             eyre::bail!("unreachable");
         };
 
@@ -387,12 +385,12 @@ impl Simulator {
         propagate_targets.extend(event.target_position.cardinal_redstone(*state));
 
         let up_pos = event.target_position.up();
-        if !self.world[&up_pos].kind.is_cobble() {
+        if !self.world[up_pos].kind.is_cobble() {
             propagate_targets.extend(up_pos.cardinal_redstone(*state));
         }
 
         if let Some(down_pos) = event.target_position.down() {
-            if !self.world[&down_pos].kind.is_cobble() {
+            if !self.world[down_pos].kind.is_cobble() {
                 eyre::bail!("unreachable");
             }
 
@@ -403,9 +401,9 @@ impl Simulator {
                     .target_position
                     .cardinal_redstone(*state)
                     .into_iter()
-                    .filter(|pos| !self.world[&pos].kind.is_cobble())
-                    .filter_map(|pos| pos.walk(&Direction::Bottom))
-                    .filter(|pos| !self.world[&pos].kind.is_cobble()),
+                    .filter(|&pos| !self.world[pos].kind.is_cobble())
+                    .filter_map(|pos| pos.walk(Direction::Bottom))
+                    .filter(|&pos| !self.world[pos].kind.is_cobble()),
             );
         }
 
@@ -416,10 +414,9 @@ impl Simulator {
             | EventType::RepeaterOff { .. } => {}
             EventType::TorchOn | EventType::HardOn => {
                 let BlockKind::Redstone {
-                    on_count,
-                    strength,
-                    ..
-                } = &mut block.kind else {
+                    on_count, strength, ..
+                } = &mut block.kind
+                else {
                     eyre::bail!("unreachable");
                 };
 
@@ -436,7 +433,7 @@ impl Simulator {
                             from_id: event.id,
                             event_type: EventType::SoftOn,
                             target_position: pos,
-                            direction: pos.diff(&event.target_position),
+                            direction: pos.diff(event.target_position),
                         });
 
                         self.push_event_to_current_tick(Event {
@@ -451,10 +448,9 @@ impl Simulator {
             }
             EventType::TorchOff | EventType::HardOff => {
                 let BlockKind::Redstone {
-                    on_count,
-                    strength,
-                    ..
-                } = &mut block.kind else {
+                    on_count, strength, ..
+                } = &mut block.kind
+                else {
                     eyre::bail!("unreachable");
                 };
 
@@ -471,7 +467,7 @@ impl Simulator {
                             from_id: event.id,
                             event_type: EventType::SoftOff,
                             target_position: pos,
-                            direction: pos.diff(&event.target_position),
+                            direction: pos.diff(event.target_position),
                         });
 
                         self.push_event_to_current_tick(Event {
@@ -487,10 +483,7 @@ impl Simulator {
             EventType::RedstoneOn { strength } => {
                 let event_strength = strength;
 
-                let BlockKind::Redstone {
-                    strength,
-                    ..
-                } = &mut block.kind else {
+                let BlockKind::Redstone { strength, .. } = &mut block.kind else {
                     eyre::bail!("unreachable");
                 };
 
@@ -498,13 +491,13 @@ impl Simulator {
                     *strength = event_strength;
 
                     propagate_targets.into_iter().for_each(|pos| {
-                        if !self.world[&pos].kind.is_redstone() {
+                        if !self.world[pos].kind.is_redstone() {
                             self.push_event_to_current_tick(Event {
                                 id: None,
                                 from_id: event.id,
                                 event_type: EventType::SoftOn,
                                 target_position: pos,
-                                direction: pos.diff(&event.target_position),
+                                direction: pos.diff(event.target_position),
                             });
                         }
 
@@ -515,7 +508,7 @@ impl Simulator {
                                 strength: *strength - 1,
                             },
                             target_position: pos,
-                            direction: pos.diff(&event.target_position),
+                            direction: pos.diff(event.target_position),
                         });
                     });
 
@@ -524,10 +517,9 @@ impl Simulator {
             }
             EventType::RedstoneOff => {
                 let BlockKind::Redstone {
-                    on_count,
-                    strength,
-                    ..
-                } = &mut block.kind else {
+                    on_count, strength, ..
+                } = &mut block.kind
+                else {
                     eyre::bail!("unreachable");
                 };
 
@@ -535,13 +527,13 @@ impl Simulator {
                     *strength = 0;
 
                     propagate_targets.into_iter().for_each(|pos| {
-                        if !self.world[&pos].kind.is_redstone() {
+                        if !self.world[pos].kind.is_redstone() {
                             self.push_event_to_current_tick(Event {
                                 id: None,
                                 from_id: event.id,
                                 event_type: EventType::SoftOff,
                                 target_position: pos,
-                                direction: pos.diff(&event.target_position),
+                                direction: pos.diff(event.target_position),
                             });
                         }
 
@@ -550,18 +542,18 @@ impl Simulator {
                             from_id: event.id,
                             event_type: EventType::RedstoneOff,
                             target_position: pos,
-                            direction: pos.diff(&event.target_position),
+                            direction: pos.diff(event.target_position),
                         });
                     });
                 } else {
                     propagate_targets.into_iter().for_each(|pos| {
-                        if !self.world[&pos].kind.is_redstone() {
+                        if !self.world[pos].kind.is_redstone() {
                             self.push_event_to_current_tick(Event {
                                 id: None,
                                 from_id: event.id,
                                 event_type: EventType::SoftOn,
                                 target_position: pos,
-                                direction: pos.diff(&event.target_position),
+                                direction: pos.diff(event.target_position),
                             });
                         }
 
@@ -570,7 +562,7 @@ impl Simulator {
                             from_id: event.id,
                             event_type: EventType::RedstoneOn { strength: 14 },
                             target_position: pos,
-                            direction: pos.diff(&event.target_position),
+                            direction: pos.diff(event.target_position),
                         });
                     });
                 }
@@ -586,7 +578,7 @@ impl Simulator {
         tracing::debug!("consume torch event: {:?}", block);
 
         // Cobble로부터 온 이벤트가 아닌 경우
-        if !self.world[&event.target_position.walk(&event.direction).unwrap()]
+        if !self.world[event.target_position.walk(event.direction).unwrap()]
             .kind
             .is_cobble()
         {
@@ -607,7 +599,7 @@ impl Simulator {
         match block.direction {
             Direction::Bottom => event.target_position.cardinal(),
             Direction::East | Direction::West | Direction::South | Direction::North => {
-                let mut positions = event.target_position.cardinal_except(&block.direction);
+                let mut positions = event.target_position.cardinal_except(block.direction);
                 positions.extend(event.target_position.down());
                 positions
             }
@@ -623,7 +615,7 @@ impl Simulator {
                 EventType::TorchOff
             },
             target_position: pos_src,
-            direction: pos_src.diff(&event.target_position),
+            direction: pos_src.diff(event.target_position),
         })
         .chain(Some(Event {
             id: None,
@@ -653,7 +645,8 @@ impl Simulator {
             is_locked,
             delay,
             ..
-        } = block.kind else {
+        } = block.kind
+        else {
             unreachable!()
         };
 
@@ -733,7 +726,7 @@ impl Simulator {
                     block.kind.set_repeater_state(true)?;
 
                     // propagate
-                    let walk = event.target_position.walk(&event.direction.inverse());
+                    let walk = event.target_position.walk(event.direction.inverse());
 
                     if let Some(pos) = walk {
                         self.push_event_to_next_tick(Event {
@@ -741,7 +734,7 @@ impl Simulator {
                             from_id: event.id,
                             event_type: EventType::HardOn,
                             target_position: pos,
-                            direction: pos.diff(&event.target_position),
+                            direction: pos.diff(event.target_position),
                         });
                     }
 
@@ -771,7 +764,7 @@ impl Simulator {
 
                     block.kind.set_repeater_state(false)?;
 
-                    let walk = event.target_position.walk(&event.direction.inverse());
+                    let walk = event.target_position.walk(event.direction.inverse());
 
                     if let Some(pos) = walk {
                         self.push_event_to_next_tick(Event {
@@ -779,7 +772,7 @@ impl Simulator {
                             from_id: event.id,
                             event_type: EventType::HardOff,
                             target_position: pos,
-                            direction: pos.diff(&event.target_position),
+                            direction: pos.diff(event.target_position),
                         });
                     }
 
@@ -891,7 +884,7 @@ mod test {
 
         let sim = Simulator::from(&mock_world).unwrap();
 
-        let BlockKind::Redstone { on_count, ..  } = sim.world.map[0][1][1].kind else {
+        let BlockKind::Redstone { on_count, .. } = sim.world.map[0][1][1].kind else {
             unreachable!();
         };
 
@@ -937,7 +930,11 @@ mod test {
 
         let sim = Simulator::from(&mock_world).unwrap();
 
-        let BlockKind::Cobble { on_count, on_base_count  } = sim.world.map[0][1][1].kind else {
+        let BlockKind::Cobble {
+            on_count,
+            on_base_count,
+        } = sim.world.map[0][1][1].kind
+        else {
             unreachable!();
         };
 
@@ -990,7 +987,7 @@ mod test {
 
         sim.run().unwrap();
 
-        let BlockKind::Redstone {  strength , .. } = sim.world.map[0][2][2].kind else {
+        let BlockKind::Redstone { strength, .. } = sim.world.map[0][2][2].kind else {
             unreachable!();
         };
 

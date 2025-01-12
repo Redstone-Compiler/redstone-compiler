@@ -72,6 +72,25 @@ impl GraphNodeKind {
             _ => unreachable!(),
         }
     }
+
+    pub fn is_input(&self) -> bool {
+        matches!(self, GraphNodeKind::Input(_))
+    }
+
+    pub fn is_output(&self) -> bool {
+        matches!(self, GraphNodeKind::Output(_))
+    }
+
+    pub fn is_logic(&self) -> bool {
+        matches!(self, GraphNodeKind::Logic(_))
+    }
+
+    pub fn as_logic(&self) -> Option<&Logic> {
+        match self {
+            GraphNodeKind::Logic(inner) => Some(inner),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Default, Debug, Clone)]
@@ -182,7 +201,7 @@ impl Graph {
             .collect();
 
         for (from, to) in replace_targets {
-            let mut node = other.nodes.iter_mut().find(|node| node.id == from).unwrap();
+            let node = other.nodes.iter_mut().find(|node| node.id == from).unwrap();
 
             self.find_node_by_id_mut(to)
                 .unwrap()
