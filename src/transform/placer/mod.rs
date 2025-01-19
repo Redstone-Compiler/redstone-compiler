@@ -294,6 +294,9 @@ impl LocalPlacer {
                         positions[&node.inputs[0]],
                         positions[&node.inputs[1]],
                     )
+                    .into_iter()
+                    .map(|(worlds, positions)| (worlds, positions.last().copied().unwrap()))
+                    .collect()
                 }
                 _ => unreachable!(),
             },
@@ -453,7 +456,7 @@ fn generate_torch_place_and_routes(
     let candidates = place_candidates
         .into_iter()
         .flat_map(|(world, torch_pos, cobble_pos)| {
-            generate_routes_to_cobble(&world, source, cobble_pos)
+            generate_routes_to_cobble(config, &world, source, torch_pos, cobble_pos)
                 .into_iter()
                 .map(|(world, _)| (world, torch_pos))
                 .collect_vec()
@@ -464,8 +467,10 @@ fn generate_torch_place_and_routes(
 }
 
 fn generate_routes_to_cobble(
+    _config: &LocalPlacerConfig,
     world: &World3D,
     source: Position,
+    _torch_pos: Position,
     cobble_pos: Position,
 ) -> Vec<(World3D, Position)> {
     let source_node = PlacedNode::new(source, world[source]);
@@ -478,10 +483,16 @@ fn generate_routes_to_cobble(
             && matches!(start.propagation_type(), PropagateType::Hard);
 
         if directly_connected {
-            route_candidates.push((world.clone(), start.position(), 0));
+            route_candidates.push((world.clone(), start.position(), 0usize));
             continue;
         }
     }
+
+    // route_candidates.extend(
+    //     generate_or_routes(config, world, source, torch_pos)
+    //         .into_iter()
+    //         .map(|(world, positions)| (world, positions.last().copied().unwrap(), 0usize)),
+    // );
 
     route_candidates.sort_by_key(|(_, _, cost)| *cost);
     route_candidates
@@ -495,7 +506,7 @@ fn generate_or_routes(
     world: &World3D,
     from: Position,
     to: Position,
-) -> Vec<(World3D, Position)> {
+) -> Vec<(World3D, Vec<Position>)> {
     let from_node = PlacedNode::new(from, world[from]);
     let second_node = PlacedNode::new(to, world[to]);
     assert!(from_node.is_propagation_target() && second_node.is_propagation_target());
@@ -556,9 +567,6 @@ fn generate_or_routes(
     }
 
     candidates
-        .into_iter()
-        .map(|(world, positions)| (world, positions.last().copied().unwrap()))
-        .collect()
 }
 
 pub struct LocalPlacerCostEstimator<'a> {
