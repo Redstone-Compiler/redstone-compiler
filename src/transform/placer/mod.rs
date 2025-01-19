@@ -522,43 +522,20 @@ fn generate_or_routes(
         let mut next_queue = vec![];
         for (world, prevs, bounds) in queue {
             for bound in bounds {
-                let mut new_world = world.clone();
-                let Some(cobble_pos) = bound.position().walk(Direction::Bottom) else {
+                let prev_pos = prevs.last().copied().unwrap();
+                let Some((new_world, redstone_node)) =
+                    place_redstone_with_cobble(&world, bound, prev_pos, to)
+                else {
                     continue;
                 };
-                let cobble_node = PlacedNode::new_cobble(cobble_pos);
-                if !world.size.bound_on(cobble_pos)
-                    || cobble_node.has_conflict(&new_world, &Default::default())
-                {
-                    continue;
-                }
-                place_node(&mut new_world, cobble_node);
 
-                let redstone_node = PlacedNode::new_redstone(bound.position());
-                let except = [
-                    prevs.last().copied(),
-                    Some(to),
-                    Some(bound.position()),
-                    bound.position().walk(bound.direction()),
-                ]
-                .into_iter()
-                .flatten()
-                .collect();
-                if !world.size.bound_on(bound.position())
-                    || redstone_node.has_conflict(&new_world, &except)
-                    || redstone_node.has_short(&world, &except)
-                {
-                    continue;
-                }
-                place_node(&mut new_world, redstone_node);
-                new_world.update_redstone_states(prevs.last().copied().unwrap());
-
-                let prevs = [prevs.clone(), vec![bound.position()]].concat();
+                let mut new_prevs = prevs.clone();
+                new_prevs.push(bound.position());
                 if redstone_node.has_connection_with(&world, to) {
-                    candidates.push((new_world, prevs));
+                    candidates.push((new_world, new_prevs));
                 } else {
                     let nexts = redstone_node.propagation_bound(Some(&new_world));
-                    next_queue.push((new_world, prevs, nexts));
+                    next_queue.push((new_world, new_prevs, nexts));
                 }
             }
         }
@@ -567,6 +544,37 @@ fn generate_or_routes(
     }
 
     candidates
+}
+
+fn place_redstone_with_cobble(
+    world: &World3D,
+    bound: PlaceBound,
+    prev: Position,
+    to: Position,
+) -> Option<(World3D, PlacedNode)> {
+    let mut new_world = world.clone();
+    let cobble_pos = bound.position().walk(Direction::Bottom)?;
+    let cobble_node = PlacedNode::new_cobble(cobble_pos);
+    if !world.size.bound_on(cobble_pos) || cobble_node.has_conflict(&new_world, &Default::default())
+    {
+        return None;
+    }
+    place_node(&mut new_world, cobble_node);
+
+    let bound_pos = bound.position();
+    let bound_back_pos = bound_pos.walk(bound.direction()).unwrap();
+    let redstone_node = PlacedNode::new_redstone(bound_pos);
+    let except = [prev, bound_back_pos, bound_pos, to].into_iter().collect();
+    if !world.size.bound_on(bound_pos)
+        || redstone_node.has_conflict(&new_world, &except)
+        || redstone_node.has_short(&world, &except)
+    {
+        return None;
+    }
+    place_node(&mut new_world, redstone_node);
+    new_world.update_redstone_states(prev);
+
+    Some((new_world, redstone_node))
 }
 
 pub struct LocalPlacerCostEstimator<'a> {

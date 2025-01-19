@@ -28,7 +28,7 @@ pub enum PropagateType {
     Repeater,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct PlaceBound(pub PropagateType, pub Position, pub Direction);
 
 impl PlaceBound {
