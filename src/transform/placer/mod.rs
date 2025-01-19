@@ -139,6 +139,17 @@ impl PlacedNode {
 
         has_nearest_stick_to_redstone || has_cardinal_cobble_short
     }
+
+    fn has_connection_with(&self, world: &World3D, target: Position) -> bool {
+        assert!(self.block.kind.is_redstone());
+        assert!(world[target].kind.is_stick_to_redstone());
+
+        self.position
+            .cardinal()
+            .into_iter()
+            .chain(Some(self.position.up()))
+            .any(|pos| pos == target)
+    }
 }
 
 pub struct LocalPlacer {
@@ -482,33 +493,23 @@ fn generate_routes_to_cobble(
 fn generate_or_routes(
     config: &LocalPlacerConfig,
     world: &World3D,
-    first: Position,
-    second: Position,
+    from: Position,
+    to: Position,
 ) -> Vec<(World3D, Position)> {
-    let first_node = PlacedNode::new(first, world[first]);
-    let second_node = PlacedNode::new(second, world[second]);
-    assert!(first_node.is_propagation_target() && second_node.is_propagation_target());
+    let from_node = PlacedNode::new(from, world[from]);
+    let second_node = PlacedNode::new(to, world[to]);
+    assert!(from_node.is_propagation_target() && second_node.is_propagation_target());
 
-    let first_bound = first_node.propagation_bound(Some(world));
-    let second_bound = second_node.propagation_bound(Some(world));
+    let first_bound = from_node.propagation_bound(Some(world));
 
-    let mut queue = vec![
-        (world.clone(), first, first_bound),
-        (world.clone(), second, second_bound),
-    ];
+    let mut queue = vec![(world.clone(), vec![from], first_bound)];
     let mut candidates = Vec::new();
     let mut step = 0;
 
     // TODO: torch의 위쪽으로 전파할 수 있는 경우도 고려
-    while step < config.max_route_step {
+    while step < config.max_route_step && !queue.is_empty() {
         let mut next_queue = vec![];
-        for (world, from, bounds) in queue {
-            // For debugging
-            if step == config.max_route_step - 1 {
-                candidates.push((world, bounds[0].position()));
-                continue;
-            }
-
+        for (world, prevs, bounds) in queue {
             for bound in bounds {
                 let mut new_world = world.clone();
                 let Some(cobble_pos) = bound.position().walk(Direction::Bottom) else {
@@ -524,7 +525,8 @@ fn generate_or_routes(
 
                 let redstone_node = PlacedNode::new_redstone(bound.position());
                 let except = [
-                    Some(from),
+                    prevs.last().copied(),
+                    Some(to),
                     Some(bound.position()),
                     bound.position().walk(bound.direction()),
                 ]
@@ -537,10 +539,16 @@ fn generate_or_routes(
                 {
                     continue;
                 }
-                let redstone_propagation_bounds = redstone_node.propagation_bound(Some(&new_world));
                 place_node(&mut new_world, redstone_node);
+                new_world.update_redstone_states(prevs.last().copied().unwrap());
 
-                next_queue.push((new_world, bound.position(), redstone_propagation_bounds));
+                let prevs = [prevs.clone(), vec![bound.position()]].concat();
+                if redstone_node.has_connection_with(&world, to) {
+                    candidates.push((new_world, prevs));
+                } else {
+                    let nexts = redstone_node.propagation_bound(Some(&new_world));
+                    next_queue.push((new_world, prevs, nexts));
+                }
             }
         }
         queue = config.route_step_sampling_policy.sample(next_queue);
@@ -548,6 +556,9 @@ fn generate_or_routes(
     }
 
     candidates
+        .into_iter()
+        .map(|(world, positions)| (world, positions.last().copied().unwrap()))
+        .collect()
 }
 
 pub struct LocalPlacerCostEstimator<'a> {
