@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use eyre::ensure;
+use indicatif::{ParallelProgressIterator, ProgressStyle};
 use itertools::{iproduct, Itertools};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
@@ -127,6 +128,7 @@ impl LocalPlacer {
             let prev_step_volume = queue.len();
             let next_queue = queue
                 .into_par_iter()
+                .progress_with_style(progress_style())
                 .flat_map(|(world, pos)| {
                     self.place_and_route_next_node(node, &world, &pos)
                         .into_iter()
@@ -189,6 +191,14 @@ impl LocalPlacer {
             _ => unreachable!(),
         }
     }
+}
+
+fn progress_style() -> ProgressStyle {
+    ProgressStyle::with_template(
+        "{spinner:.green} [{eta_precise}] [{bar:40.cyan/blue}] {pos:>7}/{len:7} {msg}",
+    )
+    .unwrap()
+    .progress_chars("#>-")
 }
 
 fn input_node_kind() -> Vec<BlockKind> {
