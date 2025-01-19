@@ -128,6 +128,7 @@ impl LocalPlacer {
             let prev_step_volume = queue.len();
             let next_queue = queue
                 .into_par_iter()
+                .panic_fuse()
                 .progress_with_style(progress_style())
                 .flat_map(|(world, pos)| {
                     self.place_and_route_next_node(node, &world, &pos)
@@ -422,6 +423,10 @@ mod tests {
     #[test]
     fn test_generate_component_and() -> eyre::Result<()> {
         tracing_subscriber::fmt::init();
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build_global()
+            .unwrap();
 
         let logic_graph = build_graph_from_stmt("a&b", "c")?.prepare_place()?;
         println!("{}", logic_graph.to_graphviz());
@@ -430,7 +435,7 @@ mod tests {
             route_torch_directly: true,
         };
         let mut placer = LocalPlacer::new(logic_graph, config)?;
-        let worlds = placer.generate(Some(4));
+        let worlds = placer.generate(Some(5));
 
         let mut rng = thread_rng();
         let sampled_worlds = worlds.into_iter().choose_multiple(&mut rng, 100);
