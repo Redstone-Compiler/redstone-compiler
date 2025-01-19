@@ -74,13 +74,20 @@ impl PlacedNode {
 
 pub struct LocalPlacer {
     graph: LogicGraph,
+    config: LocalPlacerConfig,
+}
+
+#[derive(Default)]
+pub struct LocalPlacerConfig {
+    // torch place시 input과 direct로 연결되도록 강제한다.
+    route_torch_directly: bool,
 }
 
 pub const K_MAX_LOCAL_PLACE_NODE_COUNT: usize = 25;
 
 impl LocalPlacer {
-    pub fn new(graph: LogicGraph) -> eyre::Result<Self> {
-        let result = Self { graph };
+    pub fn new(graph: LogicGraph, config: LocalPlacerConfig) -> eyre::Result<Self> {
+        let result = Self { graph, config };
         result.verify()?;
         Ok(result)
     }
@@ -153,13 +160,20 @@ impl LocalPlacer {
                 .collect(),
             GraphNodeKind::Output(_) => output_node_kind()
                 .into_iter()
-                .flat_map(|kind| generate_place_and_routes(world, positions[&node.inputs[0]], kind))
+                .flat_map(|kind| {
+                    generate_place_and_routes(&self.config, world, positions[&node.inputs[0]], kind)
+                })
                 .collect(),
             GraphNodeKind::Logic(logic) => match logic.logic_type {
                 LogicType::Not => not_node_kind()
                     .into_iter()
                     .flat_map(|kind| {
-                        generate_place_and_routes(world, positions[&node.inputs[0]], kind)
+                        generate_place_and_routes(
+                            &self.config,
+                            world,
+                            positions[&node.inputs[0]],
+                            kind,
+                        )
                     })
                     .collect(),
                 LogicType::Or => {
@@ -250,17 +264,19 @@ fn generate_inputs(world: &World3D, kind: BlockKind) -> Vec<(World3D, Position)>
 }
 
 fn generate_place_and_routes(
+    config: &LocalPlacerConfig,
     world: &World3D,
     start: Position,
     kind: BlockKind,
 ) -> Vec<(World3D, Position)> {
     match kind {
-        BlockKind::Torch { .. } => generate_torch_place_and_routes(world, start, kind),
+        BlockKind::Torch { .. } => generate_torch_place_and_routes(config, world, start, kind),
         _ => unimplemented!(),
     }
 }
 
 fn generate_torch_place_and_routes(
+    config: &LocalPlacerConfig,
     world: &World3D,
     source: Position,
     kind: BlockKind,
@@ -276,13 +292,14 @@ fn generate_torch_place_and_routes(
     .map(|direction| Block { kind, direction })
     .collect_vec();
 
-    // start에서 최소 두 칸 떨어진 곳에 위치시킨다.
     let generate_strategy = torch_strategy
         .into_iter()
         .cartesian_product(
             iproduct!(0..world.size.0, 0..world.size.1, 0..world.size.2)
                 .map(|(x, y, z)| Position(x, y, z))
-                .filter(|pos| source.manhattan_distance(pos) <= 2),
+                // start에서 최소 두 칸 떨어진 곳에 위치시킨다.
+                .filter(|pos| source.manhattan_distance(pos) > 1)
+                .filter(|pos| !config.route_torch_directly || source.manhattan_distance(pos) == 2),
         )
         .collect_vec();
 
@@ -384,7 +401,7 @@ mod tests {
             logic::{builder::LogicGraphBuilder, LogicGraph},
         },
         nbt::{NBTRoot, ToNBT},
-        transform::placer::LocalPlacer,
+        transform::placer::{LocalPlacer, LocalPlacerConfig},
         world::world::World3D,
     };
 
@@ -399,7 +416,10 @@ mod tests {
         let logic_graph = build_graph_from_stmt("a&b", "c")?.prepare_place()?;
         println!("{}", logic_graph.to_graphviz());
 
-        let mut placer = LocalPlacer::new(logic_graph)?;
+        let config = LocalPlacerConfig {
+            route_torch_directly: true,
+        };
+        let mut placer = LocalPlacer::new(logic_graph, config)?;
         let worlds = placer.generate(Some(4));
 
         let mut rng = thread_rng();
