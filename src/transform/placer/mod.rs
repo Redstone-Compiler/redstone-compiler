@@ -521,16 +521,17 @@ fn generate_or_routes(
     while step < config.max_route_step && !queue.is_empty() {
         let mut next_queue = vec![];
         for (world, prevs, bounds) in queue {
-            for bound in bounds {
-                let prev_pos = prevs.last().copied().unwrap();
-                let Some((new_world, redstone_node)) =
-                    place_redstone_with_cobble(&world, bound, prev_pos, to)
-                else {
-                    continue;
-                };
+            let prev_pos = prevs.last().copied().unwrap();
+            for (new_world, redstone_node) in bounds
+                .into_iter()
+                .flat_map(|bound| place_redstone_with_cobble(&world, bound, prev_pos, to))
+            {
+                let new_prevs = prevs
+                    .iter()
+                    .copied()
+                    .chain([redstone_node.position])
+                    .collect();
 
-                let mut new_prevs = prevs.clone();
-                new_prevs.push(bound.position());
                 if redstone_node.has_connection_with(&world, to) {
                     candidates.push((new_world, new_prevs));
                 } else {
