@@ -71,17 +71,19 @@ impl PlaceBound {
             }
             BlockKind::Redstone { state, .. } => {
                 let world = world.unwrap();
-                let has_up_block = world[pos.up()].kind.is_cobble();
 
                 let mut propagate_targets = Vec::new();
                 propagate_targets.extend(pos.cardinal_redstone(*state));
 
-                if !has_up_block {
+                if world.size.bound_on(pos.up()) && !world[pos.up()].kind.is_cobble() {
                     propagate_targets.extend(
                         pos.up()
                             .cardinal_redstone(*state)
                             .into_iter()
-                            .filter(|&up_cardinal| world[up_cardinal].kind.is_redstone()),
+                            .filter(|&up_cardinal| {
+                                world.size.bound_on(up_cardinal)
+                                // && world[up_cardinal].kind.is_redstone()
+                            }),
                     );
                 }
 
@@ -95,9 +97,9 @@ impl PlaceBound {
                     propagate_targets.extend(
                         pos.cardinal_redstone(*state)
                             .into_iter()
+                            .filter(|&pos| world.size.bound_on(pos))
                             .filter(|&pos| !world[pos].kind.is_cobble())
-                            .filter_map(|pos| pos.walk(Direction::Bottom))
-                            .filter(|&pos| world[pos].kind.is_redstone()),
+                            .filter_map(|pos| pos.walk(Direction::Bottom)), // .filter(|&pos| world[pos].kind.is_redstone()),
                     );
                 }
 

@@ -1,8 +1,12 @@
-use std::collections::HashMap;
+use std::{
+    collections::{HashMap, HashSet},
+    usize,
+};
 
 use eyre::ensure;
 use indicatif::{ParallelProgressIterator, ProgressStyle};
 use itertools::{iproduct, Itertools};
+use rand::{rngs::StdRng, seq::IteratorRandom, SeedableRng};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
 use crate::{
@@ -46,6 +50,20 @@ impl PlacedNode {
         }
     }
 
+    pub fn new_redstone(position: Position) -> Self {
+        Self {
+            position,
+            block: Block {
+                kind: BlockKind::Redstone {
+                    on_count: 0,
+                    state: 0,
+                    strength: 0,
+                },
+                direction: Direction::None,
+            },
+        }
+    }
+
     pub fn is_propagation_target(&self) -> bool {
         self.block.kind.is_stick_to_redstone() || self.block.kind.is_repeater()
     }
@@ -56,20 +74,70 @@ impl PlacedNode {
             .propagation_bound(&self.block.kind, world)
     }
 
-    pub fn has_conflict(&self, world: &World3D) -> bool {
+    pub fn has_conflict(&self, world: &World3D, except: &HashSet<Position>) -> bool {
         if self.block.kind.is_cobble() {
-            return !(world[self.position].kind.is_air() || world[self.position].kind.is_cobble());
+            return self.has_cobble_conflict(world);
         }
 
         if !world[self.position].kind.is_air() {
             return true;
         }
 
+        // 다른 블록에 signal을 보낼 수 있는 경우
         let bounds = self.propagation_bound(Some(world));
         bounds
             .into_iter()
-            .filter(|bound| bound.is_bound_on(world))
+            .filter(|bound| bound.is_bound_on(world) && !except.contains(&bound.position()))
             .any(|bound| !bound.propagate_to(world).is_empty())
+    }
+
+    fn has_cobble_conflict(&self, world: &World3D) -> bool {
+        if world[self.position].kind.is_cobble() {
+            return false;
+        }
+        if !world[self.position].kind.is_air() {
+            return true;
+        }
+
+        // 다른 레드스톤 연결을 끊어버리는 경우
+        if let Some(bottom) = self.position.walk(Direction::Bottom) {
+            if world[bottom].kind.is_redstone()
+                && (self.position.cardinal().iter())
+                    .any(|&pos| world.size.bound_on(pos) && world[pos].kind.is_redstone())
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // 다른 블록의 signal을 받을 수 있는 경우
+    fn has_short(&self, world: &World3D, except: &HashSet<Position>) -> bool {
+        assert!(self.block.kind.is_redstone());
+
+        let has_nearest_stick_to_redstone = self
+            .position
+            .cardinal()
+            .into_iter()
+            .chain(Some(self.position.up()))
+            .filter(|&pos| world.size.bound_on(pos) && !except.contains(&pos))
+            .any(|pos| world[pos].kind.is_stick_to_redstone());
+
+        let has_cardinal_cobble_short = self
+            .position
+            .cardinal()
+            .into_iter()
+            .filter(|&pos| world.size.bound_on(pos) && world[pos].kind.is_cobble())
+            .flat_map(|pos| pos.down())
+            .filter(|&pos| world.size.bound_on(pos) && !except.contains(&pos))
+            .any(|pos| {
+                world[pos].kind.is_torch()
+                    || ((world[pos].kind.is_repeater() || world[pos].kind.is_switch())
+                        && pos.diff(self.position) == world[pos].direction)
+            });
+
+        has_nearest_stick_to_redstone || has_cardinal_cobble_short
     }
 }
 
@@ -80,8 +148,36 @@ pub struct LocalPlacer {
 
 #[derive(Default)]
 pub struct LocalPlacerConfig {
+    step_sampling_policy: SamplingPolicy,
     // torch place시 input과 direct로 연결되도록 강제한다.
     route_torch_directly: bool,
+    // 최대 routing 거리를 지정한다.
+    max_route_step: usize,
+    route_step_sampling_policy: SamplingPolicy,
+}
+
+#[derive(Default, Copy, Clone)]
+pub enum SamplingPolicy {
+    #[default]
+    None,
+    Take(usize),
+    Random(usize),
+}
+
+impl SamplingPolicy {
+    pub fn sample<T>(self, src: Vec<T>) -> Vec<T> {
+        match self {
+            SamplingPolicy::None => src,
+            SamplingPolicy::Take(count) => src.into_iter().take(count).collect(),
+            SamplingPolicy::Random(count) => src
+                .into_iter()
+                .choose_multiple(&mut Self::placer_rng(), count),
+        }
+    }
+
+    fn placer_rng() -> StdRng {
+        StdRng::seed_from_u64(42)
+    }
 }
 
 pub const K_MAX_LOCAL_PLACE_NODE_COUNT: usize = 25;
@@ -141,8 +237,8 @@ impl LocalPlacer {
                         .collect_vec()
                 })
                 .collect::<Vec<_>>();
+            queue = self.config.step_sampling_policy.sample(next_queue);
             step += 1;
-            queue = next_queue;
             tracing::info!("step - {step}: {prev_step_volume} -> {}", queue.len());
         }
 
@@ -181,7 +277,8 @@ impl LocalPlacer {
                     .collect(),
                 LogicType::Or => {
                     assert_eq!(node.inputs.len(), 2);
-                    generate_routes(
+                    generate_or_routes(
+                        &self.config,
                         world,
                         positions[&node.inputs[0]],
                         positions[&node.inputs[1]],
@@ -256,7 +353,7 @@ fn generate_inputs(world: &World3D, kind: BlockKind) -> Vec<(World3D, Position)>
             .filter_map(|(x, y, z)| {
                 let position = Position(x, y, z);
                 let placed_node = PlacedNode { position, block };
-                if placed_node.has_conflict(world) {
+                if placed_node.has_conflict(world, &Default::default()) {
                     return None;
                 }
 
@@ -323,12 +420,13 @@ fn generate_torch_place_and_routes(
             continue;
         };
         let cobble_node = PlacedNode::new_cobble(cobble_pos);
-        if !world.size.bound_on(cobble_pos) || cobble_node.has_conflict(&world) {
+        if !world.size.bound_on(cobble_pos) || cobble_node.has_conflict(&world, &Default::default())
+        {
             continue;
         }
 
         let torch_node = PlacedNode::new(torch_pos, block);
-        if torch_node.has_conflict(world) {
+        if torch_node.has_conflict(world, &Default::default()) {
             continue;
         }
 
@@ -381,8 +479,75 @@ fn generate_routes_to_cobble(
         .collect()
 }
 
-fn generate_routes(world: &World3D, first: Position, second: Position) -> Vec<(World3D, Position)> {
-    todo!()
+fn generate_or_routes(
+    config: &LocalPlacerConfig,
+    world: &World3D,
+    first: Position,
+    second: Position,
+) -> Vec<(World3D, Position)> {
+    let first_node = PlacedNode::new(first, world[first]);
+    let second_node = PlacedNode::new(second, world[second]);
+    assert!(first_node.is_propagation_target() && second_node.is_propagation_target());
+
+    let first_bound = first_node.propagation_bound(Some(world));
+    let second_bound = second_node.propagation_bound(Some(world));
+
+    let mut queue = vec![
+        (world.clone(), first, first_bound),
+        (world.clone(), second, second_bound),
+    ];
+    let mut candidates = Vec::new();
+    let mut step = 0;
+
+    // TODO: torch의 위쪽으로 전파할 수 있는 경우도 고려
+    while step < config.max_route_step {
+        let mut next_queue = vec![];
+        for (world, from, bounds) in queue {
+            // For debugging
+            if step == config.max_route_step - 1 {
+                candidates.push((world, bounds[0].position()));
+                continue;
+            }
+
+            for bound in bounds {
+                let mut new_world = world.clone();
+                let Some(cobble_pos) = bound.position().walk(Direction::Bottom) else {
+                    continue;
+                };
+                let cobble_node = PlacedNode::new_cobble(cobble_pos);
+                if !world.size.bound_on(cobble_pos)
+                    || cobble_node.has_conflict(&new_world, &Default::default())
+                {
+                    continue;
+                }
+                place_node(&mut new_world, cobble_node);
+
+                let redstone_node = PlacedNode::new_redstone(bound.position());
+                let except = [
+                    Some(from),
+                    Some(bound.position()),
+                    bound.position().walk(bound.direction()),
+                ]
+                .into_iter()
+                .flatten()
+                .collect();
+                if !world.size.bound_on(bound.position())
+                    || redstone_node.has_conflict(&new_world, &except)
+                    || redstone_node.has_short(&world, &except)
+                {
+                    continue;
+                }
+                let redstone_propagation_bounds = redstone_node.propagation_bound(Some(&new_world));
+                place_node(&mut new_world, redstone_node);
+
+                next_queue.push((new_world, bound.position(), redstone_propagation_bounds));
+            }
+        }
+        queue = config.route_step_sampling_policy.sample(next_queue);
+        step += 1;
+    }
+
+    candidates
 }
 
 pub struct LocalPlacerCostEstimator<'a> {
@@ -404,15 +569,13 @@ impl<'a> LocalPlacerCostEstimator<'a> {
 #[cfg(test)]
 mod tests {
 
-    use rand::{seq::IteratorRandom, thread_rng};
-
     use crate::{
         graph::{
             graphviz::ToGraphvizGraph,
             logic::{builder::LogicGraphBuilder, LogicGraph},
         },
         nbt::{NBTRoot, ToNBT},
-        transform::placer::{LocalPlacer, LocalPlacerConfig},
+        transform::placer::{LocalPlacer, LocalPlacerConfig, SamplingPolicy},
         world::world::World3D,
     };
 
@@ -423,22 +586,24 @@ mod tests {
     #[test]
     fn test_generate_component_and() -> eyre::Result<()> {
         tracing_subscriber::fmt::init();
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(1)
-            .build_global()
-            .unwrap();
+        // rayon::ThreadPoolBuilder::new()
+        //     .num_threads(1)
+        //     .build_global()
+        //     .unwrap();
 
         let logic_graph = build_graph_from_stmt("a&b", "c")?.prepare_place()?;
         println!("{}", logic_graph.to_graphviz());
 
         let config = LocalPlacerConfig {
+            step_sampling_policy: SamplingPolicy::Random(100),
             route_torch_directly: true,
+            max_route_step: 30,
+            route_step_sampling_policy: SamplingPolicy::Random(5),
         };
         let mut placer = LocalPlacer::new(logic_graph, config)?;
         let worlds = placer.generate(Some(5));
 
-        let mut rng = thread_rng();
-        let sampled_worlds = worlds.into_iter().choose_multiple(&mut rng, 100);
+        let sampled_worlds = SamplingPolicy::Random(100).sample(worlds);
 
         let ww = World3D::concat_tiled(sampled_worlds);
 
