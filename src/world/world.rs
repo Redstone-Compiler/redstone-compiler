@@ -79,11 +79,17 @@ impl World3D {
 
         let mut state = 0;
 
-        let has_up_block = self[pos.up()].kind.is_cobble();
+        let has_up_block = self.size.bound_on(pos.up()) && self[pos.up()].kind.is_cobble();
 
         pos.cardinal().iter().for_each(|&pos_src| {
+            if !self.size.bound_on(pos_src) {
+                return;
+            }
+
             let flat_check = self[pos_src].kind.is_stick_to_redstone();
-            let up_check = !has_up_block && self[pos_src.up()].kind.is_redstone();
+            let up_check = !has_up_block
+                && self.size.bound_on(pos.up())
+                && self[pos_src.up()].kind.is_redstone();
             let down_check = !self[pos_src].kind.is_cobble()
                 && pos_src
                     .down()

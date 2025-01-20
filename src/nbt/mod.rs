@@ -142,10 +142,10 @@ fn nbt_block_name(block: &Block) -> (String, String, Option<NBTPaletteProperty>)
             format!("redstone_wire_{}_{}", strength, state),
             Some(NBTPaletteProperty {
                 power: Some(strength.to_string()),
-                east: ((state & RedstoneState::South as usize) > 0).then(|| "side".to_owned()),
-                west: ((state & RedstoneState::North as usize) > 0).then(|| "side".to_owned()),
-                south: ((state & RedstoneState::West as usize) > 0).then(|| "side".to_owned()),
-                north: ((state & RedstoneState::East as usize) > 0).then(|| "side".to_owned()),
+                east: ((state & RedstoneState::North as usize) > 0).then(|| "side".to_owned()),
+                west: ((state & RedstoneState::South as usize) > 0).then(|| "side".to_owned()),
+                south: ((state & RedstoneState::East as usize) > 0).then(|| "side".to_owned()),
+                north: ((state & RedstoneState::West as usize) > 0).then(|| "side".to_owned()),
                 ..Default::default()
             }),
         ),
@@ -302,25 +302,25 @@ fn nbt_palette_to_block(palette: &NBTPalette) -> (BlockKind, Direction) {
             if let Some(properties) = &palette.properties {
                 if let Some(east) = &properties.east {
                     if east != "none" {
-                        state |= RedstoneState::South as usize;
+                        state |= RedstoneState::North as usize;
                     }
                 }
 
                 if let Some(west) = &properties.west {
                     if west != "none" {
-                        state |= RedstoneState::North as usize;
+                        state |= RedstoneState::South as usize;
                     }
                 }
 
                 if let Some(south) = &properties.south {
                     if south != "none" {
-                        state |= RedstoneState::West as usize;
+                        state |= RedstoneState::East as usize;
                     }
                 }
 
                 if let Some(north) = &properties.north {
                     if north != "none" {
-                        state |= RedstoneState::East as usize;
+                        state |= RedstoneState::West as usize;
                     }
                 }
             }
