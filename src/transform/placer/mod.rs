@@ -349,40 +349,47 @@ fn place_node(world: &mut World3D, node: PlacedNode) {
 }
 
 fn generate_inputs(world: &World3D, kind: BlockKind) -> Vec<(World3D, Position)> {
-    // 일단 바닥에 두고 생성하기
-    let block = Block {
-        kind,
-        direction: Direction::Bottom,
-    };
+    let input_strategy = [
+        Direction::Bottom,
+        Direction::East,
+        Direction::West,
+        Direction::South,
+        Direction::North,
+    ]
+    .into_iter()
+    .map(|direction| Block { kind, direction })
+    .collect_vec();
 
-    let generate_strategy = vec![
+    let place_strategy = vec![
         // x == 0에서 먼저 생성
-        (block, iproduct!(0..1, 0..world.size.1, 0..world.size.2)),
+        iproduct!(0..1, 0..world.size.1, 0..world.size.2),
         // x == 0에서 못 찾으면 y == 0 에서 생성
-        (block, iproduct!(0..world.size.0, 0..1, 0..world.size.2)),
+        iproduct!(0..world.size.0, 0..1, 0..world.size.2),
     ];
 
-    for (block, positions) in generate_strategy {
-        let candidates = positions
-            .filter_map(|(x, y, z)| {
-                let position = Position(x, y, z);
-                let placed_node = PlacedNode { position, block };
-                if placed_node.has_conflict(world, &Default::default()) {
-                    return None;
-                }
+    let generate_strategy = input_strategy
+        .into_iter()
+        .cartesian_product(place_strategy)
+        .collect_vec();
 
-                let mut new_world = world.clone();
-                place_node(&mut new_world, placed_node);
-                Some((new_world, position))
-            })
-            .collect_vec();
+    generate_strategy
+        .into_iter()
+        .flat_map(|(block, positions)| {
+            positions
+                .filter_map(|(x, y, z)| {
+                    let position = Position(x, y, z);
+                    let placed_node = PlacedNode { position, block };
+                    if placed_node.has_conflict(world, &Default::default()) {
+                        return None;
+                    }
 
-        if !candidates.is_empty() {
-            return candidates;
-        }
-    }
-
-    Vec::default()
+                    let mut new_world = world.clone();
+                    place_node(&mut new_world, placed_node);
+                    Some((new_world, position))
+                })
+                .collect_vec()
+        })
+        .collect_vec()
 }
 
 fn generate_place_and_routes(
@@ -625,8 +632,8 @@ mod tests {
         let config = LocalPlacerConfig {
             step_sampling_policy: SamplingPolicy::Random(100),
             route_torch_directly: true,
-            max_route_step: 30,
-            route_step_sampling_policy: SamplingPolicy::Random(5),
+            max_route_step: 3,
+            route_step_sampling_policy: SamplingPolicy::Random(100),
         };
         let mut placer = LocalPlacer::new(logic_graph, config)?;
         let worlds = placer.generate(Some(5));
