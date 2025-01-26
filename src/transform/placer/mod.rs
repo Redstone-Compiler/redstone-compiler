@@ -359,8 +359,8 @@ fn generate_inputs(
     kind: BlockKind,
 ) -> Vec<(World3D, Position)> {
     let input_strategy = [
-        Direction::Bottom,
         Direction::East,
+        Direction::Bottom,
         Direction::West,
         Direction::South,
         Direction::North,
