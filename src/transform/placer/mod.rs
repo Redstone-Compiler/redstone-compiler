@@ -159,6 +159,7 @@ pub struct LocalPlacer {
 
 #[derive(Default)]
 pub struct LocalPlacerConfig {
+    greedy_input_generation: bool,
     step_sampling_policy: SamplingPolicy,
     // torch place시 input과 direct로 연결되도록 강제한다.
     route_torch_directly: bool,
@@ -231,8 +232,8 @@ impl LocalPlacer {
         while step < orders.len() && Some(step) != finish_step {
             let node_id = orders[step];
             let node = self.graph.find_node_by_id(node_id).unwrap();
-            tracing::info!("current node: {node:?}");
-            let prev_step_volume = queue.len();
+            tracing::info!("step - {step} {node:?}");
+            let prev_len = queue.len();
             let next_queue = queue
                 .into_par_iter()
                 .panic_fuse()
@@ -248,9 +249,13 @@ impl LocalPlacer {
                         .collect_vec()
                 })
                 .collect::<Vec<_>>();
+            let next_len = next_queue.len();
             queue = self.config.step_sampling_policy.sample(next_queue);
             step += 1;
-            tracing::info!("step - {step}: {prev_step_volume} -> {}", queue.len());
+            tracing::info!(
+                "from {prev_len} -> generated {next_len} -> sampled {}",
+                queue.len()
+            );
         }
 
         tracing::info!("generate complete");
@@ -266,7 +271,7 @@ impl LocalPlacer {
         match node.kind {
             GraphNodeKind::Input(_) => input_node_kind()
                 .into_iter()
-                .flat_map(|kind| generate_inputs(world, kind))
+                .flat_map(|kind| generate_inputs(&self.config, world, kind))
                 .collect(),
             GraphNodeKind::Output(_) => output_node_kind()
                 .into_iter()
@@ -348,7 +353,11 @@ fn place_node(world: &mut World3D, node: PlacedNode) {
     }
 }
 
-fn generate_inputs(world: &World3D, kind: BlockKind) -> Vec<(World3D, Position)> {
+fn generate_inputs(
+    config: &LocalPlacerConfig,
+    world: &World3D,
+    kind: BlockKind,
+) -> Vec<(World3D, Position)> {
     let input_strategy = [
         Direction::Bottom,
         Direction::East,
@@ -367,10 +376,14 @@ fn generate_inputs(world: &World3D, kind: BlockKind) -> Vec<(World3D, Position)>
         iproduct!(0..world.size.0, 0..1, 0..world.size.2),
     ];
 
-    let generate_strategy = input_strategy
+    let mut generate_strategy = input_strategy
         .into_iter()
         .cartesian_product(place_strategy)
         .collect_vec();
+
+    if config.greedy_input_generation {
+        generate_strategy = generate_strategy.into_iter().take(1).collect();
+    }
 
     generate_strategy
         .into_iter()
@@ -501,9 +514,9 @@ fn generate_routes_to_cobble(
     //         .map(|(world, positions)| (world, positions.last().copied().unwrap(), 0usize)),
     // );
 
-    route_candidates.sort_by_key(|(_, _, cost)| *cost);
     route_candidates
         .into_iter()
+        .sorted_by_key(|(_, _, cost)| *cost)
         .map(|(world, pos, _)| (world, pos))
         .collect()
 }
@@ -630,6 +643,7 @@ mod tests {
         println!("{}", logic_graph.to_graphviz());
 
         let config = LocalPlacerConfig {
+            greedy_input_generation: true,
             step_sampling_policy: SamplingPolicy::Random(100),
             route_torch_directly: true,
             max_route_step: 3,
