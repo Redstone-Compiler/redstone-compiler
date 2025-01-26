@@ -99,7 +99,8 @@ impl PlaceBound {
                             .into_iter()
                             .filter(|&pos| world.size.bound_on(pos))
                             .filter(|&pos| !world[pos].kind.is_cobble())
-                            .filter_map(|pos| pos.walk(Direction::Bottom)), // .filter(|&pos| world[pos].kind.is_redstone()),
+                            .filter_map(|pos| pos.walk(Direction::Bottom))
+                            .filter(|&pos| !world[pos].kind.is_cobble()),
                     );
                 }
 
