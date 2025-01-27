@@ -20,7 +20,7 @@ use crate::{
     },
     logic::LogicType,
     world::{
-        block::{Block, BlockKind, Direction, RedstoneState},
+        block::{Block, BlockKind, Direction},
         position::{DimSize, Position},
         world::World3D,
     },
@@ -76,7 +76,7 @@ impl PlacedNode {
 
     pub fn has_conflict(&self, world: &World3D, except: &HashSet<Position>) -> bool {
         if self.block.kind.is_cobble() {
-            return self.has_cobble_conflict(world);
+            return self.has_cobble_conflict(world, except);
         }
 
         if !world[self.position].kind.is_air() {
@@ -91,7 +91,7 @@ impl PlacedNode {
             .any(|bound| !bound.propagate_to(world).is_empty())
     }
 
-    fn has_cobble_conflict(&self, world: &World3D) -> bool {
+    fn has_cobble_conflict(&self, world: &World3D, except: &HashSet<Position>) -> bool {
         if world[self.position].kind.is_cobble() {
             return false;
         }
@@ -99,12 +99,22 @@ impl PlacedNode {
             return true;
         }
 
-        // 다른 레드스톤 연결을 끊어버리는 경우
         if let Some(bottom) = self.position.walk(Direction::Bottom) {
+            // 다른 레드스톤 연결을 끊어버리는 경우
             if world[bottom].kind.is_redstone()
                 && (self.position.cardinal().iter())
                     .any(|&pos| world.size.bound_on(pos) && world[pos].kind.is_redstone())
             {
+                return true;
+            }
+
+            // 레드스톤을 끊어버리는 경우는 예외 케이스로 반영하고 싶이 않아서 except는 여기서 체크
+            if except.contains(&bottom) {
+                return false;
+            }
+
+            // 바로 아래쪽에 Torch가 있는 경우
+            if world[bottom].kind.is_torch() {
                 return true;
             }
         }
