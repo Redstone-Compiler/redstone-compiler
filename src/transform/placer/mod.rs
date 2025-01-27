@@ -500,7 +500,13 @@ fn generate_routes_to_cobble(
     let mut route_candidates = Vec::new();
     for start in source_node.propagation_bound(Some(world)) {
         let directly_connected = start.position() == cobble_pos
-            && matches!(start.propagation_type(), PropagateType::Hard);
+            && matches!(
+                start.propagation_type(),
+                // TODO: 조건 삭제 가능한지 확인
+                // Hard: Switch -> Torch 연결
+                // Soft: Redstone -> Torch 연결
+                PropagateType::Hard | PropagateType::Soft
+            );
 
         if directly_connected {
             route_candidates.push((world.clone(), start.position(), 0usize));
@@ -650,7 +656,7 @@ mod tests {
             route_step_sampling_policy: SamplingPolicy::Random(100),
         };
         let mut placer = LocalPlacer::new(logic_graph, config)?;
-        let worlds = placer.generate(Some(5));
+        let worlds = placer.generate(Some(6));
 
         let sampled_worlds = SamplingPolicy::Random(100).sample(worlds);
 
