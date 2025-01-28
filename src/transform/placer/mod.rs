@@ -427,44 +427,42 @@ fn generate_torch_place_and_routes(
     source: Position,
     kind: BlockKind,
 ) -> Vec<(World3D, Position)> {
-    let torch_strategy = Direction::iter_direction_without_top()
-        .map(|direction| Block { kind, direction })
-        .collect_vec();
+    let torch_strategy =
+        Direction::iter_direction_without_top().map(|direction| Block { kind, direction });
+
+    let place_strategy = iproduct!(0..world.size.0, 0..world.size.1, 0..world.size.2)
+        .map(|(x, y, z)| Position(x, y, z))
+        // start에서 최소 두 칸 떨어진 곳에 위치시킨다.
+        .filter(|pos| source.manhattan_distance(pos) > 1)
+        .filter(|pos| !config.route_torch_directly || source.manhattan_distance(pos) == 2);
 
     let generate_strategy = torch_strategy
-        .into_iter()
-        .cartesian_product(
-            iproduct!(0..world.size.0, 0..world.size.1, 0..world.size.2)
-                .map(|(x, y, z)| Position(x, y, z))
-                // start에서 최소 두 칸 떨어진 곳에 위치시킨다.
-                .filter(|pos| source.manhattan_distance(pos) > 1)
-                .filter(|pos| !config.route_torch_directly || source.manhattan_distance(pos) == 2),
-        )
+        .cartesian_product(place_strategy)
         .collect_vec();
 
     tracing::trace!("strategy count: {}", generate_strategy.len());
 
     // 1. Place Torch and Cobble
-    let mut place_candidates = Vec::new();
-    for (block, torch_pos) in generate_strategy {
-        let Some(cobble_pos) = torch_pos.walk(block.direction) else {
-            continue;
-        };
-        let cobble_node = PlacedNode::new_cobble(cobble_pos);
-        if cobble_node.has_conflict(&world, &Default::default()) {
-            continue;
-        }
+    let place_candidates = generate_strategy
+        .into_iter()
+        .flat_map(|(torch, torch_pos)| {
+            let cobble_pos = torch_pos.walk(torch.direction)?;
+            let cobble_node = PlacedNode::new_cobble(cobble_pos);
+            if cobble_node.has_conflict(&world, &Default::default()) {
+                return None;
+            }
 
-        let torch_node = PlacedNode::new(torch_pos, block);
-        if torch_node.has_conflict(world, &Default::default()) {
-            continue;
-        }
+            let torch_node = PlacedNode::new(torch_pos, torch);
+            if torch_node.has_conflict(world, &Default::default()) {
+                return None;
+            }
 
-        let mut new_world = world.clone();
-        place_node(&mut new_world, cobble_node);
-        place_node(&mut new_world, torch_node);
-        place_candidates.push((new_world, torch_pos, cobble_pos));
-    }
+            let mut new_world = world.clone();
+            place_node(&mut new_world, cobble_node);
+            place_node(&mut new_world, torch_node);
+            Some((new_world, torch_pos, cobble_pos))
+        })
+        .collect_vec();
 
     // 2. Route Source with Torch Place Target Position
     let candidates = place_candidates
