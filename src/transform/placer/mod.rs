@@ -349,6 +349,12 @@ fn not_node_kind() -> Vec<BlockKind> {
 }
 
 fn place_node(world: &mut World3D, node: PlacedNode) {
+    if world[node.position] == node.block {
+        // TODO: Relax for no-op
+        assert!(world[node.position].kind.is_cobble());
+        return;
+    }
+
     world[node.position] = node.block;
     if node.block.kind.is_redstone() {
         world.update_redstone_states(node.position);
@@ -452,9 +458,7 @@ fn generate_torch_place_and_routes(
         }
 
         let mut new_world = world.clone();
-        if new_world[cobble_pos].kind.is_air() {
-            place_node(&mut new_world, cobble_node);
-        }
+        place_node(&mut new_world, cobble_node);
         place_node(&mut new_world, torch_node);
         place_candidates.push((new_world, torch_pos, cobble_pos));
     }
