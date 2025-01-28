@@ -377,34 +377,23 @@ fn generate_inputs(
         input_strategy = input_strategy.into_iter().take(1).collect();
     }
 
-    let place_strategy = vec![
-        // x == 0에서 먼저 생성
-        iproduct!(0..1, 0..world.size.1, 0..world.size.2),
-        // x == 0에서 못 찾으면 y == 0 에서 생성
-        iproduct!(0..world.size.0, 0..1, 0..world.size.2),
-    ];
+    let place_strategy = iproduct!(0..1, 0..world.size.1, 0..world.size.2)
+        .chain(iproduct!(0..world.size.0, 0..1, 0..world.size.2))
+        .map(|(x, y, z)| Position(x, y, z));
 
-    let generate_strategy = input_strategy
+    input_strategy
         .into_iter()
         .cartesian_product(place_strategy)
-        .collect_vec();
+        // Place Input Node
+        .flat_map(|(block, position)| {
+            let placed_node = PlacedNode { position, block };
+            if placed_node.has_conflict(world, &Default::default()) {
+                return None;
+            }
 
-    generate_strategy
-        .into_iter()
-        .flat_map(|(block, positions)| {
-            positions
-                .filter_map(|(x, y, z)| {
-                    let position = Position(x, y, z);
-                    let placed_node = PlacedNode { position, block };
-                    if placed_node.has_conflict(world, &Default::default()) {
-                        return None;
-                    }
-
-                    let mut new_world = world.clone();
-                    place_node(&mut new_world, placed_node);
-                    Some((new_world, position))
-                })
-                .collect_vec()
+            let mut new_world = world.clone();
+            place_node(&mut new_world, placed_node);
+            Some((new_world, position))
         })
         .collect_vec()
 }
@@ -436,46 +425,38 @@ fn generate_torch_place_and_routes(
         .filter(|pos| source.manhattan_distance(pos) > 1)
         .filter(|pos| !config.route_torch_directly || source.manhattan_distance(pos) == 2);
 
-    let generate_strategy = torch_strategy
+    torch_strategy
         .cartesian_product(place_strategy)
-        .collect_vec();
-
-    tracing::trace!("strategy count: {}", generate_strategy.len());
-
-    // 1. Place Torch and Cobble
-    let place_candidates = generate_strategy
-        .into_iter()
-        .flat_map(|(torch, torch_pos)| {
-            let cobble_pos = torch_pos.walk(torch.direction)?;
-            let cobble_node = PlacedNode::new_cobble(cobble_pos);
-            if cobble_node.has_conflict(&world, &Default::default()) {
-                return None;
-            }
-
-            let torch_node = PlacedNode::new(torch_pos, torch);
-            if torch_node.has_conflict(world, &Default::default()) {
-                return None;
-            }
-
-            let mut new_world = world.clone();
-            place_node(&mut new_world, cobble_node);
-            place_node(&mut new_world, torch_node);
-            Some((new_world, torch_pos, cobble_pos))
-        })
-        .collect_vec();
-
-    // 2. Route Source with Torch Place Target Position
-    let candidates = place_candidates
-        .into_iter()
+        // 1. Place Torch and Cobble
+        .flat_map(|(torch, torch_pos)| place_torch_with_cobble(world, torch, torch_pos))
+        // 2. Route Source with Torch Place Target Position
         .flat_map(|(world, torch_pos, cobble_pos)| {
             generate_routes_to_cobble(config, &world, source, torch_pos, cobble_pos)
                 .into_iter()
                 .map(|(world, _)| (world, torch_pos))
                 .collect_vec()
         })
-        .collect_vec();
+        .collect()
+}
 
-    candidates
+fn place_torch_with_cobble(
+    world: &World3D,
+    torch: Block,
+    torch_pos: Position,
+) -> Option<(World3D, Position, Position)> {
+    let cobble_pos = torch_pos.walk(torch.direction)?;
+    let cobble_node = PlacedNode::new_cobble(cobble_pos);
+    let torch_node = PlacedNode::new(torch_pos, torch);
+    if cobble_node.has_conflict(&world, &Default::default())
+        || torch_node.has_conflict(world, &Default::default())
+    {
+        return None;
+    }
+
+    let mut new_world = world.clone();
+    place_node(&mut new_world, cobble_node);
+    place_node(&mut new_world, torch_node);
+    Some((new_world, torch_pos, cobble_pos))
 }
 
 fn generate_routes_to_cobble(
@@ -526,8 +507,8 @@ fn generate_or_routes(
     to: Position,
 ) -> Vec<(World3D, Vec<Position>)> {
     let from_node = PlacedNode::new(from, world[from]);
-    let second_node = PlacedNode::new(to, world[to]);
-    assert!(from_node.is_propagation_target() && second_node.is_propagation_target());
+    let to_node = PlacedNode::new(to, world[to]);
+    assert!(from_node.is_propagation_target() && to_node.is_propagation_target());
 
     let first_bound = from_node.propagation_bound(Some(world));
 
