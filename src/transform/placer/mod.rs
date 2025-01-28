@@ -182,6 +182,7 @@ impl PlacedNode {
 pub struct LocalPlacer {
     graph: LogicGraph,
     config: LocalPlacerConfig,
+    visit_orders: Vec<GraphNodeId>,
 }
 
 #[derive(Default)]
@@ -221,9 +222,16 @@ impl SamplingPolicy {
 
 pub const K_MAX_LOCAL_PLACE_NODE_COUNT: usize = 25;
 
+type PlacerQueue = Vec<(World3D, HashMap<GraphNodeId, Position>)>;
+
 impl LocalPlacer {
     pub fn new(graph: LogicGraph, config: LocalPlacerConfig) -> eyre::Result<Self> {
-        let result = Self { graph, config };
+        let visit_orders = graph.topological_order();
+        let result = Self {
+            graph,
+            config,
+            visit_orders,
+        };
         result.verify()?;
         Ok(result)
     }
@@ -249,35 +257,23 @@ impl LocalPlacer {
         Ok(())
     }
 
-    pub fn generate(&mut self, finish_step: Option<usize>) -> Vec<World3D> {
+    pub fn generate(&self, dim: DimSize, finish_step: Option<usize>) -> Vec<World3D> {
         tracing::info!("generate starts");
-        let orders = self.graph.topological_order();
-        let mut queue: Vec<(World3D, HashMap<GraphNodeId, Position>)> = Vec::new();
-        queue.push((World3D::new(DimSize(10, 10, 5)), Default::default()));
+
+        let mut queue = PlacerQueue::new();
+        queue.push((World3D::new(dim), Default::default()));
 
         let mut step = 0;
-        while step < orders.len() && Some(step) != finish_step {
-            let node_id = orders[step];
-            let node = self.graph.find_node_by_id(node_id).unwrap();
-            tracing::info!("step - {step} {node:?}");
+        while step < self.visit_orders.len() && Some(step) != finish_step {
             let prev_len = queue.len();
-            let next_queue = queue
-                .into_par_iter()
-                .panic_fuse()
-                .progress_with_style(progress_style())
-                .flat_map(|(world, pos)| {
-                    self.place_and_route_next_node(node, &world, &pos)
-                        .into_iter()
-                        .map(|(world, place_position)| {
-                            let mut nodes_position = pos.clone();
-                            nodes_position.insert(node_id, place_position);
-                            (world, nodes_position)
-                        })
-                        .collect_vec()
-                })
-                .collect::<Vec<_>>();
+
+            // 1. Generate places and routes
+            let next_queue = self.do_step(step, &queue);
             let next_len = next_queue.len();
+
+            // 2. Sampling
             queue = self.config.step_sampling_policy.sample(next_queue);
+
             step += 1;
             tracing::info!(
                 "from {prev_len} -> generated {next_len} -> sampled {}",
@@ -289,7 +285,28 @@ impl LocalPlacer {
         queue.into_iter().map(|(world, _)| world).collect()
     }
 
-    fn place_and_route_next_node(
+    fn do_step(&self, step: usize, queue: &PlacerQueue) -> PlacerQueue {
+        let node = self.graph.find_node_by_id(self.visit_orders[step]).unwrap();
+        tracing::info!("[{}/{}] {node}", step + 1, self.visit_orders.len());
+
+        queue
+            .into_par_iter()
+            .panic_fuse()
+            .progress_with_style(progress_style())
+            .flat_map(|(world, pos)| {
+                self.generate_place_and_route(node, &world, &pos)
+                    .into_iter()
+                    .map(|(world, place_position)| {
+                        let mut nodes_position = pos.clone();
+                        nodes_position.insert(node.id, place_position);
+                        (world, nodes_position)
+                    })
+                    .collect_vec()
+            })
+            .collect()
+    }
+
+    fn generate_place_and_route(
         &self,
         node: &GraphNode,
         world: &World3D,
@@ -618,6 +635,7 @@ mod tests {
     use crate::graph::logic::LogicGraph;
     use crate::nbt::{NBTRoot, ToNBT};
     use crate::transform::placer::{LocalPlacer, LocalPlacerConfig, SamplingPolicy};
+    use crate::world::position::DimSize;
     use crate::world::world::World3D;
 
     fn build_graph_from_stmt(stmt: &str, output: &str) -> eyre::Result<LogicGraph> {
@@ -642,8 +660,8 @@ mod tests {
             max_route_step: 3,
             route_step_sampling_policy: SamplingPolicy::Random(100),
         };
-        let mut placer = LocalPlacer::new(logic_graph, config)?;
-        let worlds = placer.generate(Some(6));
+        let placer = LocalPlacer::new(logic_graph, config)?;
+        let worlds = placer.generate(DimSize(10, 10, 5), Some(6));
 
         let sampled_worlds = SamplingPolicy::Random(100).sample(worlds);
 
