@@ -67,6 +67,10 @@ impl PlacedNode {
     }
 
     pub fn has_conflict(&self, world: &World3D, except: &HashSet<Position>) -> bool {
+        if !world.size.bound_on(self.position) {
+            return true;
+        }
+
         if self.block.kind.is_cobble() {
             return self.has_cobble_conflict(world, except);
         }
@@ -447,8 +451,7 @@ fn generate_torch_place_and_routes(
             continue;
         };
         let cobble_node = PlacedNode::new_cobble(cobble_pos);
-        if !world.size.bound_on(cobble_pos) || cobble_node.has_conflict(&world, &Default::default())
-        {
+        if cobble_node.has_conflict(&world, &Default::default()) {
             continue;
         }
 
@@ -573,8 +576,7 @@ fn place_redstone_with_cobble(
     let mut new_world = world.clone();
     let cobble_pos = bound.position().walk(Direction::Bottom)?;
     let cobble_node = PlacedNode::new_cobble(cobble_pos);
-    if !world.size.bound_on(cobble_pos) || cobble_node.has_conflict(&new_world, &Default::default())
-    {
+    if cobble_node.has_conflict(&new_world, &Default::default()) {
         return None;
     }
     place_node(&mut new_world, cobble_node);
@@ -583,10 +585,7 @@ fn place_redstone_with_cobble(
     let bound_back_pos = bound_pos.walk(bound.direction()).unwrap();
     let redstone_node = PlacedNode::new_redstone(bound_pos);
     let except = [prev, bound_back_pos, bound_pos, to].into_iter().collect();
-    if !world.size.bound_on(bound_pos)
-        || redstone_node.has_conflict(&new_world, &except)
-        || redstone_node.has_short(&world, &except)
-    {
+    if redstone_node.has_conflict(&new_world, &except) || redstone_node.has_short(&world, &except) {
         return None;
     }
     place_node(&mut new_world, redstone_node);
