@@ -655,18 +655,21 @@ mod tests {
         //     .build_global()
         //     .unwrap();
 
-        let logic_graph = build_graph_from_stmt("a&b", "c")?.prepare_place()?;
+        // (~a & b) | (a & ~b)
+        // ~(~a|~b)
+        // ~(~~a|~b)|~(~a|~~b)
+        let logic_graph = build_graph_from_stmt("(~a&b)|(a&~b)", "c")?.prepare_place()?;
         println!("{}", logic_graph.to_graphviz());
 
         let config = LocalPlacerConfig {
             greedy_input_generation: true,
-            step_sampling_policy: SamplingPolicy::Random(100),
+            step_sampling_policy: SamplingPolicy::Random(1000),
             route_torch_directly: true,
-            max_route_step: 3,
+            max_route_step: 2,
             route_step_sampling_policy: SamplingPolicy::Random(100),
         };
         let mut placer = LocalPlacer::new(logic_graph, config)?;
-        let worlds = placer.generate(Some(6));
+        let worlds = placer.generate(Some(10));
 
         let sampled_worlds = SamplingPolicy::Random(100).sample(worlds);
 
