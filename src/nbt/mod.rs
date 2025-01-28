@@ -1,19 +1,17 @@
-use std::{
-    collections::HashMap,
-    fs::File,
-    io::{Read, Write},
-    path::PathBuf,
-};
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::{Read, Write};
+use std::path::PathBuf;
 
-use flate2::{read::GzDecoder, write::GzEncoder, Compression};
+use flate2::read::GzDecoder;
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 
-use crate::world::{
-    block::{Block, BlockKind, Direction, RedstoneState},
-    position::{DimSize, Position},
-    world::{World, World3D},
-};
+use crate::world::block::{Block, BlockKind, Direction, RedstoneState};
+use crate::world::position::{DimSize, Position};
+use crate::world::world::{World, World3D};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct NBTRoot {
@@ -440,18 +438,16 @@ mod tests {
     use std::io::{Read, Write};
 
     use fastnbt::stream::{Parser, Value};
-    use flate2::{read::GzDecoder, write::GzEncoder, Compression};
-
-    use crate::{
-        graph::{graphviz::ToGraphvizGraph, world::builder::WorldGraphBuilder},
-        world::{
-            block::Direction,
-            position::{DimSize, Position},
-            world::World,
-        },
-    };
+    use flate2::read::GzDecoder;
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
 
     use super::*;
+    use crate::graph::graphviz::ToGraphvizGraph;
+    use crate::graph::world::builder::WorldGraphBuilder;
+    use crate::world::block::Direction;
+    use crate::world::position::{DimSize, Position};
+    use crate::world::world::World;
 
     #[test]
     fn unittest_show_nbt_structure() -> eyre::Result<()> {

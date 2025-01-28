@@ -3,13 +3,10 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use disjoint_set::DisjointSet;
 use itertools::Itertools;
 
-use crate::{
-    graph::{
-        logic::{builder::LogicGraphBuilder, LogicGraph},
-        Graph, GraphNode, GraphNodeId, GraphNodeKind, SubGraphWithGraph,
-    },
-    logic::{Logic, LogicType},
-};
+use crate::graph::logic::builder::LogicGraphBuilder;
+use crate::graph::logic::LogicGraph;
+use crate::graph::{Graph, GraphNode, GraphNodeId, GraphNodeKind, SubGraphWithGraph};
+use crate::logic::{Logic, LogicType};
 
 pub struct LogicGraphTransformer {
     pub graph: LogicGraph,

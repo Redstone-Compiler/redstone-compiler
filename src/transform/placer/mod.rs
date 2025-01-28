@@ -1,30 +1,22 @@
-use std::{
-    collections::{HashMap, HashSet},
-    usize,
-};
+use std::collections::{HashMap, HashSet};
+use std::usize;
 
 use eyre::ensure;
 use indicatif::{ParallelProgressIterator, ProgressStyle};
 use itertools::{iproduct, Itertools};
-use rand::{rngs::StdRng, seq::IteratorRandom, SeedableRng};
+use rand::rngs::StdRng;
+use rand::seq::IteratorRandom;
+use rand::SeedableRng;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
-use crate::{
-    graph::{
-        logic::LogicGraph,
-        world::{
-            builder::{PlaceBound, PropagateType},
-            WorldGraph,
-        },
-        GraphNode, GraphNodeId, GraphNodeKind,
-    },
-    logic::LogicType,
-    world::{
-        block::{Block, BlockKind, Direction},
-        position::{DimSize, Position},
-        world::World3D,
-    },
-};
+use crate::graph::logic::LogicGraph;
+use crate::graph::world::builder::{PlaceBound, PropagateType};
+use crate::graph::world::WorldGraph;
+use crate::graph::{GraphNode, GraphNodeId, GraphNodeKind};
+use crate::logic::LogicType;
+use crate::world::block::{Block, BlockKind, Direction};
+use crate::world::position::{DimSize, Position};
+use crate::world::world::World3D;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct PlacedNode {
@@ -633,15 +625,12 @@ impl<'a> LocalPlacerCostEstimator<'a> {
 #[cfg(test)]
 mod tests {
 
-    use crate::{
-        graph::{
-            graphviz::ToGraphvizGraph,
-            logic::{builder::LogicGraphBuilder, LogicGraph},
-        },
-        nbt::{NBTRoot, ToNBT},
-        transform::placer::{LocalPlacer, LocalPlacerConfig, SamplingPolicy},
-        world::world::World3D,
-    };
+    use crate::graph::graphviz::ToGraphvizGraph;
+    use crate::graph::logic::builder::LogicGraphBuilder;
+    use crate::graph::logic::LogicGraph;
+    use crate::nbt::{NBTRoot, ToNBT};
+    use crate::transform::placer::{LocalPlacer, LocalPlacerConfig, SamplingPolicy};
+    use crate::world::world::World3D;
 
     fn build_graph_from_stmt(stmt: &str, output: &str) -> eyre::Result<LogicGraph> {
         LogicGraphBuilder::new(stmt.to_string()).build(output.to_string())

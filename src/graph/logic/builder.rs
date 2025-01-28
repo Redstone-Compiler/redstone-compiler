@@ -1,11 +1,8 @@
 use std::collections::HashMap;
 
-use crate::{
-    graph::{Graph, GraphNode, GraphNodeId, GraphNodeKind},
-    logic::{Logic, LogicType},
-};
-
 use super::LogicGraph;
+use crate::graph::{Graph, GraphNode, GraphNodeId, GraphNodeKind};
+use crate::logic::{Logic, LogicType};
 
 #[derive(Default)]
 pub struct LogicGraphBuilder {
@@ -232,12 +229,11 @@ impl LogicGraphBuilder {
 mod tests {
     use itertools::Itertools;
 
-    use crate::{
-        graph::{graphviz::ToGraphvizGraph, logic::LogicGraph, Graph},
-        transform::logic::LogicGraphTransformer,
-    };
-
     use super::LogicGraphBuilder;
+    use crate::graph::graphviz::ToGraphvizGraph;
+    use crate::graph::logic::LogicGraph;
+    use crate::graph::Graph;
+    use crate::transform::logic::LogicGraphTransformer;
 
     fn build_graph_from_stmt(stmt: &str, output: &str) -> eyre::Result<LogicGraph> {
         LogicGraphBuilder::new(stmt.to_string()).build(output.to_string())

@@ -3,10 +3,9 @@ use std::collections::{HashMap, HashSet};
 use disjoint_set::DisjointSet;
 use itertools::Itertools;
 
-use crate::{
-    graph::{world::WorldGraph, GraphNode, GraphNodeId, GraphNodeKind},
-    world::block::{Block, BlockKind, Direction},
-};
+use crate::graph::world::WorldGraph;
+use crate::graph::{GraphNode, GraphNodeId, GraphNodeKind};
+use crate::world::block::{Block, BlockKind, Direction};
 
 pub struct WorldGraphTransformer {
     pub graph: WorldGraph,
@@ -169,12 +168,10 @@ impl WorldGraphTransformer {
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        graph::{graphviz::ToGraphvizGraph, world::builder::WorldGraphBuilder},
-        nbt::NBTRoot,
-    };
-
     use super::WorldGraphTransformer;
+    use crate::graph::graphviz::ToGraphvizGraph;
+    use crate::graph::world::builder::WorldGraphBuilder;
+    use crate::nbt::NBTRoot;
 
     #[test]
     fn unittest_fold_redstone() -> eyre::Result<()> {

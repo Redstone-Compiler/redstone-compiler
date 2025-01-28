@@ -1,6 +1,5 @@
-use crate::transform::logic::LogicGraphTransformer;
-
 use super::Graph;
+use crate::transform::logic::LogicGraphTransformer;
 
 pub mod builder;
 

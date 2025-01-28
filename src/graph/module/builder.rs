@@ -2,13 +2,11 @@ use std::collections::{HashMap, HashSet};
 
 use itertools::Itertools;
 
-use crate::graph::{
-    module::{
-        GraphModule, GraphModuleContext, GraphModulePort, GraphModulePortTarget,
-        GraphModulePortType, GraphModuleVariable,
-    },
-    Graph,
+use crate::graph::module::{
+    GraphModule, GraphModuleContext, GraphModulePort, GraphModulePortTarget, GraphModulePortType,
+    GraphModuleVariable,
 };
+use crate::graph::Graph;
 
 #[derive(Debug)]
 pub struct GraphModuleBuilder {
@@ -177,13 +175,11 @@ impl GraphModuleBuilder {
 
 #[cfg(test)]
 mod tests {
-    use crate::graph::{
-        graphviz::{ToGraphvizGraph, ToGraphvizModule},
-        logic::{builder::LogicGraphBuilder, LogicGraph},
-        module::{GraphModule, GraphWithSubGraphs},
-    };
-
     use super::GraphModuleBuilder;
+    use crate::graph::graphviz::{ToGraphvizGraph, ToGraphvizModule};
+    use crate::graph::logic::builder::LogicGraphBuilder;
+    use crate::graph::logic::LogicGraph;
+    use crate::graph::module::{GraphModule, GraphWithSubGraphs};
 
     fn build_graph_from_stmt(stmt: &str, output: &str) -> eyre::Result<LogicGraph> {
         LogicGraphBuilder::new(stmt.to_string()).build(output.to_string())

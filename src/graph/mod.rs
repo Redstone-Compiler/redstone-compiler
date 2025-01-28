@@ -1,18 +1,15 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use itertools::Itertools;
-use petgraph::{stable_graph::NodeIndex, visit::NodeRef};
+use petgraph::stable_graph::NodeIndex;
+use petgraph::visit::NodeRef;
 
-use crate::{
-    cluster::{Clustered, ClusteredType},
-    logic::Logic,
-    world::block::Block,
-};
-
-use self::{
-    cluster::ClusteredGraph,
-    module::{builder::GraphModuleBuilder, GraphModule},
-};
+use self::cluster::ClusteredGraph;
+use self::module::builder::GraphModuleBuilder;
+use self::module::GraphModule;
+use crate::cluster::{Clustered, ClusteredType};
+use crate::logic::Logic;
+use crate::world::block::Block;
 
 mod cluster;
 pub mod graphviz;

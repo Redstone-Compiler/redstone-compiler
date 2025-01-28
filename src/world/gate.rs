@@ -1,8 +1,6 @@
-use super::{
-    block::Block,
-    position::{DimSize, Position},
-    world::World,
-};
+use super::block::Block;
+use super::position::{DimSize, Position};
+use super::world::World;
 
 // 게이트의 종류
 pub enum GateKind {

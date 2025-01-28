@@ -1,14 +1,11 @@
-use std::{
-    collections::{HashMap, HashSet},
-    ops::Index,
-};
+use std::collections::{HashMap, HashSet};
+use std::ops::Index;
 
 use eyre::ContextCompat;
 use itertools::Itertools;
 
-use crate::graph::GraphNodeKind;
-
 use super::{Graph, GraphNodeId};
+use crate::graph::GraphNodeKind;
 
 pub mod builder;
 
