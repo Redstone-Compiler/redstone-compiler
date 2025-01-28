@@ -144,6 +144,10 @@ impl BlockKind {
         matches!(self, BlockKind::Cobble { .. })
     }
 
+    pub fn is_switch(&self) -> bool {
+        matches!(self, BlockKind::Switch { .. })
+    }
+
     pub fn get_redstone_strength(&self) -> eyre::Result<usize> {
         let BlockKind::Redstone { strength, .. } = self else {
             eyre::bail!("unreachable");

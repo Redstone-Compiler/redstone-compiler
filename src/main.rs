@@ -26,9 +26,9 @@ pub struct CompilerOption {
 fn main() -> eyre::Result<()> {
     tracing_subscriber::fmt::init();
     let opt = CompilerOption::from_args();
-    let syntax = verilog::load(&opt.input)?;
+    // let syntax = verilog::load(&opt.input)?;
 
-    println!("{syntax:?}");
+    // println!("{syntax:?}");
 
     Ok(())
 }
