@@ -145,7 +145,7 @@ impl PlacedNode {
             .filter(|&pos| world[pos].kind.is_cobble())
             .map(|pos| pos.down())
             .flatten()
-            .map(|pos| world[pos].kind.is_torch())
+            .map(|pos| world[pos].kind.is_torch() && !except.contains(&pos))
             .unwrap_or_default();
 
         let receiving_hard_signal = cardinal
