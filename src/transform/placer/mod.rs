@@ -14,7 +14,7 @@ use crate::graph::world::builder::{PlaceBound, PropagateType};
 use crate::graph::world::WorldGraph;
 use crate::graph::{GraphNode, GraphNodeId, GraphNodeKind};
 use crate::logic::LogicType;
-use crate::world::block::{Block, BlockKind, Direction};
+use crate::world::block::{Block, BlockKind, Direction, RedstoneState};
 use crate::world::position::{DimSize, Position};
 use crate::world::world::World3D;
 
