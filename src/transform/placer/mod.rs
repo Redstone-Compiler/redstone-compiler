@@ -360,16 +360,12 @@ fn generate_inputs(
     world: &World3D,
     kind: BlockKind,
 ) -> Vec<(World3D, Position)> {
-    let input_strategy = [
-        Direction::East,
-        Direction::Bottom,
-        Direction::West,
-        Direction::South,
-        Direction::North,
-    ]
-    .into_iter()
-    .map(|direction| Block { kind, direction })
-    .collect_vec();
+    let mut input_strategy = Direction::iter_direction_without_top()
+        .map(|direction| Block { kind, direction })
+        .collect_vec();
+    if config.greedy_input_generation {
+        input_strategy = input_strategy.into_iter().take(1).collect();
+    }
 
     let place_strategy = vec![
         // x == 0에서 먼저 생성
@@ -378,14 +374,10 @@ fn generate_inputs(
         iproduct!(0..world.size.0, 0..1, 0..world.size.2),
     ];
 
-    let mut generate_strategy = input_strategy
+    let generate_strategy = input_strategy
         .into_iter()
         .cartesian_product(place_strategy)
         .collect_vec();
-
-    if config.greedy_input_generation {
-        generate_strategy = generate_strategy.into_iter().take(1).collect();
-    }
 
     generate_strategy
         .into_iter()
@@ -425,16 +417,9 @@ fn generate_torch_place_and_routes(
     source: Position,
     kind: BlockKind,
 ) -> Vec<(World3D, Position)> {
-    let torch_strategy = [
-        Direction::Bottom,
-        Direction::East,
-        Direction::West,
-        Direction::South,
-        Direction::North,
-    ]
-    .into_iter()
-    .map(|direction| Block { kind, direction })
-    .collect_vec();
+    let torch_strategy = Direction::iter_direction_without_top()
+        .map(|direction| Block { kind, direction })
+        .collect_vec();
 
     let generate_strategy = torch_strategy
         .into_iter()

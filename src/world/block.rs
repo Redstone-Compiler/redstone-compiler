@@ -42,6 +42,17 @@ impl Direction {
             Direction::North => Self::South,
         }
     }
+
+    pub fn iter_direction_without_top() -> impl Iterator<Item = Direction> {
+        [
+            Direction::Bottom,
+            Direction::East,
+            Direction::West,
+            Direction::South,
+            Direction::North,
+        ]
+        .into_iter()
+    }
 }
 
 pub type RedstoneStateType = usize;
