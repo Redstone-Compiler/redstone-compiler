@@ -2,15 +2,12 @@ use std::collections::HashMap;
 
 use itertools::Itertools;
 
+use super::cluster::ClusteredGraph;
+use super::logic::LogicGraph;
+use super::module::{GraphModule, GraphWithSubGraphs};
+use super::world::WorldGraph;
+use super::{Graph, GraphNode, GraphNodeId, SubGraph};
 use crate::graph::module::GraphModulePortTarget;
-
-use super::{
-    cluster::ClusteredGraph,
-    logic::LogicGraph,
-    module::{GraphModule, GraphWithSubGraphs},
-    world::WorldGraph,
-    Graph, GraphNode, GraphNodeId, SubGraph,
-};
 
 #[derive(Default)]
 pub struct GraphvizBuilder<'a> {

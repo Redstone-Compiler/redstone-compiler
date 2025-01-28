@@ -1,12 +1,11 @@
 use std::collections::HashMap;
 
-use crate::{
-    graph::{logic::LogicGraph, world::WorldGraph, Graph, GraphNode, GraphNodeKind},
-    logic::{Logic, LogicType},
-    world::block::BlockKind,
-};
-
 use super::world::WorldGraphTransformer;
+use crate::graph::logic::LogicGraph;
+use crate::graph::world::WorldGraph;
+use crate::graph::{Graph, GraphNode, GraphNodeKind};
+use crate::logic::{Logic, LogicType};
+use crate::world::block::BlockKind;
 
 // for testing Layout vs. Schematic
 #[derive(Default)]
@@ -148,14 +147,12 @@ impl WorldToLogicTransformer {
 mod tests {
     use itertools::Itertools;
 
-    use crate::{
-        graph::{
-            graphviz::ToGraphvizGraph, subgraphs_to_clustered_graph,
-            world::builder::WorldGraphBuilder,
-        },
-        nbt::NBTRoot,
-        transform::{logic::LogicGraphTransformer, world_to_logic::WorldToLogicTransformer},
-    };
+    use crate::graph::graphviz::ToGraphvizGraph;
+    use crate::graph::subgraphs_to_clustered_graph;
+    use crate::graph::world::builder::WorldGraphBuilder;
+    use crate::nbt::NBTRoot;
+    use crate::transform::logic::LogicGraphTransformer;
+    use crate::transform::world_to_logic::WorldToLogicTransformer;
 
     #[test]
     fn unittest_world_to_logic_graph() -> eyre::Result<()> {

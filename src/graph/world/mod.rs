@@ -2,13 +2,11 @@ use std::collections::{HashMap, HashSet};
 
 use itertools::Itertools;
 
-use crate::{
-    graph::GraphNodeKind,
-    utils::Verify,
-    world::{block::BlockKind, position::Position},
-};
-
 use super::{Graph, GraphNodeId};
+use crate::graph::GraphNodeKind;
+use crate::utils::Verify;
+use crate::world::block::BlockKind;
+use crate::world::position::Position;
 
 pub mod builder;
 

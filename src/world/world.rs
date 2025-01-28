@@ -1,9 +1,7 @@
 use std::cmp;
+use std::collections::BTreeMap;
 use std::fmt::Debug;
-use std::{
-    collections::BTreeMap,
-    ops::{Index, IndexMut},
-};
+use std::ops::{Index, IndexMut};
 
 use itertools::Itertools;
 

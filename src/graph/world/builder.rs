@@ -2,16 +2,11 @@ use std::collections::{HashMap, HashSet};
 
 use itertools::Itertools;
 
-use crate::{
-    graph::{Graph, GraphNode, GraphNodeId, GraphNodeKind},
-    world::{
-        block::{BlockKind, Direction},
-        position::Position,
-        world::{World, World3D},
-    },
-};
-
 use super::WorldGraph;
+use crate::graph::{Graph, GraphNode, GraphNodeId, GraphNodeKind};
+use crate::world::block::{BlockKind, Direction};
+use crate::world::position::Position;
+use crate::world::world::{World, World3D};
 
 #[derive(Debug, Clone)]
 pub struct WorldGraphBuilder {
@@ -378,16 +373,11 @@ impl<'a> From<&'a World> for WorldGraph {
 
 #[cfg(test)]
 mod test {
-    use crate::{
-        graph::graphviz::ToGraphvizGraph,
-        world::{
-            block::{Block, BlockKind, Direction},
-            position::{DimSize, Position},
-            world::World,
-        },
-    };
-
     use super::WorldGraphBuilder;
+    use crate::graph::graphviz::ToGraphvizGraph;
+    use crate::world::block::{Block, BlockKind, Direction};
+    use crate::world::position::{DimSize, Position};
+    use crate::world::world::World;
 
     #[test]
     fn unittest_worldgraph_and_gate() {

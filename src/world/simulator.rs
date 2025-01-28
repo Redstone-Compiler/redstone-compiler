@@ -1,10 +1,8 @@
 use std::collections::VecDeque;
 
-use super::{
-    block::{Block, BlockKind, Direction},
-    position::Position,
-    world::{World, World3D},
-};
+use super::block::{Block, BlockKind, Direction};
+use super::position::Position;
+use super::world::{World, World3D};
 
 #[derive(Clone, Debug)]
 enum EventType {
@@ -801,9 +799,9 @@ impl Simulator {
 mod test {
     use std::collections::VecDeque;
 
-    use crate::world::{block::RedstoneState, position::DimSize};
-
     use super::*;
+    use crate::world::block::RedstoneState;
+    use crate::world::position::DimSize;
 
     #[test]
     pub fn unittest_simulator_init_states() {

@@ -1,9 +1,6 @@
+use super::position::{DimSize, Position};
+use super::world::World;
 use crate::graph::GraphNodeId;
-
-use super::{
-    position::{DimSize, Position},
-    world::World,
-};
 
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Direction {
