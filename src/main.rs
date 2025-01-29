@@ -1,3 +1,5 @@
+#![feature(let_chains)]
+
 pub mod circuit;
 pub mod cluster;
 pub mod estimator;

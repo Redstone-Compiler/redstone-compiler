@@ -122,49 +122,11 @@ impl PlacedNode {
     fn has_short(&self, world: &World3D, except: &HashSet<Position>) -> bool {
         assert!(self.block.kind.is_redstone());
 
-        let cardinal = self.position.cardinal();
-
-        let has_nearest_stick_to_redstone = cardinal
-            .iter()
-            .copied()
-            .chain(Some(self.position.up()))
-            .filter(|&pos| world.size.bound_on(pos) && !except.contains(&pos))
-            .any(|pos| world[pos].kind.is_stick_to_redstone());
-
-        let receiving_cardinal_torch_signal = cardinal
-            .iter()
-            .copied()
-            .filter(|&pos| world.size.bound_on(pos) && world[pos].kind.is_cobble())
-            .flat_map(|pos| pos.down())
-            .filter(|&pos| world.size.bound_on(pos) && !except.contains(&pos))
-            .any(|pos| world[pos].kind.is_torch());
-
-        let receiving_bottom_torch_signal = self
-            .position
-            .down()
-            .filter(|&pos| world[pos].kind.is_cobble())
-            .map(|pos| pos.down())
-            .flatten()
-            .map(|pos| world[pos].kind.is_torch() && !except.contains(&pos))
-            .unwrap_or_default();
-
-        let receiving_hard_signal = cardinal
-            .iter()
-            .copied()
-            .filter(|&pos| world.size.bound_on(pos))
-            .flat_map(|pos| pos.down())
-            .filter(|&pos| world.size.bound_on(pos) && !except.contains(&pos))
-            .any(|pos| {
-                // Hard Signal을 보내려면 특정 방향으로 설정되어 있어야 한다.
-                let hard_signal_kind = world[pos].kind.is_repeater() || world[pos].kind.is_switch();
-                let hard_signal_direction = pos.diff(self.position) == world[pos].direction;
-                hard_signal_kind && hard_signal_direction
-            });
-
-        has_nearest_stick_to_redstone
-            || receiving_cardinal_torch_signal
-            || receiving_bottom_torch_signal
-            || receiving_hard_signal
+        PlaceBound::propagated_from(self.position, &self.block.kind, world)
+            .into_iter()
+            .filter(|bound| !except.contains(&bound.position()))
+            .next()
+            .is_some()
     }
 
     fn has_connection_with(&self, world: &World3D, target: Position) -> bool {

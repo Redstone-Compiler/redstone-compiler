@@ -1,8 +1,10 @@
+use strum_macros::{EnumIs, EnumIter};
+
 use super::position::{DimSize, Position};
 use super::world::World;
 use crate::graph::GraphNodeId;
 
-#[derive(Debug, Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Default, EnumIter, EnumIs, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Direction {
     #[default]
     None,
