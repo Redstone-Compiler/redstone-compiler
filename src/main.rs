@@ -14,7 +14,11 @@ pub mod world;
 
 use std::path::PathBuf;
 
+use mimalloc::MiMalloc;
 use structopt::StructOpt;
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "example", about = "An example of StructOpt usage.")]
