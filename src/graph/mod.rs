@@ -89,6 +89,13 @@ impl GraphNodeKind {
             _ => None,
         }
     }
+
+    pub fn as_block(&self) -> Option<&Block> {
+        match self {
+            GraphNodeKind::Block(inner) => Some(inner),
+            _ => unreachable!(),
+        }
+    }
 }
 
 #[derive(Default, Debug, Clone)]
