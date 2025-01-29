@@ -633,19 +633,52 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_component_xor() -> eyre::Result<()> {
+    fn test_generate_component_xor_simple() -> eyre::Result<()> {
+        tracing_subscriber::fmt::init();
+
+        let logic_graph = build_graph_from_stmt("a^b", "c")?.prepare_place()?;
+        println!("{}", logic_graph.to_graphviz());
+
+        let config = LocalPlacerConfig {
+            greedy_input_generation: false,
+            step_sampling_policy: SamplingPolicy::Random(100),
+            route_torch_directly: true,
+            max_route_step: 5,
+            route_step_sampling_policy: SamplingPolicy::Random(100),
+        };
+        let placer = LocalPlacer::new(logic_graph, config)?;
+        let worlds = placer.generate(DimSize(10, 10, 5), None);
+
+        let sampled_worlds = SamplingPolicy::Random(100).sample(worlds);
+        let sample_logic = world3d_to_logic(&sampled_worlds[0])?.prepare_place()?;
+        println!("{}", sample_logic.to_graphviz());
+
+        save_worlds_to_nbt(sampled_worlds, "test/xor-gate-simple.nbt")?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_generate_component_xor_complex() -> eyre::Result<()> {
         tracing_subscriber::fmt::init();
         // rayon::ThreadPoolBuilder::new()
         //     .num_threads(1)
         //     .build_global()
         //     .unwrap();
 
-        let logic_graph = build_graph_from_stmt("a^b", "c")?.prepare_place()?;
-        println!("{}", logic_graph.to_graphviz());
+        // c := (~((a&b)|~a))|(~((a&b)|~b))
+        let logic_graph1 = build_graph_from_stmt("a&b", "c")?;
+        let logic_graph2 = build_graph_from_stmt("(~(c|~a))|(~(c|~b))", "d")?;
+
+        let mut fm = logic_graph1.clone();
+        fm.graph.merge(logic_graph2.graph);
+        println!("{}", fm.to_graphviz());
+
+        let logic_graph = fm.prepare_place()?;
 
         let config = LocalPlacerConfig {
-            greedy_input_generation: true,
-            step_sampling_policy: SamplingPolicy::Random(1000),
+            greedy_input_generation: false,
+            step_sampling_policy: SamplingPolicy::Random(100),
             route_torch_directly: true,
             max_route_step: 3,
             route_step_sampling_policy: SamplingPolicy::Random(100),
@@ -653,12 +686,11 @@ mod tests {
         let placer = LocalPlacer::new(logic_graph, config)?;
         let worlds = placer.generate(DimSize(10, 10, 5), None);
 
-        let sampled_worlds = SamplingPolicy::Random(1).sample(worlds);
-
-        let sample_logic = world3d_to_logic(&sampled_worlds[0])?;
+        let sampled_worlds = SamplingPolicy::Random(100).sample(worlds);
+        let sample_logic = world3d_to_logic(&sampled_worlds[0])?.prepare_place()?;
         println!("{}", sample_logic.to_graphviz());
 
-        save_worlds_to_nbt(sampled_worlds, "test/xor-gate-new.nbt")?;
+        save_worlds_to_nbt(sampled_worlds, "test/xor-gate-complex.nbt")?;
 
         Ok(())
     }
