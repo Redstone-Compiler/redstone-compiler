@@ -26,21 +26,21 @@ impl World {
 #[derive(Clone)]
 pub struct World3D {
     pub size: DimSize,
-    // z, y, x
-    pub map: Vec<Block>,
+    // z, y, z
+    pub map: Vec<Vec<Vec<Block>>>,
 }
 
 impl World3D {
     pub fn new(size: DimSize) -> Self {
         Self {
             size,
-            map: vec![Block::default(); size.0 * size.1 * size.2],
+            map: vec![vec![vec![Block::default(); size.0]; size.1]; size.2],
         }
     }
 
     pub fn iter_pos(&self) -> Vec<Position> {
         let mut result = Vec::new();
-        let DimSize(x, y, z) = self.size;
+        let (z, y, x) = (self.map.len(), self.map[0].len(), self.map[0][1].len());
 
         for z in 0..z {
             for y in 0..y {
@@ -202,10 +202,10 @@ impl<'a> From<&'a World> for World3D {
             block_map.insert(block.0.index(&value.size), &block.1);
         }
 
-        let map: Vec<Block> = (0..value.size.2)
-            .flat_map(|z| {
+        let map: Vec<Vec<Vec<Block>>> = (0..value.size.2)
+            .map(|z| {
                 (0..value.size.1)
-                    .flat_map(|y| {
+                    .map(|y| {
                         (0..value.size.0)
                             .map(|x| {
                                 let pos = PositionIndex(
@@ -217,9 +217,9 @@ impl<'a> From<&'a World> for World3D {
                                     .map(|block| (*block).clone())
                                     .unwrap_or(Block::default())
                             })
-                            .collect_vec()
+                            .collect()
                     })
-                    .collect_vec()
+                    .collect()
             })
             .collect();
 
@@ -243,29 +243,26 @@ impl Index<Position> for World3D {
     type Output = Block;
 
     fn index(&self, index: Position) -> &Self::Output {
-        &self.map[index.2 * self.size.1 * self.size.0 + index.1 * self.size.0 + index.0]
+        &self.map[index.2][index.1][index.0]
     }
 }
 
 impl IndexMut<Position> for World3D {
     fn index_mut(&mut self, index: Position) -> &mut Self::Output {
-        &mut self.map[index.2 * self.size.1 * self.size.0 + index.1 * self.size.0 + index.0]
+        &mut self.map[index.2][index.1][index.0]
     }
 }
 
 impl Debug for World3D {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        for height in 0..self.size.2 {
-            writeln!(f, "h={height}")?;
+        for (height, plane) in self.map.iter().enumerate().rev() {
+            writeln!(f, "h={height:?}")?;
 
-            for y in 0..self.size.1 {
-                let row = height * self.size.1 * self.size.0 + y * self.size.0
-                    ..height * self.size.1 * self.size.0 + (y + 1) * self.size.0;
+            for row in plane.iter().rev() {
                 writeln!(
                     f,
                     "  {}",
-                    self.map[row]
-                        .iter()
+                    row.iter()
                         .map(|block| match block.kind {
                             BlockKind::Air => ".",
                             BlockKind::Cobble { .. } => "c",
