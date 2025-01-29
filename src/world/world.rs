@@ -23,7 +23,7 @@ impl World {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct World3D {
     pub size: DimSize,
     // z, y, z

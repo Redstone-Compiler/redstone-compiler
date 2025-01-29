@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::usize;
+use std::{mem, usize};
 
 use eyre::ensure;
 use indicatif::{ParallelProgressIterator, ProgressStyle};
@@ -151,6 +151,8 @@ pub struct LocalPlacer {
 pub struct LocalPlacerConfig {
     greedy_input_generation: bool,
     step_sampling_policy: SamplingPolicy,
+    // dealloc 시간을 줄이기 위해 generation들을 leak 시킨다
+    leak_sampling: bool,
     // torch place시 input과 direct로 연결되도록 강제한다.
     route_torch_directly: bool,
     // 최대 routing 거리를 지정한다.
@@ -174,6 +176,19 @@ impl SamplingPolicy {
             SamplingPolicy::Random(count) => src
                 .into_iter()
                 .choose_multiple(&mut Self::placer_rng(), count),
+        }
+    }
+
+    pub fn sample_with_taking<T: Clone + Default>(self, src: &mut Vec<T>) -> Vec<T> {
+        match self {
+            SamplingPolicy::None => src.to_vec(),
+            SamplingPolicy::Take(count) => src.iter_mut().take(count).map(mem::take).collect(),
+            SamplingPolicy::Random(count) => src
+                .iter_mut()
+                .choose_multiple(&mut Self::placer_rng(), count)
+                .into_iter()
+                .map(mem::take)
+                .collect(),
         }
     }
 
@@ -234,7 +249,7 @@ impl LocalPlacer {
             let next_len = next_queue.len();
 
             // 2. Sampling
-            queue = self.config.step_sampling_policy.sample(next_queue);
+            queue = self.sample(next_queue);
 
             step += 1;
             tracing::info!(
@@ -316,6 +331,17 @@ impl LocalPlacer {
                 _ => unreachable!(),
             },
             _ => unreachable!(),
+        }
+    }
+
+    fn sample(&self, queue: PlacerQueue) -> PlacerQueue {
+        if self.config.leak_sampling && queue.len() > 10_000 {
+            // TODO: deallocate on other thread
+            self.config
+                .step_sampling_policy
+                .sample_with_taking(Box::leak(Box::new(queue)))
+        } else {
+            self.config.step_sampling_policy.sample(queue)
         }
     }
 }
@@ -609,6 +635,7 @@ mod tests {
         let config = LocalPlacerConfig {
             greedy_input_generation: true,
             step_sampling_policy: SamplingPolicy::Random(1000),
+            leak_sampling: false,
             route_torch_directly: true,
             max_route_step: 1,
             route_step_sampling_policy: SamplingPolicy::Random(100),
@@ -642,6 +669,7 @@ mod tests {
         let config = LocalPlacerConfig {
             greedy_input_generation: false,
             step_sampling_policy: SamplingPolicy::Random(100),
+            leak_sampling: false,
             route_torch_directly: true,
             max_route_step: 5,
             route_step_sampling_policy: SamplingPolicy::Random(100),
@@ -678,10 +706,11 @@ mod tests {
 
         let config = LocalPlacerConfig {
             greedy_input_generation: false,
-            step_sampling_policy: SamplingPolicy::Random(100),
+            step_sampling_policy: SamplingPolicy::Random(1000),
+            leak_sampling: true,
             route_torch_directly: true,
             max_route_step: 3,
-            route_step_sampling_policy: SamplingPolicy::Random(100),
+            route_step_sampling_policy: SamplingPolicy::Random(1000),
         };
         let placer = LocalPlacer::new(logic_graph, config)?;
         let worlds = placer.generate(DimSize(10, 10, 5), None);
