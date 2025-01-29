@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use itertools::Itertools;
+use strum::IntoEnumIterator;
 
 use super::WorldGraph;
 use crate::graph::{Graph, GraphNode, GraphNodeId, GraphNodeKind};
@@ -43,6 +44,8 @@ impl PlaceBound {
         world.size.bound_on(self.position())
     }
 
+    // Signal을 보낼 수 있는 블록들을 탐색
+    // 탐색 지점에 어떤 블록이 있는지는 검사하지 않음 (이 검사에는 propagate_to를 사용)
     pub fn propagation_bound(&self, kind: &BlockKind, world: Option<&World3D>) -> Vec<PlaceBound> {
         let dir = self.direction();
         let pos = self.position();
@@ -149,6 +152,7 @@ impl PlaceBound {
         }
     }
 
+    // Signal을 받은 경우 어디에다 전파할 것인지 탐색
     pub fn propagate_to(&self, world: &World3D) -> Vec<(Direction, Position)> {
         let propagate_type = self.propagation_type();
         let pos = self.position();
@@ -231,6 +235,75 @@ impl PlaceBound {
             }
             BlockKind::Piston { .. } => todo!(),
         }
+    }
+
+    // Signal을 받을 수 있는 블록들을 탐색
+    pub fn propagated_from(pos_src: Position, kind: &BlockKind, world: &World3D) -> Vec<Self> {
+        let mut result = Vec::new();
+        for dir in Direction::iter().filter(|dir| !dir.is_none()) {
+            let Some(pos) = pos_src.walk(dir) else {
+                continue;
+            };
+
+            if !world.size.bound_on(pos) {
+                continue;
+            }
+
+            match kind {
+                BlockKind::Redstone { .. } => {
+                    // Stick to Redstone
+                    if (dir.is_cardinal() || dir.is_top()) && world[pos].kind.is_stick_to_redstone()
+                    {
+                        result.push(Self(PropagateType::Soft, pos, dir.inverse()));
+                    }
+
+                    // Cobble
+                    if world[pos].kind.is_cobble() {
+                        let hard_propagation = Self::propagated_from(pos, &world[pos].kind, world)
+                            .into_iter()
+                            .filter(|bound| {
+                                bound.position() != pos
+                                    && matches!(bound.propagation_type(), PropagateType::Hard)
+                            });
+
+                        result.extend(hard_propagation.map(|bound| {
+                            Self(PropagateType::Soft, bound.position(), bound.direction())
+                        }));
+                    }
+                }
+                BlockKind::Cobble { .. } => match world[pos].kind {
+                    BlockKind::Repeater { .. } | BlockKind::Switch { .. } => {
+                        if dir.is_cardinal() && world[pos].direction == dir.inverse() {
+                            result.push(Self(PropagateType::Hard, pos, dir.inverse()));
+                        }
+                    }
+                    BlockKind::Redstone { state, .. } => {
+                        if (dir.is_cardinal() || dir.is_top())
+                            && pos
+                                .cardinal_redstone(state)
+                                .into_iter()
+                                .any(|pos_redstone| pos_redstone == pos)
+                        {
+                            result.push(Self(PropagateType::Soft, pos, dir.inverse()));
+                        }
+                    }
+                    BlockKind::Torch { .. } => {
+                        if dir.is_bottom() {
+                            result.push(Self(PropagateType::Hard, pos, dir.inverse()));
+                        }
+                    }
+                    _ => (),
+                },
+                BlockKind::Torch { .. } => todo!(),
+                BlockKind::Repeater { .. } => todo!(),
+                BlockKind::Piston { .. } => todo!(),
+                BlockKind::RedstoneBlock => todo!(),
+                BlockKind::Switch { .. } => todo!(),
+                BlockKind::Air => (),
+            }
+        }
+
+        result
     }
 }
 

@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::fmt::Display;
 
 use itertools::Itertools;
 use petgraph::stable_graph::NodeIndex;
@@ -97,6 +98,20 @@ pub struct GraphNode {
     pub inputs: Vec<GraphNodeId>,
     pub outputs: Vec<GraphNodeId>,
     pub tag: String,
+}
+
+impl Display for GraphNode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "N{} {:?} := {} {:?} {}",
+            self.id,
+            self.outputs,
+            self.kind.name(),
+            self.inputs,
+            self.tag
+        )
+    }
 }
 
 impl GraphNode {

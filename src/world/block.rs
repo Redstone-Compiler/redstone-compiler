@@ -1,8 +1,10 @@
+use strum_macros::{EnumIs, EnumIter};
+
 use super::position::{DimSize, Position};
 use super::world::World;
 use crate::graph::GraphNodeId;
 
-#[derive(Debug, Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Default, EnumIter, EnumIs, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Direction {
     #[default]
     None,
@@ -41,6 +43,17 @@ impl Direction {
             Direction::South => Self::North,
             Direction::North => Self::South,
         }
+    }
+
+    pub fn iter_direction_without_top() -> impl Iterator<Item = Direction> {
+        [
+            Direction::Bottom,
+            Direction::East,
+            Direction::West,
+            Direction::South,
+            Direction::North,
+        ]
+        .into_iter()
     }
 }
 
