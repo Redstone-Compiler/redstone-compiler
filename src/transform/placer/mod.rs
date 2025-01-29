@@ -304,7 +304,13 @@ impl LocalPlacer {
                         positions[&node.inputs[1]],
                     )
                     .into_iter()
-                    .map(|(worlds, positions)| (worlds, positions.last().copied().unwrap()))
+                    .flat_map(|(world, positions)| {
+                        // TODO: Optimize using Cow
+                        positions
+                            .into_iter()
+                            .map(|pos| (world.clone(), pos))
+                            .collect_vec()
+                    })
                     .collect()
                 }
                 _ => unreachable!(),
