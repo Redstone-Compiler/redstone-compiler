@@ -602,7 +602,23 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_component_and() -> eyre::Result<()> {
+    fn test_generate_component_and_shortest() -> eyre::Result<()> {
+        let logic_graph = build_graph_from_stmt("a&b", "c")?.prepare_place()?;
+        let config = LocalPlacerConfig {
+            greedy_input_generation: true,
+            step_sampling_policy: SamplingPolicy::Random(1000),
+            route_torch_directly: true,
+            max_route_step: 1,
+            route_step_sampling_policy: SamplingPolicy::Random(100),
+        };
+        let placer = LocalPlacer::new(logic_graph, config)?;
+        let worlds = placer.generate(DimSize(10, 10, 5), None);
+        assert!(!worlds.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn test_generate_component_xor() -> eyre::Result<()> {
         tracing_subscriber::fmt::init();
         // rayon::ThreadPoolBuilder::new()
         //     .num_threads(1)
