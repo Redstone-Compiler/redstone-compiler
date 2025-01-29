@@ -14,7 +14,7 @@ use crate::graph::world::builder::{PlaceBound, PropagateType};
 use crate::graph::world::WorldGraph;
 use crate::graph::{GraphNode, GraphNodeId, GraphNodeKind};
 use crate::logic::LogicType;
-use crate::world::block::{Block, BlockKind, Direction, RedstoneState};
+use crate::world::block::{Block, BlockKind, Direction};
 use crate::world::position::{DimSize, Position};
 use crate::world::world::World3D;
 
@@ -230,7 +230,7 @@ impl LocalPlacer {
             let prev_len = queue.len();
 
             // 1. Generate places and routes
-            let next_queue = self.do_step(step, &queue);
+            let next_queue = self.do_step(step, queue);
             let next_len = next_queue.len();
 
             // 2. Sampling
@@ -247,7 +247,7 @@ impl LocalPlacer {
         queue.into_iter().map(|(world, _)| world).collect()
     }
 
-    fn do_step(&self, step: usize, queue: &PlacerQueue) -> PlacerQueue {
+    fn do_step(&self, step: usize, queue: PlacerQueue) -> PlacerQueue {
         let node = self.graph.find_node_by_id(self.visit_orders[step]).unwrap();
         tracing::info!("[{}/{}] {node}", step + 1, self.visit_orders.len());
 
@@ -256,7 +256,7 @@ impl LocalPlacer {
             .panic_fuse()
             .progress_with_style(progress_style())
             .flat_map(|(world, pos)| {
-                self.generate_place_and_route(node, &world, &pos)
+                self.generate_place_and_route(node, world, &pos)
                     .into_iter()
                     .map(|(world, place_position)| {
                         let mut nodes_position = pos.clone();
@@ -271,27 +271,25 @@ impl LocalPlacer {
     fn generate_place_and_route(
         &self,
         node: &GraphNode,
-        world: &World3D,
+        world: World3D,
         positions: &HashMap<GraphNodeId, Position>,
     ) -> Vec<(World3D, Position)> {
         match node.kind {
             GraphNodeKind::Input(_) => input_node_kind()
                 .into_iter()
-                .flat_map(|kind| generate_inputs(&self.config, world, kind))
+                .flat_map(|kind| generate_inputs(&self.config, &world, kind))
                 .collect(),
-            GraphNodeKind::Output(_) => output_node_kind()
-                .into_iter()
-                .flat_map(|kind| {
-                    generate_place_and_routes(&self.config, world, positions[&node.inputs[0]], kind)
-                })
-                .collect(),
+            GraphNodeKind::Output(_) => {
+                // Noop
+                vec![(world.clone(), positions[&node.inputs[0]])]
+            }
             GraphNodeKind::Logic(logic) => match logic.logic_type {
                 LogicType::Not => not_node_kind()
                     .into_iter()
                     .flat_map(|kind| {
                         generate_place_and_routes(
                             &self.config,
-                            world,
+                            &world,
                             positions[&node.inputs[0]],
                             kind,
                         )
@@ -301,12 +299,18 @@ impl LocalPlacer {
                     assert_eq!(node.inputs.len(), 2);
                     generate_or_routes(
                         &self.config,
-                        world,
+                        &world,
                         positions[&node.inputs[0]],
                         positions[&node.inputs[1]],
                     )
                     .into_iter()
-                    .map(|(worlds, positions)| (worlds, positions.last().copied().unwrap()))
+                    .flat_map(|(world, positions)| {
+                        // TODO: Optimize using Cow
+                        positions
+                            .into_iter()
+                            .map(|pos| (world.clone(), pos))
+                            .collect_vec()
+                    })
                     .collect()
                 }
                 _ => unreachable!(),
@@ -338,14 +342,6 @@ fn input_node_kind() -> Vec<BlockKind> {
         // },
         // BlockKind::RedstoneBlock,
     ]
-}
-
-fn output_node_kind() -> Vec<BlockKind> {
-    vec![BlockKind::Redstone {
-        on_count: 0,
-        state: RedstoneState::None as usize,
-        strength: 0,
-    }]
 }
 
 fn not_node_kind() -> Vec<BlockKind> {
@@ -500,6 +496,7 @@ fn generate_routes_to_cobble(
         .collect()
 }
 
+// 두 torch를 연결하는 redstone routes를 생성한다.
 fn generate_or_routes(
     config: &LocalPlacerConfig,
     world: &World3D,
@@ -595,42 +592,105 @@ mod tests {
     use crate::graph::graphviz::ToGraphvizGraph;
     use crate::graph::logic::builder::LogicGraphBuilder;
     use crate::graph::logic::LogicGraph;
+    use crate::graph::world::WorldGraph;
     use crate::nbt::{NBTRoot, ToNBT};
     use crate::transform::placer::{LocalPlacer, LocalPlacerConfig, SamplingPolicy};
+    use crate::transform::world_to_logic::WorldToLogicTransformer;
     use crate::world::position::DimSize;
-    use crate::world::world::World3D;
+    use crate::world::world::{World, World3D};
 
     fn build_graph_from_stmt(stmt: &str, output: &str) -> eyre::Result<LogicGraph> {
         LogicGraphBuilder::new(stmt.to_string()).build(output.to_string())
     }
 
     #[test]
-    fn test_generate_component_and() -> eyre::Result<()> {
+    fn test_generate_component_and_shortest() -> eyre::Result<()> {
+        let logic_graph = build_graph_from_stmt("a&b", "c")?.prepare_place()?;
+        let config = LocalPlacerConfig {
+            greedy_input_generation: true,
+            step_sampling_policy: SamplingPolicy::Random(1000),
+            route_torch_directly: true,
+            max_route_step: 1,
+            route_step_sampling_policy: SamplingPolicy::Random(100),
+        };
+        let placer = LocalPlacer::new(logic_graph, config)?;
+        let worlds = placer.generate(DimSize(10, 10, 5), None);
+        assert!(!worlds.is_empty());
+        Ok(())
+    }
+
+    fn world3d_to_logic(world3d: &World3D) -> eyre::Result<LogicGraph> {
+        let world = World::from(world3d);
+        let world_graph = WorldGraph::from(&world);
+        WorldToLogicTransformer::new(world_graph)?.transform()
+    }
+
+    fn save_worlds_to_nbt(worlds: Vec<World3D>, path: &str) -> eyre::Result<()> {
+        let concated_world = World3D::concat_tiled(worlds);
+        let nbt: NBTRoot = concated_world.to_nbt();
+        nbt.save(path);
+        Ok(())
+    }
+
+    #[test]
+    fn test_generate_component_xor_simple() -> eyre::Result<()> {
+        tracing_subscriber::fmt::init();
+
+        let logic_graph = build_graph_from_stmt("a^b", "c")?.prepare_place()?;
+        println!("{}", logic_graph.to_graphviz());
+
+        let config = LocalPlacerConfig {
+            greedy_input_generation: false,
+            step_sampling_policy: SamplingPolicy::Random(100),
+            route_torch_directly: true,
+            max_route_step: 5,
+            route_step_sampling_policy: SamplingPolicy::Random(100),
+        };
+        let placer = LocalPlacer::new(logic_graph, config)?;
+        let worlds = placer.generate(DimSize(10, 10, 5), None);
+
+        let sampled_worlds = SamplingPolicy::Random(100).sample(worlds);
+        let sample_logic = world3d_to_logic(&sampled_worlds[0])?.prepare_place()?;
+        println!("{}", sample_logic.to_graphviz());
+
+        save_worlds_to_nbt(sampled_worlds, "test/xor-gate-simple.nbt")?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_generate_component_xor_complex() -> eyre::Result<()> {
         tracing_subscriber::fmt::init();
         // rayon::ThreadPoolBuilder::new()
         //     .num_threads(1)
         //     .build_global()
         //     .unwrap();
 
-        let logic_graph = build_graph_from_stmt("a&b", "c")?.prepare_place()?;
-        println!("{}", logic_graph.to_graphviz());
+        // c := (~((a&b)|~a))|(~((a&b)|~b))
+        let logic_graph1 = build_graph_from_stmt("a&b", "c")?;
+        let logic_graph2 = build_graph_from_stmt("(~(c|~a))|(~(c|~b))", "d")?;
+
+        let mut fm = logic_graph1.clone();
+        fm.graph.merge(logic_graph2.graph);
+        println!("{}", fm.to_graphviz());
+
+        let logic_graph = fm.prepare_place()?;
 
         let config = LocalPlacerConfig {
-            greedy_input_generation: true,
+            greedy_input_generation: false,
             step_sampling_policy: SamplingPolicy::Random(100),
             route_torch_directly: true,
             max_route_step: 3,
             route_step_sampling_policy: SamplingPolicy::Random(100),
         };
         let placer = LocalPlacer::new(logic_graph, config)?;
-        let worlds = placer.generate(DimSize(10, 10, 5), Some(6));
+        let worlds = placer.generate(DimSize(10, 10, 5), None);
 
         let sampled_worlds = SamplingPolicy::Random(100).sample(worlds);
+        let sample_logic = world3d_to_logic(&sampled_worlds[0])?.prepare_place()?;
+        println!("{}", sample_logic.to_graphviz());
 
-        let ww = World3D::concat_tiled(sampled_worlds);
-
-        let nbt: NBTRoot = ww.to_nbt();
-        nbt.save("test/and-gate-new.nbt");
+        save_worlds_to_nbt(sampled_worlds, "test/xor-gate-complex.nbt")?;
 
         Ok(())
     }
