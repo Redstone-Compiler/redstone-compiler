@@ -135,14 +135,20 @@ impl WorldGraphTransformer {
     }
 
     pub fn remove_redstone(&mut self) {
-        self.remove_specific_kind_of_block(|kind| matches!(&kind, BlockKind::Redstone { .. }));
+        self.remove_specific_kind_of_block(
+            |kind| matches!(&kind, BlockKind::Redstone { .. }),
+            true,
+        );
     }
 
     pub fn remove_repeater(&mut self) {
-        self.remove_specific_kind_of_block(|kind| matches!(&kind, BlockKind::Repeater { .. }));
+        self.remove_specific_kind_of_block(
+            |kind| matches!(&kind, BlockKind::Repeater { .. }),
+            true,
+        );
     }
 
-    fn remove_specific_kind_of_block<F>(&mut self, filter: F)
+    fn remove_specific_kind_of_block<F>(&mut self, filter: F, except_output: bool)
     where
         F: Fn(&BlockKind) -> bool,
     {
@@ -151,6 +157,7 @@ impl WorldGraphTransformer {
             .graph
             .nodes
             .iter()
+            .filter(|node| !except_output || !node.outputs.is_empty())
             .filter(|node| matches!(&node.kind, GraphNodeKind::Block(block) if filter(&block.kind)))
             .map(|node| node.id)
             .collect_vec();
