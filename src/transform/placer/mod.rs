@@ -592,10 +592,12 @@ mod tests {
     use crate::graph::graphviz::ToGraphvizGraph;
     use crate::graph::logic::builder::LogicGraphBuilder;
     use crate::graph::logic::LogicGraph;
+    use crate::graph::world::WorldGraph;
     use crate::nbt::{NBTRoot, ToNBT};
     use crate::transform::placer::{LocalPlacer, LocalPlacerConfig, SamplingPolicy};
+    use crate::transform::world_to_logic::WorldToLogicTransformer;
     use crate::world::position::DimSize;
-    use crate::world::world::World3D;
+    use crate::world::world::{World, World3D};
 
     fn build_graph_from_stmt(stmt: &str, output: &str) -> eyre::Result<LogicGraph> {
         LogicGraphBuilder::new(stmt.to_string()).build(output.to_string())
@@ -617,6 +619,19 @@ mod tests {
         Ok(())
     }
 
+    fn world3d_to_logic(world3d: &World3D) -> eyre::Result<LogicGraph> {
+        let world = World::from(world3d);
+        let world_graph = WorldGraph::from(&world);
+        WorldToLogicTransformer::new(world_graph)?.transform()
+    }
+
+    fn save_worlds_to_nbt(worlds: Vec<World3D>, path: &str) -> eyre::Result<()> {
+        let concated_world = World3D::concat_tiled(worlds);
+        let nbt: NBTRoot = concated_world.to_nbt();
+        nbt.save(path);
+        Ok(())
+    }
+
     #[test]
     fn test_generate_component_xor() -> eyre::Result<()> {
         tracing_subscriber::fmt::init();
@@ -625,12 +640,12 @@ mod tests {
         //     .build_global()
         //     .unwrap();
 
-        let logic_graph = build_graph_from_stmt("a&b", "c")?.prepare_place()?;
+        let logic_graph = build_graph_from_stmt("a^b", "c")?.prepare_place()?;
         println!("{}", logic_graph.to_graphviz());
 
         let config = LocalPlacerConfig {
             greedy_input_generation: true,
-            step_sampling_policy: SamplingPolicy::Random(100),
+            step_sampling_policy: SamplingPolicy::Random(1000),
             route_torch_directly: true,
             max_route_step: 3,
             route_step_sampling_policy: SamplingPolicy::Random(100),
@@ -638,12 +653,12 @@ mod tests {
         let placer = LocalPlacer::new(logic_graph, config)?;
         let worlds = placer.generate(DimSize(10, 10, 5), None);
 
-        let sampled_worlds = SamplingPolicy::Random(100).sample(worlds);
+        let sampled_worlds = SamplingPolicy::Random(1).sample(worlds);
 
-        let ww = World3D::concat_tiled(sampled_worlds);
+        let sample_logic = world3d_to_logic(&sampled_worlds[0])?;
+        println!("{}", sample_logic.to_graphviz());
 
-        let nbt: NBTRoot = ww.to_nbt();
-        nbt.save("test/and-gate-new.nbt");
+        save_worlds_to_nbt(sampled_worlds, "test/xor-gate-new.nbt")?;
 
         Ok(())
     }

@@ -360,6 +360,7 @@ impl WorldGraphBuilder {
             let propagation_targets = bound.propagation_bound(&block.kind, Some(&self.world));
             let mut visits = propagation_targets
                 .into_iter()
+                .filter(|bound| self.world.size.bound_on(bound.position()))
                 .map(|bound| bound.propagate_to(&self.world))
                 .flatten()
                 .collect_vec();

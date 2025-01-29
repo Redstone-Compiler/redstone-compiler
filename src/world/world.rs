@@ -53,11 +53,11 @@ impl World3D {
         result
     }
 
-    pub fn iter_block(&self) -> Vec<(Position, &Block)> {
+    pub fn iter_block(&self) -> Vec<(Position, Block)> {
         self.iter_pos()
             .into_iter()
             .filter(|&pos| !self[pos].kind.is_air())
-            .map(|pos| (pos, &self[pos]))
+            .map(|pos| (pos, self[pos]))
             .collect_vec()
     }
 
@@ -226,6 +226,15 @@ impl<'a> From<&'a World> for World3D {
         Self {
             size: value.size,
             map,
+        }
+    }
+}
+
+impl<'a> From<&'a World3D> for World {
+    fn from(value: &'a World3D) -> Self {
+        Self {
+            size: value.size,
+            blocks: value.iter_block(),
         }
     }
 }
