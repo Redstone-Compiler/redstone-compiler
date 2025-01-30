@@ -61,6 +61,10 @@ impl PlacedNode {
         self.block.kind.is_stick_to_redstone() || self.block.kind.is_repeater()
     }
 
+    pub fn is_diode(&self) -> bool {
+        self.block.kind.is_switch() || self.block.kind.is_torch() || self.block.kind.is_repeater()
+    }
+
     // signal을 보낼 수 있는 부분들의 위치를 반환합니다.
     pub fn propagation_bound(&self, world: Option<&World3D>) -> Vec<PlaceBound> {
         PlaceBound(PropagateType::Soft, self.position, self.block.direction)
@@ -585,7 +589,7 @@ fn generate_or_routes_init_states(
 ) -> Vec<(World3D, Vec<Position>, Vec<PlaceBound>)> {
     let from_node = PlacedNode::new(from, world[from]);
     let to_node = PlacedNode::new(to, world[to]);
-    assert!(from_node.is_propagation_target() && to_node.is_propagation_target());
+    assert!(from_node.is_diode() && to_node.is_diode());
 
     let boolean_comb = [false, true];
 
