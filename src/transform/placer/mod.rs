@@ -581,9 +581,11 @@ fn place_redstone_with_cobble(
     let mut new_world = world.clone();
     let cobble_pos = bound.position().walk(Direction::Bottom)?;
     let cobble_node = PlacedNode::new_cobble(cobble_pos);
-    if cobble_node.has_conflict(&new_world, &Default::default()) {
+    if cobble_node.has_conflict(&world, &Default::default()) {
         return None;
     }
+
+    let mut new_world = world.clone();
     place_node(&mut new_world, cobble_node);
 
     let bound_pos = bound.position();
