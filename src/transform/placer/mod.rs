@@ -66,6 +66,10 @@ impl PlacedNode {
             .propagation_bound(&self.block.kind, world)
     }
 
+    fn propagated_from(&self, world: &World3D) -> Vec<PlaceBound> {
+        PlaceBound::propagated_from(self.position, &self.block.kind, world)
+    }
+
     pub fn has_conflict(&self, world: &World3D, except: &HashSet<Position>) -> bool {
         if !world.size.bound_on(self.position) {
             return true;
@@ -122,7 +126,7 @@ impl PlacedNode {
     fn has_short(&self, world: &World3D, except: &HashSet<Position>) -> bool {
         assert!(self.block.kind.is_redstone());
 
-        PlaceBound::propagated_from(self.position, &self.block.kind, world)
+        self.propagated_from(world)
             .into_iter()
             .filter(|bound| !except.contains(&bound.position()))
             .next()
@@ -133,11 +137,9 @@ impl PlacedNode {
         assert!(self.block.kind.is_redstone());
         assert!(world[target].kind.is_stick_to_redstone());
 
-        self.position
-            .cardinal()
+        self.propagated_from(world)
             .into_iter()
-            .chain(Some(self.position.up()))
-            .any(|pos| pos == target)
+            .any(|bound| bound.position() == target)
     }
 }
 
