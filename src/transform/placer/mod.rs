@@ -609,6 +609,8 @@ fn generate_or_routes_init_states(
                 from.up()
                     .cardinal()
                     .into_iter()
+                    // Cobble 위쪽에 redstone을 배치하는 케이스
+                    .chain(Some(from.up().up()))
                     .map(|pos| PlaceBound(PropagateType::Soft, pos, pos.diff(from)))
                     .collect_vec()
             } else {
