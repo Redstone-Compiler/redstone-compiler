@@ -548,6 +548,7 @@ fn generate_or_routes(
             let prev_pos = prevs.last().copied().unwrap();
             for (new_world, redstone_node) in bounds
                 .into_iter()
+                .filter(|bound| world.size.bound_on(bound.position()))
                 .flat_map(|bound| place_redstone_with_cobble(&world, bound, prev_pos, to))
             {
                 let new_prevs = prevs
