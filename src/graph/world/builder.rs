@@ -272,8 +272,13 @@ impl PlaceBound {
                     }
                 }
                 BlockKind::Cobble { .. } => match world[pos].kind {
-                    BlockKind::Repeater { .. } | BlockKind::Switch { .. } => {
+                    BlockKind::Repeater { .. } => {
                         if dir.is_cardinal() && world[pos].direction == dir.inverse() {
+                            result.push(Self(PropagateType::Hard, pos, dir.inverse()));
+                        }
+                    }
+                    BlockKind::Switch { .. } => {
+                        if dir.is_cardinal() && world[pos].direction == dir {
                             result.push(Self(PropagateType::Hard, pos, dir.inverse()));
                         }
                     }
