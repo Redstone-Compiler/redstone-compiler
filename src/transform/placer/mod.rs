@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::{mem, usize};
 
@@ -60,10 +61,18 @@ impl PlacedNode {
         self.block.kind.is_stick_to_redstone() || self.block.kind.is_repeater()
     }
 
+    pub fn is_diode(&self) -> bool {
+        self.block.kind.is_switch() || self.block.kind.is_torch() || self.block.kind.is_repeater()
+    }
+
     // signal을 보낼 수 있는 부분들의 위치를 반환합니다.
     pub fn propagation_bound(&self, world: Option<&World3D>) -> Vec<PlaceBound> {
         PlaceBound(PropagateType::Soft, self.position, self.block.direction)
             .propagation_bound(&self.block.kind, world)
+    }
+
+    fn propagated_from(&self, world: &World3D) -> Vec<PlaceBound> {
+        PlaceBound::propagated_from(self.position, &self.block.kind, world)
     }
 
     pub fn has_conflict(&self, world: &World3D, except: &HashSet<Position>) -> bool {
@@ -104,6 +113,18 @@ impl PlacedNode {
                 return true;
             }
 
+            // 재귀를 이르키는 경우
+            if world[bottom].kind.is_torch()
+                && !world[bottom].direction.is_bottom()
+                && self.position.cardinal().into_iter().any(|pos| {
+                    world.size.bound_on(pos)
+                        && world[pos].kind.is_redstone()
+                        && self.position.diff(pos) == world[bottom].direction
+                })
+            {
+                return true;
+            }
+
             // 레드스톤을 끊어버리는 경우는 예외 케이스로 반영하고 싶이 않아서 except는 여기서 체크
             if except.contains(&bottom) {
                 return false;
@@ -122,7 +143,7 @@ impl PlacedNode {
     fn has_short(&self, world: &World3D, except: &HashSet<Position>) -> bool {
         assert!(self.block.kind.is_redstone());
 
-        PlaceBound::propagated_from(self.position, &self.block.kind, world)
+        self.propagated_from(world)
             .into_iter()
             .filter(|bound| !except.contains(&bound.position()))
             .next()
@@ -133,11 +154,9 @@ impl PlacedNode {
         assert!(self.block.kind.is_redstone());
         assert!(world[target].kind.is_stick_to_redstone());
 
-        self.position
-            .cardinal()
+        self.propagated_from(world)
             .into_iter()
-            .chain(Some(self.position.up()))
-            .any(|pos| pos == target)
+            .any(|bound| bound.position() == target)
     }
 }
 
@@ -197,7 +216,7 @@ impl SamplingPolicy {
     }
 }
 
-pub const K_MAX_LOCAL_PLACE_NODE_COUNT: usize = 25;
+pub const K_MAX_LOCAL_PLACE_NODE_COUNT: usize = 40;
 
 type PlacerQueue = Vec<(World3D, HashMap<GraphNodeId, Position>)>;
 
@@ -529,23 +548,17 @@ fn generate_or_routes(
     from: Position,
     to: Position,
 ) -> Vec<(World3D, Vec<Position>)> {
-    let from_node = PlacedNode::new(from, world[from]);
-    let to_node = PlacedNode::new(to, world[to]);
-    assert!(from_node.is_propagation_target() && to_node.is_propagation_target());
-
-    let first_bound = from_node.propagation_bound(Some(world));
-
-    let mut queue = vec![(world.clone(), vec![from], first_bound)];
+    let mut queue = generate_or_routes_init_states(world, from, to);
     let mut candidates = Vec::new();
     let mut step = 0;
 
-    // TODO: torch의 위쪽으로 전파할 수 있는 경우도 고려
     while step < config.max_route_step && !queue.is_empty() {
         let mut next_queue = vec![];
         for (world, prevs, bounds) in queue {
             let prev_pos = prevs.last().copied().unwrap();
             for (new_world, redstone_node) in bounds
                 .into_iter()
+                .filter(|bound| world.size.bound_on(bound.position()))
                 .flat_map(|bound| place_redstone_with_cobble(&world, bound, prev_pos, to))
             {
                 let new_prevs = prevs
@@ -569,18 +582,72 @@ fn generate_or_routes(
     candidates
 }
 
+fn generate_or_routes_init_states(
+    world: &World3D,
+    from: Position,
+    to: Position,
+) -> Vec<(World3D, Vec<Position>, Vec<PlaceBound>)> {
+    let from_node = PlacedNode::new(from, world[from]);
+    let to_node = PlacedNode::new(to, world[to]);
+    assert!(from_node.is_diode() && to_node.is_diode());
+
+    let boolean_comb = [false, true];
+
+    boolean_comb
+        .iter()
+        .cartesian_product(boolean_comb.iter())
+        .flat_map(|(input_top_cobble, output_top_cobble)| {
+            let mut new_world = Cow::Borrowed(world);
+
+            if *input_top_cobble {
+                let cobble_node = try_generate_cobble_node(world, from.up(), &[from])?;
+                place_node(new_world.to_mut(), cobble_node);
+            }
+
+            if *output_top_cobble {
+                let cobble_node = try_generate_cobble_node(world, to.up(), &[to])?;
+                place_node(new_world.to_mut(), cobble_node);
+            }
+
+            let bounds = if *input_top_cobble {
+                from.up()
+                    .cardinal()
+                    .into_iter()
+                    // Cobble 위쪽에 redstone을 배치하는 케이스
+                    .chain(Some(from.up().up()))
+                    .map(|pos| PlaceBound(PropagateType::Soft, pos, pos.diff(from)))
+                    .collect_vec()
+            } else {
+                from_node.propagation_bound(Some(&world))
+            };
+
+            Some((new_world.into_owned(), vec![from], bounds))
+        })
+        .collect()
+}
+
+fn try_generate_cobble_node(
+    world: &World3D,
+    cobble_pos: Position,
+    except: &[Position],
+) -> Option<PlacedNode> {
+    let cobble_node = PlacedNode::new_cobble(cobble_pos);
+    if !cobble_node.has_conflict(&world, &except.into_iter().copied().collect()) {
+        Some(cobble_node)
+    } else {
+        None
+    }
+}
+
 fn place_redstone_with_cobble(
     world: &World3D,
     bound: PlaceBound,
     prev: Position,
     to: Position,
 ) -> Option<(World3D, PlacedNode)> {
-    let mut new_world = world.clone();
     let cobble_pos = bound.position().walk(Direction::Bottom)?;
-    let cobble_node = PlacedNode::new_cobble(cobble_pos);
-    if cobble_node.has_conflict(&new_world, &Default::default()) {
-        return None;
-    }
+    let cobble_node = try_generate_cobble_node(world, cobble_pos, &[])?;
+    let mut new_world = world.clone();
     place_node(&mut new_world, cobble_node);
 
     let bound_pos = bound.position();
@@ -686,14 +753,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn test_generate_component_xor_complex() -> eyre::Result<()> {
-        tracing_subscriber::fmt::init();
-        // rayon::ThreadPoolBuilder::new()
-        //     .num_threads(1)
-        //     .build_global()
-        //     .unwrap();
-
+    fn buffered_xor_graph() -> eyre::Result<LogicGraph> {
         // c := (~((a&b)|~a))|(~((a&b)|~b))
         let logic_graph1 = build_graph_from_stmt("a&b", "c")?;
         let logic_graph2 = build_graph_from_stmt("(~(c|~a))|(~(c|~b))", "d")?;
@@ -701,9 +761,12 @@ mod tests {
         let mut fm = logic_graph1.clone();
         fm.graph.merge(logic_graph2.graph);
         println!("{}", fm.to_graphviz());
+        fm.prepare_place()
+    }
 
-        let logic_graph = fm.prepare_place()?;
-
+    #[test]
+    fn test_generate_component_xor_complex() -> eyre::Result<()> {
+        tracing_subscriber::fmt::init();
         let config = LocalPlacerConfig {
             greedy_input_generation: false,
             step_sampling_policy: SamplingPolicy::Random(1000),
@@ -712,7 +775,9 @@ mod tests {
             max_route_step: 3,
             route_step_sampling_policy: SamplingPolicy::Random(1000),
         };
-        let placer = LocalPlacer::new(logic_graph, config)?;
+
+        let xor_graph = buffered_xor_graph()?;
+        let placer = LocalPlacer::new(xor_graph, config)?;
         let worlds = placer.generate(DimSize(10, 10, 5), None);
 
         let sampled_worlds = SamplingPolicy::Random(100).sample(worlds);
@@ -720,6 +785,130 @@ mod tests {
         println!("{}", sample_logic.to_graphviz());
 
         save_worlds_to_nbt(sampled_worlds, "test/xor-gate-complex.nbt")?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_generate_component_xor_shortest() -> eyre::Result<()> {
+        tracing_subscriber::fmt::init();
+        // rayon::ThreadPoolBuilder::new()
+        //     .num_threads(1)
+        //     .build_global()
+        //     .unwrap();
+
+        let config = LocalPlacerConfig {
+            greedy_input_generation: true,
+            step_sampling_policy: SamplingPolicy::Random(10000),
+            leak_sampling: true,
+            route_torch_directly: true,
+            max_route_step: 1,
+            route_step_sampling_policy: SamplingPolicy::Random(1000),
+        };
+
+        let xor_graph = buffered_xor_graph()?;
+        let placer = LocalPlacer::new(xor_graph, config)?;
+        let worlds = placer.generate(DimSize(10, 10, 5), None);
+
+        let sampled_worlds = SamplingPolicy::Random(100).sample(worlds);
+        let sample_logic = world3d_to_logic(&sampled_worlds[0])?.prepare_place()?;
+        println!("{}", sample_logic.to_graphviz());
+
+        save_worlds_to_nbt(sampled_worlds, "test/xor-gate-fixed-input.nbt")?;
+
+        Ok(())
+    }
+
+    fn buffered_half_adder_graph() -> eyre::Result<LogicGraph> {
+        let and_0 = build_graph_from_stmt("a&b", "c")?;
+        let xor_o = build_graph_from_stmt("(~(c|~a))|(~(c|~b))", "i")?;
+        let and_1 = build_graph_from_stmt("i&cin", "d")?;
+        let out_s = build_graph_from_stmt("(~(d|~i))|(~(d|~cin))", "s")?;
+
+        let mut fa = and_0.clone();
+        fa.graph.merge(xor_o.graph);
+        fa.graph.merge(and_1.graph);
+        fa.graph.merge(out_s.graph);
+        fa.prepare_place()
+    }
+
+    #[test]
+    fn test_generate_component_half_adder() -> eyre::Result<()> {
+        tracing_subscriber::fmt::init();
+
+        let config = LocalPlacerConfig {
+            greedy_input_generation: true,
+            step_sampling_policy: SamplingPolicy::Random(10000),
+            leak_sampling: false,
+            route_torch_directly: true,
+            max_route_step: 3,
+            route_step_sampling_policy: SamplingPolicy::Random(100),
+        };
+
+        let fa_graph = buffered_half_adder_graph()?;
+        println!("{}", fa_graph.to_graphviz());
+        let placer = LocalPlacer::new(fa_graph, config)?;
+        let worlds = placer.generate(DimSize(10, 10, 5), None);
+
+        let sampled_worlds = SamplingPolicy::Random(100).sample(worlds);
+        let sample_logic = world3d_to_logic(&sampled_worlds[0])?.prepare_place()?;
+        println!("{}", sample_logic.to_graphviz());
+
+        save_worlds_to_nbt(sampled_worlds, "test/half-adder.nbt")?;
+
+        Ok(())
+    }
+
+    #[expect(dead_code)]
+    fn full_adder_graph() -> eyre::Result<LogicGraph> {
+        let out_s = build_graph_from_stmt("(a^b)^cin", "s")?;
+        let out_cout = build_graph_from_stmt("(a&b)|(s&cin)", "cout")?;
+
+        let mut fa = out_s.clone();
+        fa.graph.merge(out_cout.graph);
+        fa.prepare_place()
+    }
+
+    fn buffered_full_adder_graph() -> eyre::Result<LogicGraph> {
+        let and_0 = build_graph_from_stmt("a&b", "c")?;
+        let xor_o = build_graph_from_stmt("(~(c|~a))|(~(c|~b))", "i")?;
+        let and_1 = build_graph_from_stmt("i&cin", "d")?;
+        let out_s = build_graph_from_stmt("(~(d|~i))|(~(d|~cin))", "s")?;
+
+        let out_cout = build_graph_from_stmt("(a&b)|(s&cin)", "cout")?;
+
+        let mut fa = and_0.clone();
+        fa.graph.merge(xor_o.graph);
+        fa.graph.merge(and_1.graph);
+        fa.graph.merge(out_s.graph);
+        fa.graph.merge(out_cout.graph);
+        fa.prepare_place()
+    }
+
+    #[test]
+    #[ignore = "cannot route last or gate inputs"]
+    fn test_generate_component_full_adder() -> eyre::Result<()> {
+        tracing_subscriber::fmt::init();
+
+        let config = LocalPlacerConfig {
+            greedy_input_generation: true,
+            step_sampling_policy: SamplingPolicy::Random(10000),
+            leak_sampling: false,
+            route_torch_directly: true,
+            max_route_step: 8,
+            route_step_sampling_policy: SamplingPolicy::Random(100),
+        };
+
+        let fa_graph = buffered_full_adder_graph()?;
+        println!("{}", fa_graph.to_graphviz());
+        let placer = LocalPlacer::new(fa_graph, config)?;
+        let worlds = placer.generate(DimSize(10, 10, 5), None);
+
+        let sampled_worlds = SamplingPolicy::Random(1).sample(worlds);
+        let sample_logic = world3d_to_logic(&sampled_worlds[0])?.prepare_place()?;
+        println!("{}", sample_logic.to_graphviz());
+
+        save_worlds_to_nbt(sampled_worlds, "test/full-adder.nbt")?;
 
         Ok(())
     }

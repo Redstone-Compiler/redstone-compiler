@@ -47,8 +47,8 @@ impl Direction {
 
     pub fn iter_direction_without_top() -> impl Iterator<Item = Direction> {
         [
-            Direction::Bottom,
             Direction::East,
+            Direction::Bottom,
             Direction::West,
             Direction::South,
             Direction::North,
