@@ -786,7 +786,7 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_component_xor_fixed_input() -> eyre::Result<()> {
+    fn test_generate_component_xor_shortest() -> eyre::Result<()> {
         tracing_subscriber::fmt::init();
         // rayon::ThreadPoolBuilder::new()
         //     .num_threads(1)
