@@ -216,7 +216,7 @@ impl SamplingPolicy {
     }
 }
 
-pub const K_MAX_LOCAL_PLACE_NODE_COUNT: usize = 25;
+pub const K_MAX_LOCAL_PLACE_NODE_COUNT: usize = 40;
 
 type PlacerQueue = Vec<(World3D, HashMap<GraphNodeId, Position>)>;
 
@@ -815,6 +815,100 @@ mod tests {
         println!("{}", sample_logic.to_graphviz());
 
         save_worlds_to_nbt(sampled_worlds, "test/xor-gate-fixed-input.nbt")?;
+
+        Ok(())
+    }
+
+    fn buffered_half_adder_graph() -> eyre::Result<LogicGraph> {
+        let and_0 = build_graph_from_stmt("a&b", "c")?;
+        let xor_o = build_graph_from_stmt("(~(c|~a))|(~(c|~b))", "i")?;
+        let and_1 = build_graph_from_stmt("i&cin", "d")?;
+        let out_s = build_graph_from_stmt("(~(d|~i))|(~(d|~cin))", "s")?;
+
+        let mut fa = and_0.clone();
+        fa.graph.merge(xor_o.graph);
+        fa.graph.merge(and_1.graph);
+        fa.graph.merge(out_s.graph);
+        fa.prepare_place()
+    }
+
+    #[test]
+    fn test_generate_component_half_adder() -> eyre::Result<()> {
+        tracing_subscriber::fmt::init();
+
+        let config = LocalPlacerConfig {
+            greedy_input_generation: true,
+            step_sampling_policy: SamplingPolicy::Random(10000),
+            leak_sampling: false,
+            route_torch_directly: true,
+            max_route_step: 3,
+            route_step_sampling_policy: SamplingPolicy::Random(100),
+        };
+
+        let fa_graph = buffered_half_adder_graph()?;
+        println!("{}", fa_graph.to_graphviz());
+        let placer = LocalPlacer::new(fa_graph, config)?;
+        let worlds = placer.generate(DimSize(10, 10, 5), None);
+
+        let sampled_worlds = SamplingPolicy::Random(100).sample(worlds);
+        let sample_logic = world3d_to_logic(&sampled_worlds[0])?.prepare_place()?;
+        println!("{}", sample_logic.to_graphviz());
+
+        save_worlds_to_nbt(sampled_worlds, "test/half-adder.nbt")?;
+
+        Ok(())
+    }
+
+    #[expect(dead_code)]
+    fn full_adder_graph() -> eyre::Result<LogicGraph> {
+        let out_s = build_graph_from_stmt("(a^b)^cin", "s")?;
+        let out_cout = build_graph_from_stmt("(a&b)|(s&cin)", "cout")?;
+
+        let mut fa = out_s.clone();
+        fa.graph.merge(out_cout.graph);
+        fa.prepare_place()
+    }
+
+    fn buffered_full_adder_graph() -> eyre::Result<LogicGraph> {
+        let and_0 = build_graph_from_stmt("a&b", "c")?;
+        let xor_o = build_graph_from_stmt("(~(c|~a))|(~(c|~b))", "i")?;
+        let and_1 = build_graph_from_stmt("i&cin", "d")?;
+        let out_s = build_graph_from_stmt("(~(d|~i))|(~(d|~cin))", "s")?;
+
+        let out_cout = build_graph_from_stmt("(a&b)|(s&cin)", "cout")?;
+
+        let mut fa = and_0.clone();
+        fa.graph.merge(xor_o.graph);
+        fa.graph.merge(and_1.graph);
+        fa.graph.merge(out_s.graph);
+        fa.graph.merge(out_cout.graph);
+        fa.prepare_place()
+    }
+
+    #[test]
+    #[ignore = "cannot route last or gate inputs"]
+    fn test_generate_component_full_adder() -> eyre::Result<()> {
+        tracing_subscriber::fmt::init();
+
+        let config = LocalPlacerConfig {
+            greedy_input_generation: true,
+            step_sampling_policy: SamplingPolicy::Random(10000),
+            leak_sampling: false,
+            route_torch_directly: true,
+            max_route_step: 8,
+            route_step_sampling_policy: SamplingPolicy::Random(100),
+        };
+
+        let fa_graph = buffered_full_adder_graph()?;
+        println!("{}", fa_graph.to_graphviz());
+        let placer = LocalPlacer::new(fa_graph, config)?;
+        let worlds = placer.generate(DimSize(10, 10, 5), None);
+
+        let sampled_worlds = SamplingPolicy::Random(1).sample(worlds);
+        let sample_logic = world3d_to_logic(&sampled_worlds[0])?.prepare_place()?;
+        println!("{}", sample_logic.to_graphviz());
+
+        save_worlds_to_nbt(sampled_worlds, "test/full-adder.nbt")?;
 
         Ok(())
     }
