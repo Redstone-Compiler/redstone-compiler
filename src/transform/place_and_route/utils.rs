@@ -11,7 +11,7 @@ pub fn world3d_to_logic(world3d: &World3D) -> eyre::Result<LogicGraph> {
 
 pub fn world_to_logic(world: &World) -> eyre::Result<LogicGraph> {
     let world_graph = WorldGraph::from(world);
-    let logic_graph = WorldToLogicTransformer::new(world_graph)?.transform()?;
+    let logic_graph = WorldToLogicTransformer::new(world_graph, true)?.transform()?;
     logic_graph.verify()?;
     Ok(logic_graph)
 }

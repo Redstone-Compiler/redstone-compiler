@@ -14,11 +14,15 @@ pub struct WorldToLogicTransformer {
 }
 
 impl WorldToLogicTransformer {
-    pub fn new(graph: WorldGraph) -> eyre::Result<Self> {
+    /// Before transform, `WorldToLogicTransformer` runs some optimizations
+    /// such as fold_redstone, remove_redstone, remove_repeater.
+    /// However, sometimes routing information such as redstone and repeater
+    /// may be needed (e.g. isomorphism), and for this, `remain_routings` is provided.
+    pub fn new(graph: WorldGraph, remain_routings: bool) -> eyre::Result<Self> {
         Self::verify_input(&graph)?;
 
         Ok(Self {
-            graph: Self::optimize(graph),
+            graph: Self::optimize(graph, remain_routings),
         })
     }
 
@@ -48,11 +52,13 @@ impl WorldToLogicTransformer {
         Ok(())
     }
 
-    fn optimize(graph: WorldGraph) -> WorldGraph {
+    fn optimize(graph: WorldGraph, remain_routings: bool) -> WorldGraph {
         let mut transform = WorldGraphTransformer::new(graph);
         transform.fold_redstone();
-        transform.remove_redstone();
-        transform.remove_repeater();
+        if !remain_routings {
+            transform.remove_redstone();
+            transform.remove_repeater();
+        }
         transform.finish()
     }
 
@@ -172,7 +178,7 @@ mod tests {
         let g = WorldGraphBuilder::new(&nbt.to_world()).build();
         g.graph.verify()?;
 
-        let g = WorldToLogicTransformer::new(g)?.transform()?;
+        let g = WorldToLogicTransformer::new(g, false)?.transform()?;
         g.graph.verify()?;
 
         let mut transform = LogicGraphTransformer::new(g);
@@ -197,6 +203,16 @@ mod tests {
         let nbt = NBTRoot::load("test/xor-generated.nbt")?;
         let world = &nbt.to_world();
         let expected = predefined_logics::buffered_xor_graph()?;
+        assert!(equivalent_logic_with_world(&expected, world)?);
+
+        Ok(())
+    }
+
+    #[test]
+    fn unittest_world_to_logic_graph_half_adder() -> eyre::Result<()> {
+        let nbt = NBTRoot::load("test/half-adder-generated.nbt")?;
+        let world = &nbt.to_world();
+        let expected = predefined_logics::buffered_half_adder_graph()?;
         assert!(equivalent_logic_with_world(&expected, world)?);
 
         Ok(())
