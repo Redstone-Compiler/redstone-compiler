@@ -83,10 +83,9 @@ impl PlacedNode {
     }
 
     fn has_cobble_conflict(&self, world: &World3D, except: &HashSet<Position>) -> bool {
-        if world[self.position].kind.is_cobble() {
-            return false;
-        }
-        if !world[self.position].kind.is_air() {
+        if !(world[self.position].kind.is_air()
+            || (world[self.position].kind.is_cobble() && except.contains(&self.position)))
+        {
             return true;
         }
 

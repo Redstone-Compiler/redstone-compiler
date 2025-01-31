@@ -309,7 +309,7 @@ fn place_torch_with_cobble(
     let cobble_pos = torch_pos.walk(torch.direction)?;
     let cobble_node = PlacedNode::new_cobble(cobble_pos);
     let torch_node = PlacedNode::new(torch_pos, torch);
-    if cobble_node.has_conflict(world, &Default::default())
+    if cobble_node.has_conflict(world, &[cobble_pos].into_iter().collect())
         || torch_node.has_conflict(world, &Default::default())
     {
         return None;
@@ -467,14 +467,20 @@ fn place_redstone_with_cobble(
     to: Position,
 ) -> Option<(World3D, PlacedNode)> {
     let cobble_pos = bound.position().walk(Direction::Bottom)?;
-    let cobble_node = try_generate_cobble_node(world, cobble_pos, &[])?;
+    // 첫 번째 step에서 torch 위쪽에 cobble + redstone이 놓인 경우 예외처리
+    let cobble_except = (world[prev].kind.is_torch())
+        .then_some(vec![cobble_pos, prev])
+        .unwrap_or_default();
+    let cobble_node = try_generate_cobble_node(world, cobble_pos, &cobble_except)?;
     let mut new_world = world.clone();
     place_node(&mut new_world, cobble_node);
 
     let bound_pos = bound.position();
     let bound_back_pos = bound_pos.walk(bound.direction()).unwrap();
     let redstone_node = PlacedNode::new_redstone(bound_pos);
-    let except = [prev, bound_back_pos, bound_pos, to].into_iter().collect();
+    let except = [prev, bound_back_pos, bound_pos, to, to.up()]
+        .into_iter()
+        .collect();
     if redstone_node.has_conflict(&new_world, &except) || redstone_node.has_short(world, &except) {
         return None;
     }
@@ -578,7 +584,6 @@ mod tests {
 
         let mut fm = logic_graph1.clone();
         fm.graph.merge(logic_graph2.graph);
-        println!("{}", fm.to_graphviz());
         fm.prepare_place()
     }
 
