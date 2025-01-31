@@ -69,6 +69,7 @@ pub enum RedstoneState {
     North = 8,
     Horizontal = 1 | 2,
     Vertical = 4 | 8,
+    Cardinal = 1 | 2 | 4 | 8,
 }
 
 // 블럭의 종류
