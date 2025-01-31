@@ -110,7 +110,7 @@ impl LocalPlacer {
         queue
             .into_par_iter()
             .panic_fuse()
-            .progress_with_style(progress_style())
+            .progress_with_style(progress_style(step + 1, self.visit_orders.len()))
             .flat_map(|(world, pos)| {
                 self.generate_place_and_route(node, world, &pos)
                     .into_iter()
@@ -186,9 +186,9 @@ impl LocalPlacer {
     }
 }
 
-fn progress_style() -> ProgressStyle {
+fn progress_style(step: usize, len: usize) -> ProgressStyle {
     ProgressStyle::with_template(
-        "{spinner:.green} [{eta_precise}] [{bar:40.cyan/blue}] {pos:>7}/{len:7} {msg}",
+        &format!("{{spinner:.green}} [{{eta_precise}}] [{step}/{len}] [{{bar:40.cyan/blue}}] {{pos:>7}}/{{len:7}} {{msg}}"),
     )
     .unwrap()
     .progress_chars("#>-")
@@ -526,7 +526,7 @@ mod tests {
         let logic_graph = predefined_logics::and_graph()?;
         let config = LocalPlacerConfig {
             greedy_input_generation: true,
-            step_sampling_policy: SamplingPolicy::Random(1000),
+            step_sampling_policy: SamplingPolicy::None,
             leak_sampling: false,
             route_torch_directly: true,
             max_route_step: 1,
