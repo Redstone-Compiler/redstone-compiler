@@ -1,3 +1,5 @@
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+
 use crate::graph::logic::LogicGraph;
 use crate::graph::world::WorldGraph;
 use crate::transform::world_to_logic::WorldToLogicTransformer;
@@ -36,6 +38,21 @@ pub fn equivalent_logic_with_world3d(
     let expected = outputs_removed(expected);
     let generated = world3d_to_logic(generated)?;
     Ok(equivalent_graph(&expected, &generated))
+}
+
+pub fn equivalent_logic_with_world3ds(
+    expected: &LogicGraph,
+    generates: &Vec<World3D>,
+) -> eyre::Result<bool> {
+    let expected = outputs_removed(expected);
+    let checks = generates
+        .par_iter()
+        .map(|generated| {
+            let logic = world3d_to_logic(generated)?;
+            Ok(equivalent_graph(&expected, &logic))
+        })
+        .collect::<eyre::Result<Vec<_>>>()?;
+    Ok(checks.into_iter().all(|x| x))
 }
 
 pub fn equivalent_logic_with_world(expected: &LogicGraph, generated: &World) -> eyre::Result<bool> {

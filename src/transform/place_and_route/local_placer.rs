@@ -516,7 +516,7 @@ mod tests {
         LocalPlacer, LocalPlacerConfig, SamplingPolicy,
     };
     use crate::transform::place_and_route::utils::{
-        equivalent_logic_with_world3d, world3d_to_logic,
+        equivalent_logic_with_world3d, equivalent_logic_with_world3ds, world3d_to_logic,
     };
     use crate::world::position::DimSize;
     use crate::world::World3D;
@@ -532,9 +532,10 @@ mod tests {
             max_route_step: 1,
             route_step_sampling_policy: SamplingPolicy::Random(100),
         };
-        let placer = LocalPlacer::new(logic_graph, config)?;
+        let placer = LocalPlacer::new(logic_graph.clone(), config)?;
         let worlds = placer.generate(DimSize(10, 10, 5), None);
         assert!(!worlds.is_empty());
+        assert!(equivalent_logic_with_world3ds(&logic_graph, &worlds)?);
         Ok(())
     }
 
