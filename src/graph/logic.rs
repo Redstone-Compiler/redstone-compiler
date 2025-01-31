@@ -246,6 +246,75 @@ impl LogicGraphBuilder {
     }
 }
 
+pub mod predefined_logics {
+    use super::LogicGraph;
+
+    pub fn and_graph() -> eyre::Result<LogicGraph> {
+        LogicGraph::from_stmt("a&b", "c")?.prepare_place()
+    }
+
+    pub fn xor_graph() -> eyre::Result<LogicGraph> {
+        LogicGraph::from_stmt("a^b", "c")?.prepare_place()
+    }
+
+    pub fn buffered_xor_graph() -> eyre::Result<LogicGraph> {
+        // c := (~((a&b)|~a))|(~((a&b)|~b))
+        let logic_graph1 = LogicGraph::from_stmt("a&b", "c")?;
+        let logic_graph2 = LogicGraph::from_stmt("(~(c|~a))|(~(c|~b))", "d")?;
+
+        let mut fm = logic_graph1.clone();
+        fm.graph.merge(logic_graph2.graph);
+        fm.prepare_place()
+    }
+
+    pub fn half_adder_graph() -> eyre::Result<LogicGraph> {
+        let s = LogicGraph::from_stmt("a^b", "s")?;
+        let c = LogicGraph::from_stmt("a&b", "c")?;
+
+        let mut ha = s.clone();
+        ha.graph.merge(c.graph);
+        ha.prepare_place()
+    }
+
+    pub fn buffered_half_adder_graph() -> eyre::Result<LogicGraph> {
+        let and_0 = LogicGraph::from_stmt("a&b", "c")?;
+        let xor_o = LogicGraph::from_stmt("(~(c|~a))|(~(c|~b))", "i")?;
+        let and_1 = LogicGraph::from_stmt("i&cin", "d")?;
+        let out_s = LogicGraph::from_stmt("(~(d|~i))|(~(d|~cin))", "s")?;
+
+        let mut ha = and_0.clone();
+        ha.graph.merge(xor_o.graph);
+        ha.graph.merge(and_1.graph);
+        ha.graph.merge(out_s.graph);
+        ha.prepare_place()
+    }
+
+    pub fn full_adder_graph() -> eyre::Result<LogicGraph> {
+        let out_s = LogicGraph::from_stmt("(a^b)^cin", "s")?;
+        let out_cout = LogicGraph::from_stmt("(a&b)|(s&cin)", "cout")?;
+
+        let mut fa = out_s.clone();
+        fa.graph.merge(out_cout.graph);
+        fa.prepare_place()
+    }
+
+    pub fn buffered_full_adder_graph() -> eyre::Result<LogicGraph> {
+        let and_0 = LogicGraph::from_stmt("a&b", "c")?;
+        let xor_o = LogicGraph::from_stmt("(~(c|~a))|(~(c|~b))", "i")?;
+        let and_1 = LogicGraph::from_stmt("i&cin", "d")?;
+        let out_s = LogicGraph::from_stmt("(~(d|~i))|(~(d|~cin))", "s")?;
+
+        let out_cout = LogicGraph::from_stmt("(a&b)|(s&cin)", "cout")?;
+
+        let mut fa = and_0.clone();
+        fa.graph.merge(xor_o.graph);
+        fa.graph.merge(and_1.graph);
+        fa.graph.merge(out_s.graph);
+        fa.graph.merge(out_cout.graph);
+        fa.prepare_place()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use itertools::Itertools;

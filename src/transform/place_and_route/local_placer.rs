@@ -510,7 +510,7 @@ impl<'a> LocalPlacerCostEstimator<'a> {
 mod tests {
 
     use crate::graph::graphviz::ToGraphvizGraph;
-    use crate::graph::logic::LogicGraph;
+    use crate::graph::logic::{predefined_logics, LogicGraph};
     use crate::graph::world::WorldGraph;
     use crate::nbt::{NBTRoot, ToNBT};
     use crate::transform::place_and_route::local_placer::{
@@ -522,7 +522,7 @@ mod tests {
 
     #[test]
     fn test_generate_component_and_shortest() -> eyre::Result<()> {
-        let logic_graph = LogicGraph::from_stmt("a&b", "c")?.prepare_place()?;
+        let logic_graph = predefined_logics::and_graph()?;
         let config = LocalPlacerConfig {
             greedy_input_generation: true,
             step_sampling_policy: SamplingPolicy::Random(1000),
@@ -554,9 +554,6 @@ mod tests {
     fn test_generate_component_xor_simple() -> eyre::Result<()> {
         tracing_subscriber::fmt::init();
 
-        let logic_graph = LogicGraph::from_stmt("a^b", "c")?.prepare_place()?;
-        println!("{}", logic_graph.to_graphviz());
-
         let config = LocalPlacerConfig {
             greedy_input_generation: false,
             step_sampling_policy: SamplingPolicy::Random(100),
@@ -565,6 +562,7 @@ mod tests {
             max_route_step: 5,
             route_step_sampling_policy: SamplingPolicy::Random(100),
         };
+        let logic_graph = predefined_logics::xor_graph()?;
         let placer = LocalPlacer::new(logic_graph, config)?;
         let worlds = placer.generate(DimSize(10, 10, 5), None);
 
@@ -575,16 +573,6 @@ mod tests {
         save_worlds_to_nbt(sampled_worlds, "test/xor-gate-simple.nbt")?;
 
         Ok(())
-    }
-
-    fn buffered_xor_graph() -> eyre::Result<LogicGraph> {
-        // c := (~((a&b)|~a))|(~((a&b)|~b))
-        let logic_graph1 = LogicGraph::from_stmt("a&b", "c")?;
-        let logic_graph2 = LogicGraph::from_stmt("(~(c|~a))|(~(c|~b))", "d")?;
-
-        let mut fm = logic_graph1.clone();
-        fm.graph.merge(logic_graph2.graph);
-        fm.prepare_place()
     }
 
     #[test]
@@ -599,7 +587,7 @@ mod tests {
             route_step_sampling_policy: SamplingPolicy::Random(1000),
         };
 
-        let xor_graph = buffered_xor_graph()?;
+        let xor_graph = predefined_logics::buffered_xor_graph()?;
         let placer = LocalPlacer::new(xor_graph, config)?;
         let worlds = placer.generate(DimSize(10, 10, 5), None);
 
@@ -629,7 +617,7 @@ mod tests {
             route_step_sampling_policy: SamplingPolicy::Random(1000),
         };
 
-        let xor_graph = buffered_xor_graph()?;
+        let xor_graph = predefined_logics::buffered_xor_graph()?;
         let placer = LocalPlacer::new(xor_graph, config)?;
         let worlds = placer.generate(DimSize(10, 10, 5), None);
 
@@ -637,22 +625,9 @@ mod tests {
         let sample_logic = world3d_to_logic(&sampled_worlds[0])?.prepare_place()?;
         println!("{}", sample_logic.to_graphviz());
 
-        save_worlds_to_nbt(sampled_worlds, "test/xor-gate-fixed-input.nbt")?;
+        save_worlds_to_nbt(sampled_worlds, "test/xor-gate-shortest.nbt")?;
 
         Ok(())
-    }
-
-    fn buffered_half_adder_graph() -> eyre::Result<LogicGraph> {
-        let and_0 = LogicGraph::from_stmt("a&b", "c")?;
-        let xor_o = LogicGraph::from_stmt("(~(c|~a))|(~(c|~b))", "i")?;
-        let and_1 = LogicGraph::from_stmt("i&cin", "d")?;
-        let out_s = LogicGraph::from_stmt("(~(d|~i))|(~(d|~cin))", "s")?;
-
-        let mut fa = and_0.clone();
-        fa.graph.merge(xor_o.graph);
-        fa.graph.merge(and_1.graph);
-        fa.graph.merge(out_s.graph);
-        fa.prepare_place()
     }
 
     #[test]
@@ -668,7 +643,7 @@ mod tests {
             route_step_sampling_policy: SamplingPolicy::Random(100),
         };
 
-        let fa_graph = buffered_half_adder_graph()?;
+        let fa_graph = predefined_logics::buffered_half_adder_graph()?;
         println!("{}", fa_graph.to_graphviz());
         let placer = LocalPlacer::new(fa_graph, config)?;
         let worlds = placer.generate(DimSize(10, 10, 5), None);
@@ -680,32 +655,6 @@ mod tests {
         save_worlds_to_nbt(sampled_worlds, "test/half-adder.nbt")?;
 
         Ok(())
-    }
-
-    #[expect(dead_code)]
-    fn full_adder_graph() -> eyre::Result<LogicGraph> {
-        let out_s = LogicGraph::from_stmt("(a^b)^cin", "s")?;
-        let out_cout = LogicGraph::from_stmt("(a&b)|(s&cin)", "cout")?;
-
-        let mut fa = out_s.clone();
-        fa.graph.merge(out_cout.graph);
-        fa.prepare_place()
-    }
-
-    fn buffered_full_adder_graph() -> eyre::Result<LogicGraph> {
-        let and_0 = LogicGraph::from_stmt("a&b", "c")?;
-        let xor_o = LogicGraph::from_stmt("(~(c|~a))|(~(c|~b))", "i")?;
-        let and_1 = LogicGraph::from_stmt("i&cin", "d")?;
-        let out_s = LogicGraph::from_stmt("(~(d|~i))|(~(d|~cin))", "s")?;
-
-        let out_cout = LogicGraph::from_stmt("(a&b)|(s&cin)", "cout")?;
-
-        let mut fa = and_0.clone();
-        fa.graph.merge(xor_o.graph);
-        fa.graph.merge(and_1.graph);
-        fa.graph.merge(out_s.graph);
-        fa.graph.merge(out_cout.graph);
-        fa.prepare_place()
     }
 
     #[test]
@@ -722,7 +671,7 @@ mod tests {
             route_step_sampling_policy: SamplingPolicy::Random(100),
         };
 
-        let fa_graph = buffered_full_adder_graph()?;
+        let fa_graph = predefined_logics::buffered_full_adder_graph()?;
         println!("{}", fa_graph.to_graphviz());
         let placer = LocalPlacer::new(fa_graph, config)?;
         let worlds = placer.generate(DimSize(10, 10, 5), None);

@@ -157,7 +157,7 @@ mod tests {
     use itertools::Itertools;
 
     use crate::graph::graphviz::ToGraphvizGraph;
-    use crate::graph::logic::LogicGraph;
+    use crate::graph::logic::predefined_logics;
     use crate::graph::subgraphs_to_clustered_graph;
     use crate::graph::world::WorldGraphBuilder;
     use crate::nbt::NBTRoot;
@@ -193,16 +193,6 @@ mod tests {
 
     #[test]
     fn unittest_world_to_logic_graph_xor() -> eyre::Result<()> {
-        fn buffered_xor_graph() -> eyre::Result<LogicGraph> {
-            // c := (~((a&b)|~a))|(~((a&b)|~b))
-            let logic_graph1 = LogicGraph::from_stmt("a&b", "c")?;
-            let logic_graph2 = LogicGraph::from_stmt("(~(c|~a))|(~(c|~b))", "d")?;
-
-            let mut fm = logic_graph1.clone();
-            fm.graph.merge(logic_graph2.graph);
-            fm.prepare_place()
-        }
-
         let nbt = NBTRoot::load("test/xor-generated.nbt")?;
 
         let g = WorldGraphBuilder::new(&nbt.to_world()).build();
@@ -213,7 +203,7 @@ mod tests {
 
         println!("{}", g.to_graphviz());
 
-        let mut expected = buffered_xor_graph()?;
+        let mut expected = predefined_logics::buffered_xor_graph()?;
         let outputs = expected.outputs();
         outputs
             .into_iter()
