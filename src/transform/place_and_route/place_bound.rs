@@ -68,7 +68,8 @@ impl PlaceBound {
                             .into_iter()
                             .filter(|&up_cardinal| {
                                 world.size.bound_on(up_cardinal)
-                                // && world[up_cardinal].kind.is_redstone()
+                                    && (world[up_cardinal].kind.is_air()
+                                        || world[up_cardinal].kind.is_redstone())
                             }),
                     );
                 }

@@ -153,9 +153,11 @@ impl WorldToLogicTransformer {
 
 #[cfg(test)]
 mod tests {
+
     use itertools::Itertools;
 
     use crate::graph::graphviz::ToGraphvizGraph;
+    use crate::graph::logic::LogicGraph;
     use crate::graph::subgraphs_to_clustered_graph;
     use crate::graph::world::WorldGraphBuilder;
     use crate::nbt::NBTRoot;
@@ -185,6 +187,44 @@ mod tests {
 
         let clustered_g = subgraphs_to_clustered_graph(&g.graph, &sub_graphs);
         println!("{}", clustered_g.to_graphviz());
+
+        Ok(())
+    }
+
+    #[test]
+    fn unittest_world_to_logic_graph_xor() -> eyre::Result<()> {
+        fn buffered_xor_graph() -> eyre::Result<LogicGraph> {
+            // c := (~((a&b)|~a))|(~((a&b)|~b))
+            let logic_graph1 = LogicGraph::from_stmt("a&b", "c")?;
+            let logic_graph2 = LogicGraph::from_stmt("(~(c|~a))|(~(c|~b))", "d")?;
+
+            let mut fm = logic_graph1.clone();
+            fm.graph.merge(logic_graph2.graph);
+            fm.prepare_place()
+        }
+
+        let nbt = NBTRoot::load("test/xor-generated.nbt")?;
+
+        let g = WorldGraphBuilder::new(&nbt.to_world()).build();
+        g.graph.verify()?;
+
+        let g = WorldToLogicTransformer::new(g)?.transform()?;
+        g.graph.verify()?;
+
+        println!("{}", g.to_graphviz());
+
+        let mut expected = buffered_xor_graph()?;
+        let outputs = expected.outputs();
+        outputs
+            .into_iter()
+            .for_each(|o| expected.graph.remove_by_node_id_lazy(o));
+        expected.graph.build_outputs();
+        expected.graph.build_producers();
+
+        println!("{}", expected.to_graphviz());
+
+        let equivalent = petgraph::algo::is_isomorphic(&expected.to_petgraph(), &g.to_petgraph());
+        assert!(equivalent);
 
         Ok(())
     }
