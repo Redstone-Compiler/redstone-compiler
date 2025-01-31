@@ -2,11 +2,11 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Display;
 
 use itertools::Itertools;
+use module::GraphModuleBuilder;
 use petgraph::stable_graph::NodeIndex;
 use petgraph::visit::NodeRef;
 
 use self::cluster::ClusteredGraph;
-use self::module::builder::GraphModuleBuilder;
 use self::module::GraphModule;
 use crate::cluster::{Clustered, ClusteredType};
 use crate::logic::Logic;

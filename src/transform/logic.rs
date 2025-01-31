@@ -3,8 +3,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use disjoint_set::DisjointSet;
 use itertools::Itertools;
 
-use crate::graph::logic::builder::LogicGraphBuilder;
-use crate::graph::logic::LogicGraph;
+use crate::graph::logic::{LogicGraph, LogicGraphBuilder};
 use crate::graph::{Graph, GraphNode, GraphNodeId, GraphNodeKind, SubGraphWithGraph};
 use crate::logic::{Logic, LogicType};
 

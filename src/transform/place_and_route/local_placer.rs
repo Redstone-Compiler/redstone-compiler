@@ -1,164 +1,23 @@
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
-use std::{mem, usize};
+use std::collections::HashMap;
+use std::usize;
 
 use eyre::ensure;
 use indicatif::{ParallelProgressIterator, ProgressStyle};
 use itertools::{iproduct, Itertools};
-use rand::rngs::StdRng;
-use rand::seq::IteratorRandom;
-use rand::SeedableRng;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
+use super::place_bound::PlaceBound;
+use super::placed_node::PlacedNode;
+use super::sampling::SamplingPolicy;
 use crate::graph::logic::LogicGraph;
-use crate::graph::world::builder::{PlaceBound, PropagateType};
 use crate::graph::world::WorldGraph;
 use crate::graph::{GraphNode, GraphNodeId, GraphNodeKind};
 use crate::logic::LogicType;
+use crate::transform::place_and_route::place_bound::PropagateType;
 use crate::world::block::{Block, BlockKind, Direction};
 use crate::world::position::{DimSize, Position};
 use crate::world::world::World3D;
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub struct PlacedNode {
-    position: Position,
-    block: Block,
-}
-
-impl PlacedNode {
-    pub fn new(position: Position, block: Block) -> Self {
-        Self { position, block }
-    }
-
-    pub fn new_cobble(position: Position) -> Self {
-        Self {
-            position,
-            block: Block {
-                kind: BlockKind::Cobble {
-                    on_count: 0,
-                    on_base_count: 0,
-                },
-                direction: Direction::None,
-            },
-        }
-    }
-
-    pub fn new_redstone(position: Position) -> Self {
-        Self {
-            position,
-            block: Block {
-                kind: BlockKind::Redstone {
-                    on_count: 0,
-                    state: 0,
-                    strength: 0,
-                },
-                direction: Direction::None,
-            },
-        }
-    }
-
-    pub fn is_propagation_target(&self) -> bool {
-        self.block.kind.is_stick_to_redstone() || self.block.kind.is_repeater()
-    }
-
-    pub fn is_diode(&self) -> bool {
-        self.block.kind.is_switch() || self.block.kind.is_torch() || self.block.kind.is_repeater()
-    }
-
-    // signal을 보낼 수 있는 부분들의 위치를 반환합니다.
-    pub fn propagation_bound(&self, world: Option<&World3D>) -> Vec<PlaceBound> {
-        PlaceBound(PropagateType::Soft, self.position, self.block.direction)
-            .propagation_bound(&self.block.kind, world)
-    }
-
-    fn propagated_from(&self, world: &World3D) -> Vec<PlaceBound> {
-        PlaceBound::propagated_from(self.position, &self.block.kind, world)
-    }
-
-    pub fn has_conflict(&self, world: &World3D, except: &HashSet<Position>) -> bool {
-        if !world.size.bound_on(self.position) {
-            return true;
-        }
-
-        if self.block.kind.is_cobble() {
-            return self.has_cobble_conflict(world, except);
-        }
-
-        if !world[self.position].kind.is_air() {
-            return true;
-        }
-
-        // 다른 블록에 signal을 보낼 수 있는 경우
-        let bounds = self.propagation_bound(Some(world));
-        bounds
-            .into_iter()
-            .filter(|bound| bound.is_bound_on(world) && !except.contains(&bound.position()))
-            .any(|bound| !bound.propagate_to(world).is_empty())
-    }
-
-    fn has_cobble_conflict(&self, world: &World3D, except: &HashSet<Position>) -> bool {
-        if world[self.position].kind.is_cobble() {
-            return false;
-        }
-        if !world[self.position].kind.is_air() {
-            return true;
-        }
-
-        if let Some(bottom) = self.position.walk(Direction::Bottom) {
-            // 다른 레드스톤 연결을 끊어버리는 경우
-            if world[bottom].kind.is_redstone()
-                && (self.position.cardinal().iter())
-                    .any(|&pos| world.size.bound_on(pos) && world[pos].kind.is_redstone())
-            {
-                return true;
-            }
-
-            // 재귀를 이르키는 경우
-            if world[bottom].kind.is_torch()
-                && !world[bottom].direction.is_bottom()
-                && self.position.cardinal().into_iter().any(|pos| {
-                    world.size.bound_on(pos)
-                        && world[pos].kind.is_redstone()
-                        && self.position.diff(pos) == world[bottom].direction
-                })
-            {
-                return true;
-            }
-
-            // 레드스톤을 끊어버리는 경우는 예외 케이스로 반영하고 싶이 않아서 except는 여기서 체크
-            if except.contains(&bottom) {
-                return false;
-            }
-
-            // 바로 아래쪽에 Torch가 있는 경우
-            if world[bottom].kind.is_torch() {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    // 다른 블록의 signal을 받을 수 있는 경우
-    fn has_short(&self, world: &World3D, except: &HashSet<Position>) -> bool {
-        assert!(self.block.kind.is_redstone());
-
-        self.propagated_from(world)
-            .into_iter()
-            .filter(|bound| !except.contains(&bound.position()))
-            .next()
-            .is_some()
-    }
-
-    fn has_connection_with(&self, world: &World3D, target: Position) -> bool {
-        assert!(self.block.kind.is_redstone());
-        assert!(world[target].kind.is_stick_to_redstone());
-
-        self.propagated_from(world)
-            .into_iter()
-            .any(|bound| bound.position() == target)
-    }
-}
 
 pub struct LocalPlacer {
     graph: LogicGraph,
@@ -177,43 +36,6 @@ pub struct LocalPlacerConfig {
     // 최대 routing 거리를 지정한다.
     max_route_step: usize,
     route_step_sampling_policy: SamplingPolicy,
-}
-
-#[derive(Default, Copy, Clone)]
-pub enum SamplingPolicy {
-    #[default]
-    None,
-    Take(usize),
-    Random(usize),
-}
-
-impl SamplingPolicy {
-    pub fn sample<T>(self, src: Vec<T>) -> Vec<T> {
-        match self {
-            SamplingPolicy::None => src,
-            SamplingPolicy::Take(count) => src.into_iter().take(count).collect(),
-            SamplingPolicy::Random(count) => src
-                .into_iter()
-                .choose_multiple(&mut Self::placer_rng(), count),
-        }
-    }
-
-    pub fn sample_with_taking<T: Clone + Default>(self, src: &mut Vec<T>) -> Vec<T> {
-        match self {
-            SamplingPolicy::None => src.to_vec(),
-            SamplingPolicy::Take(count) => src.iter_mut().take(count).map(mem::take).collect(),
-            SamplingPolicy::Random(count) => src
-                .iter_mut()
-                .choose_multiple(&mut Self::placer_rng(), count)
-                .into_iter()
-                .map(mem::take)
-                .collect(),
-        }
-    }
-
-    fn placer_rng() -> StdRng {
-        StdRng::seed_from_u64(42)
-    }
 }
 
 pub const K_MAX_LOCAL_PLACE_NODE_COUNT: usize = 40;
@@ -683,11 +505,12 @@ impl<'a> LocalPlacerCostEstimator<'a> {
 mod tests {
 
     use crate::graph::graphviz::ToGraphvizGraph;
-    use crate::graph::logic::builder::LogicGraphBuilder;
-    use crate::graph::logic::LogicGraph;
+    use crate::graph::logic::{LogicGraph, LogicGraphBuilder};
     use crate::graph::world::WorldGraph;
     use crate::nbt::{NBTRoot, ToNBT};
-    use crate::transform::placer::{LocalPlacer, LocalPlacerConfig, SamplingPolicy};
+    use crate::transform::place_and_route::local_placer::{
+        LocalPlacer, LocalPlacerConfig, SamplingPolicy,
+    };
     use crate::transform::world_to_logic::WorldToLogicTransformer;
     use crate::world::position::DimSize;
     use crate::world::world::{World, World3D};

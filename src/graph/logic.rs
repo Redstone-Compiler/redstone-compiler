@@ -1,8 +1,25 @@
 use std::collections::HashMap;
 
-use super::LogicGraph;
-use crate::graph::{Graph, GraphNode, GraphNodeId, GraphNodeKind};
+use super::Graph;
+use crate::graph::{GraphNode, GraphNodeId, GraphNodeKind};
 use crate::logic::{Logic, LogicType};
+use crate::transform::logic::LogicGraphTransformer;
+
+#[derive(Debug, Clone, derive_more::Deref)]
+pub struct LogicGraph {
+    #[deref]
+    pub graph: Graph,
+}
+
+impl LogicGraph {
+    pub fn prepare_place(self) -> eyre::Result<Self> {
+        let mut transform = LogicGraphTransformer::new(self);
+        transform.decompose_xor()?;
+        transform.decompose_and()?;
+        transform.remove_double_neg_expression();
+        Ok(transform.finish())
+    }
+}
 
 #[derive(Default)]
 pub struct LogicGraphBuilder {

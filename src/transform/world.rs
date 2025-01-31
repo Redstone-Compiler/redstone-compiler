@@ -177,7 +177,7 @@ impl WorldGraphTransformer {
 mod tests {
     use super::WorldGraphTransformer;
     use crate::graph::graphviz::ToGraphvizGraph;
-    use crate::graph::world::builder::WorldGraphBuilder;
+    use crate::graph::world::WorldGraphBuilder;
     use crate::nbt::NBTRoot;
 
     #[test]

@@ -1,5 +1,4 @@
 pub mod logic;
-pub mod placer;
-pub mod router;
+pub mod place_and_route;
 pub mod world;
 pub mod world_to_logic;

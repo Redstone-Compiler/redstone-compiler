@@ -1,12 +1,9 @@
 #![feature(let_chains)]
 
-pub mod circuit;
 pub mod cluster;
-pub mod estimator;
 pub mod graph;
 pub mod logic;
 pub mod nbt;
-pub mod option;
 pub mod transform;
 pub mod utils;
 pub mod verilog;
@@ -32,7 +29,7 @@ pub struct CompilerOption {
 
 fn main() -> eyre::Result<()> {
     tracing_subscriber::fmt::init();
-    let opt = CompilerOption::from_args();
+    let _opt = CompilerOption::from_args();
     // let syntax = verilog::load(&opt.input)?;
 
     // println!("{syntax:?}");
