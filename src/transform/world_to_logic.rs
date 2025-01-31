@@ -162,7 +162,7 @@ mod tests {
 
     use crate::graph::graphviz::ToGraphvizGraph;
     use crate::graph::subgraphs_to_clustered_graph;
-    use crate::graph::world::builder::WorldGraphBuilder;
+    use crate::graph::world::WorldGraphBuilder;
     use crate::nbt::NBTRoot;
     use crate::transform::logic::LogicGraphTransformer;
     use crate::transform::world_to_logic::WorldToLogicTransformer;

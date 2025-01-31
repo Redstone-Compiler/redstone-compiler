@@ -505,8 +505,7 @@ impl<'a> LocalPlacerCostEstimator<'a> {
 mod tests {
 
     use crate::graph::graphviz::ToGraphvizGraph;
-    use crate::graph::logic::builder::LogicGraphBuilder;
-    use crate::graph::logic::LogicGraph;
+    use crate::graph::logic::{LogicGraph, LogicGraphBuilder};
     use crate::graph::world::WorldGraph;
     use crate::nbt::{NBTRoot, ToNBT};
     use crate::transform::place_and_route::local_placer::{

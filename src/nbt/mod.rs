@@ -444,7 +444,7 @@ mod tests {
 
     use super::*;
     use crate::graph::graphviz::ToGraphvizGraph;
-    use crate::graph::world::builder::WorldGraphBuilder;
+    use crate::graph::world::WorldGraphBuilder;
     use crate::world::block::Direction;
     use crate::world::position::{DimSize, Position};
     use crate::world::world::World;
