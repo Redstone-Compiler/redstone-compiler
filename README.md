@@ -9,7 +9,7 @@ Currently, you can use only unittests.
 ## Compiler Stack
 
 ```
-HDL -> Synthesis -> Cluster -> Logic Graph -> Place and Route -> Synthesis -> World -> NBT -> Minecraft
+HDL -> Synthesis -> Cluster -> Logic Graph -> Place and Route -> Synthesis -> World -> NBT
 ```
 
 - Synthesis: Converts HDL to a compilable netlist graph. Inserts buffers to match the clock timing of each module, and generates and connects gates in a form that is easy to compile into a Minecraft redstone circuit.
