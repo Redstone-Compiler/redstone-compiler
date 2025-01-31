@@ -11,7 +11,7 @@ use rand::SeedableRng;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
 use crate::graph::logic::LogicGraph;
-use crate::graph::world::builder::{PlaceBound, PropagateType};
+use crate::graph::world::place_bound::{PlaceBound, PropagateType};
 use crate::graph::world::WorldGraph;
 use crate::graph::{GraphNode, GraphNodeId, GraphNodeKind};
 use crate::logic::LogicType;

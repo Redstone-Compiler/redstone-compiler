@@ -9,6 +9,7 @@ use crate::world::block::BlockKind;
 use crate::world::position::Position;
 
 pub mod builder;
+pub mod place_bound;
 
 #[derive(Debug, Default, Clone)]
 pub struct WorldGraph {
