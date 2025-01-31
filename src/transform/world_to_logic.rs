@@ -83,7 +83,6 @@ impl WorldToLogicTransformer {
                         inputs,
                         outputs: node.outputs,
                         tag: format!("From #{id}"),
-                        ..Default::default()
                     }]
                 }
                 BlockKind::Redstone { .. } | BlockKind::Repeater { .. } => {
@@ -95,7 +94,6 @@ impl WorldToLogicTransformer {
                         inputs,
                         outputs: node.outputs,
                         tag: format!("From #{id}"),
-                        ..Default::default()
                     }]
                 }
                 BlockKind::Torch { .. } => {
@@ -108,7 +106,6 @@ impl WorldToLogicTransformer {
                             inputs,
                             outputs: node.outputs,
                             tag: format!("From #{id}"),
-                            ..Default::default()
                         }]
                     } else {
                         next_new_id += 1;
@@ -121,7 +118,6 @@ impl WorldToLogicTransformer {
                             inputs,
                             outputs: vec![next_new_id],
                             tag: format!("From #{id}"),
-                            ..Default::default()
                         };
 
                         let not_node = GraphNode {
@@ -132,7 +128,6 @@ impl WorldToLogicTransformer {
                             inputs: vec![or_node.id],
                             outputs: node.outputs.clone(),
                             tag: format!("From #{id}"),
-                            ..Default::default()
                         };
 
                         new_in_id.insert(or_node.id, next_new_id);

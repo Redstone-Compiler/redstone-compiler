@@ -34,7 +34,7 @@ pub enum GraphNodeKind {
 impl GraphNodeKind {
     pub fn name(&self) -> String {
         match self {
-            GraphNodeKind::None => format!("None"),
+            GraphNodeKind::None => "None".to_string(),
             GraphNodeKind::Input(input) => format!("Input {input}"),
             GraphNodeKind::Block(block) => block.kind.name(),
             GraphNodeKind::Logic(logic) => logic.logic_type.name(),
@@ -45,14 +45,14 @@ impl GraphNodeKind {
 
     pub fn as_input(&self) -> &String {
         match self {
-            GraphNodeKind::Input(name) => &name,
+            GraphNodeKind::Input(name) => name,
             _ => unreachable!(),
         }
     }
 
     pub fn as_output(&self) -> &String {
         match self {
-            GraphNodeKind::Output(name) => &name,
+            GraphNodeKind::Output(name) => name,
             _ => unreachable!(),
         }
     }
@@ -233,10 +233,8 @@ impl Graph {
         other.build_consumers();
 
         self.nodes
-            .extend(other.nodes.into_iter().filter(|node| match &node.kind {
-                GraphNodeKind::Input(name) if src_inputs.contains_key(name) => false,
-                _ => true,
-            }));
+            .extend(other.nodes.into_iter().filter(|node|
+                !matches!(&node.kind, GraphNodeKind::Input(name) if src_inputs.contains_key(name))));
         self.build_inputs();
         self.build_producers();
         self.build_consumers();
@@ -287,15 +285,11 @@ impl Graph {
         target.build_producers();
         target.build_consumers();
 
-        self.nodes.retain(|node| match &node.kind {
-            GraphNodeKind::Output(name) if src_outputs.contains_key(name.as_str()) => false,
-            _ => true,
-        });
+        self.nodes.retain(|node| 
+            !matches!(&node.kind, GraphNodeKind::Output(name) if src_outputs.contains_key(name.as_str())));
         self.nodes
-            .extend(target.nodes.into_iter().filter(|node| match &node.kind {
-                GraphNodeKind::Input(name) if target_inputs.contains_key(name.as_str()) => false,
-                _ => true,
-            }));
+            .extend(target.nodes.into_iter().filter(|node| 
+                !matches!(&node.kind, GraphNodeKind::Input(name) if target_inputs.contains_key(name.as_str()))));
         self.build_inputs();
         self.build_producers();
         self.build_consumers();
@@ -383,10 +377,8 @@ impl Graph {
         target.build_consumers();
 
         self.nodes
-            .extend(target.nodes.into_iter().filter(|node| match &node.kind {
-                GraphNodeKind::Input(name) if target_inputs.contains_key(name.as_str()) => false,
-                _ => true,
-            }));
+            .extend(target.nodes.into_iter().filter(|node| 
+                !matches!(&node.kind, GraphNodeKind::Input(name) if target_inputs.contains_key(name.as_str()))));
         self.build_inputs();
         self.build_producers();
         self.build_consumers();
@@ -570,8 +562,7 @@ impl Graph {
     pub fn replace_node_id_lazy(&mut self, from: GraphNodeId, to: GraphNodeId) {
         self.nodes
             .iter_mut()
-            .map(|node| itertools::chain!(&mut node.inputs, &mut node.outputs))
-            .flatten()
+            .flat_map(|node| itertools::chain!(&mut node.inputs, &mut node.outputs))
             .filter(|node_id| **node_id == from)
             .for_each(|node_id| *node_id = to);
     }
@@ -579,8 +570,7 @@ impl Graph {
     pub fn replace_input_node_id_lazy(&mut self, from: GraphNodeId, to: GraphNodeId) {
         self.nodes
             .iter_mut()
-            .map(|node| &mut node.inputs)
-            .flatten()
+            .flat_map(|node| &mut node.inputs)
             .filter(|node_id| **node_id == from)
             .for_each(|node_id| *node_id = to);
     }
@@ -588,8 +578,7 @@ impl Graph {
     pub fn replace_output_node_id_lazy(&mut self, from: GraphNodeId, to: GraphNodeId) {
         self.nodes
             .iter_mut()
-            .map(|node| &mut node.outputs)
-            .flatten()
+            .flat_map(|node| &mut node.outputs)
             .filter(|node_id| **node_id == from)
             .for_each(|node_id| *node_id = to);
     }
@@ -776,11 +765,9 @@ impl Graph {
     }
 
     pub fn remove_output(&mut self, output_name: &str) -> Option<GraphNodeId> {
-        let Some((index, _)) = self.nodes.iter().find_position(
+        let (index, _) = self.nodes.iter().find_position(
             |node| matches!(&node.kind, GraphNodeKind::Output(name) if name == output_name),
-        ) else {
-            return None;
-        };
+        )?;
 
         let id = self.nodes.remove(index).id;
         self.build_outputs();
@@ -813,18 +800,12 @@ impl Graph {
 
 impl From<&Graph> for petgraph::Graph<(), ()> {
     fn from(value: &Graph) -> Self {
-        petgraph::Graph::<(), ()>::from_edges(
-            value
-                .nodes
+        petgraph::Graph::<(), ()>::from_edges(value.nodes.iter().flat_map(|node| {
+            node.outputs
                 .iter()
-                .map(|node| {
-                    node.outputs
-                        .iter()
-                        .map(|&id| (NodeIndex::new(node.id), NodeIndex::new(id.into())))
-                        .collect_vec()
-                })
-                .flatten(),
-        )
+                .map(|&id| (NodeIndex::new(node.id), NodeIndex::new(id)))
+                .collect_vec()
+        }))
     }
 }
 
@@ -958,13 +939,12 @@ impl<'a> From<Vec<SubGraphWithGraph<'a>>> for Graph {
     }
 }
 
-pub fn subgraphs_to_clustered_graph(graph: &Graph, subgraphs: &Vec<SubGraph>) -> ClusteredGraph {
+pub fn subgraphs_to_clustered_graph(graph: &Graph, subgraphs: &[SubGraph]) -> ClusteredGraph {
     // GraphNodeId, Cluster Index
     let cluster_index: HashMap<GraphNodeId, usize> = subgraphs
         .iter()
         .enumerate()
-        .map(|(index, sg)| sg.nodes.iter().map(|&id| (id, index)).collect_vec())
-        .flatten()
+        .flat_map(|(index, sg)| sg.nodes.iter().map(|&id| (id, index)).collect_vec())
         .collect();
 
     let mut nodes = subgraphs
@@ -990,8 +970,7 @@ pub fn subgraphs_to_clustered_graph(graph: &Graph, subgraphs: &Vec<SubGraph>) ->
             let consumers = sg
                 .nodes
                 .iter()
-                .map(|node| graph.consumers[&node.id()].clone())
-                .flatten()
+                .flat_map(|node| graph.consumers[&node.id()].clone())
                 .collect_vec();
 
             // cluster_index, weight
@@ -1005,7 +984,7 @@ pub fn subgraphs_to_clustered_graph(graph: &Graph, subgraphs: &Vec<SubGraph>) ->
             }
 
             // weighed_node, consumer
-            let weighted_nodes = consumer_cluster_weights
+            consumer_cluster_weights
                 .into_iter()
                 .map(|(cluster_id, w)| {
                     let weighted = Clustered {
@@ -1018,9 +997,7 @@ pub fn subgraphs_to_clustered_graph(graph: &Graph, subgraphs: &Vec<SubGraph>) ->
                         ..Default::default()
                     }
                 })
-                .collect_vec();
-
-            weighted_nodes
+                .collect_vec()
         })
         .collect_vec();
 
@@ -1035,7 +1012,7 @@ pub fn subgraphs_to_clustered_graph(graph: &Graph, subgraphs: &Vec<SubGraph>) ->
     }
 
     let mut graph = Graph {
-        nodes: vec![nodes, weighted_node.into_iter().flatten().collect_vec()].concat(),
+        nodes: [nodes, weighted_node.into_iter().flatten().collect_vec()].concat(),
         ..Default::default()
     };
 

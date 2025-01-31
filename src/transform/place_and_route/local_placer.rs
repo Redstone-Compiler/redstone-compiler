@@ -1,6 +1,5 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::usize;
 
 use eyre::ensure;
 use indicatif::{ParallelProgressIterator, ProgressStyle};
@@ -17,7 +16,7 @@ use crate::logic::LogicType;
 use crate::transform::place_and_route::place_bound::PropagateType;
 use crate::world::block::{Block, BlockKind, Direction};
 use crate::world::position::{DimSize, Position};
-use crate::world::world::World3D;
+use crate::world::World3D;
 
 pub struct LocalPlacer {
     graph: LogicGraph,
@@ -55,7 +54,7 @@ impl LocalPlacer {
     }
 
     fn verify(&self) -> eyre::Result<()> {
-        ensure!(self.graph.nodes.len() > 0, "");
+        ensure!(!self.graph.nodes.is_empty(), "");
         ensure!(
             self.graph.nodes.len() <= K_MAX_LOCAL_PLACE_NODE_COUNT,
             "too large graph"
@@ -75,6 +74,7 @@ impl LocalPlacer {
         Ok(())
     }
 
+    #[allow(clippy::vec_init_then_push)]
     pub fn generate(&self, dim: DimSize, finish_step: Option<usize>) -> Vec<World3D> {
         tracing::info!("generate starts");
 
@@ -178,9 +178,8 @@ impl LocalPlacer {
     fn sample(&self, queue: PlacerQueue) -> PlacerQueue {
         if self.config.leak_sampling && queue.len() > 10_000 {
             // TODO: deallocate on other thread
-            self.config
-                .step_sampling_policy
-                .sample_with_taking(Box::leak(Box::new(queue)))
+            let leak = Box::leak(Box::new(queue));
+            self.config.step_sampling_policy.sample_with_taking(leak)
         } else {
             self.config.step_sampling_policy.sample(queue)
         }
@@ -310,7 +309,7 @@ fn place_torch_with_cobble(
     let cobble_pos = torch_pos.walk(torch.direction)?;
     let cobble_node = PlacedNode::new_cobble(cobble_pos);
     let torch_node = PlacedNode::new(torch_pos, torch);
-    if cobble_node.has_conflict(&world, &Default::default())
+    if cobble_node.has_conflict(world, &Default::default())
         || torch_node.has_conflict(world, &Default::default())
     {
         return None;
@@ -440,7 +439,7 @@ fn generate_or_routes_init_states(
                     .map(|pos| PlaceBound(PropagateType::Soft, pos, pos.diff(from)))
                     .collect_vec()
             } else {
-                from_node.propagation_bound(Some(&world))
+                from_node.propagation_bound(Some(world))
             };
 
             Some((new_world.into_owned(), vec![from], bounds))
@@ -454,7 +453,7 @@ fn try_generate_cobble_node(
     except: &[Position],
 ) -> Option<PlacedNode> {
     let cobble_node = PlacedNode::new_cobble(cobble_pos);
-    if !cobble_node.has_conflict(&world, &except.into_iter().copied().collect()) {
+    if !cobble_node.has_conflict(world, &except.iter().copied().collect()) {
         Some(cobble_node)
     } else {
         None
@@ -476,7 +475,7 @@ fn place_redstone_with_cobble(
     let bound_back_pos = bound_pos.walk(bound.direction()).unwrap();
     let redstone_node = PlacedNode::new_redstone(bound_pos);
     let except = [prev, bound_back_pos, bound_pos, to].into_iter().collect();
-    if redstone_node.has_conflict(&new_world, &except) || redstone_node.has_short(&world, &except) {
+    if redstone_node.has_conflict(&new_world, &except) || redstone_node.has_short(world, &except) {
         return None;
     }
     place_node(&mut new_world, redstone_node);
@@ -513,7 +512,7 @@ mod tests {
     };
     use crate::transform::world_to_logic::WorldToLogicTransformer;
     use crate::world::position::DimSize;
-    use crate::world::world::{World, World3D};
+    use crate::world::{World, World3D};
 
     fn build_graph_from_stmt(stmt: &str, output: &str) -> eyre::Result<LogicGraph> {
         LogicGraphBuilder::new(stmt.to_string()).build(output.to_string())

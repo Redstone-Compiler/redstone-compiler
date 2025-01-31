@@ -302,6 +302,7 @@ mod tests {
         let mut finish = transform.finish();
         println!("{}", finish.to_graphviz());
 
+        #[allow(clippy::needless_range_loop)]
         for index in 1..2 {
             let mut graph: Graph = (&splits[index]).into();
             graph = graph.rebuild_node_ids();

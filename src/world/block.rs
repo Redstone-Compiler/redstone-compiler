@@ -1,7 +1,7 @@
 use strum_macros::{EnumIs, EnumIter};
 
 use super::position::{DimSize, Position};
-use super::world::World;
+use super::World;
 use crate::graph::GraphNodeId;
 
 #[derive(Debug, Default, EnumIter, EnumIs, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -199,7 +199,7 @@ impl BlockKind {
 }
 
 // 모든 물리적 소자의 최소 단위
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct Block {
     pub kind: BlockKind,
     pub direction: Direction,
@@ -284,15 +284,6 @@ impl Block {
         };
 
         Ok(cnt)
-    }
-}
-
-impl Default for Block {
-    fn default() -> Self {
-        Self {
-            kind: Default::default(),
-            direction: Default::default(),
-        }
     }
 }
 

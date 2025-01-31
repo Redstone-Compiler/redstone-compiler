@@ -248,8 +248,7 @@ impl From<(&GraphModuleContext, &GraphModule)> for GraphWithSubGraphs {
                         GraphNodeKind::Input(name) | GraphNodeKind::Output(name) => {
                             if let Some(port_name) = module_port_name
                                 .get_mut(instance)
-                                .map(|ports| ports.get_mut(name))
-                                .flatten()
+                                .and_then(|ports| ports.get_mut(name))
                             {
                                 *name = port_name.clone();
                             }
@@ -278,9 +277,8 @@ impl From<(&GraphModuleContext, &GraphModule)> for GraphWithSubGraphs {
             .windows(2)
             .map(|w| {
                 w[1].difference(&w[0])
-                    .into_iter()
                     .filter(|p| !removed_id.contains(p))
-                    .map(|p| *p)
+                    .copied()
                     .collect_vec()
             })
             .collect_vec();
@@ -289,18 +287,12 @@ impl From<(&GraphModuleContext, &GraphModule)> for GraphWithSubGraphs {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct GraphModuleBuilder {
     context: GraphModuleContext,
 }
 
 impl GraphModuleBuilder {
-    pub fn new() -> Self {
-        Self {
-            context: GraphModuleContext::default(),
-        }
-    }
-
     pub fn finish(self) -> GraphModuleContext {
         self.context
     }
@@ -477,7 +469,7 @@ mod tests {
 
     #[test]
     fn unittest_module_full_adder_parallel() -> eyre::Result<()> {
-        let mut builder = GraphModuleBuilder::new();
+        let mut builder = GraphModuleBuilder::default();
 
         let fa = get_full_adder_graph()?;
         let gm: GraphModule = fa.graph.to_module(&mut builder, "full_adder");
