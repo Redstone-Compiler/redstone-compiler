@@ -1,12 +1,9 @@
 #![feature(let_chains)]
 
-pub mod circuit;
 pub mod cluster;
-pub mod estimator;
 pub mod graph;
 pub mod logic;
 pub mod nbt;
-pub mod option;
 pub mod transform;
 pub mod utils;
 pub mod verilog;
