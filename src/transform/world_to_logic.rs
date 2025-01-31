@@ -153,13 +153,16 @@ impl WorldToLogicTransformer {
 
 #[cfg(test)]
 mod tests {
+
     use itertools::Itertools;
 
     use crate::graph::graphviz::ToGraphvizGraph;
+    use crate::graph::logic::predefined_logics;
     use crate::graph::subgraphs_to_clustered_graph;
     use crate::graph::world::WorldGraphBuilder;
     use crate::nbt::NBTRoot;
     use crate::transform::logic::LogicGraphTransformer;
+    use crate::transform::place_and_route::utils::equivalent_logic_with_world;
     use crate::transform::world_to_logic::WorldToLogicTransformer;
 
     #[test]
@@ -185,6 +188,16 @@ mod tests {
 
         let clustered_g = subgraphs_to_clustered_graph(&g.graph, &sub_graphs);
         println!("{}", clustered_g.to_graphviz());
+
+        Ok(())
+    }
+
+    #[test]
+    fn unittest_world_to_logic_graph_xor() -> eyre::Result<()> {
+        let nbt = NBTRoot::load("test/xor-generated.nbt")?;
+        let world = &nbt.to_world();
+        let expected = predefined_logics::buffered_xor_graph()?;
+        assert!(equivalent_logic_with_world(&expected, world)?);
 
         Ok(())
     }

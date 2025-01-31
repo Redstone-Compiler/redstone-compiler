@@ -25,7 +25,7 @@ impl LogicType {
     }
 }
 
-#[derive(Debug, Copy, Clone, derive_more::Deref)]
+#[derive(Debug, Copy, Clone, derive_more::Deref, PartialEq)]
 pub struct Logic {
     #[deref]
     pub logic_type: LogicType,

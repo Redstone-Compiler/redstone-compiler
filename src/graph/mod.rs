@@ -20,7 +20,7 @@ pub mod world;
 
 pub type GraphNodeId = usize;
 
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug, Clone, PartialEq)]
 pub enum GraphNodeKind {
     #[default]
     None,
@@ -139,13 +139,38 @@ pub struct Graph {
 }
 
 impl Graph {
-    pub fn to_petgraph(&self) -> petgraph::Graph<(), ()> {
-        self.into()
+    pub fn to_petgraph_only_edges(&self) -> petgraph::Graph<(), ()> {
+        let edges = self.nodes.iter().flat_map(|node| {
+            node.outputs
+                .iter()
+                .map(|&id| (NodeIndex::new(node.id), NodeIndex::new(id)))
+                .collect_vec()
+        });
+
+        petgraph::Graph::<(), ()>::from_edges(edges)
+    }
+
+    pub fn to_petgraph(&self) -> petgraph::Graph<GraphNodeKind, ()> {
+        let mut graph = petgraph::Graph::new();
+        let mut node_to_id = HashMap::new();
+
+        for node in &self.nodes {
+            let nx = graph.add_node(node.kind.clone());
+            node_to_id.insert(node.id, nx);
+        }
+
+        for (id, producers) in &self.producers {
+            for producer in producers {
+                graph.add_edge(node_to_id[producer], node_to_id[id], ());
+            }
+        }
+
+        graph
     }
 
     pub fn topological_order(&self) -> Vec<GraphNodeId> {
         let nodes: HashSet<GraphNodeId> = self.nodes.iter().map(|node| node.id).collect();
-        petgraph::algo::toposort(&self.to_petgraph(), None)
+        petgraph::algo::toposort(&self.to_petgraph_only_edges(), None)
             .unwrap()
             .iter()
             .map(|index| index.index())
@@ -157,7 +182,10 @@ impl Graph {
         &self,
         target_root: GraphNodeId,
     ) -> petgraph::algo::dominators::Dominators<NodeIndex> {
-        petgraph::algo::dominators::simple_fast(&self.to_petgraph(), NodeIndex::new(target_root))
+        petgraph::algo::dominators::simple_fast(
+            &self.to_petgraph_only_edges(),
+            NodeIndex::new(target_root),
+        )
     }
 
     pub fn inputs(&self) -> Vec<GraphNodeId> {
@@ -285,10 +313,10 @@ impl Graph {
         target.build_producers();
         target.build_consumers();
 
-        self.nodes.retain(|node| 
+        self.nodes.retain(|node|
             !matches!(&node.kind, GraphNodeKind::Output(name) if src_outputs.contains_key(name.as_str())));
         self.nodes
-            .extend(target.nodes.into_iter().filter(|node| 
+            .extend(target.nodes.into_iter().filter(|node|
                 !matches!(&node.kind, GraphNodeKind::Input(name) if target_inputs.contains_key(name.as_str()))));
         self.build_inputs();
         self.build_producers();
@@ -377,7 +405,7 @@ impl Graph {
         target.build_consumers();
 
         self.nodes
-            .extend(target.nodes.into_iter().filter(|node| 
+            .extend(target.nodes.into_iter().filter(|node|
                 !matches!(&node.kind, GraphNodeKind::Input(name) if target_inputs.contains_key(name.as_str()))));
         self.build_inputs();
         self.build_producers();
@@ -411,7 +439,7 @@ impl Graph {
     }
 
     pub fn has_cycle(&self) -> bool {
-        petgraph::algo::is_cyclic_directed(&self.to_petgraph())
+        petgraph::algo::is_cyclic_directed(&self.to_petgraph_only_edges())
     }
 
     pub fn max_node_id(&self) -> Option<GraphNodeId> {
@@ -472,7 +500,7 @@ impl Graph {
     pub fn rebuild_node_ids_deprecated(self) -> Self {
         // toposort가 기존에 없는 새로운 index를 창조함
         // ???
-        let index_map = petgraph::algo::toposort(&self.to_petgraph(), None)
+        let index_map = petgraph::algo::toposort(&self.to_petgraph_only_edges(), None)
             .unwrap()
             .iter()
             .enumerate()
@@ -738,7 +766,7 @@ impl Graph {
             longest_path.cloned().flatten()
         }
 
-        let mut path = find_longest_path(&self.into())
+        let mut path = find_longest_path(&self.to_petgraph_only_edges())
             .unwrap()
             .iter()
             .map(|id| id.index())
@@ -795,17 +823,6 @@ impl Graph {
         }
 
         Ok(())
-    }
-}
-
-impl From<&Graph> for petgraph::Graph<(), ()> {
-    fn from(value: &Graph) -> Self {
-        petgraph::Graph::<(), ()>::from_edges(value.nodes.iter().flat_map(|node| {
-            node.outputs
-                .iter()
-                .map(|&id| (NodeIndex::new(node.id), NodeIndex::new(id)))
-                .collect_vec()
-        }))
     }
 }
 

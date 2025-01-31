@@ -309,7 +309,7 @@ fn place_torch_with_cobble(
     let cobble_pos = torch_pos.walk(torch.direction)?;
     let cobble_node = PlacedNode::new_cobble(cobble_pos);
     let torch_node = PlacedNode::new(torch_pos, torch);
-    if cobble_node.has_conflict(world, &Default::default())
+    if cobble_node.has_conflict(world, &[cobble_pos].into_iter().collect())
         || torch_node.has_conflict(world, &Default::default())
     {
         return None;
@@ -467,14 +467,20 @@ fn place_redstone_with_cobble(
     to: Position,
 ) -> Option<(World3D, PlacedNode)> {
     let cobble_pos = bound.position().walk(Direction::Bottom)?;
-    let cobble_node = try_generate_cobble_node(world, cobble_pos, &[])?;
+    // 첫 번째 step에서 torch 위쪽에 cobble + redstone이 놓인 경우 예외처리
+    let cobble_except = (world[prev].kind.is_torch())
+        .then_some(vec![cobble_pos, prev])
+        .unwrap_or_default();
+    let cobble_node = try_generate_cobble_node(world, cobble_pos, &cobble_except)?;
     let mut new_world = world.clone();
     place_node(&mut new_world, cobble_node);
 
     let bound_pos = bound.position();
     let bound_back_pos = bound_pos.walk(bound.direction()).unwrap();
     let redstone_node = PlacedNode::new_redstone(bound_pos);
-    let except = [prev, bound_back_pos, bound_pos, to].into_iter().collect();
+    let except = [prev, bound_back_pos, bound_pos, to, to.up()]
+        .into_iter()
+        .collect();
     if redstone_node.has_conflict(&new_world, &except) || redstone_node.has_short(world, &except) {
         return None;
     }
@@ -504,19 +510,20 @@ impl<'a> LocalPlacerCostEstimator<'a> {
 mod tests {
 
     use crate::graph::graphviz::ToGraphvizGraph;
-    use crate::graph::logic::LogicGraph;
-    use crate::graph::world::WorldGraph;
+    use crate::graph::logic::predefined_logics;
     use crate::nbt::{NBTRoot, ToNBT};
     use crate::transform::place_and_route::local_placer::{
         LocalPlacer, LocalPlacerConfig, SamplingPolicy,
     };
-    use crate::transform::world_to_logic::WorldToLogicTransformer;
+    use crate::transform::place_and_route::utils::{
+        equivalent_logic_with_world3d, equivalent_logic_with_world3ds, world3d_to_logic,
+    };
     use crate::world::position::DimSize;
-    use crate::world::{World, World3D};
+    use crate::world::World3D;
 
     #[test]
     fn test_generate_component_and_shortest() -> eyre::Result<()> {
-        let logic_graph = LogicGraph::from_stmt("a&b", "c")?.prepare_place()?;
+        let logic_graph = predefined_logics::and_graph()?;
         let config = LocalPlacerConfig {
             greedy_input_generation: true,
             step_sampling_policy: SamplingPolicy::Random(1000),
@@ -525,16 +532,11 @@ mod tests {
             max_route_step: 1,
             route_step_sampling_policy: SamplingPolicy::Random(100),
         };
-        let placer = LocalPlacer::new(logic_graph, config)?;
+        let placer = LocalPlacer::new(logic_graph.clone(), config)?;
         let worlds = placer.generate(DimSize(10, 10, 5), None);
         assert!(!worlds.is_empty());
+        assert!(equivalent_logic_with_world3ds(&logic_graph, &worlds)?);
         Ok(())
-    }
-
-    fn world3d_to_logic(world3d: &World3D) -> eyre::Result<LogicGraph> {
-        let world = World::from(world3d);
-        let world_graph = WorldGraph::from(&world);
-        WorldToLogicTransformer::new(world_graph)?.transform()
     }
 
     fn save_worlds_to_nbt(worlds: Vec<World3D>, path: &str) -> eyre::Result<()> {
@@ -548,9 +550,6 @@ mod tests {
     fn test_generate_component_xor_simple() -> eyre::Result<()> {
         tracing_subscriber::fmt::init();
 
-        let logic_graph = LogicGraph::from_stmt("a^b", "c")?.prepare_place()?;
-        println!("{}", logic_graph.to_graphviz());
-
         let config = LocalPlacerConfig {
             greedy_input_generation: false,
             step_sampling_policy: SamplingPolicy::Random(100),
@@ -559,6 +558,7 @@ mod tests {
             max_route_step: 5,
             route_step_sampling_policy: SamplingPolicy::Random(100),
         };
+        let logic_graph = predefined_logics::xor_graph()?;
         let placer = LocalPlacer::new(logic_graph, config)?;
         let worlds = placer.generate(DimSize(10, 10, 5), None);
 
@@ -569,17 +569,6 @@ mod tests {
         save_worlds_to_nbt(sampled_worlds, "test/xor-gate-simple.nbt")?;
 
         Ok(())
-    }
-
-    fn buffered_xor_graph() -> eyre::Result<LogicGraph> {
-        // c := (~((a&b)|~a))|(~((a&b)|~b))
-        let logic_graph1 = LogicGraph::from_stmt("a&b", "c")?;
-        let logic_graph2 = LogicGraph::from_stmt("(~(c|~a))|(~(c|~b))", "d")?;
-
-        let mut fm = logic_graph1.clone();
-        fm.graph.merge(logic_graph2.graph);
-        println!("{}", fm.to_graphviz());
-        fm.prepare_place()
     }
 
     #[test]
@@ -594,7 +583,7 @@ mod tests {
             route_step_sampling_policy: SamplingPolicy::Random(1000),
         };
 
-        let xor_graph = buffered_xor_graph()?;
+        let xor_graph = predefined_logics::buffered_xor_graph()?;
         let placer = LocalPlacer::new(xor_graph, config)?;
         let worlds = placer.generate(DimSize(10, 10, 5), None);
 
@@ -624,30 +613,26 @@ mod tests {
             route_step_sampling_policy: SamplingPolicy::Random(1000),
         };
 
-        let xor_graph = buffered_xor_graph()?;
-        let placer = LocalPlacer::new(xor_graph, config)?;
+        let xor_graph = predefined_logics::buffered_xor_graph()?;
+        let placer = LocalPlacer::new(xor_graph.clone(), config)?;
         let worlds = placer.generate(DimSize(10, 10, 5), None);
 
         let sampled_worlds = SamplingPolicy::Random(100).sample(worlds);
         let sample_logic = world3d_to_logic(&sampled_worlds[0])?.prepare_place()?;
         println!("{}", sample_logic.to_graphviz());
 
-        save_worlds_to_nbt(sampled_worlds, "test/xor-gate-fixed-input.nbt")?;
+        for sample in &sampled_worlds {
+            // For debug
+            // if !equivalent_logic_with_world3d(&xor_graph, sample)? {
+            //     let sample_logic = world3d_to_logic(&sample)?.prepare_place()?;
+            //     println!("{}", sample_logic.to_graphviz());
+            // }
+            assert!(equivalent_logic_with_world3d(&xor_graph, sample)?);
+        }
+
+        save_worlds_to_nbt(sampled_worlds, "test/xor-gate-shortest.nbt")?;
 
         Ok(())
-    }
-
-    fn buffered_half_adder_graph() -> eyre::Result<LogicGraph> {
-        let and_0 = LogicGraph::from_stmt("a&b", "c")?;
-        let xor_o = LogicGraph::from_stmt("(~(c|~a))|(~(c|~b))", "i")?;
-        let and_1 = LogicGraph::from_stmt("i&cin", "d")?;
-        let out_s = LogicGraph::from_stmt("(~(d|~i))|(~(d|~cin))", "s")?;
-
-        let mut fa = and_0.clone();
-        fa.graph.merge(xor_o.graph);
-        fa.graph.merge(and_1.graph);
-        fa.graph.merge(out_s.graph);
-        fa.prepare_place()
     }
 
     #[test]
@@ -663,7 +648,7 @@ mod tests {
             route_step_sampling_policy: SamplingPolicy::Random(100),
         };
 
-        let fa_graph = buffered_half_adder_graph()?;
+        let fa_graph = predefined_logics::buffered_half_adder_graph()?;
         println!("{}", fa_graph.to_graphviz());
         let placer = LocalPlacer::new(fa_graph, config)?;
         let worlds = placer.generate(DimSize(10, 10, 5), None);
@@ -675,32 +660,6 @@ mod tests {
         save_worlds_to_nbt(sampled_worlds, "test/half-adder.nbt")?;
 
         Ok(())
-    }
-
-    #[expect(dead_code)]
-    fn full_adder_graph() -> eyre::Result<LogicGraph> {
-        let out_s = LogicGraph::from_stmt("(a^b)^cin", "s")?;
-        let out_cout = LogicGraph::from_stmt("(a&b)|(s&cin)", "cout")?;
-
-        let mut fa = out_s.clone();
-        fa.graph.merge(out_cout.graph);
-        fa.prepare_place()
-    }
-
-    fn buffered_full_adder_graph() -> eyre::Result<LogicGraph> {
-        let and_0 = LogicGraph::from_stmt("a&b", "c")?;
-        let xor_o = LogicGraph::from_stmt("(~(c|~a))|(~(c|~b))", "i")?;
-        let and_1 = LogicGraph::from_stmt("i&cin", "d")?;
-        let out_s = LogicGraph::from_stmt("(~(d|~i))|(~(d|~cin))", "s")?;
-
-        let out_cout = LogicGraph::from_stmt("(a&b)|(s&cin)", "cout")?;
-
-        let mut fa = and_0.clone();
-        fa.graph.merge(xor_o.graph);
-        fa.graph.merge(and_1.graph);
-        fa.graph.merge(out_s.graph);
-        fa.graph.merge(out_cout.graph);
-        fa.prepare_place()
     }
 
     #[test]
@@ -717,7 +676,7 @@ mod tests {
             route_step_sampling_policy: SamplingPolicy::Random(100),
         };
 
-        let fa_graph = buffered_full_adder_graph()?;
+        let fa_graph = predefined_logics::buffered_full_adder_graph()?;
         println!("{}", fa_graph.to_graphviz());
         let placer = LocalPlacer::new(fa_graph, config)?;
         let worlds = placer.generate(DimSize(10, 10, 5), None);

@@ -68,7 +68,8 @@ impl PlaceBound {
                             .into_iter()
                             .filter(|&up_cardinal| {
                                 world.size.bound_on(up_cardinal)
-                                // && world[up_cardinal].kind.is_redstone()
+                                    && (world[up_cardinal].kind.is_air()
+                                        || world[up_cardinal].kind.is_redstone())
                             }),
                     );
                 }
@@ -106,6 +107,8 @@ impl PlaceBound {
                     _ => unreachable!(),
                 }
                 .into_iter()
+                // CHECK: 현재 propagation_bound는 블록 검사의 책임이 없기 때문에 다음과 같은 조건 체크는 외부의 책임임
+                // .filter(|&pos| !world.unwrap()[pos].kind.is_cobble())
                 .map(|pos_src| PlaceBound(PropagateType::Torch, pos_src, pos_src.diff(pos)))
                 .chain(Some(PlaceBound(
                     PropagateType::Hard,
