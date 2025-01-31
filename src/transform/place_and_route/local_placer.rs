@@ -510,15 +510,16 @@ impl<'a> LocalPlacerCostEstimator<'a> {
 mod tests {
 
     use crate::graph::graphviz::ToGraphvizGraph;
-    use crate::graph::logic::{predefined_logics, LogicGraph};
-    use crate::graph::world::WorldGraph;
+    use crate::graph::logic::predefined_logics;
     use crate::nbt::{NBTRoot, ToNBT};
     use crate::transform::place_and_route::local_placer::{
         LocalPlacer, LocalPlacerConfig, SamplingPolicy,
     };
-    use crate::transform::world_to_logic::WorldToLogicTransformer;
+    use crate::transform::place_and_route::utils::{
+        equivalent_logic_with_world3d, world3d_to_logic,
+    };
     use crate::world::position::DimSize;
-    use crate::world::{World, World3D};
+    use crate::world::World3D;
 
     #[test]
     fn test_generate_component_and_shortest() -> eyre::Result<()> {
@@ -535,12 +536,6 @@ mod tests {
         let worlds = placer.generate(DimSize(10, 10, 5), None);
         assert!(!worlds.is_empty());
         Ok(())
-    }
-
-    fn world3d_to_logic(world3d: &World3D) -> eyre::Result<LogicGraph> {
-        let world = World::from(world3d);
-        let world_graph = WorldGraph::from(&world);
-        WorldToLogicTransformer::new(world_graph)?.transform()
     }
 
     fn save_worlds_to_nbt(worlds: Vec<World3D>, path: &str) -> eyre::Result<()> {
@@ -618,12 +613,21 @@ mod tests {
         };
 
         let xor_graph = predefined_logics::buffered_xor_graph()?;
-        let placer = LocalPlacer::new(xor_graph, config)?;
+        let placer = LocalPlacer::new(xor_graph.clone(), config)?;
         let worlds = placer.generate(DimSize(10, 10, 5), None);
 
         let sampled_worlds = SamplingPolicy::Random(100).sample(worlds);
         let sample_logic = world3d_to_logic(&sampled_worlds[0])?.prepare_place()?;
         println!("{}", sample_logic.to_graphviz());
+
+        for sample in &sampled_worlds {
+            // For debug
+            // if !equivalent_logic_with_world3d(&xor_graph, sample)? {
+            //     let sample_logic = world3d_to_logic(&sample)?.prepare_place()?;
+            //     println!("{}", sample_logic.to_graphviz());
+            // }
+            assert!(equivalent_logic_with_world3d(&xor_graph, sample)?);
+        }
 
         save_worlds_to_nbt(sampled_worlds, "test/xor-gate-shortest.nbt")?;
 

@@ -15,7 +15,7 @@ impl ClusteredType {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Clustered {
     pub clustered_type: ClusteredType,
 }

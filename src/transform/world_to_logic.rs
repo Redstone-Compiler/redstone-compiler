@@ -162,6 +162,7 @@ mod tests {
     use crate::graph::world::WorldGraphBuilder;
     use crate::nbt::NBTRoot;
     use crate::transform::logic::LogicGraphTransformer;
+    use crate::transform::place_and_route::utils::equivalent_logic_with_world;
     use crate::transform::world_to_logic::WorldToLogicTransformer;
 
     #[test]
@@ -194,27 +195,9 @@ mod tests {
     #[test]
     fn unittest_world_to_logic_graph_xor() -> eyre::Result<()> {
         let nbt = NBTRoot::load("test/xor-generated.nbt")?;
-
-        let g = WorldGraphBuilder::new(&nbt.to_world()).build();
-        g.graph.verify()?;
-
-        let g = WorldToLogicTransformer::new(g)?.transform()?;
-        g.graph.verify()?;
-
-        println!("{}", g.to_graphviz());
-
-        let mut expected = predefined_logics::buffered_xor_graph()?;
-        let outputs = expected.outputs();
-        outputs
-            .into_iter()
-            .for_each(|o| expected.graph.remove_by_node_id_lazy(o));
-        expected.graph.build_outputs();
-        expected.graph.build_producers();
-
-        println!("{}", expected.to_graphviz());
-
-        let equivalent = petgraph::algo::is_isomorphic(&expected.to_petgraph(), &g.to_petgraph());
-        assert!(equivalent);
+        let world = &nbt.to_world();
+        let expected = predefined_logics::buffered_xor_graph()?;
+        assert!(equivalent_logic_with_world(&expected, world)?);
 
         Ok(())
     }

@@ -20,7 +20,7 @@ pub mod world;
 
 pub type GraphNodeId = usize;
 
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug, Clone, PartialEq)]
 pub enum GraphNodeKind {
     #[default]
     None,
