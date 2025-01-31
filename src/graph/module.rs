@@ -450,16 +450,12 @@ impl GraphModuleBuilder {
 mod tests {
     use super::GraphModuleBuilder;
     use crate::graph::graphviz::{ToGraphvizGraph, ToGraphvizModule};
-    use crate::graph::logic::{LogicGraph, LogicGraphBuilder};
+    use crate::graph::logic::LogicGraph;
     use crate::graph::module::{GraphModule, GraphWithSubGraphs};
 
-    fn build_graph_from_stmt(stmt: &str, output: &str) -> eyre::Result<LogicGraph> {
-        LogicGraphBuilder::new(stmt.to_string()).build(output.to_string())
-    }
-
     fn get_full_adder_graph() -> eyre::Result<LogicGraph> {
-        let out_s = build_graph_from_stmt("(a^b)^cin", "s")?;
-        let out_cout = build_graph_from_stmt("(a&b)|(s&cin)", "cout")?;
+        let out_s = LogicGraph::from_stmt("(a^b)^cin", "s")?;
+        let out_cout = LogicGraph::from_stmt("(a&b)|(s&cin)", "cout")?;
 
         let mut fa = out_s.clone();
         fa.graph.merge(out_cout.graph);

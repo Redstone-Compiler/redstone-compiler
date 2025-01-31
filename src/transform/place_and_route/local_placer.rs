@@ -504,7 +504,7 @@ impl<'a> LocalPlacerCostEstimator<'a> {
 mod tests {
 
     use crate::graph::graphviz::ToGraphvizGraph;
-    use crate::graph::logic::{LogicGraph, LogicGraphBuilder};
+    use crate::graph::logic::LogicGraph;
     use crate::graph::world::WorldGraph;
     use crate::nbt::{NBTRoot, ToNBT};
     use crate::transform::place_and_route::local_placer::{
@@ -514,13 +514,9 @@ mod tests {
     use crate::world::position::DimSize;
     use crate::world::{World, World3D};
 
-    fn build_graph_from_stmt(stmt: &str, output: &str) -> eyre::Result<LogicGraph> {
-        LogicGraphBuilder::new(stmt.to_string()).build(output.to_string())
-    }
-
     #[test]
     fn test_generate_component_and_shortest() -> eyre::Result<()> {
-        let logic_graph = build_graph_from_stmt("a&b", "c")?.prepare_place()?;
+        let logic_graph = LogicGraph::from_stmt("a&b", "c")?.prepare_place()?;
         let config = LocalPlacerConfig {
             greedy_input_generation: true,
             step_sampling_policy: SamplingPolicy::Random(1000),
@@ -552,7 +548,7 @@ mod tests {
     fn test_generate_component_xor_simple() -> eyre::Result<()> {
         tracing_subscriber::fmt::init();
 
-        let logic_graph = build_graph_from_stmt("a^b", "c")?.prepare_place()?;
+        let logic_graph = LogicGraph::from_stmt("a^b", "c")?.prepare_place()?;
         println!("{}", logic_graph.to_graphviz());
 
         let config = LocalPlacerConfig {
@@ -577,8 +573,8 @@ mod tests {
 
     fn buffered_xor_graph() -> eyre::Result<LogicGraph> {
         // c := (~((a&b)|~a))|(~((a&b)|~b))
-        let logic_graph1 = build_graph_from_stmt("a&b", "c")?;
-        let logic_graph2 = build_graph_from_stmt("(~(c|~a))|(~(c|~b))", "d")?;
+        let logic_graph1 = LogicGraph::from_stmt("a&b", "c")?;
+        let logic_graph2 = LogicGraph::from_stmt("(~(c|~a))|(~(c|~b))", "d")?;
 
         let mut fm = logic_graph1.clone();
         fm.graph.merge(logic_graph2.graph);
@@ -642,10 +638,10 @@ mod tests {
     }
 
     fn buffered_half_adder_graph() -> eyre::Result<LogicGraph> {
-        let and_0 = build_graph_from_stmt("a&b", "c")?;
-        let xor_o = build_graph_from_stmt("(~(c|~a))|(~(c|~b))", "i")?;
-        let and_1 = build_graph_from_stmt("i&cin", "d")?;
-        let out_s = build_graph_from_stmt("(~(d|~i))|(~(d|~cin))", "s")?;
+        let and_0 = LogicGraph::from_stmt("a&b", "c")?;
+        let xor_o = LogicGraph::from_stmt("(~(c|~a))|(~(c|~b))", "i")?;
+        let and_1 = LogicGraph::from_stmt("i&cin", "d")?;
+        let out_s = LogicGraph::from_stmt("(~(d|~i))|(~(d|~cin))", "s")?;
 
         let mut fa = and_0.clone();
         fa.graph.merge(xor_o.graph);
@@ -683,8 +679,8 @@ mod tests {
 
     #[expect(dead_code)]
     fn full_adder_graph() -> eyre::Result<LogicGraph> {
-        let out_s = build_graph_from_stmt("(a^b)^cin", "s")?;
-        let out_cout = build_graph_from_stmt("(a&b)|(s&cin)", "cout")?;
+        let out_s = LogicGraph::from_stmt("(a^b)^cin", "s")?;
+        let out_cout = LogicGraph::from_stmt("(a&b)|(s&cin)", "cout")?;
 
         let mut fa = out_s.clone();
         fa.graph.merge(out_cout.graph);
@@ -692,12 +688,12 @@ mod tests {
     }
 
     fn buffered_full_adder_graph() -> eyre::Result<LogicGraph> {
-        let and_0 = build_graph_from_stmt("a&b", "c")?;
-        let xor_o = build_graph_from_stmt("(~(c|~a))|(~(c|~b))", "i")?;
-        let and_1 = build_graph_from_stmt("i&cin", "d")?;
-        let out_s = build_graph_from_stmt("(~(d|~i))|(~(d|~cin))", "s")?;
+        let and_0 = LogicGraph::from_stmt("a&b", "c")?;
+        let xor_o = LogicGraph::from_stmt("(~(c|~a))|(~(c|~b))", "i")?;
+        let and_1 = LogicGraph::from_stmt("i&cin", "d")?;
+        let out_s = LogicGraph::from_stmt("(~(d|~i))|(~(d|~cin))", "s")?;
 
-        let out_cout = build_graph_from_stmt("(a&b)|(s&cin)", "cout")?;
+        let out_cout = LogicGraph::from_stmt("(a&b)|(s&cin)", "cout")?;
 
         let mut fa = and_0.clone();
         fa.graph.merge(xor_o.graph);

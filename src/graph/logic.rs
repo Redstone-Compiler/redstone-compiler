@@ -12,6 +12,10 @@ pub struct LogicGraph {
 }
 
 impl LogicGraph {
+    pub fn from_stmt(stmt: &str, output: &str) -> eyre::Result<LogicGraph> {
+        LogicGraphBuilder::new(stmt.to_string()).build(output.to_string())
+    }
+
     pub fn prepare_place(self) -> eyre::Result<Self> {
         let mut transform = LogicGraphTransformer::new(self);
         transform.decompose_xor()?;
@@ -246,28 +250,23 @@ impl LogicGraphBuilder {
 mod tests {
     use itertools::Itertools;
 
-    use super::LogicGraphBuilder;
     use crate::graph::graphviz::ToGraphvizGraph;
     use crate::graph::logic::LogicGraph;
     use crate::graph::Graph;
     use crate::transform::logic::LogicGraphTransformer;
 
-    fn build_graph_from_stmt(stmt: &str, output: &str) -> eyre::Result<LogicGraph> {
-        LogicGraphBuilder::new(stmt.to_string()).build(output.to_string())
-    }
-
     #[test]
     fn unittest_logicgraph_full_adder() -> eyre::Result<()> {
         // s = (a ^ b) ^ cin;
         // cout = (a & b) | (s & cin);
-        let logic_graph1 = build_graph_from_stmt("(a1^b1)^cin1", "s1")?;
-        let logic_graph2 = build_graph_from_stmt("(a1&b1)|(s1&cin1)", "cout1")?;
+        let logic_graph1 = LogicGraph::from_stmt("(a1^b1)^cin1", "s1")?;
+        let logic_graph2 = LogicGraph::from_stmt("(a1&b1)|(s1&cin1)", "cout1")?;
 
         let mut fa1 = logic_graph1.clone();
         fa1.graph.merge(logic_graph2.graph);
 
-        let logic_graph3 = build_graph_from_stmt("(a2^b2)^cout1", "s2")?;
-        let logic_graph4 = build_graph_from_stmt("(a2&b2)|(s2&cout1)", "cout2")?;
+        let logic_graph3 = LogicGraph::from_stmt("(a2^b2)^cout1", "s2")?;
+        let logic_graph4 = LogicGraph::from_stmt("(a2&b2)|(s2&cout1)", "cout2")?;
 
         let mut fa2 = logic_graph3.clone();
         fa2.graph.merge(logic_graph4.graph);
