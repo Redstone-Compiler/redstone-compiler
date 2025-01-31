@@ -8,7 +8,7 @@ use crate::transform::place_and_route::place_bound::{PlaceBound, PropagateType};
 use crate::utils::Verify;
 use crate::world::block::{BlockKind, Direction};
 use crate::world::position::Position;
-use crate::world::world::{World, World3D};
+use crate::world::{World, World3D};
 
 #[derive(Debug, Default, Clone)]
 pub struct WorldGraph {
@@ -36,7 +36,7 @@ impl WorldGraphBuilder {
             .blocks
             .iter()
             .filter(|(_, block)| !block.kind.is_cobble())
-            .map(|(pos, _)| pos.clone())
+            .map(|(pos, _)| *pos)
             .collect();
         let mut world: World3D = world.into();
         world.initialize_redstone_states();
@@ -84,8 +84,7 @@ impl WorldGraphBuilder {
             let mut visits = propagation_targets
                 .into_iter()
                 .filter(|bound| self.world.size.bound_on(bound.position()))
-                .map(|bound| bound.propagate_to(&self.world))
-                .flatten()
+                .flat_map(|bound| bound.propagate_to(&self.world))
                 .collect_vec();
 
             if block.kind.is_redstone() {
@@ -96,7 +95,7 @@ impl WorldGraphBuilder {
                     .collect_vec();
             }
 
-            if visits.len() > 0 {
+            if !visits.is_empty() {
                 self.outputs.insert(*pos, visits);
             }
         }
@@ -132,7 +131,7 @@ impl WorldGraphBuilder {
             let mut block = self.world[*pos];
 
             for (dir, pos) in outputs {
-                let id = graph_id[&pos];
+                let id = graph_id[pos];
 
                 if let BlockKind::Repeater {
                     lock_input1,
@@ -154,7 +153,7 @@ impl WorldGraphBuilder {
         }
 
         let positions = nodes.iter().map(|(pos, node)| (node.id, *pos)).collect();
-        let mut nodes = nodes.into_iter().map(|(_, node)| node).collect_vec();
+        let mut nodes = nodes.into_values().collect_vec();
 
         nodes.sort_by(|a, b| a.id.cmp(&b.id));
 
@@ -174,7 +173,7 @@ mod test {
     use crate::graph::graphviz::ToGraphvizGraph;
     use crate::world::block::{Block, BlockKind, Direction};
     use crate::world::position::{DimSize, Position};
-    use crate::world::world::World;
+    use crate::world::World;
 
     #[test]
     fn unittest_worldgraph_and_gate() {
@@ -200,13 +199,13 @@ mod test {
         let mock_world = World {
             size: DimSize(4, 6, 3),
             blocks: vec![
-                (Position(0, 1, 0), default_restone.clone()),
-                (Position(2, 1, 0), default_restone.clone()),
-                (Position(0, 2, 0), default_cobble.clone()),
-                (Position(1, 2, 0), default_cobble.clone()),
-                (Position(2, 2, 0), default_cobble.clone()),
-                (Position(1, 2, 1), default_restone.clone()),
-                (Position(1, 4, 0), default_restone.clone()),
+                (Position(0, 1, 0), default_restone),
+                (Position(2, 1, 0), default_restone),
+                (Position(0, 2, 0), default_cobble),
+                (Position(1, 2, 0), default_cobble),
+                (Position(2, 2, 0), default_cobble),
+                (Position(1, 2, 1), default_restone),
+                (Position(1, 4, 0), default_restone),
                 (
                     Position(0, 2, 1),
                     Block {
@@ -289,16 +288,16 @@ mod test {
         let mock_world = World {
             size: DimSize(4, 4, 2),
             blocks: vec![
-                (Position(1, 1, 0), default_cobble.clone()),
+                (Position(1, 1, 0), default_cobble),
                 (Position(1, 0, 0), input_repeater),
-                (Position(0, 1, 0), default_restone.clone()),
-                (Position(1, 2, 0), default_restone.clone()),
-                (Position(2, 2, 0), default_restone.clone()),
+                (Position(0, 1, 0), default_restone),
+                (Position(1, 2, 0), default_restone),
+                (Position(2, 2, 0), default_restone),
                 (Position(2, 1, 0), output_torch),
             ],
         };
 
-        let _3d: crate::world::world::World3D = (&mock_world).into();
+        let _3d: crate::world::World3D = (&mock_world).into();
         println!("{:?}", _3d);
         let g = WorldGraphBuilder::new(&mock_world).build();
         println!("{}", g.to_graphviz());
@@ -344,17 +343,17 @@ mod test {
         let mock_world = World {
             size: DimSize(5, 5, 3),
             blocks: vec![
-                (Position(1, 1, 0), default_cobble.clone()),
-                (Position(1, 0, 1), default_cobble.clone()),
-                (Position(1, 2, 1), default_cobble.clone()),
+                (Position(1, 1, 0), default_cobble),
+                (Position(1, 0, 1), default_cobble),
+                (Position(1, 2, 1), default_cobble),
                 (Position(1, 1, 1), input_repeater),
                 (Position(1, 2, 0), output_torch),
-                (Position(1, 0, 0), default_restone.clone()),
-                (Position(1, 3, 0), default_restone.clone()),
+                (Position(1, 0, 0), default_restone),
+                (Position(1, 3, 0), default_restone),
             ],
         };
 
-        let _3d: crate::world::world::World3D = (&mock_world).into();
+        let _3d: crate::world::World3D = (&mock_world).into();
         println!("{:?}", _3d);
         let g = WorldGraphBuilder::new(&mock_world).build();
         println!("{}", g.to_graphviz());

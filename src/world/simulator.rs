@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 
 use super::block::{Block, BlockKind, Direction};
 use super::position::Position;
-use super::world::{World, World3D};
+use super::{World, World3D};
 
 #[derive(Clone, Debug)]
 enum EventType {
@@ -116,9 +116,7 @@ impl Simulator {
                     direction: pos_src.diff(pos),
                 })
                 .chain(|| -> Option<Event> {
-                    let Some(pos) = pos.walk(self.world[pos].direction) else {
-                        return None;
-                    };
+                    let pos = pos.walk(self.world[pos].direction)?;
 
                     Some(Event {
                         id: None,
@@ -200,7 +198,7 @@ impl Simulator {
             _ => unreachable!(),
         }
         .into_iter()
-        .map(|pos_src| {
+        .flat_map(|pos_src| {
             vec![Event {
                 id: None,
                 from_id: None,
@@ -209,7 +207,6 @@ impl Simulator {
                 direction: pos_src.diff(pos),
             }]
         })
-        .flatten()
         .chain(Some(Event {
             id: None,
             from_id: None,
@@ -235,9 +232,7 @@ impl Simulator {
                 direction: pos_src.diff(pos),
             })
             .chain(|| -> Option<Event> {
-                let Some(pos) = pos.walk(dir) else {
-                    return None;
-                };
+                let pos = pos.walk(dir)?;
 
                 Some(Event {
                     id: None,
@@ -352,12 +347,10 @@ impl Simulator {
                     } else {
                         EventType::HardOff
                     }
+                } else if event.event_type.is_on() {
+                    EventType::SoftOn
                 } else {
-                    if event.event_type.is_on() {
-                        EventType::SoftOn
-                    } else {
-                        EventType::SoftOff
-                    }
+                    EventType::SoftOff
                 },
                 target_position: pos_src,
                 direction: pos_src.diff(event.target_position),
@@ -659,68 +652,57 @@ impl Simulator {
         }
 
         // TODO: Consider block off-pulse input lower by setting delay
-        loop {
-            match event.event_type {
-                EventType::SoftOn
-                | EventType::HardOn
-                | EventType::TorchOn
-                | EventType::RedstoneOn { .. } => {
-                    if is_on {
-                        break;
-                    }
-
+        match event.event_type {
+            EventType::SoftOn
+            | EventType::HardOn
+            | EventType::TorchOn
+            | EventType::RedstoneOn { .. } => {
+                if !is_on {
                     if lock_signal {
                         block.kind.set_repeater_lock(true)?;
 
                         tracing::info!("trigger repeater event: {event:?}, {block:?}");
-
-                        break;
+                    } else {
+                        self.push_event_to_next_tick(Event {
+                            id: None,
+                            from_id: event.id,
+                            event_type: EventType::RepeaterOn { delay },
+                            target_position: event.target_position,
+                            direction: event.direction,
+                        });
                     }
-
-                    self.push_event_to_next_tick(Event {
-                        id: None,
-                        from_id: event.id,
-                        event_type: EventType::RepeaterOn { delay: delay },
-                        target_position: event.target_position,
-                        direction: event.direction,
-                    });
                 }
-                EventType::SoftOff
-                | EventType::HardOff
-                | EventType::TorchOff
-                | EventType::RedstoneOff => {
-                    if !is_on {
-                        break;
-                    }
-
+            }
+            EventType::SoftOff
+            | EventType::HardOff
+            | EventType::TorchOff
+            | EventType::RedstoneOff => {
+                if is_on {
                     if lock_signal {
                         block.kind.set_repeater_lock(false)?;
 
                         tracing::info!("trigger repeater event: {event:?}, {block:?}");
-
-                        break;
-                    }
-
-                    self.push_event_to_next_tick(Event {
-                        id: None,
-                        from_id: event.id,
-                        event_type: EventType::RepeaterOff { delay: delay },
-                        target_position: event.target_position,
-                        direction: event.direction,
-                    });
-                }
-                EventType::RepeaterOn { delay } => {
-                    if delay != 0 {
+                    } else {
                         self.push_event_to_next_tick(Event {
                             id: None,
                             from_id: event.id,
-                            event_type: EventType::RepeaterOn { delay: delay - 1 },
+                            event_type: EventType::RepeaterOff { delay },
                             target_position: event.target_position,
                             direction: event.direction,
                         });
-                        break;
                     }
-
+                }
+            }
+            EventType::RepeaterOn { delay } => {
+                if delay != 0 {
+                    self.push_event_to_next_tick(Event {
+                        id: None,
+                        from_id: event.id,
+                        event_type: EventType::RepeaterOn { delay: delay - 1 },
+                        target_position: event.target_position,
+                        direction: event.direction,
+                    });
+                } else {
                     block.kind.set_repeater_state(true)?;
 
                     // propagate
@@ -736,7 +718,7 @@ impl Simulator {
                         });
                     }
 
-                    if let Some(pos) = walk.map(|pos| pos.down()).flatten() {
+                    if let Some(pos) = walk.and_then(|pos| pos.down()) {
                         self.push_event_to_next_tick(Event {
                             id: None,
                             from_id: event.id,
@@ -748,18 +730,17 @@ impl Simulator {
 
                     tracing::info!("trigger repeater event: {event:?}, {block:?}");
                 }
-                EventType::RepeaterOff { delay } => {
-                    if delay != 0 {
-                        self.push_event_to_next_tick(Event {
-                            id: None,
-                            from_id: event.id,
-                            event_type: EventType::RepeaterOff { delay: delay - 1 },
-                            target_position: event.target_position,
-                            direction: event.direction,
-                        });
-                        break;
-                    }
-
+            }
+            EventType::RepeaterOff { delay } => {
+                if delay != 0 {
+                    self.push_event_to_next_tick(Event {
+                        id: None,
+                        from_id: event.id,
+                        event_type: EventType::RepeaterOff { delay: delay - 1 },
+                        target_position: event.target_position,
+                        direction: event.direction,
+                    });
+                } else {
                     block.kind.set_repeater_state(false)?;
 
                     let walk = event.target_position.walk(event.direction.inverse());
@@ -774,7 +755,7 @@ impl Simulator {
                         });
                     }
 
-                    if let Some(pos) = walk.map(|pos| pos.down()).flatten() {
+                    if let Some(pos) = walk.and_then(|pos| pos.down()) {
                         self.push_event_to_next_tick(Event {
                             id: None,
                             from_id: event.id,
@@ -787,8 +768,6 @@ impl Simulator {
                     tracing::info!("trigger repeater event: {event:?}, {block:?}");
                 }
             }
-
-            break;
         }
 
         Ok(())
@@ -819,9 +798,9 @@ mod test {
         let mock_world = World {
             size: DimSize(3, 4, 2),
             blocks: vec![
-                (Position(1, 1, 0), default_restone.clone()),
-                (Position(0, 1, 0), default_restone.clone()),
-                (Position(1, 0, 0), default_restone.clone()),
+                (Position(1, 1, 0), default_restone),
+                (Position(0, 1, 0), default_restone),
+                (Position(1, 0, 0), default_restone),
                 (
                     Position(1, 2, 0),
                     Block {
@@ -867,9 +846,9 @@ mod test {
         let mock_world = World {
             size: DimSize(3, 4, 2),
             blocks: vec![
-                (Position(1, 1, 0), default_restone.clone()),
-                (Position(0, 1, 0), default_restone.clone()),
-                (Position(1, 0, 0), default_restone.clone()),
+                (Position(1, 1, 0), default_restone),
+                (Position(0, 1, 0), default_restone),
+                (Position(1, 0, 0), default_restone),
                 (
                     Position(1, 2, 0),
                     Block {
@@ -913,9 +892,9 @@ mod test {
         let mock_world = World {
             size: DimSize(3, 4, 2),
             blocks: vec![
-                (Position(1, 1, 0), default_cobble.clone()),
-                (Position(0, 1, 0), default_restone.clone()),
-                (Position(1, 0, 0), default_restone.clone()),
+                (Position(1, 1, 0), default_cobble),
+                (Position(0, 1, 0), default_restone),
+                (Position(1, 0, 0), default_restone),
                 (
                     Position(1, 2, 0),
                     Block {
@@ -967,10 +946,10 @@ mod test {
         let mock_world = World {
             size: DimSize(4, 4, 2),
             blocks: vec![
-                (Position(1, 2, 0), default_restone.clone()),
-                (Position(1, 1, 0), default_repeater.clone()),
-                (Position(0, 2, 0), default_restone.clone()),
-                (Position(2, 2, 0), default_restone.clone()),
+                (Position(1, 2, 0), default_restone),
+                (Position(1, 1, 0), default_repeater),
+                (Position(0, 2, 0), default_restone),
+                (Position(2, 2, 0), default_restone),
                 (
                     Position(1, 0, 0),
                     Block {
@@ -1016,8 +995,8 @@ mod test {
         let mock_world = World {
             size: DimSize(7, 4, 2),
             blocks: vec![
-                (Position(0, 1, 0), default_restone.clone()),
-                (Position(0, 2, 0), default_cobble.clone()),
+                (Position(0, 1, 0), default_restone),
+                (Position(0, 2, 0), default_cobble),
                 (
                     Position(1, 2, 0),
                     Block {
@@ -1025,8 +1004,8 @@ mod test {
                         direction: Direction::West,
                     },
                 ),
-                (Position(2, 2, 0), default_restone.clone()),
-                (Position(3, 2, 0), default_cobble.clone()),
+                (Position(2, 2, 0), default_restone),
+                (Position(3, 2, 0), default_cobble),
                 (
                     Position(4, 2, 0),
                     Block {
@@ -1034,7 +1013,7 @@ mod test {
                         direction: Direction::West,
                     },
                 ),
-                (Position(5, 2, 0), default_restone.clone()),
+                (Position(5, 2, 0), default_restone),
                 (
                     Position(0, 0, 0),
                     Block {
@@ -1088,13 +1067,13 @@ mod test {
         let mock_world = World {
             size: DimSize(4, 6, 3),
             blocks: vec![
-                (Position(0, 1, 0), default_restone.clone()),
-                (Position(2, 1, 0), default_restone.clone()),
-                (Position(0, 2, 0), default_cobble.clone()),
-                (Position(1, 2, 0), default_cobble.clone()),
-                (Position(2, 2, 0), default_cobble.clone()),
-                (Position(1, 2, 1), default_restone.clone()),
-                (Position(1, 4, 0), default_restone.clone()),
+                (Position(0, 1, 0), default_restone),
+                (Position(2, 1, 0), default_restone),
+                (Position(0, 2, 0), default_cobble),
+                (Position(1, 2, 0), default_cobble),
+                (Position(2, 2, 0), default_cobble),
+                (Position(1, 2, 1), default_restone),
+                (Position(1, 4, 0), default_restone),
                 (
                     Position(0, 2, 1),
                     Block {

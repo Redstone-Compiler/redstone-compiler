@@ -3,7 +3,7 @@ use strum::IntoEnumIterator;
 
 use crate::world::block::{BlockKind, Direction};
 use crate::world::position::Position;
-use crate::world::world::World3D;
+use crate::world::World3D;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum PropagateType {
@@ -35,6 +35,7 @@ impl PlaceBound {
 
     // Signal을 보낼 수 있는 블록들을 탐색
     // 탐색 지점에 어떤 블록이 있는지는 검사하지 않음 (이 검사에는 propagate_to를 사용)
+    #[allow(clippy::let_and_return)]
     pub fn propagation_bound(&self, kind: &BlockKind, world: Option<&World3D>) -> Vec<PlaceBound> {
         let dir = self.direction();
         let pos = self.position();
@@ -46,9 +47,7 @@ impl PlaceBound {
                     .into_iter()
                     .map(|pos_src| PlaceBound(PropagateType::Torch, pos_src, pos.diff(pos_src)))
                     .chain(|| -> Option<PlaceBound> {
-                        let Some(pos) = pos.walk(dir) else {
-                            return None;
-                        };
+                        let pos = pos.walk(dir)?;
 
                         Some(PlaceBound(PropagateType::Hard, pos, Direction::None))
                     }())
@@ -125,7 +124,7 @@ impl PlaceBound {
                     result.push(PlaceBound(PropagateType::Repeater, pos, dir));
                 }
 
-                if let Some(pos) = walk.map(|pos| pos.down()).flatten() {
+                if let Some(pos) = walk.and_then(|pos| pos.down()) {
                     result.push(PlaceBound(PropagateType::Soft, pos, Direction::Bottom));
                 }
 

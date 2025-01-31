@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::world::block::{Block, BlockKind, Direction, RedstoneState};
 use crate::world::position::{DimSize, Position};
-use crate::world::world::{World, World3D};
+use crate::world::{World, World3D};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct NBTRoot {
@@ -212,10 +212,10 @@ fn world3d_to_nbt(world: &World3D) -> NBTRoot {
     for (_, block) in world.iter_block() {
         let (name, specify_name, properties) = nbt_block_name(&block);
 
-        if !palette_index.contains_key(&specify_name) {
+        palette_index.entry(specify_name).or_insert_with(|| {
             palette.push(NBTPalette { name, properties });
-            palette_index.insert(specify_name, palette.len() - 1);
-        }
+            palette.len() - 1
+        });
     }
 
     // make block
@@ -266,8 +266,7 @@ fn nbt_palette_to_block(palette: &NBTPalette) -> (BlockKind, Direction) {
                 is_on: palette
                     .properties
                     .as_ref()
-                    .map(|p| p.powered.as_ref().map(|p| p.eq("true").then(|| 0)))
-                    .flatten()
+                    .and_then(|p| p.powered.as_ref().map(|p| p.eq("true").then_some(0)))
                     .is_some(),
             },
             if let Some(face) = &palette.properties.as_ref().unwrap().face {
@@ -398,11 +397,7 @@ fn nbt_palette_to_block(palette: &NBTPalette) -> (BlockKind, Direction) {
 }
 
 fn nbt_to_world(nbt: &NBTRoot) -> World {
-    let palette = nbt
-        .palette
-        .iter()
-        .map(|palette| nbt_palette_to_block(palette))
-        .collect_vec();
+    let palette = nbt.palette.iter().map(nbt_palette_to_block).collect_vec();
 
     let mut blocks = Vec::new();
     for block in &nbt.blocks {
@@ -447,11 +442,11 @@ mod tests {
     use crate::graph::world::WorldGraphBuilder;
     use crate::world::block::Direction;
     use crate::world::position::{DimSize, Position};
-    use crate::world::world::World;
+    use crate::world::World;
 
     #[test]
     fn unittest_show_nbt_structure() -> eyre::Result<()> {
-        let file = std::fs::File::open(&"test/alu.nbt").unwrap();
+        let file = std::fs::File::open("test/alu.nbt").unwrap();
         let decoder = GzDecoder::new(file);
 
         let mut parser = Parser::new(decoder);
@@ -486,7 +481,7 @@ mod tests {
 
     #[test]
     fn unittest_nbt_file_load_and_save() -> eyre::Result<()> {
-        let file = std::fs::File::open(&"test/test.nbt").unwrap();
+        let file = std::fs::File::open("test/test.nbt").unwrap();
         let mut decoder = GzDecoder::new(file);
 
         let mut bytes = vec![];
@@ -536,13 +531,13 @@ mod tests {
         let mock_world = World {
             size: DimSize(4, 6, 3),
             blocks: vec![
-                (Position(0, 1, 0), default_restone.clone()),
-                (Position(2, 1, 0), default_restone.clone()),
-                (Position(0, 2, 0), default_cobble.clone()),
-                (Position(1, 2, 0), default_cobble.clone()),
-                (Position(2, 2, 0), default_cobble.clone()),
-                (Position(1, 2, 1), default_restone.clone()),
-                (Position(1, 4, 0), default_restone.clone()),
+                (Position(0, 1, 0), default_restone),
+                (Position(2, 1, 0), default_restone),
+                (Position(0, 2, 0), default_cobble),
+                (Position(1, 2, 0), default_cobble),
+                (Position(2, 2, 0), default_cobble),
+                (Position(1, 2, 1), default_restone),
+                (Position(1, 4, 0), default_restone),
                 (
                     Position(0, 2, 1),
                     Block {

@@ -137,7 +137,7 @@ impl LogicGraphTransformer {
                 continue;
             }
 
-            if node.outputs.len() == 0 {
+            if node.outputs.is_empty() {
                 continue;
             }
 
@@ -444,8 +444,8 @@ impl LogicGraphTransformer {
         }
 
         clusters
-            .into_iter()
-            .map(|(_, nodes)| SubGraphWithGraph::from(&self.graph.graph, nodes))
+            .into_values()
+            .map(|nodes| SubGraphWithGraph::from(&self.graph.graph, nodes))
             .collect_vec()
     }
 }

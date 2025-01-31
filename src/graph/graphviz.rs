@@ -82,14 +82,10 @@ digraph {graph_name} {{
 {}
 }}
         "#,
-            if self.table_style {
+            if self.table_style || self.module.is_some() {
                 "TB"
             } else {
-                if self.module.is_some() {
-                    "TB"
-                } else {
-                    "LR"
-                }
+                "LR"
             },
             if self.table_style { "auto" } else { "0.8" },
             if self.table_style {
@@ -144,7 +140,7 @@ digraph {graph_name} {{
             name
         };
 
-        let inputs = if self.table_style && node.inputs.len() > 0 {
+        let inputs = if self.table_style && !node.inputs.is_empty() {
             format!(
                 r#"<TR>
                 {}
@@ -160,8 +156,7 @@ digraph {graph_name} {{
                             self.named_inputs
                                 .as_ref()
                                 .and_then(|map| {
-                                    map.get(&(4, node.id))
-                                        .and_then(|name| Some(name.to_owned()))
+                                    map.get(&(4, node.id)).map(|name| name.to_owned())
                                 })
                                 .unwrap_or(format!("Input {}", index + 1))
                         )
@@ -242,17 +237,12 @@ digraph {graph_name} {{
                 graph
                     .nodes
                     .iter()
-                    .map(|node| {
+                    .flat_map(|node| {
                         node.inputs.iter().map(|input| {
-                            format!(
-                                "    node{}:out->node{}:{}\n",
-                                input,
-                                node.id,
-                                format!("in{}_{}", input, node.id),
-                            )
+                            let in_suffix = format!("in{}_{}", input, node.id);
+                            format!("    node{}:out->node{}:{}\n", input, node.id, in_suffix)
                         })
                     })
-                    .flatten()
                     .collect::<Vec<_>>()
                     .join("")
             } else {
@@ -284,7 +274,7 @@ digraph {graph_name} {{
         };
 
         clusters
-            .into_iter()
+            .iter()
             .enumerate()
             .map(|(index, (name, members))| {
                 format!(
@@ -304,7 +294,7 @@ digraph {graph_name} {{
 pub trait ToGraphvizGraph {
     fn to_graphviz(&self) -> String;
 
-    fn to_graphviz_with_clusters(&self, clusters: &Vec<SubGraph>) -> String;
+    fn to_graphviz_with_clusters(&self, clusters: &[SubGraph]) -> String;
 }
 
 impl ToGraphvizGraph for Graph {
@@ -314,7 +304,7 @@ impl ToGraphvizGraph for Graph {
             .build("DefaultGraph")
     }
 
-    fn to_graphviz_with_clusters(&self, clusters: &Vec<SubGraph>) -> String {
+    fn to_graphviz_with_clusters(&self, clusters: &[SubGraph]) -> String {
         GraphvizBuilder::default()
             .with_graph(self)
             .with_cluster(
@@ -335,7 +325,7 @@ impl ToGraphvizGraph for LogicGraph {
             .build("LogicGraph")
     }
 
-    fn to_graphviz_with_clusters(&self, clusters: &Vec<SubGraph>) -> String {
+    fn to_graphviz_with_clusters(&self, clusters: &[SubGraph]) -> String {
         GraphvizBuilder::default()
             .with_graph(&self.graph)
             .with_cluster(
@@ -357,7 +347,7 @@ impl ToGraphvizGraph for WorldGraph {
                 .iter()
                 .map(|(id, pos)| (*id, format!("{pos:?}"))),
         );
-        subnames.extend(self.routings.iter().map(|id| (*id, format!("Routings"))));
+        subnames.extend(self.routings.iter().map(|id| (*id, "Routings".to_string())));
 
         GraphvizBuilder::default()
             .with_graph(&self.graph)
@@ -367,7 +357,7 @@ impl ToGraphvizGraph for WorldGraph {
             .build("WorldGraph")
     }
 
-    fn to_graphviz_with_clusters(&self, clusters: &Vec<SubGraph>) -> String {
+    fn to_graphviz_with_clusters(&self, clusters: &[SubGraph]) -> String {
         GraphvizBuilder::default()
             .with_graph(&self.graph)
             .with_cluster(
@@ -395,7 +385,7 @@ impl ToGraphvizGraph for GraphWithSubGraphs {
             .build("LogicGraph")
     }
 
-    fn to_graphviz_with_clusters(&self, clusters: &Vec<SubGraph>) -> String {
+    fn to_graphviz_with_clusters(&self, clusters: &[SubGraph]) -> String {
         GraphvizBuilder::default()
             .with_graph(&self.0)
             .with_cluster(
@@ -422,7 +412,7 @@ impl ToGraphvizGraph for ClusteredGraph {
             .build("ClusteredGraph")
     }
 
-    fn to_graphviz_with_clusters(&self, _: &Vec<SubGraph>) -> String {
+    fn to_graphviz_with_clusters(&self, _: &[SubGraph]) -> String {
         unimplemented!()
     }
 }

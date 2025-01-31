@@ -23,7 +23,7 @@ impl SamplingPolicy {
         }
     }
 
-    pub fn sample_with_taking<T: Clone + Default>(self, src: &mut Vec<T>) -> Vec<T> {
+    pub fn sample_with_taking<T: Clone + Default>(self, src: &mut [T]) -> Vec<T> {
         match self {
             SamplingPolicy::None => src.to_vec(),
             SamplingPolicy::Take(count) => src.iter_mut().take(count).map(mem::take).collect(),

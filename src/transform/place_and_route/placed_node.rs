@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use super::place_bound::{PlaceBound, PropagateType};
 use crate::world::block::{Block, BlockKind, Direction};
 use crate::world::position::Position;
-use crate::world::world::World3D;
+use crate::world::World3D;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct PlacedNode {
@@ -122,7 +122,7 @@ impl PlacedNode {
             }
         }
 
-        return false;
+        false
     }
 
     // 다른 블록의 signal을 받을 수 있는 경우
@@ -131,9 +131,7 @@ impl PlacedNode {
 
         self.propagated_from(world)
             .into_iter()
-            .filter(|bound| !except.contains(&bound.position()))
-            .next()
-            .is_some()
+            .any(|bound| !except.contains(&bound.position()))
     }
 
     pub fn has_connection_with(&self, world: &World3D, target: Position) -> bool {
