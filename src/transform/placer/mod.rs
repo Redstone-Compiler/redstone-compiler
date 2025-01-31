@@ -375,7 +375,7 @@ fn progress_style() -> ProgressStyle {
 
 fn input_node_kind() -> Vec<BlockKind> {
     vec![
-        BlockKind::Switch { is_on: true },
+        BlockKind::Switch { is_on: false },
         // BlockKind::Cobble {
         //     on_count: 0,
         //     on_base_count: 0,
