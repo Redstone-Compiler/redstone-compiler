@@ -2,9 +2,9 @@ use std::collections::{HashMap, HashSet};
 
 use itertools::Itertools;
 
-use super::place_bound::{PlaceBound, PropagateType};
 use super::WorldGraph;
 use crate::graph::{Graph, GraphNode, GraphNodeId, GraphNodeKind};
+use crate::transform::place_and_route::place_bound::{PlaceBound, PropagateType};
 use crate::world::block::{BlockKind, Direction};
 use crate::world::position::Position;
 use crate::world::world::{World, World3D};
