@@ -116,6 +116,8 @@ impl World3D {
             } else {
                 state |= RedstoneState::Vertical as usize;
             }
+        } else if state == 0 {
+            state |= RedstoneState::Cardinal as usize;
         }
 
         self[pos].kind = BlockKind::Redstone {
