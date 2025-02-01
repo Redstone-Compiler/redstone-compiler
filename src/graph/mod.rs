@@ -913,7 +913,7 @@ impl<'a> SubGraphWithGraph<'a> {
     }
 }
 
-impl<'a> From<&SubGraphWithGraph<'a>> for Graph {
+impl From<&SubGraphWithGraph<'_>> for Graph {
     fn from(value: &SubGraphWithGraph) -> Self {
         let node_ids: HashSet<_> = value.nodes.iter().collect();
 

@@ -95,11 +95,9 @@ impl World3D {
             let down_check = !self[pos_src].kind.is_cobble()
                 && pos_src
                     .down()
-                    .map_or(false, |pos| self[pos].kind.is_redstone());
+                    .is_some_and(|pos| self[pos].kind.is_redstone());
             let flat_repeater_check = self[pos_src].kind.is_repeater()
-                && pos_src
-                    .walk(self[pos_src].direction)
-                    .map_or(false, |walk| walk == pos);
+                && (pos_src.walk(self[pos_src].direction) == Some(pos));
 
             if !(flat_check || flat_repeater_check || up_check || down_check) {
                 return;
