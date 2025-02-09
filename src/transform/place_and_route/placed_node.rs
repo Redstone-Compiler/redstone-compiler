@@ -98,6 +98,17 @@ impl PlacedNode {
                 return true;
             }
 
+            // 다른 레드스톤에 신호를 보내버리게 되는 경우
+            if world[bottom].kind.is_torch()
+                && self
+                    .position
+                    .cardinal()
+                    .into_iter()
+                    .any(|pos| world.size.bound_on(pos) && world[pos].kind.is_redstone())
+            {
+                return true;
+            }
+
             // 재귀를 이르키는 경우
             if world[bottom].kind.is_torch()
                 && !world[bottom].direction.is_bottom()
