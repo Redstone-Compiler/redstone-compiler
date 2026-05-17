@@ -7,8 +7,8 @@ Sequential circuits are represented as top-level `GraphNodeKind::Sequential` nod
 For an RS latch, the inner graph currently records the cyclic equations:
 
 ```text
-q  = ~(s | nq)
-nq = ~(r | q)
+q  = ~(r | nq)
+nq = ~(s | q)
 ```
 
 This keeps feedback out of the top-level placement graph while preserving the gate-level meaning of the primitive.
@@ -26,7 +26,7 @@ The first implementation supports only one exposed sequential output in the top-
 
 ## Current RS Latch Macro
 
-`src/sequential/layout.rs` defines the initial `SequentialMacro` interface and one RS latch macro candidate. Tests currently validate:
+`src/sequential/layout.rs` defines the initial `SequentialMacro` interface and one simulator-validated RS latch macro candidate. Tests currently validate:
 
 - expected input and output port names,
 - port positions are unique,
@@ -35,14 +35,13 @@ The first implementation supports only one exposed sequential output in the top-
 - multi-output sequential nodes are rejected until graph edges become port-aware,
 - unsupported sequential primitives such as `DLatch` are rejected,
 - macro output ports are registered in placement state,
-- existing source positions can be routed into macro input ports.
+- existing source positions can be routed into macro input ports,
+- the RS latch macro satisfies reset, hold, set, and reset sequences under `Simulator`.
 
 ## Remaining Work
 
 - Make graph edges port-aware so `q` and `nq` can drive different consumers.
-- Replace or strengthen the initial RS latch macro with a simulator-validated physical latch layout.
-- Add behavioral simulation tests for set/reset/hold sequences.
-- Add more macro candidates with different port orientations and costs.
+- Add more RS latch macro candidates with different port orientations and costs.
 - Extend macro placement to orientation and mirroring.
 
 Run placement-related tests with `cargo test --release`.

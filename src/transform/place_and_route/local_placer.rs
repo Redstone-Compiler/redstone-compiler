@@ -1098,7 +1098,7 @@ fn generate_or_routes_init_states(
 ) -> (Vec<(World3D, Vec<Position>, Vec<PlaceBound>)>, RouteDebug) {
     let from_node = PlacedNode::new(from, world[from]);
     let to_node = PlacedNode::new(to, world[to]);
-    assert!(from_node.is_diode() && to_node.is_diode());
+    assert!(from_node.is_diode() && to_node.is_propagation_target());
 
     let mut debug = RouteDebug::default();
     let boolean_comb = [false, true];

@@ -476,19 +476,17 @@ fn sequential_macro_generation_registers_output_port_positions() {
 
 #[test]
 fn sequential_macro_routes_input_ports_from_existing_sources() {
-    let mut world = World3D::new(DimSize(8, 8, 4));
-    let source_s = Position(0, 0, 1);
-    let source_r = Position(0, 4, 1);
+    let mut world = World3D::new(DimSize(12, 9, 4));
+    let source_s = Position(11, 3, 1);
+    let source_r = Position(0, 3, 1);
     place_node(
         &mut world,
-        PlacedNode::new(source_s, switch(Direction::East)),
+        PlacedNode::new(source_s, switch(Direction::West)),
     );
     place_node(
         &mut world,
         PlacedNode::new(source_r, switch(Direction::East)),
     );
-    place_node(&mut world, PlacedNode::new_cobble(Position(1, 0, 0)));
-    place_node(&mut world, PlacedNode::new_cobble(Position(1, 4, 0)));
 
     let sequential = SequentialPrimitive::new(
         SequentialType::RsLatch,
@@ -502,10 +500,10 @@ fn sequential_macro_routes_input_ports_from_existing_sources() {
         ..Default::default()
     };
     let candidate = SequentialMacro::candidates(&sequential).remove(0);
-    let placed = place_sequential_macro(&world, &candidate, Position(0, 0, 0)).unwrap();
+    let placed = place_sequential_macro(&world, &candidate, Position(2, 1, 0)).unwrap();
     let state = [(0, source_s), (1, source_r)].into_iter().collect();
 
-    let routed = route_sequential_inputs(&config(1), &node, &sequential, &state, &placed);
+    let routed = route_sequential_inputs(&config(4), &node, &sequential, &state, &placed);
 
     assert!(!routed.is_empty());
 }

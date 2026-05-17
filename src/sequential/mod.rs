@@ -84,7 +84,7 @@ fn default_inner_graph(sequential_type: SequentialType) -> Graph {
 }
 
 fn rs_latch_inner_graph() -> Graph {
-    // q = ~(s | nq), nq = ~(r | q)
+    // q = ~(r | nq), nq = ~(s | q)
     let mut graph = Graph {
         nodes: vec![
             GraphNode {
@@ -102,7 +102,7 @@ fn rs_latch_inner_graph() -> Graph {
                 kind: GraphNodeKind::Logic(Logic {
                     logic_type: LogicType::Or,
                 }),
-                inputs: vec![0, 5],
+                inputs: vec![1, 5],
                 ..Default::default()
             },
             GraphNode {
@@ -118,7 +118,7 @@ fn rs_latch_inner_graph() -> Graph {
                 kind: GraphNodeKind::Logic(Logic {
                     logic_type: LogicType::Or,
                 }),
-                inputs: vec![1, 3],
+                inputs: vec![0, 3],
                 ..Default::default()
             },
             GraphNode {
