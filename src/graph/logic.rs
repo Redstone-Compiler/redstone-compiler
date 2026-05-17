@@ -21,6 +21,7 @@ impl LogicGraph {
         transform.decompose_xor()?;
         transform.decompose_and()?;
         transform.remove_double_neg_expression();
+        transform.optimize_cse()?;
         Ok(transform.finish())
     }
 }
@@ -304,7 +305,7 @@ pub mod predefined_logics {
         let and_1 = LogicGraph::from_stmt("i&cin", "d")?;
         let out_s = LogicGraph::from_stmt("(~(d|~i))|(~(d|~cin))", "s")?;
 
-        let out_cout = LogicGraph::from_stmt("(a&b)|(s&cin)", "cout")?;
+        let out_cout = LogicGraph::from_stmt("c|d", "cout")?;
 
         let mut fa = and_0.clone();
         fa.graph.merge(xor_o.graph);

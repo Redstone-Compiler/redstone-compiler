@@ -12,6 +12,7 @@ use crate::cluster::{Clustered, ClusteredType};
 use crate::logic::Logic;
 use crate::world::block::Block;
 
+pub mod analysis;
 mod cluster;
 pub mod graphviz;
 pub mod logic;
@@ -649,7 +650,7 @@ impl Graph {
         for node in self.nodes.iter_mut() {
             node.inputs = input_map
                 .get(&node.id)
-                .map(|ids| ids.clone().into_iter().collect_vec())
+                .map(|ids| ids.iter().copied().sorted().collect_vec())
                 .unwrap_or_default();
         }
     }
@@ -670,7 +671,7 @@ impl Graph {
         for node in self.nodes.iter_mut() {
             node.outputs = output_map
                 .get(&node.id)
-                .map(|ids| ids.clone().into_iter().collect())
+                .map(|ids| ids.iter().copied().sorted().collect())
                 .unwrap_or_default();
         }
     }
@@ -1039,4 +1040,46 @@ pub fn subgraphs_to_clustered_graph(graph: &Graph, subgraphs: &[SubGraph]) -> Cl
     graph.verify().unwrap();
 
     ClusteredGraph { graph }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_inputs_and_outputs_are_sorted() {
+        let mut graph = Graph {
+            nodes: vec![
+                GraphNode {
+                    id: 0,
+                    outputs: vec![3],
+                    ..Default::default()
+                },
+                GraphNode {
+                    id: 1,
+                    outputs: vec![3],
+                    ..Default::default()
+                },
+                GraphNode {
+                    id: 2,
+                    outputs: vec![3],
+                    ..Default::default()
+                },
+                GraphNode {
+                    id: 3,
+                    inputs: vec![2, 0, 1],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        graph.build_inputs();
+        graph.build_outputs();
+
+        assert_eq!(graph.find_node_by_id(3).unwrap().inputs, vec![0, 1, 2]);
+        assert_eq!(graph.find_node_by_id(0).unwrap().outputs, vec![3]);
+        assert_eq!(graph.find_node_by_id(1).unwrap().outputs, vec![3]);
+        assert_eq!(graph.find_node_by_id(2).unwrap().outputs, vec![3]);
+    }
 }
