@@ -13,6 +13,7 @@ use crate::graph::logic::LogicGraph;
 use crate::graph::world::WorldGraph;
 use crate::graph::{GraphNode, GraphNodeId, GraphNodeKind};
 use crate::logic::LogicType;
+use crate::transform::place_and_route::estimate::world_compact_cost;
 use crate::transform::place_and_route::place_bound::PropagateType;
 use crate::world::block::{Block, BlockKind, Direction};
 use crate::world::position::{DimSize, Position};
@@ -539,7 +540,7 @@ impl LocalPlacer {
         positions: &HashMap<GraphNodeId, Position>,
     ) -> usize {
         let current_node_id = self.visit_orders[step];
-        let mut cost = world.iter_block().len();
+        let mut cost = world_compact_cost(world);
 
         if let Some(&position) = positions.get(&current_node_id) {
             cost += local_density(world, position) * 3;
@@ -1031,6 +1032,7 @@ mod tests {
     use crate::graph::graphviz::ToGraphvizGraph;
     use crate::graph::logic::predefined_logics;
     use crate::nbt::{NBTRoot, ToNBT};
+    use crate::transform::place_and_route::estimate::world_compact_cost;
     use crate::transform::place_and_route::local_placer::{
         InputPlacementStrategy, LocalPlacer, LocalPlacerConfig, LocalPlacerDebug, NotRouteStrategy,
         PlacementSamplingPolicy, SamplingPolicy, TorchPlacementStrategy,
@@ -1294,11 +1296,8 @@ mod tests {
             );
         }
         println!("worlds generated: {}", worlds.len());
-        if !worlds.is_empty() {
-            save_worlds_to_nbt(
-                SamplingPolicy::Take(1).sample(worlds),
-                "test/full-adder.nbt",
-            )?;
+        if let Some(world) = worlds.into_iter().min_by_key(world_compact_cost) {
+            save_worlds_to_nbt(vec![world], "test/full-adder.nbt")?;
         }
 
         Ok(())
