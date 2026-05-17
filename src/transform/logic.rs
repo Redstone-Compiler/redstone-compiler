@@ -377,8 +377,72 @@ impl LogicGraphTransformer {
         Ok(())
     }
 
+    // Merge structurally equivalent logic nodes so shared sub-expressions are
+    // placed once and reused by all consumers. This is intentionally structural
+    // CSE only: it canonicalizes commutative input order, but does not apply
+    // boolean algebra rewrites such as idempotence or absorption.
     pub fn optimize_cse(&mut self) -> eyre::Result<()> {
-        todo!()
+        let mut expressions: HashMap<GraphNodeId, String> = HashMap::new();
+        let mut representatives: HashMap<String, GraphNodeId> = HashMap::new();
+        let mut replacements = Vec::new();
+
+        for node_id in self.graph.graph.topological_order() {
+            let Some(node) = self.graph.graph.find_node_by_id(node_id) else {
+                continue;
+            };
+
+            let expression = match &node.kind {
+                GraphNodeKind::Input(name) => format!("Input({name})"),
+                GraphNodeKind::Logic(logic) => {
+                    let mut inputs = node
+                        .inputs
+                        .iter()
+                        .map(|input| {
+                            expressions.get(input).cloned().ok_or_else(|| {
+                                eyre::eyre!("CSE expression is missing for input node {input}")
+                            })
+                        })
+                        .collect::<eyre::Result<Vec<_>>>()?;
+
+                    if matches!(
+                        logic.logic_type,
+                        LogicType::Or | LogicType::And | LogicType::Xor
+                    ) {
+                        inputs.sort();
+                    }
+
+                    format!("{}({})", logic.logic_type.name(), inputs.join(", "))
+                }
+                GraphNodeKind::Output(_) => continue,
+                _ => continue,
+            };
+
+            expressions.insert(node_id, expression.clone());
+
+            if !node.kind.is_logic() {
+                continue;
+            }
+
+            if let Some(&representative) = representatives.get(&expression) {
+                replacements.push((node_id, representative));
+            } else {
+                representatives.insert(expression, node_id);
+            }
+        }
+
+        for (from, to) in replacements {
+            self.graph.graph.replace_input_node_id_lazy(from, to);
+            self.graph.graph.remove_by_node_id_lazy(from);
+        }
+
+        self.graph.graph.build_outputs();
+        self.graph.graph.build_inputs();
+        self.graph.graph.build_outputs();
+        self.graph.graph.build_producers();
+        self.graph.graph.build_consumers();
+        self.graph.graph.verify()?;
+
+        Ok(())
     }
 
     pub fn cluster(&self, include_ouput_node: bool) -> Vec<SubGraphWithGraph> {
@@ -447,5 +511,88 @@ impl LogicGraphTransformer {
             .into_values()
             .map(|nodes| SubGraphWithGraph::from(&self.graph.graph, nodes))
             .collect_vec()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::analysis::equivalent_expression_groups;
+    use crate::graph::logic::predefined_logics;
+
+    fn has_duplicate_expression(graph: &LogicGraph, expression: &str) -> bool {
+        equivalent_expression_groups(graph)
+            .iter()
+            .any(|group| group.expression == expression)
+    }
+
+    #[test]
+    fn optimize_cse_merges_duplicate_not_nodes() -> eyre::Result<()> {
+        let graph = LogicGraph::from_stmt("~a|~a", "out")?;
+        let mut transform = LogicGraphTransformer::new(graph);
+
+        transform.optimize_cse()?;
+
+        assert!(!has_duplicate_expression(&transform.graph, "Not(Input(a))"));
+        transform.graph.graph.verify()?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn optimize_cse_merges_commutative_or_nodes() -> eyre::Result<()> {
+        let graph = LogicGraph::from_stmt("(a|b)|(b|a)", "out")?;
+        let mut transform = LogicGraphTransformer::new(graph);
+
+        transform.optimize_cse()?;
+
+        assert!(!has_duplicate_expression(
+            &transform.graph,
+            "Or(Input(a), Input(b))"
+        ));
+        transform.graph.graph.verify()?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn optimize_cse_rewrites_outputs_to_representative() -> eyre::Result<()> {
+        let out_x = LogicGraph::from_stmt("~a", "x")?;
+        let out_y = LogicGraph::from_stmt("~a", "y")?;
+
+        let mut graph = out_x.clone();
+        graph.graph.merge(out_y.graph);
+
+        let mut transform = LogicGraphTransformer::new(graph);
+        transform.optimize_cse()?;
+
+        let output_inputs = transform
+            .graph
+            .graph
+            .nodes
+            .iter()
+            .filter_map(|node| match &node.kind {
+                GraphNodeKind::Output(name) if name == "x" || name == "y" => Some(node.inputs[0]),
+                _ => None,
+            })
+            .collect_vec();
+
+        assert_eq!(output_inputs.len(), 2);
+        assert_eq!(output_inputs[0], output_inputs[1]);
+        transform.graph.graph.verify()?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn prepare_place_runs_cse_for_buffered_full_adder() -> eyre::Result<()> {
+        let graph = predefined_logics::buffered_full_adder_graph()?;
+
+        assert!(!has_duplicate_expression(&graph, "Not(Input(a))"));
+        assert!(!has_duplicate_expression(&graph, "Not(Input(b))"));
+        assert!(!has_duplicate_expression(&graph, "Not(Input(cin))"));
+        graph.graph.verify()?;
+
+        Ok(())
     }
 }

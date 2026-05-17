@@ -92,7 +92,7 @@ fn canonical_expression(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::logic::{predefined_logics, LogicGraph};
+    use crate::graph::logic::LogicGraph;
 
     #[test]
     fn equivalent_expression_groups_reports_duplicate_logic_nodes() -> eyre::Result<()> {
@@ -108,20 +108,14 @@ mod tests {
     }
 
     #[test]
-    fn buffered_full_adder_has_visible_duplicate_not_expressions() -> eyre::Result<()> {
-        let graph = predefined_logics::buffered_full_adder_graph()?;
+    fn equivalent_expression_groups_handles_commutative_inputs() -> eyre::Result<()> {
+        let graph = LogicGraph::from_stmt("(a|b)|(b|a)", "out")?;
 
         let groups = equivalent_expression_groups(&graph);
 
         assert!(groups
             .iter()
-            .any(|group| group.expression == "Not(Input(a))"));
-        assert!(groups
-            .iter()
-            .any(|group| group.expression == "Not(Input(b))"));
-        assert!(groups
-            .iter()
-            .any(|group| group.expression == "Not(Input(cin))"));
+            .any(|group| group.expression == "Or(Input(a), Input(b))"));
 
         Ok(())
     }

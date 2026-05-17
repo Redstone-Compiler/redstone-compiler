@@ -21,6 +21,7 @@ impl LogicGraph {
         transform.decompose_xor()?;
         transform.decompose_and()?;
         transform.remove_double_neg_expression();
+        transform.optimize_cse()?;
         Ok(transform.finish())
     }
 }
