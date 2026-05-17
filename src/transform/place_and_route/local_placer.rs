@@ -28,11 +28,11 @@ pub struct LocalPlacer {
 pub struct LocalPlacerConfig {
     greedy_input_generation: bool,
     step_sampling_policy: SamplingPolicy,
-    // Leak large generations to reduce deallocation cost.
+    // dealloc 시간을 줄이기 위해 generation들을 leak 시킨다
     leak_sampling: bool,
-    // Force torch placement to connect directly to the input.
+    // torch place시 input과 direct로 연결되도록 강제한다.
     route_torch_directly: bool,
-    // Maximum routing distance.
+    // 최대 routing 거리를 지정한다.
     max_route_step: usize,
     route_step_sampling_policy: SamplingPolicy,
 }
@@ -487,7 +487,7 @@ fn generate_torch_place_and_routes(
 
     let place_strategy = iproduct!(0..world.size.0, 0..world.size.1, 0..world.size.2)
         .map(|(x, y, z)| Position(x, y, z))
-        // Place at least one block away from the start.
+        // start에서 최소 두 칸 떨어진 곳에 위치시킨다.
         .filter(|pos| source.manhattan_distance(pos) > 1)
         .filter(|pos| !config.route_torch_directly || source.manhattan_distance(pos) == 2);
 
@@ -541,9 +541,9 @@ fn generate_routes_to_cobble(
         let directly_connected = start.position() == cobble_pos
             && matches!(
                 start.propagation_type(),
-                // TODO: Verify when this direct-connection condition is valid.
-                // Hard: switch -> torch
-                // Soft: redstone -> torch
+                // TODO: 조건 삭제 가능한지 확인
+                // Hard: Switch -> Torch 연결
+                // Soft: Redstone -> Torch 연결
                 PropagateType::Hard | PropagateType::Soft
             );
 
@@ -566,7 +566,7 @@ fn generate_routes_to_cobble(
         .collect()
 }
 
-// Generate redstone routes that connect two diode-like nodes.
+// 두 torch를 연결하는 redstone routes를 생성한다.
 fn generate_or_routes(
     config: &LocalPlacerConfig,
     world: &World3D,
@@ -682,6 +682,7 @@ fn generate_or_routes_init_states(
                 from.up()
                     .cardinal()
                     .into_iter()
+                    // Cobble 위쪽에 redstone을 배치하는 케이스
                     .chain(Some(from.up().up()))
                     .map(|pos| PlaceBound(PropagateType::Soft, pos, pos.diff(from)))
                     .collect_vec()
@@ -718,7 +719,7 @@ fn place_redstone_with_cobble(
     let Some(cobble_pos) = bound.position().walk(Direction::Bottom) else {
         return PlaceRedstoneResult::Rejected(RouteRejectReason::NoBottomForCobble);
     };
-    // Allow the first step to place cobble and redstone adjacent to a torch.
+    // 첫 번째 step에서 torch 위쪽에 cobble + redstone이 놓인 경우 예외처리
     let cobble_except = (world[prev].kind.is_torch())
         .then_some(vec![cobble_pos, prev])
         .unwrap_or_default();
