@@ -4,7 +4,7 @@ use rand::rngs::StdRng;
 use rand::seq::IteratorRandom;
 use rand::SeedableRng;
 
-#[derive(Default, Copy, Clone)]
+#[derive(Default, Debug, Copy, Clone, PartialEq, Eq)]
 pub enum SamplingPolicy {
     #[default]
     None,

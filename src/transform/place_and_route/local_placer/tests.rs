@@ -24,9 +24,12 @@ fn torch(direction: Direction) -> Block {
 fn config(max_route_step: usize) -> LocalPlacerConfig {
     LocalPlacerConfig {
         greedy_input_generation: true,
+        input_placement_strategy: InputPlacementStrategy::Boundary,
         step_sampling_policy: SamplingPolicy::None,
         leak_sampling: false,
         route_torch_directly: true,
+        torch_placement_strategy: TorchPlacementStrategy::DirectOnly,
+        not_route_strategy: NotRouteStrategy::DirectOnly,
         max_route_step,
         route_step_sampling_policy: SamplingPolicy::None,
     }
@@ -43,6 +46,17 @@ fn generate_inputs_uses_greedy_boundary_switch_placements() {
         assert!(world[position].kind.is_switch());
         assert_eq!(world[position].direction, Direction::East);
     }
+}
+
+#[test]
+fn generate_inputs_can_search_anywhere() {
+    let world = World3D::new(DimSize(3, 3, 2));
+    let mut config = config(1);
+    config.input_placement_strategy = InputPlacementStrategy::Anywhere;
+
+    let generated = generate_inputs(&config, &world, BlockKind::Switch { is_on: false });
+
+    assert_eq!(generated.len(), 18);
 }
 
 #[test]
@@ -72,6 +86,52 @@ fn generate_routes_to_cobble_accepts_direct_hard_connection() {
 
     assert_eq!(routes.len(), 1);
     assert_eq!(routes[0].1, cobble_pos);
+}
+
+#[test]
+fn generate_routes_to_cobble_can_use_redstone_route() {
+    let mut world = empty_world();
+    let source = Position(1, 1, 1);
+    let torch_pos = Position(3, 1, 1);
+    let cobble_pos = Position(3, 1, 0);
+    let mut config = config(1);
+    config.not_route_strategy = NotRouteStrategy::RedstoneOnly;
+    place_node(
+        &mut world,
+        PlacedNode::new(source, torch(Direction::Bottom)),
+    );
+    place_node(&mut world, PlacedNode::new_cobble(cobble_pos));
+    place_node(
+        &mut world,
+        PlacedNode::new(torch_pos, torch(Direction::Bottom)),
+    );
+
+    let routes = generate_routes_to_cobble(&config, &world, source, torch_pos, cobble_pos);
+
+    assert!(routes.iter().any(|(_, pos)| *pos == Position(2, 1, 1)));
+}
+
+#[test]
+fn exhaustive_config_disables_search_reduction_knobs() {
+    let config = LocalPlacerConfig::exhaustive(12);
+
+    assert!(!config.greedy_input_generation);
+    assert_eq!(
+        config.input_placement_strategy,
+        InputPlacementStrategy::Anywhere
+    );
+    assert_eq!(config.step_sampling_policy, SamplingPolicy::None);
+    assert!(!config.route_torch_directly);
+    assert_eq!(
+        config.torch_placement_strategy,
+        TorchPlacementStrategy::AnywhereNonAdjacent
+    );
+    assert_eq!(
+        config.not_route_strategy,
+        NotRouteStrategy::DirectAndRedstone
+    );
+    assert_eq!(config.max_route_step, 12);
+    assert_eq!(config.route_step_sampling_policy, SamplingPolicy::None);
 }
 
 #[test]

@@ -26,15 +26,56 @@ pub struct LocalPlacer {
 
 #[derive(Default)]
 pub struct LocalPlacerConfig {
-    greedy_input_generation: bool,
-    step_sampling_policy: SamplingPolicy,
+    pub greedy_input_generation: bool,
+    pub input_placement_strategy: InputPlacementStrategy,
+    pub step_sampling_policy: SamplingPolicy,
     // dealloc 시간을 줄이기 위해 generation들을 leak 시킨다
-    leak_sampling: bool,
+    pub leak_sampling: bool,
     // torch place시 input과 direct로 연결되도록 강제한다.
-    route_torch_directly: bool,
+    pub route_torch_directly: bool,
+    pub torch_placement_strategy: TorchPlacementStrategy,
+    pub not_route_strategy: NotRouteStrategy,
     // 최대 routing 거리를 지정한다.
-    max_route_step: usize,
-    route_step_sampling_policy: SamplingPolicy,
+    pub max_route_step: usize,
+    pub route_step_sampling_policy: SamplingPolicy,
+}
+
+#[derive(Default, Debug, Copy, Clone, PartialEq, Eq)]
+pub enum InputPlacementStrategy {
+    #[default]
+    Boundary,
+    Anywhere,
+}
+
+#[derive(Default, Debug, Copy, Clone, PartialEq, Eq)]
+pub enum TorchPlacementStrategy {
+    #[default]
+    DirectOnly,
+    AnywhereNonAdjacent,
+}
+
+#[derive(Default, Debug, Copy, Clone, PartialEq, Eq)]
+pub enum NotRouteStrategy {
+    #[default]
+    DirectOnly,
+    RedstoneOnly,
+    DirectAndRedstone,
+}
+
+impl LocalPlacerConfig {
+    pub fn exhaustive(max_route_step: usize) -> Self {
+        Self {
+            greedy_input_generation: false,
+            input_placement_strategy: InputPlacementStrategy::Anywhere,
+            step_sampling_policy: SamplingPolicy::None,
+            leak_sampling: false,
+            route_torch_directly: false,
+            torch_placement_strategy: TorchPlacementStrategy::AnywhereNonAdjacent,
+            not_route_strategy: NotRouteStrategy::DirectAndRedstone,
+            max_route_step,
+            route_step_sampling_policy: SamplingPolicy::None,
+        }
+    }
 }
 
 pub const K_MAX_LOCAL_PLACE_NODE_COUNT: usize = 40;
@@ -443,9 +484,17 @@ fn generate_inputs(
         input_strategy = input_strategy.into_iter().take(1).collect();
     }
 
-    let place_strategy = iproduct!(0..1, 0..world.size.1, 0..world.size.2)
-        .chain(iproduct!(0..world.size.0, 0..1, 0..world.size.2))
-        .map(|(x, y, z)| Position(x, y, z));
+    let place_strategy = match config.input_placement_strategy {
+        InputPlacementStrategy::Boundary => iproduct!(0..1, 0..world.size.1, 0..world.size.2)
+            .chain(iproduct!(0..world.size.0, 0..1, 0..world.size.2))
+            .map(|(x, y, z)| Position(x, y, z))
+            .collect_vec(),
+        InputPlacementStrategy::Anywhere => {
+            iproduct!(0..world.size.0, 0..world.size.1, 0..world.size.2)
+                .map(|(x, y, z)| Position(x, y, z))
+                .collect_vec()
+        }
+    };
 
     input_strategy
         .into_iter()
@@ -489,7 +538,14 @@ fn generate_torch_place_and_routes(
         .map(|(x, y, z)| Position(x, y, z))
         // start에서 최소 두 칸 떨어진 곳에 위치시킨다.
         .filter(|pos| source.manhattan_distance(pos) > 1)
-        .filter(|pos| !config.route_torch_directly || source.manhattan_distance(pos) == 2);
+        .filter(|pos| {
+            !config.route_torch_directly
+                || matches!(
+                    config.torch_placement_strategy,
+                    TorchPlacementStrategy::AnywhereNonAdjacent
+                )
+                || source.manhattan_distance(pos) == 2
+        });
 
     torch_strategy
         .cartesian_product(place_strategy)
@@ -526,10 +582,10 @@ fn place_torch_with_cobble(
 }
 
 fn generate_routes_to_cobble(
-    _config: &LocalPlacerConfig,
+    config: &LocalPlacerConfig,
     world: &World3D,
     source: Position,
-    _torch_pos: Position,
+    torch_pos: Position,
     cobble_pos: Position,
 ) -> Vec<(World3D, Position)> {
     let source_node = PlacedNode::new(source, world[source]);
@@ -537,27 +593,40 @@ fn generate_routes_to_cobble(
 
     // (world, pos, cost)
     let mut route_candidates = Vec::new();
-    for start in source_node.propagation_bound(Some(world)) {
-        let directly_connected = start.position() == cobble_pos
-            && matches!(
-                start.propagation_type(),
-                // TODO: 조건 삭제 가능한지 확인
-                // Hard: Switch -> Torch 연결
-                // Soft: Redstone -> Torch 연결
-                PropagateType::Hard | PropagateType::Soft
-            );
+    if matches!(
+        config.not_route_strategy,
+        NotRouteStrategy::DirectOnly | NotRouteStrategy::DirectAndRedstone
+    ) {
+        for start in source_node.propagation_bound(Some(world)) {
+            let directly_connected = start.position() == cobble_pos
+                && matches!(
+                    start.propagation_type(),
+                    // TODO: 조건 삭제 가능한지 확인
+                    // Hard: Switch -> Torch 연결
+                    // Soft: Redstone -> Torch 연결
+                    PropagateType::Hard | PropagateType::Soft
+                );
 
-        if directly_connected {
-            route_candidates.push((world.clone(), start.position(), 0usize));
-            continue;
+            if directly_connected {
+                route_candidates.push((world.clone(), start.position(), 0usize));
+                continue;
+            }
         }
     }
 
-    // route_candidates.extend(
-    //     generate_or_routes(config, world, source, torch_pos)
-    //         .into_iter()
-    //         .map(|(world, positions)| (world, positions.last().copied().unwrap(), 0usize)),
-    // );
+    if matches!(
+        config.not_route_strategy,
+        NotRouteStrategy::RedstoneOnly | NotRouteStrategy::DirectAndRedstone
+    ) {
+        route_candidates.extend(
+            generate_or_routes(config, world, source, torch_pos)
+                .routes
+                .into_iter()
+                .map(|(world, positions)| {
+                    (world, positions.last().copied().unwrap(), positions.len())
+                }),
+        );
+    }
 
     route_candidates
         .into_iter()
@@ -781,7 +850,8 @@ mod tests {
     use crate::graph::logic::predefined_logics;
     use crate::nbt::{NBTRoot, ToNBT};
     use crate::transform::place_and_route::local_placer::{
-        LocalPlacer, LocalPlacerConfig, LocalPlacerDebug, SamplingPolicy,
+        InputPlacementStrategy, LocalPlacer, LocalPlacerConfig, LocalPlacerDebug, NotRouteStrategy,
+        SamplingPolicy, TorchPlacementStrategy,
     };
     use crate::transform::place_and_route::utils::{
         equivalent_logic_with_world3d, equivalent_logic_with_world3ds, world3d_to_logic,
@@ -794,9 +864,12 @@ mod tests {
         let logic_graph = predefined_logics::and_graph()?;
         let config = LocalPlacerConfig {
             greedy_input_generation: true,
+            input_placement_strategy: InputPlacementStrategy::Boundary,
             step_sampling_policy: SamplingPolicy::None,
             leak_sampling: false,
             route_torch_directly: true,
+            torch_placement_strategy: TorchPlacementStrategy::DirectOnly,
+            not_route_strategy: NotRouteStrategy::DirectOnly,
             max_route_step: 1,
             route_step_sampling_policy: SamplingPolicy::Random(100),
         };
@@ -820,9 +893,12 @@ mod tests {
 
         let config = LocalPlacerConfig {
             greedy_input_generation: false,
+            input_placement_strategy: InputPlacementStrategy::Boundary,
             step_sampling_policy: SamplingPolicy::Random(100),
             leak_sampling: false,
             route_torch_directly: true,
+            torch_placement_strategy: TorchPlacementStrategy::DirectOnly,
+            not_route_strategy: NotRouteStrategy::DirectOnly,
             max_route_step: 5,
             route_step_sampling_policy: SamplingPolicy::Random(100),
         };
@@ -844,9 +920,12 @@ mod tests {
         tracing_subscriber::fmt::init();
         let config = LocalPlacerConfig {
             greedy_input_generation: false,
+            input_placement_strategy: InputPlacementStrategy::Boundary,
             step_sampling_policy: SamplingPolicy::Random(1000),
             leak_sampling: true,
             route_torch_directly: true,
+            torch_placement_strategy: TorchPlacementStrategy::DirectOnly,
+            not_route_strategy: NotRouteStrategy::DirectOnly,
             max_route_step: 3,
             route_step_sampling_policy: SamplingPolicy::Random(1000),
         };
@@ -874,9 +953,12 @@ mod tests {
 
         let config = LocalPlacerConfig {
             greedy_input_generation: true,
+            input_placement_strategy: InputPlacementStrategy::Boundary,
             step_sampling_policy: SamplingPolicy::Random(10000),
             leak_sampling: true,
             route_torch_directly: true,
+            torch_placement_strategy: TorchPlacementStrategy::DirectOnly,
+            not_route_strategy: NotRouteStrategy::DirectOnly,
             max_route_step: 1,
             route_step_sampling_policy: SamplingPolicy::Random(1000),
         };
@@ -909,9 +991,12 @@ mod tests {
 
         let config = LocalPlacerConfig {
             greedy_input_generation: true,
+            input_placement_strategy: InputPlacementStrategy::Boundary,
             step_sampling_policy: SamplingPolicy::Random(10000),
             leak_sampling: false,
             route_torch_directly: true,
+            torch_placement_strategy: TorchPlacementStrategy::DirectOnly,
+            not_route_strategy: NotRouteStrategy::DirectOnly,
             max_route_step: 3,
             route_step_sampling_policy: SamplingPolicy::Random(100),
         };
@@ -937,9 +1022,12 @@ mod tests {
 
         let config = LocalPlacerConfig {
             greedy_input_generation: true,
+            input_placement_strategy: InputPlacementStrategy::Boundary,
             step_sampling_policy: SamplingPolicy::Random(10000),
             leak_sampling: false,
             route_torch_directly: true,
+            torch_placement_strategy: TorchPlacementStrategy::DirectOnly,
+            not_route_strategy: NotRouteStrategy::DirectOnly,
             max_route_step: 8,
             route_step_sampling_policy: SamplingPolicy::Random(100),
         };
@@ -965,9 +1053,12 @@ mod tests {
 
         let config = LocalPlacerConfig {
             greedy_input_generation: true,
+            input_placement_strategy: InputPlacementStrategy::Boundary,
             step_sampling_policy: SamplingPolicy::Random(10000),
             leak_sampling: false,
             route_torch_directly: true,
+            torch_placement_strategy: TorchPlacementStrategy::DirectOnly,
+            not_route_strategy: NotRouteStrategy::DirectOnly,
             max_route_step: 8,
             route_step_sampling_policy: SamplingPolicy::Random(100),
         };
