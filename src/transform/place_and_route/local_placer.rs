@@ -616,7 +616,7 @@ fn generate_or_routes(
                     .chain([redstone_node.position])
                     .collect();
 
-                if redstone_node.has_connection_with(&world, to) {
+                if redstone_node.has_connection_with(&new_world, to) {
                     depth_debug.accepted_routes += 1;
                     candidates.push((new_world, new_prevs));
                 } else {
@@ -769,6 +769,10 @@ impl<'a> LocalPlacerCostEstimator<'a> {
         todo!()
     }
 }
+
+#[cfg(test)]
+#[path = "local_placer/tests.rs"]
+mod unit_tests;
 
 #[cfg(test)]
 mod tests {
