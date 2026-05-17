@@ -73,6 +73,8 @@ pub struct Simulator {
     world: World3D,
     cycle: usize,
     event_id_count: usize,
+    soft_power_sources: HashSet<(Position, Position)>,
+    hard_power_sources: HashSet<(Position, Position)>,
     trace: Vec<SimulationTraceEntry>,
     snapshots: Vec<SimulationSnapshot>,
     trace_limit: usize,
@@ -170,7 +172,8 @@ impl Simulator {
 
         sim.queue.push_back(VecDeque::new());
         sim.world.initialize_redstone_states();
-        sim.init(world);
+        sim.normalize_torches_on();
+        sim.init();
 
         tracing::debug!("queue: {:?}", sim.queue);
 
@@ -198,7 +201,8 @@ impl Simulator {
 
         sim.queue.push_back(VecDeque::new());
         sim.world.initialize_redstone_states();
-        sim.init(world);
+        sim.normalize_torches_on();
+        sim.init();
 
         tracing::debug!("queue: {:?}", sim.queue);
 
@@ -214,6 +218,8 @@ impl Simulator {
             world: world.into(),
             cycle: 0,
             event_id_count: 0,
+            soft_power_sources: HashSet::new(),
+            hard_power_sources: HashSet::new(),
             trace: Vec::new(),
             snapshots: Vec::new(),
             trace_limit,
@@ -378,8 +384,16 @@ impl Simulator {
         self.queue.back_mut().unwrap().push_back(event);
     }
 
-    fn init(&mut self, world: &World) {
-        for (pos, block) in world.blocks.iter().copied() {
+    fn normalize_torches_on(&mut self) {
+        for pos in self.world.iter_pos() {
+            if matches!(self.world[pos].kind, BlockKind::Torch { .. }) {
+                self.world[pos].kind = BlockKind::Torch { is_on: true };
+            }
+        }
+    }
+
+    fn init(&mut self) {
+        for (pos, block) in self.world.iter_block() {
             match block.kind {
                 BlockKind::Torch { is_on } if is_on => {
                     self.init_torch_event(block.direction, pos);
@@ -570,8 +584,22 @@ impl Simulator {
         }
 
         let is_hard = matches!(event.event_type, EventType::HardOn | EventType::HardOff);
+        let source_position = event
+            .target_position
+            .walk(event.direction)
+            .unwrap_or(event.target_position);
+        let source_key = (event.target_position, source_position);
+        let power_sources = if is_hard {
+            &mut self.hard_power_sources
+        } else {
+            &mut self.soft_power_sources
+        };
 
         if event.event_type.is_on() {
+            if !power_sources.insert(source_key) {
+                return Ok(());
+            }
+
             block.count_up(event.event_type.is_hard())?;
         } else {
             let BlockKind::Cobble {
@@ -581,6 +609,10 @@ impl Simulator {
             else {
                 unreachable!()
             };
+
+            if !power_sources.remove(&source_key) {
+                return Ok(());
+            }
 
             if on_count == 0 || (is_hard && on_base_count == 0) {
                 return Ok(());
@@ -1114,6 +1146,7 @@ impl Simulator {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::nbt::NBTRoot;
     use crate::world::block::RedstoneState;
     use crate::world::position::DimSize;
 
@@ -1248,6 +1281,93 @@ mod test {
 
         assert_eq!(on_count, 1);
         assert_eq!(on_base_count, 0);
+    }
+
+    #[test]
+    fn unittest_simulator_cobble_deduplicates_same_soft_power_source() -> eyre::Result<()> {
+        let target = Position(1, 1, 0);
+        let mock_world = World {
+            size: DimSize(3, 3, 2),
+            blocks: vec![(
+                target,
+                Block {
+                    kind: BlockKind::Cobble {
+                        on_count: 0,
+                        on_base_count: 0,
+                    },
+                    direction: Direction::None,
+                },
+            )],
+        };
+        let event = Event {
+            id: None,
+            from_id: None,
+            event_type: EventType::SoftOn,
+            target_position: target,
+            direction: Direction::South,
+        };
+        let mut sim = Simulator::new(&mock_world, DEFAULT_TRACE_LIMIT);
+        sim.queue.push_back(VecDeque::new());
+        let mut block = sim.world[target];
+
+        sim.propgate_cobble_event(&mut block, &event)?;
+        sim.propgate_cobble_event(&mut block, &event)?;
+
+        assert!(matches!(
+            block.kind,
+            BlockKind::Cobble {
+                on_count: 1,
+                on_base_count: 0
+            }
+        ));
+
+        let event = Event {
+            event_type: EventType::SoftOff,
+            ..event
+        };
+        sim.propgate_cobble_event(&mut block, &event)?;
+        sim.propgate_cobble_event(&mut block, &event)?;
+
+        assert!(matches!(
+            block.kind,
+            BlockKind::Cobble {
+                on_count: 0,
+                on_base_count: 0
+            }
+        ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn unittest_simulator_full_adder_all_on_recomputes_wall_torch() -> eyre::Result<()> {
+        let nbt = NBTRoot::from_nbt_bytes(&std::fs::read("test/full-adder.nbt")?)?;
+        let world = nbt.to_world();
+        let mut sim = Simulator::from_with_limits_and_trace(&world, 256, 50_000, 0)
+            .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
+        let states = world
+            .blocks
+            .iter()
+            .filter_map(|(pos, block)| {
+                matches!(block.kind, BlockKind::Switch { .. }).then_some((*pos, true))
+            })
+            .collect::<Vec<_>>();
+
+        sim.change_state_with_limits(states, 256, 50_000)?;
+
+        assert!(matches!(
+            sim.world[Position(8, 2, 3)].kind,
+            BlockKind::Torch { is_on: true }
+        ));
+        assert!(matches!(
+            sim.world[Position(7, 2, 3)].kind,
+            BlockKind::Cobble {
+                on_count: 0,
+                on_base_count: 0
+            }
+        ));
+
+        Ok(())
     }
 
     #[test]

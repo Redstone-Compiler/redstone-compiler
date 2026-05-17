@@ -147,7 +147,12 @@ fn main() -> eyre::Result<()> {
 
             println!("  switches: {switches:?}");
             println!("  leaves: {leaves:?}");
-            for mask in 0..(1usize << switches.len()) {
+            let masks = if let Ok(mask) = std::env::var("PRINT_MASK") {
+                vec![usize::from_str_radix(&mask, 2).or_else(|_| mask.parse())?]
+            } else {
+                (0..(1usize << switches.len())).collect::<Vec<_>>()
+            };
+            for mask in masks {
                 let mut sim = Simulator::from_with_limits_and_trace(&world, 256, 50_000, 50_000)
                     .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
                 let states = switches
@@ -155,7 +160,14 @@ fn main() -> eyre::Result<()> {
                     .enumerate()
                     .map(|(index, pos)| (*pos, (mask & (1 << index)) != 0))
                     .collect::<Vec<(Position, bool)>>();
-                sim.change_state_with_limits(states.clone(), 256, 50_000)?;
+                if let Err(error) = sim.change_state_with_limits(states.clone(), 256, 50_000) {
+                    println!(
+                        "  mask={mask:0width$b} states={states:?}",
+                        width = switches.len()
+                    );
+                    print_trace_context(sim.trace());
+                    return Err(error);
+                }
                 let world = sim.world();
                 println!(
                     "  mask={mask:0width$b} states={states:?}",
@@ -238,6 +250,70 @@ fn print_trace_for_positions(trace: &[SimulationTraceEntry], positions: &[Positi
             entry.block_before
         );
     }
+}
+
+fn print_trace_context(trace: &[SimulationTraceEntry]) {
+    let Some(last) = trace.last() else {
+        println!("    trace: empty");
+        return;
+    };
+
+    let cycle = last.cycle;
+    let target = last.target_position;
+
+    println!(
+        "    trace context: cycle={cycle}, last target=({}, {}, {}), {} events total",
+        target[0],
+        target[1],
+        target[2],
+        trace.len()
+    );
+
+    let cycle_events = trace
+        .iter()
+        .filter(|entry| entry.cycle == cycle)
+        .collect::<Vec<_>>();
+    println!("    cycle {cycle}: {} events", cycle_events.len());
+
+    println!("    target history in cycle {cycle}:");
+    for entry in cycle_events
+        .iter()
+        .filter(|entry| entry.target_position == target)
+    {
+        print_trace_entry(entry);
+    }
+
+    println!("    ancestry:");
+    let mut current = last;
+    print_trace_entry(current);
+    while let Some(from_id) = current.from_event_id {
+        let Some(parent) = trace.iter().find(|entry| entry.event_id == Some(from_id)) else {
+            println!("      missing parent #{from_id}");
+            break;
+        };
+        current = parent;
+        print_trace_entry(current);
+    }
+
+    println!("    recent cycle events:");
+    for entry in cycle_events.iter().rev().take(80).rev() {
+        print_trace_entry(entry);
+    }
+}
+
+fn print_trace_entry(entry: &SimulationTraceEntry) {
+    println!(
+        "      #{:<5?} <- #{:<5?} cycle={:<3} {:<24} target={},{},{} dir={:<6} block={}",
+        entry.event_id,
+        entry.from_event_id,
+        entry.cycle,
+        entry.event_type,
+        entry.target_position[0],
+        entry.target_position[1],
+        entry.target_position[2],
+        entry.direction,
+        entry.block_before
+    );
 }
 
 fn print_signal_state(world: &redstone_compiler::world::World3D) {
