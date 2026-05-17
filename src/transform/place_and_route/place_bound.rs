@@ -169,7 +169,7 @@ impl PlaceBound {
                         BlockKind::Torch { .. } => match propagate_type {
                             PropagateType::Torch => None,
                             PropagateType::Soft | PropagateType::Hard | PropagateType::Repeater => {
-                                if pos_src.walk(world[pos_src].direction).unwrap() == pos {
+                                if pos_src.walk(world[pos_src].direction) == Some(pos) {
                                     Some((Direction::None, pos_src))
                                 } else {
                                     None
@@ -179,7 +179,7 @@ impl PlaceBound {
                         BlockKind::Repeater { .. } => match propagate_type {
                             PropagateType::Torch => None,
                             PropagateType::Soft | PropagateType::Hard | PropagateType::Repeater => {
-                                if pos_src.walk(world[pos_src].direction).unwrap() == pos {
+                                if pos_src.walk(world[pos_src].direction) == Some(pos) {
                                     Some((Direction::None, pos_src))
                                 } else {
                                     None
