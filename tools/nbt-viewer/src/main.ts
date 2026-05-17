@@ -2,7 +2,7 @@ import './styles.css';
 import { loadNbtFile, stringifyNbt } from './nbt/loadNbt';
 import { toStructureModel } from './nbt/toStructure';
 import { StructureViewer } from './render/StructureViewer';
-import { NbtSimulation } from './sim/NbtSimulation';
+import { NbtSimulation, NbtSimulationError, type SnapshotInfo, type TraceEntry } from './sim/NbtSimulation';
 import type { StructureBlock, StructurePaletteEntry } from './types';
 
 interface DroppedFileSystemEntry {
@@ -74,6 +74,19 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
           </div>
           <pre id="inspector">Select a block in the 3D view.</pre>
         </aside>
+        <details id="trace-panel" class="floating-panel trace-panel">
+          <summary>
+            <span>Trace</span>
+            <span id="trace-count">No events</span>
+          </summary>
+          <div class="trace-controls">
+            <button id="trace-prev" type="button" aria-label="Previous cycle">Prev</button>
+            <input id="trace-cycle" type="range" min="0" max="0" value="0" />
+            <button id="trace-next" type="button" aria-label="Next cycle">Next</button>
+            <span id="trace-cycle-label">cycle -</span>
+          </div>
+          <pre id="trace-output">Run a simulation to inspect events.</pre>
+        </details>
         <div id="viewer-empty" class="viewer-empty">Drop an .nbt file or use Open NBT.</div>
       </section>
     </section>
@@ -90,6 +103,13 @@ const canvas = document.querySelector<HTMLCanvasElement>('#structure-canvas')!;
 const viewerEmpty = document.querySelector<HTMLElement>('#viewer-empty')!;
 const inspector = document.querySelector<HTMLElement>('#inspector')!;
 const toggleSwitchButton = document.querySelector<HTMLButtonElement>('#toggle-switch')!;
+const tracePanel = document.querySelector<HTMLDetailsElement>('#trace-panel')!;
+const traceCount = document.querySelector<HTMLElement>('#trace-count')!;
+const traceOutput = document.querySelector<HTMLElement>('#trace-output')!;
+const traceCycleInput = document.querySelector<HTMLInputElement>('#trace-cycle')!;
+const traceCycleLabel = document.querySelector<HTMLElement>('#trace-cycle-label')!;
+const tracePrevButton = document.querySelector<HTMLButtonElement>('#trace-prev')!;
+const traceNextButton = document.querySelector<HTMLButtonElement>('#trace-next')!;
 
 const viewer = new StructureViewer(canvas);
 viewer.setSelectionHandler(renderSelection);
@@ -98,6 +118,11 @@ let simulation: NbtSimulation | undefined;
 let selectedBlock: StructureBlock | undefined;
 let currentNbtBytes: Uint8Array | undefined;
 let currentRoot: unknown;
+let currentTrace: TraceEntry[] = [];
+let traceCycles: number[] = [];
+let currentSnapshots: SnapshotInfo[] = [];
+let traceBaseRoot: unknown;
+let isTracePreviewActive = false;
 
 folderInput.setAttribute('webkitdirectory', '');
 folderInput.setAttribute('directory', '');
@@ -113,18 +138,30 @@ folderInput.addEventListener('change', () => {
 
 toggleSwitchButton.addEventListener('click', () => {
   void toggleSelectedSwitch().catch(error => {
-    inspector.textContent = error instanceof Error ? error.message : String(error);
+    renderSimulationError(error);
   });
+});
+
+traceCycleInput.addEventListener('input', () => {
+  void renderTraceCycle(Number(traceCycleInput.value));
+});
+
+tracePrevButton.addEventListener('click', () => {
+  traceCycleInput.value = String(Math.max(0, Number(traceCycleInput.value) - 1));
+  void renderTraceCycle(Number(traceCycleInput.value));
+});
+
+traceNextButton.addEventListener('click', () => {
+  traceCycleInput.value = String(Math.min(traceCycles.length - 1, Number(traceCycleInput.value) + 1));
+  void renderTraceCycle(Number(traceCycleInput.value));
 });
 
 async function toggleSelectedSwitch(): Promise<void> {
   if (!selectedBlock || !currentNbtBytes) return;
 
   simulation ??= await NbtSimulation.create(currentNbtBytes);
-  if (!simulation) {
-    throw new Error('Simulator is unavailable for this file.');
-  }
 
+  const baseRoot = currentRoot;
   const nextRoot = simulation.toggleSwitch(selectedBlock);
   if (!nextRoot) return;
 
@@ -135,6 +172,7 @@ async function toggleSelectedSwitch(): Promise<void> {
   await viewer.setStructure(structure);
   selectedBlock = undefined;
   renderSelection(undefined);
+  renderTrace(simulation.trace(), simulation.snapshots(), baseRoot);
   inspector.textContent = [
     `updated by simulator`,
     `size: ${structure.size.join(' x ')}`,
@@ -348,9 +386,11 @@ async function openFile(file: File, selectedEntry?: Element | null): Promise<voi
         `palette: ${structure.palette.length}`,
         `blocks: ${structure.blocks.length}`,
       ].join('\n');
+      renderTrace([], [], undefined);
     } else {
       viewerEmpty.classList.remove('hidden');
       inspector.textContent = 'This NBT file does not look like a Minecraft structure file.';
+      renderTrace([], [], undefined);
     }
   } catch (error) {
     simulation = undefined;
@@ -360,6 +400,7 @@ async function openFile(file: File, selectedEntry?: Element | null): Promise<voi
     toggleSwitchButton.classList.add('hidden');
     viewerEmpty.classList.remove('hidden');
     inspector.textContent = error instanceof Error ? error.message : String(error);
+    renderTrace([], [], undefined);
   }
 }
 
@@ -393,6 +434,116 @@ function renderSelection(block: StructureBlock | undefined): void {
 
 function getLeverPowered(block: StructureBlock | undefined): boolean {
   return block?.palette.properties?.powered === 'true';
+}
+
+function renderSimulationError(error: unknown): void {
+  if (error instanceof NbtSimulationError) {
+    inspector.textContent = error.message;
+    renderTrace(error.trace, error.snapshots, currentRoot, true);
+    return;
+  }
+
+  inspector.textContent = error instanceof Error ? error.message : String(error);
+}
+
+function renderTrace(trace: TraceEntry[], snapshots: SnapshotInfo[], baseRoot: unknown, open = false): void {
+  currentTrace = trace;
+  currentSnapshots = snapshots;
+  traceBaseRoot = baseRoot;
+  traceCycles = Array.from(new Set(trace.map(entry => entry.cycle))).sort((a, b) => a - b);
+  traceCount.textContent = trace.length === 0 ? 'No events' : `${trace.length} events`;
+  traceCycleInput.max = String(Math.max(0, traceCycles.length - 1));
+  traceCycleInput.value = '0';
+  traceCycleInput.disabled = traceCycles.length === 0;
+  tracePrevButton.disabled = traceCycles.length === 0;
+  traceNextButton.disabled = traceCycles.length === 0;
+  void renderTraceCycle(traceCycles.length === 0 ? -1 : 0);
+  if (open || trace.length > 0) {
+    tracePanel.open = true;
+  }
+}
+
+async function renderTraceCycle(index: number): Promise<void> {
+  if (index < 0 || traceCycles.length === 0) {
+    traceCycleLabel.textContent = 'cycle -';
+    traceOutput.textContent = 'Run a simulation to inspect events.';
+    viewer.setTraceHighlights([]);
+    await restoreCurrentStructurePreview();
+    return;
+  }
+
+  const safeIndex = Math.max(0, Math.min(traceCycles.length - 1, index));
+  const cycle = traceCycles[safeIndex];
+  const entries = currentTrace.filter(entry => entry.cycle === cycle);
+  const positions = uniquePositions(entries.map(entry => rustPosToRenderPos(entry.target_position)));
+  const snapshot = currentSnapshots.find(snapshot => snapshot.cycle === cycle);
+  traceCycleInput.value = String(safeIndex);
+  traceCycleLabel.textContent = `cycle ${cycle} / ${entries.length} events`;
+  traceOutput.textContent = formatTrace(entries);
+  await renderTraceSnapshot(snapshot, positions);
+}
+
+async function renderTraceSnapshot(
+  snapshot: SnapshotInfo | undefined,
+  highlights: Array<[number, number, number]>,
+): Promise<void> {
+  if (snapshot && traceBaseRoot) {
+    const structure = toStructureModel(mergeSimulatedState(traceBaseRoot, snapshot.root));
+    if (structure) {
+      isTracePreviewActive = true;
+      await viewer.setStructure(structure, { preserveSelection: true, preserveView: true });
+    }
+  }
+
+  viewer.setTraceHighlights(highlights);
+}
+
+async function restoreCurrentStructurePreview(): Promise<void> {
+  if (!isTracePreviewActive || !currentRoot) return;
+
+  const structure = toStructureModel(currentRoot);
+  if (structure) {
+    await viewer.setStructure(structure, { preserveSelection: true, preserveView: true });
+  }
+  isTracePreviewActive = false;
+}
+
+function uniquePositions(positions: Array<[number, number, number]>): Array<[number, number, number]> {
+  const seen = new Set<string>();
+  return positions.filter(pos => {
+    const key = pos.join(',');
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function rustPosToRenderPos(pos: [number, number, number]): [number, number, number] {
+  return [pos[1], pos[2], pos[0]];
+}
+
+function formatTrace(trace: TraceEntry[]): string {
+  const shown = trace.slice(0, 500);
+  const lines = shown
+    .map(entry => {
+      const id = entry.event_id ?? '-';
+      const pos = entry.target_position.join(',');
+      return [
+        `#${id}`,
+        `cycle=${entry.cycle}`,
+        entry.event_type,
+        `target=${pos}`,
+        `dir=${entry.direction}`,
+        `block=${entry.block_before}`,
+        `queue=${entry.current_queue_len}/${entry.next_queue_len}`,
+      ].join('  ');
+    });
+
+  if (trace.length > shown.length) {
+    lines.push(`... ${trace.length - shown.length} more events in this cycle`);
+  }
+
+  return lines.join('\n');
 }
 
 function mergeSimulatedState(originalRoot: unknown, simulatedRoot: unknown): unknown {

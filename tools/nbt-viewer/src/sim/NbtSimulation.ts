@@ -2,12 +2,17 @@ import type { StructureBlock } from '../types';
 
 type WasmModule = {
   default: (moduleOrPath?: string | URL | Request | Response | WebAssembly.Module) => Promise<unknown>;
-  NbtSimulator: new (nbtBytes: Uint8Array) => WasmSimulator;
+  NbtSimulator: {
+    new (nbtBytes: Uint8Array): WasmSimulator;
+    trace_init(nbtBytes: Uint8Array): TraceReport;
+  };
 };
 
 type WasmSimulator = {
   switches(): SwitchInfo[];
+  snapshots(): SnapshotInfo[];
   structure(): unknown;
+  trace(): TraceEntry[];
   toggle_switch(x: number, y: number, z: number, isOn: boolean): unknown;
 };
 
@@ -15,6 +20,36 @@ export type SwitchInfo = {
   pos: [number, number, number];
   is_on: boolean;
 };
+
+export type TraceEntry = {
+  cycle: number;
+  event_id?: number;
+  event_type: string;
+  target_position: [number, number, number];
+  direction: string;
+  block_before: string;
+  current_queue_len: number;
+  next_queue_len: number;
+};
+
+export type TraceReport = {
+  ok: boolean;
+  error?: string;
+  trace: TraceEntry[];
+  snapshots: SnapshotInfo[];
+};
+
+export type SnapshotInfo = {
+  cycle: number;
+  root: unknown;
+};
+
+export class NbtSimulationError extends Error {
+  constructor(message: string, readonly trace: TraceEntry[], readonly snapshots: SnapshotInfo[]) {
+    super(message);
+    this.name = 'NbtSimulationError';
+  }
+}
 
 const wasmModulePath = '/wasm/nbt-sim/nbt_sim_wasm.js';
 const wasmBinaryPath = '/wasm/nbt-sim/nbt_sim_wasm_bg.wasm';
@@ -37,19 +72,28 @@ function samePos(a: [number, number, number], b: [number, number, number]): bool
 export class NbtSimulation {
   private constructor(private readonly sim: WasmSimulator) {}
 
-  static async create(nbtBytes: Uint8Array): Promise<NbtSimulation | undefined> {
+  static async create(nbtBytes: Uint8Array): Promise<NbtSimulation> {
+    const wasm = await loadWasmModule();
+    await wasm.default(wasmBinaryPath);
+
     try {
-      const wasm = await loadWasmModule();
-      await wasm.default(wasmBinaryPath);
       return new NbtSimulation(new wasm.NbtSimulator(nbtBytes));
     } catch (error) {
-      console.warn('NBT simulator WASM is unavailable.', error);
-      return undefined;
+      const report = wasm.NbtSimulator.trace_init(nbtBytes);
+      throw new NbtSimulationError(report.error ?? getErrorMessage(error), report.trace, report.snapshots);
     }
   }
 
   structure(): unknown {
     return this.sim.structure();
+  }
+
+  trace(): TraceEntry[] {
+    return this.sim.trace();
+  }
+
+  snapshots(): SnapshotInfo[] {
+    return this.sim.snapshots();
   }
 
   getSwitch(block: StructureBlock): SwitchInfo | undefined {
@@ -64,6 +108,14 @@ export class NbtSimulation {
     if (!current) return undefined;
 
     const [x, y, z] = current.pos;
-    return this.sim.toggle_switch(x, y, z, !current.is_on);
+    try {
+      return this.sim.toggle_switch(x, y, z, !current.is_on);
+    } catch (error) {
+      throw new NbtSimulationError(getErrorMessage(error), this.trace(), this.snapshots());
+    }
   }
+}
+
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

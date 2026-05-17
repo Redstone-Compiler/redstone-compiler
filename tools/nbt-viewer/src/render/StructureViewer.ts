@@ -6,6 +6,10 @@ import { MinecraftResources } from './mcmeta';
 
 type SelectionHandler = (block: StructureBlock | undefined) => void;
 type DragMode = 'move' | 'rotate';
+type SetStructureOptions = {
+  preserveView?: boolean;
+  preserveSelection?: boolean;
+};
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
@@ -33,6 +37,7 @@ export class StructureViewer {
   private structure = Structure.EMPTY;
   private model?: StructureModel;
   private selectedBlock?: vec3;
+  private traceHighlights: vec3[] = [];
   private onSelect: SelectionHandler = () => undefined;
   private frame = 0;
   private dragMode?: DragMode;
@@ -69,7 +74,7 @@ export class StructureViewer {
     this.onSelect = handler;
   }
 
-  async setStructure(model: StructureModel): Promise<void> {
+  async setStructure(model: StructureModel, options: SetStructureOptions = {}): Promise<void> {
     this.model = model;
     this.structure = createDeepslateStructure(model);
 
@@ -80,10 +85,22 @@ export class StructureViewer {
       this.renderer.setStructure(this.structure);
     }
 
-    vec3.copy(this.cPos, this.structure.getSize());
-    vec3.scale(this.cPos, this.cPos, -0.5);
-    this.cDist = Math.max(5, vec3.distance([0, 0, 0], this.cPos) * 1.7);
-    this.selectedBlock = undefined;
+    if (!options.preserveView) {
+      vec3.copy(this.cPos, this.structure.getSize());
+      vec3.scale(this.cPos, this.cPos, -0.5);
+      this.cDist = Math.max(5, vec3.distance([0, 0, 0], this.cPos) * 1.7);
+    }
+
+    if (!options.preserveSelection) {
+      this.selectedBlock = undefined;
+    }
+
+    this.traceHighlights = [];
+    this.render();
+  }
+
+  setTraceHighlights(positions: Array<[number, number, number]>): void {
+    this.traceHighlights = positions.map(pos => vec3.fromValues(pos[0], pos[1], pos[2]));
     this.render();
   }
 
@@ -222,6 +239,9 @@ export class StructureViewer {
       const viewMatrix = this.getViewMatrix();
       this.renderer.drawGrid(viewMatrix);
       this.renderer.drawStructure(viewMatrix);
+      for (const block of this.traceHighlights) {
+        this.renderer.drawOutline(viewMatrix, block);
+      }
       if (this.selectedBlock) {
         this.renderer.drawOutline(viewMatrix, this.selectedBlock);
       }

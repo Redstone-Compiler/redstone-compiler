@@ -1,11 +1,13 @@
 use redstone_compiler::nbt::{NBTRoot, ToNBT};
 use redstone_compiler::world::block::BlockKind;
 use redstone_compiler::world::position::Position;
-use redstone_compiler::world::simulator::Simulator;
+use redstone_compiler::world::simulator::{SimulationSnapshot, SimulationTraceEntry, Simulator};
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
-const MAX_SIMULATION_CYCLES: usize = 512;
+const MAX_SIMULATION_CYCLES: usize = 96;
+const MAX_SIMULATION_EVENTS: usize = 10_000;
+const TRACE_LIMIT: usize = 12_000;
 
 #[derive(Serialize)]
 struct SwitchInfo {
@@ -13,9 +15,25 @@ struct SwitchInfo {
     is_on: bool,
 }
 
+#[derive(Serialize)]
+struct TraceReport {
+    ok: bool,
+    error: Option<String>,
+    trace: Vec<SimulationTraceEntry>,
+    snapshots: Vec<SnapshotInfo>,
+}
+
+#[derive(Serialize)]
+struct SnapshotInfo {
+    cycle: usize,
+    root: NBTRoot,
+}
+
 #[wasm_bindgen]
 pub struct NbtSimulator {
     sim: Simulator,
+    last_trace: Vec<SimulationTraceEntry>,
+    last_snapshots: Vec<SnapshotInfo>,
 }
 
 #[wasm_bindgen]
@@ -24,10 +42,47 @@ impl NbtSimulator {
     pub fn new(nbt_bytes: &[u8]) -> Result<NbtSimulator, JsValue> {
         let nbt = NBTRoot::from_nbt_bytes(nbt_bytes).map_err(to_js_error)?;
         let world = nbt.to_world();
-        let sim =
-            Simulator::from_with_max_cycles(&world, MAX_SIMULATION_CYCLES).map_err(to_js_error)?;
+        let sim = Simulator::from_with_limits_and_trace(
+            &world,
+            MAX_SIMULATION_CYCLES,
+            MAX_SIMULATION_EVENTS,
+            TRACE_LIMIT,
+        )
+        .map_err(to_js_error)?;
+        let last_trace = sim.trace().to_vec();
+        let last_snapshots = snapshots_to_info(sim.snapshots());
 
-        Ok(Self { sim })
+        Ok(Self {
+            sim,
+            last_trace,
+            last_snapshots,
+        })
+    }
+
+    pub fn trace_init(nbt_bytes: &[u8]) -> Result<JsValue, JsValue> {
+        let nbt = NBTRoot::from_nbt_bytes(nbt_bytes).map_err(to_js_error)?;
+        let world = nbt.to_world();
+        let report = match Simulator::from_with_limits_and_trace(
+            &world,
+            MAX_SIMULATION_CYCLES,
+            MAX_SIMULATION_EVENTS,
+            TRACE_LIMIT,
+        ) {
+            Ok(sim) => TraceReport {
+                ok: true,
+                error: None,
+                trace: sim.trace().to_vec(),
+                snapshots: snapshots_to_info(sim.snapshots()),
+            },
+            Err(error) => TraceReport {
+                ok: false,
+                error: Some(error.message().to_owned()),
+                trace: error.trace().to_vec(),
+                snapshots: snapshots_to_info(error.snapshots()),
+            },
+        };
+
+        serde_wasm_bindgen::to_value(&report).map_err(to_js_error)
     }
 
     pub fn switches(&self) -> Result<JsValue, JsValue> {
@@ -58,10 +113,27 @@ impl NbtSimulator {
         z: usize,
         is_on: bool,
     ) -> Result<JsValue, JsValue> {
-        self.sim
-            .change_state_with_max_cycles(vec![(Position(x, y, z), is_on)], MAX_SIMULATION_CYCLES)
-            .map_err(to_js_error)?;
+        self.sim.clear_trace();
+        if let Err(error) = self.sim.change_state_with_limits(
+            vec![(Position(x, y, z), is_on)],
+            MAX_SIMULATION_CYCLES,
+            MAX_SIMULATION_EVENTS,
+        ) {
+            self.last_trace = self.sim.trace().to_vec();
+            self.last_snapshots = snapshots_to_info(self.sim.snapshots());
+            return Err(to_js_error(error));
+        }
+        self.last_trace = self.sim.trace().to_vec();
+        self.last_snapshots = snapshots_to_info(self.sim.snapshots());
         self.structure()
+    }
+
+    pub fn trace(&self) -> Result<JsValue, JsValue> {
+        serde_wasm_bindgen::to_value(&self.last_trace).map_err(to_js_error)
+    }
+
+    pub fn snapshots(&self) -> Result<JsValue, JsValue> {
+        serde_wasm_bindgen::to_value(&self.last_snapshots).map_err(to_js_error)
     }
 
     pub fn structure(&self) -> Result<JsValue, JsValue> {
@@ -80,4 +152,14 @@ impl NbtSimulator {
 
 fn to_js_error(error: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&error.to_string())
+}
+
+fn snapshots_to_info(snapshots: &[SimulationSnapshot]) -> Vec<SnapshotInfo> {
+    snapshots
+        .iter()
+        .map(|snapshot| SnapshotInfo {
+            cycle: snapshot.cycle,
+            root: snapshot.world.to_nbt(),
+        })
+        .collect()
 }
