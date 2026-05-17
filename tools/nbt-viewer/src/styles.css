@@ -86,14 +86,23 @@ input {
   backdrop-filter: blur(14px);
 }
 
-.tree-panel {
+.files-panel {
   top: 16px;
   left: 16px;
   width: min(420px, calc(100vw - 32px));
-  max-height: calc(100vh - 32px);
+  max-height: min(42vh, 360px);
   overflow: hidden;
 }
 
+.tree-panel {
+  top: 62px;
+  left: 16px;
+  width: min(420px, calc(100vw - 32px));
+  max-height: calc(100vh - 78px);
+  overflow: hidden;
+}
+
+.files-panel summary,
 .tree-panel summary {
   display: flex;
   align-items: center;
@@ -107,10 +116,12 @@ input {
   list-style: none;
 }
 
+.files-panel summary::-webkit-details-marker,
 .tree-panel summary::-webkit-details-marker {
   display: none;
 }
 
+.files-panel summary::before,
 .tree-panel summary::before {
   content: "+";
   display: inline-grid;
@@ -123,16 +134,63 @@ input {
   flex: 0 0 auto;
 }
 
+.files-panel[open] summary::before,
 .tree-panel[open] summary::before {
   content: "-";
 }
 
+#files-count,
 #file-meta {
   min-width: 0;
   overflow: hidden;
   color: #9ea9b3;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.files-list {
+  max-height: calc(min(42vh, 360px) - 38px);
+  overflow: auto;
+  padding: 6px;
+  border-top: 1px solid rgb(154 164 173 / 18%);
+}
+
+.files-list.empty {
+  display: grid;
+  min-height: 120px;
+  place-items: center;
+  padding: 14px;
+  color: #7f8992;
+  font-size: 13px;
+  text-align: center;
+}
+
+.file-entry {
+  display: block;
+  width: 100%;
+  min-height: 28px;
+  margin: 0;
+  padding: 5px 7px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #dce3e7;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 12px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.file-entry:hover {
+  background: rgb(255 255 255 / 7%);
+}
+
+.file-entry.selected {
+  background: rgb(211 50 50 / 24%);
+  color: #fff;
 }
 
 .tree-root {
@@ -235,6 +293,12 @@ input {
   }
 
   .tree-panel {
+    top: 104px;
+    left: 12px;
+    width: calc(100vw - 24px);
+  }
+
+  .files-panel {
     top: 58px;
     left: 12px;
     width: calc(100vw - 24px);
