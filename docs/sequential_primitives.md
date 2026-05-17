@@ -47,9 +47,11 @@ Port(rs_latch_node, "nq")
 
 The first implementation supports only one exposed sequential output in the top-level graph. This is intentional because graph edges do not yet encode the source output port. The RS latch macro exposes both `q` and `nq` internally, but only q-only top-level use is accepted by `LocalPlacer`.
 
-## Current RS Latch Macro
+## Current RS Latch Placement
 
 `src/sequential/layout.rs` defines the initial `SequentialMacro` interface and one simulator-validated RS latch macro candidate. RS latch macro candidates are gated by successful recognition of the RS latch feedback core in the primitive `inner_graph`.
+
+`LocalPlacer` now prefers a gate-level RS latch path when the primitive exposes a recognized RS latch core. That path places the two NOT torches with the normal torch/support helper, then routes the cross-coupled feedback and external `s`/`r` inputs with existing OR-route helpers. The macro candidate remains as a fallback interface and as a simulator-validated reference layout; it is not the only way the RS latch NBT test is generated.
 
 Tests currently validate:
 
@@ -63,12 +65,13 @@ Tests currently validate:
 - macro output ports are registered in placement state,
 - existing source positions can be routed into macro input ports,
 - the RS latch macro satisfies reset, hold, set, and reset sequences under `Simulator`.
+- RS latch local placement can generate an NBT fixture from searched gate-level placements and routes.
 
 ## Remaining Work
 
 - Make graph edges port-aware so `q` and `nq` can drive different consumers.
-- Replace the first RS latch hardcoded macro with direct local placer support for cyclic gate SCC placement.
-- Reuse local placer route/place helpers for RS latch gate-level placement instead of physical macro synthesis.
+- Broaden direct local placer support beyond the first RS latch feedback-core shape.
+- Add stronger behavior validation for searched sequential layouts, not only for the reference macro.
 - Reuse the RS latch feedback core when composing D latches and flip-flops.
 
 Run placement-related tests with `cargo test --release`.
