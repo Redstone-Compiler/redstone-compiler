@@ -186,8 +186,8 @@ fn generate_routes_to_cobble_accepts_direct_hard_connection() {
 fn generate_routes_to_cobble_can_use_redstone_route() {
     let mut world = empty_world();
     let source = Position(1, 1, 1);
-    let torch_pos = Position(3, 1, 1);
-    let cobble_pos = Position(3, 1, 0);
+    let torch_pos = Position(4, 1, 1);
+    let cobble_pos = Position(3, 1, 1);
     let mut config = config(1);
     config.not_route_strategy = NotRouteStrategy::RedstoneOnly;
     place_node(
@@ -195,35 +195,33 @@ fn generate_routes_to_cobble_can_use_redstone_route() {
         PlacedNode::new(source, torch(Direction::Bottom)),
     );
     place_node(&mut world, PlacedNode::new_cobble(cobble_pos));
-    place_node(
-        &mut world,
-        PlacedNode::new(torch_pos, torch(Direction::Bottom)),
-    );
 
     let routes = generate_routes_to_cobble(&config, &world, source, torch_pos, cobble_pos);
 
-    assert!(routes.iter().any(|(_, pos)| *pos == Position(2, 1, 1)));
+    assert!(routes.iter().any(|(world, pos)| {
+        world[*pos].kind.is_redstone()
+            && PlacedNode::new(*pos, world[*pos]).has_connection_with(world, cobble_pos)
+    }));
 }
 
 #[test]
-fn generate_routes_to_cobble_skips_redstone_route_for_non_diode_source() {
+fn generate_routes_to_cobble_can_extend_redstone_source() {
     let mut world = empty_world();
     let source = Position(1, 1, 1);
-    let torch_pos = Position(3, 1, 1);
-    let cobble_pos = Position(3, 1, 0);
+    let torch_pos = Position(4, 1, 1);
+    let cobble_pos = Position(3, 1, 1);
     let mut config = config(1);
     config.not_route_strategy = NotRouteStrategy::DirectAndRedstone;
     place_node(&mut world, PlacedNode::new_cobble(Position(1, 1, 0)));
     place_node(&mut world, PlacedNode::new_redstone(source));
     place_node(&mut world, PlacedNode::new_cobble(cobble_pos));
-    place_node(
-        &mut world,
-        PlacedNode::new(torch_pos, torch(Direction::Bottom)),
-    );
 
     let routes = generate_routes_to_cobble(&config, &world, source, torch_pos, cobble_pos);
 
-    assert!(routes.is_empty());
+    assert!(routes.iter().any(|(world, pos)| {
+        world[*pos].kind.is_redstone()
+            && PlacedNode::new(*pos, world[*pos]).has_connection_with(world, cobble_pos)
+    }));
 }
 
 #[test]
