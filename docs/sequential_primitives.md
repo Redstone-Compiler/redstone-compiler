@@ -21,8 +21,16 @@ For RS latch, the recognizer checks:
 
 - a cyclic SCC containing the two OR/NOT feedback branches,
 - `q` and `nq` outputs driven by NOT nodes,
-- cross-coupled NOR structure,
-- external `s` and `r` input nodes.
+- cross-coupled NOR structure.
+
+The set/reset drivers are allowed to be either external `s`/`r` inputs or upstream combinational gates. This lets larger primitives keep the RS latch feedback core intact while adding logic around it. `DLatch` is now represented this way:
+
+```text
+s = d & en
+r = ~d & en
+q  = ~(r | nq)
+nq = ~(s | q)
+```
 
 This lets larger cells remain compositions:
 
@@ -61,7 +69,8 @@ Tests currently validate:
 - RS latch feedback SCC/core recognition,
 - q-only sequential nodes are accepted by `LocalPlacer`,
 - multi-output sequential nodes are rejected until graph edges become port-aware,
-- unsupported sequential primitives such as `DLatch` are rejected,
+- `DLatch` inner graph contains input gating around the RS latch feedback core,
+- unsupported local placement for sequential primitives such as `DLatch` is still rejected,
 - macro output ports are registered in placement state,
 - existing source positions can be routed into macro input ports,
 - the RS latch macro satisfies reset, hold, set, and reset sequences under `Simulator`,
@@ -72,6 +81,7 @@ Tests currently validate:
 - Make graph edges port-aware so `q` and `nq` can drive different consumers.
 - Improve RS latch gate-level candidate ranking so valid layouts are found with smaller search budgets.
 - Broaden direct local placer support beyond the first RS latch feedback-core shape.
-- Reuse the RS latch feedback core when composing D latches and flip-flops.
+- Add direct local placement support for `DLatch` by placing the input gating around the RS latch core.
+- Reuse the D latch composition when building flip-flops.
 
 Run placement-related tests with `cargo test --release`.

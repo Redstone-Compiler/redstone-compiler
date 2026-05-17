@@ -72,6 +72,14 @@ impl SequentialPrimitive {
         )
     }
 
+    pub fn d_latch() -> Self {
+        Self::new(
+            SequentialType::DLatch,
+            vec!["d".to_owned(), "en".to_owned()],
+            vec!["q".to_owned(), "nq".to_owned()],
+        )
+    }
+
     pub fn name(&self) -> String {
         self.sequential_type.name()
     }
@@ -88,7 +96,8 @@ impl SequentialPrimitive {
 fn default_inner_graph(sequential_type: SequentialType) -> Graph {
     match sequential_type {
         SequentialType::RsLatch => rs_latch_inner_graph(),
-        SequentialType::DLatch | SequentialType::DFlipFlop => Graph::default(),
+        SequentialType::DLatch => d_latch_inner_graph(),
+        SequentialType::DFlipFlop => Graph::default(),
     }
 }
 
@@ -160,6 +169,98 @@ fn rs_latch_inner_graph() -> Graph {
     graph
 }
 
+fn d_latch_inner_graph() -> Graph {
+    // s = d & en, r = ~d & en, q = ~(r | nq), nq = ~(s | q)
+    let mut graph = Graph {
+        nodes: vec![
+            GraphNode {
+                id: 0,
+                kind: GraphNodeKind::Input("d".to_owned()),
+                ..Default::default()
+            },
+            GraphNode {
+                id: 1,
+                kind: GraphNodeKind::Input("en".to_owned()),
+                ..Default::default()
+            },
+            GraphNode {
+                id: 2,
+                kind: GraphNodeKind::Logic(Logic {
+                    logic_type: LogicType::And,
+                }),
+                inputs: vec![0, 1],
+                ..Default::default()
+            },
+            GraphNode {
+                id: 3,
+                kind: GraphNodeKind::Logic(Logic {
+                    logic_type: LogicType::Not,
+                }),
+                inputs: vec![0],
+                ..Default::default()
+            },
+            GraphNode {
+                id: 4,
+                kind: GraphNodeKind::Logic(Logic {
+                    logic_type: LogicType::And,
+                }),
+                inputs: vec![3, 1],
+                ..Default::default()
+            },
+            GraphNode {
+                id: 5,
+                kind: GraphNodeKind::Logic(Logic {
+                    logic_type: LogicType::Or,
+                }),
+                inputs: vec![4, 8],
+                ..Default::default()
+            },
+            GraphNode {
+                id: 6,
+                kind: GraphNodeKind::Logic(Logic {
+                    logic_type: LogicType::Not,
+                }),
+                inputs: vec![5],
+                ..Default::default()
+            },
+            GraphNode {
+                id: 7,
+                kind: GraphNodeKind::Logic(Logic {
+                    logic_type: LogicType::Or,
+                }),
+                inputs: vec![2, 6],
+                ..Default::default()
+            },
+            GraphNode {
+                id: 8,
+                kind: GraphNodeKind::Logic(Logic {
+                    logic_type: LogicType::Not,
+                }),
+                inputs: vec![7],
+                ..Default::default()
+            },
+            GraphNode {
+                id: 9,
+                kind: GraphNodeKind::Output("q".to_owned()),
+                inputs: vec![6],
+                ..Default::default()
+            },
+            GraphNode {
+                id: 10,
+                kind: GraphNodeKind::Output("nq".to_owned()),
+                inputs: vec![8],
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    graph.build_outputs();
+    graph.build_producers();
+    graph.build_consumers();
+    graph.verify().unwrap();
+    graph
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,5 +309,19 @@ mod tests {
             [core::FeedbackCore::RsLatch(_)]
         ));
         assert!(primitive.rs_latch_core().is_some());
+    }
+
+    #[test]
+    fn d_latch_contains_input_gating_around_rs_latch_core() {
+        let primitive = SequentialPrimitive::d_latch();
+
+        assert_eq!(primitive.input_ports, vec!["d".to_owned(), "en".to_owned()]);
+        assert_eq!(
+            primitive.output_ports,
+            vec!["q".to_owned(), "nq".to_owned()]
+        );
+        assert!(primitive.inner_graph.has_cycle());
+        assert!(primitive.rs_latch_core().is_some());
+        primitive.inner_graph.verify().unwrap();
     }
 }

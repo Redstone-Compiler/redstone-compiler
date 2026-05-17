@@ -15,7 +15,7 @@ use crate::graph::world::WorldGraph;
 use crate::graph::{GraphNode, GraphNodeId, GraphNodeKind};
 use crate::logic::LogicType;
 use crate::sequential::layout::SequentialMacro;
-use crate::sequential::SequentialPrimitive;
+use crate::sequential::{SequentialPrimitive, SequentialType};
 use crate::transform::place_and_route::estimate::world_compact_cost;
 use crate::transform::place_and_route::place_bound::PropagateType;
 use crate::world::block::{Block, BlockKind, Direction};
@@ -553,7 +553,9 @@ impl LocalPlacer {
                 _ => unreachable!(),
             },
             GraphNodeKind::Sequential(ref sequential) => {
-                if sequential.rs_latch_core().is_some() {
+                if matches!(sequential.sequential_type, SequentialType::RsLatch)
+                    && sequential.rs_latch_core().is_some()
+                {
                     generate_rs_latch_gate_routes(&self.config, node, sequential, &world, state)
                 } else {
                     generate_sequential_macro_routes(&self.config, node, sequential, &world, state)
@@ -686,7 +688,9 @@ fn local_density(world: &World3D, position: Position) -> usize {
 }
 
 fn supports_sequential_primitive(sequential: &SequentialPrimitive) -> bool {
-    sequential.rs_latch_core().is_some() || !SequentialMacro::candidates(sequential).is_empty()
+    matches!(sequential.sequential_type, SequentialType::RsLatch)
+        && (sequential.rs_latch_core().is_some()
+            || !SequentialMacro::candidates(sequential).is_empty())
 }
 
 #[derive(Debug, Clone)]

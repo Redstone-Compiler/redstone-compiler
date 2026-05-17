@@ -52,8 +52,6 @@ pub fn recognize_rs_latch_core(graph: &Graph) -> Option<RsLatchCore> {
     if !q_or_inputs.contains(&nq_not) || !nq_or_inputs.contains(&q_not) {
         return None;
     }
-    ensure_input(graph, set_input, "s")?;
-    ensure_input(graph, reset_input, "r")?;
 
     let feedback_nodes = [q_or, q_not, nq_or, nq_not]
         .into_iter()
@@ -97,11 +95,6 @@ fn ensure_logic(graph: &Graph, node_id: GraphNodeId, logic_type: LogicType) -> O
         .then_some(())
 }
 
-fn ensure_input(graph: &Graph, node_id: GraphNodeId, input_name: &str) -> Option<()> {
-    let node = graph.find_node_by_id(node_id)?;
-    matches!(&node.kind, GraphNodeKind::Input(name) if name == input_name).then_some(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,5 +122,21 @@ mod tests {
         let cores = feedback_cores(&primitive.inner_graph);
 
         assert!(matches!(cores.as_slice(), [FeedbackCore::RsLatch(_)]));
+    }
+
+    #[test]
+    fn recognize_rs_latch_core_inside_d_latch_decomposition() {
+        let primitive = SequentialPrimitive::d_latch();
+        let core = recognize_rs_latch_core(&primitive.inner_graph).unwrap();
+
+        assert_eq!(core.set_input, 2);
+        assert_eq!(core.reset_input, 4);
+        assert_eq!(core.q_or, 5);
+        assert_eq!(core.q_not, 6);
+        assert_eq!(core.nq_or, 7);
+        assert_eq!(core.nq_not, 8);
+        assert_eq!(core.q_output, 9);
+        assert_eq!(core.nq_output, 10);
+        assert_eq!(core.feedback_scc, vec![5, 6, 7, 8]);
     }
 }
