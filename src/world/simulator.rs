@@ -144,6 +144,10 @@ impl Simulator {
         Ok(())
     }
 
+    pub fn world(&self) -> &World3D {
+        &self.world
+    }
+
     pub fn run(&mut self) -> eyre::Result<usize> {
         let mut local_cycle = 0;
 

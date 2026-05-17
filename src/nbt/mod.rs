@@ -80,6 +80,22 @@ impl From<&World3D> for NBTRoot {
 }
 
 impl NBTRoot {
+    pub fn from_gzip_bytes(bytes: &[u8]) -> eyre::Result<NBTRoot> {
+        let mut decoder = GzDecoder::new(bytes);
+        let mut decoded = vec![];
+        decoder.read_to_end(&mut decoded)?;
+
+        Ok(fastnbt::from_bytes(&decoded)?)
+    }
+
+    pub fn to_gzip_bytes(&self) -> eyre::Result<Vec<u8>> {
+        let new_bytes = fastnbt::to_bytes(self)?;
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
+        encoder.write_all(&new_bytes)?;
+
+        Ok(encoder.finish()?)
+    }
+
     pub fn load(path: impl Into<PathBuf>) -> eyre::Result<NBTRoot> {
         let file = File::open(path.into()).unwrap();
         let mut decoder = GzDecoder::new(file);
@@ -91,10 +107,11 @@ impl NBTRoot {
     }
 
     pub fn save(&self, path: impl Into<PathBuf>) {
-        let new_bytes = fastnbt::to_bytes(&self).unwrap();
         let outfile = File::create(path.into()).unwrap();
         let mut encoder = GzEncoder::new(outfile, Compression::best());
-        encoder.write_all(&new_bytes).unwrap();
+        encoder
+            .write_all(&fastnbt::to_bytes(&self).unwrap())
+            .unwrap();
     }
 
     pub fn to_world(&self) -> World {
