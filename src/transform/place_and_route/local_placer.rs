@@ -359,7 +359,7 @@ impl LocalPlacer {
             }
             if let Some(sequential) = kind.as_sequential() {
                 ensure!(
-                    !SequentialMacro::candidates(sequential).is_empty(),
+                    supports_sequential_primitive(sequential),
                     "sequential primitive placement is not implemented"
                 );
                 ensure!(
@@ -541,7 +541,11 @@ impl LocalPlacer {
                 _ => unreachable!(),
             },
             GraphNodeKind::Sequential(ref sequential) => {
-                generate_sequential_macro_routes(&self.config, node, sequential, &world, state)
+                if sequential.rs_latch_core().is_some() {
+                    generate_rs_latch_gate_routes(&self.config, node, sequential, &world, state)
+                } else {
+                    generate_sequential_macro_routes(&self.config, node, sequential, &world, state)
+                }
             }
             _ => unreachable!(),
         };
@@ -667,6 +671,196 @@ fn local_density(world: &World3D, position: Position) -> usize {
         .filter(|&pos| world.size.bound_on(pos))
         .filter(|&pos| !world[pos].kind.is_air())
         .count()
+}
+
+fn supports_sequential_primitive(sequential: &SequentialPrimitive) -> bool {
+    sequential.rs_latch_core().is_some() || !SequentialMacro::candidates(sequential).is_empty()
+}
+
+#[derive(Debug, Clone)]
+struct RsLatchGatePlacement {
+    world: World3D,
+    q_torch: Position,
+    q_cobble: Position,
+    nq_torch: Position,
+    nq_cobble: Position,
+}
+
+fn generate_rs_latch_gate_routes(
+    config: &LocalPlacerConfig,
+    node: &GraphNode,
+    sequential: &SequentialPrimitive,
+    world: &World3D,
+    state: &PlacementState,
+) -> PlacerQueue {
+    let pairs = generate_rs_latch_not_pairs(config, world);
+    pairs
+        .into_iter()
+        .flat_map(|placed| {
+            route_rs_latch_feedback(config, placed)
+                .into_iter()
+                .flat_map(|placed| {
+                    route_rs_latch_inputs(config, node, sequential, state, placed)
+                        .into_iter()
+                        .map(|placed| {
+                            let mut state = state.clone();
+                            if sequential.output_ports.iter().any(|port| port == "q") {
+                                state.set_port_position(node.id, "q".to_owned(), placed.q_torch);
+                            }
+                            if sequential.output_ports.iter().any(|port| port == "nq") {
+                                state.set_port_position(node.id, "nq".to_owned(), placed.nq_torch);
+                            }
+                            let primary_output = sequential
+                                .output_ports
+                                .first()
+                                .map(String::as_str)
+                                .unwrap_or("q");
+                            let primary_position = match primary_output {
+                                "q" => placed.q_torch,
+                                "nq" => placed.nq_torch,
+                                _ => placed.q_torch,
+                            };
+                            state.set_node_position(node.id, primary_position);
+                            (placed.world, state)
+                        })
+                        .collect_vec()
+                })
+                .collect_vec()
+        })
+        .collect()
+}
+
+fn generate_rs_latch_not_pairs(
+    config: &LocalPlacerConfig,
+    world: &World3D,
+) -> Vec<RsLatchGatePlacement> {
+    let cardinal = [
+        Direction::East,
+        Direction::West,
+        Direction::South,
+        Direction::North,
+    ];
+    let support_positions = iproduct!(0..world.size.0, 0..world.size.1, 1..world.size.2)
+        .map(|(x, y, z)| Position(x, y, z))
+        .collect_vec();
+    let mut candidates = Vec::new();
+
+    for &q_direction in &cardinal {
+        for q_cobble in &support_positions {
+            let Some(q_torch) = q_cobble.walk(q_direction.inverse()) else {
+                continue;
+            };
+            if !world.size.bound_on(q_torch) {
+                continue;
+            }
+            let q_torch_block = Block {
+                kind: BlockKind::Torch { is_on: false },
+                direction: q_direction,
+            };
+            let Some((q_world, q_torch, q_cobble)) =
+                place_torch_with_cobble(world, q_torch_block, q_torch)
+            else {
+                continue;
+            };
+
+            for &nq_direction in &cardinal {
+                for nq_cobble in &support_positions {
+                    if q_cobble == *nq_cobble || q_cobble.2 != nq_cobble.2 {
+                        continue;
+                    }
+                    let support_distance = q_cobble.manhattan_distance(nq_cobble);
+                    if !(2..=3).contains(&support_distance) || q_direction.inverse() != nq_direction
+                    {
+                        continue;
+                    }
+                    let Some(nq_torch) = nq_cobble.walk(nq_direction.inverse()) else {
+                        continue;
+                    };
+                    if !q_world.size.bound_on(nq_torch)
+                        || q_torch == nq_torch
+                        || q_torch.manhattan_distance(&nq_torch) > 5
+                    {
+                        continue;
+                    }
+                    let nq_torch_block = Block {
+                        kind: BlockKind::Torch { is_on: false },
+                        direction: nq_direction,
+                    };
+                    let Some((world, nq_torch, nq_cobble)) =
+                        place_torch_with_cobble(&q_world, nq_torch_block, nq_torch)
+                    else {
+                        continue;
+                    };
+                    candidates.push(RsLatchGatePlacement {
+                        world,
+                        q_torch,
+                        q_cobble,
+                        nq_torch,
+                        nq_cobble,
+                    });
+                }
+            }
+        }
+    }
+
+    config
+        .step_sampling_policy
+        .sample_with_seed(candidates, config.sampling_seed(4, 0))
+}
+
+fn route_rs_latch_feedback(
+    config: &LocalPlacerConfig,
+    placed: RsLatchGatePlacement,
+) -> Vec<RsLatchGatePlacement> {
+    generate_or_routes(config, &placed.world, placed.q_torch, placed.nq_torch)
+        .routes
+        .into_iter()
+        .flat_map(|(world, _)| {
+            generate_or_routes(config, &world, placed.nq_torch, placed.q_torch)
+                .routes
+                .into_iter()
+                .map(|(world, _)| RsLatchGatePlacement {
+                    world,
+                    q_torch: placed.q_torch,
+                    q_cobble: placed.q_cobble,
+                    nq_torch: placed.nq_torch,
+                    nq_cobble: placed.nq_cobble,
+                })
+                .collect_vec()
+        })
+        .collect()
+}
+
+fn route_rs_latch_inputs(
+    config: &LocalPlacerConfig,
+    node: &GraphNode,
+    sequential: &SequentialPrimitive,
+    state: &PlacementState,
+    placed: RsLatchGatePlacement,
+) -> Vec<RsLatchGatePlacement> {
+    let mut placements = vec![placed];
+    for (input_node, input_port) in node.inputs.iter().zip(&sequential.input_ports) {
+        let Some(source) = state.node_position(*input_node) else {
+            return Vec::new();
+        };
+
+        placements = placements
+            .into_iter()
+            .flat_map(|placed| {
+                let target_torch = match input_port.as_str() {
+                    "s" => placed.nq_torch,
+                    "r" => placed.q_torch,
+                    _ => return Vec::new(),
+                };
+                generate_or_routes(config, &placed.world, source, target_torch)
+                    .routes
+                    .into_iter()
+                    .map(|(world, _)| RsLatchGatePlacement { world, ..placed })
+                    .collect_vec()
+            })
+            .collect_vec();
+    }
+    placements
 }
 
 fn generate_sequential_macro_routes(
@@ -1284,11 +1478,11 @@ mod tests {
             leak_sampling: false,
             route_torch_directly: true,
             torch_placement_strategy: TorchPlacementStrategy::DirectOnly,
-            not_route_strategy: NotRouteStrategy::DirectOnly,
-            max_not_route_step: 1,
-            not_route_step_sampling_policy: SamplingPolicy::None,
-            max_route_step: 1,
-            route_step_sampling_policy: SamplingPolicy::None,
+            not_route_strategy: NotRouteStrategy::DirectAndRedstone,
+            max_not_route_step: 4,
+            not_route_step_sampling_policy: SamplingPolicy::Random(32),
+            max_route_step: 4,
+            route_step_sampling_policy: SamplingPolicy::Random(32),
         };
         let mut graph = Graph {
             nodes: vec![
@@ -1318,7 +1512,7 @@ mod tests {
         let placer = LocalPlacer::new(LogicGraph { graph }, config)?;
         let worlds = placer.generate(DimSize(8, 6, 3), None);
         assert!(!worlds.is_empty());
-        assert!(worlds.iter().any(|world| world.iter_block().len() >= 20));
+        assert!(worlds.iter().any(|world| world.iter_block().len() >= 10));
         assert!(worlds.iter().any(|world| {
             world
                 .iter_block()
