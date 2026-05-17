@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::sequential::synthesis::synthesize_rs_latch_macros;
 use crate::sequential::{SequentialPrimitive, SequentialType};
 use crate::world::block::{Block, BlockKind, Direction};
 use crate::world::position::{DimSize, Position};
@@ -18,16 +19,17 @@ pub struct SequentialMacro {
 impl SequentialMacro {
     pub fn candidates(primitive: &SequentialPrimitive) -> Vec<Self> {
         match primitive.sequential_type {
-            SequentialType::RsLatch if primitive.rs_latch_core().is_some() => {
-                vec![rs_latch_macro()]
-            }
-            SequentialType::RsLatch => Vec::new(),
+            SequentialType::RsLatch => primitive
+                .rs_latch_core()
+                .as_ref()
+                .map(synthesize_rs_latch_macros)
+                .unwrap_or_default(),
             SequentialType::DLatch | SequentialType::DFlipFlop => Vec::new(),
         }
     }
 }
 
-fn rs_latch_macro() -> SequentialMacro {
+pub(super) fn canonical_rs_latch_macro() -> SequentialMacro {
     let mut world = World3D::new(DimSize(8, 6, 3));
     let r_input = Position(1, 2, 1);
     let s_input = Position(5, 2, 1);
@@ -130,7 +132,7 @@ mod tests {
         let primitive = SequentialPrimitive::rs_latch();
         let candidates = SequentialMacro::candidates(&primitive);
 
-        assert_eq!(candidates.len(), 1);
+        assert!(candidates.len() > 1);
         let candidate = &candidates[0];
         assert_eq!(candidate.primitive_type, SequentialType::RsLatch);
         assert_eq!(candidate.primary_output_port, "q");
@@ -179,11 +181,13 @@ mod tests {
 
     fn rs_latch_macro_preview_world(candidate: &SequentialMacro) -> World3D {
         let mut world = candidate.world.clone();
-        world[Position(0, 2, 1)] = Block {
+        let r_driver = candidate.input_ports["r"].walk(Direction::West).unwrap();
+        let s_driver = candidate.input_ports["s"].walk(Direction::East).unwrap();
+        world[r_driver] = Block {
             kind: BlockKind::Switch { is_on: false },
             direction: Direction::East,
         };
-        world[Position(6, 2, 1)] = Block {
+        world[s_driver] = Block {
             kind: BlockKind::Switch { is_on: false },
             direction: Direction::West,
         };
@@ -196,8 +200,8 @@ mod tests {
         let primitive = SequentialPrimitive::rs_latch();
         let candidate = SequentialMacro::candidates(&primitive).remove(0);
         let mut candidate_world = rs_latch_macro_preview_world(&candidate);
-        let s = Position(6, 2, 1);
-        let r = Position(0, 2, 1);
+        let s = candidate.input_ports["s"].walk(Direction::East).unwrap();
+        let r = candidate.input_ports["r"].walk(Direction::West).unwrap();
         let q = candidate.output_ports["q"];
         let nq = candidate.output_ports["nq"];
         candidate_world[r].kind = BlockKind::Switch { is_on: true };

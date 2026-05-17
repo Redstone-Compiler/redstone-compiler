@@ -47,14 +47,17 @@ Port(rs_latch_node, "nq")
 
 The first implementation supports only one exposed sequential output in the top-level graph. This is intentional because graph edges do not yet encode the source output port. The RS latch macro exposes both `q` and `nq` internally, but only q-only top-level use is accepted by `LocalPlacer`.
 
-## Current RS Latch Macro
+## Current RS Latch Synthesis
 
-`src/sequential/layout.rs` defines the initial `SequentialMacro` interface and one simulator-validated RS latch macro candidate. RS latch macro candidates are now gated by successful recognition of the RS latch feedback core in the primitive `inner_graph`. Tests currently validate:
+`src/sequential/layout.rs` defines the `SequentialMacro` interface. `src/sequential/synthesis.rs` generates the current RS latch macro candidates from the recognized RS latch feedback core. The first synthesizer still starts from one canonical physical latch, but it returns multiple rotated/mirrored candidates and runs `Simulator` set/reset/hold verification before exposing them to the local placer.
+
+Tests currently validate:
 
 - expected input and output port names,
 - port positions are unique,
 - port positions are in bounds and non-air,
 - RS latch feedback SCC/core recognition,
+- RS latch macro synthesis returns multiple simulator-verified oriented candidates,
 - q-only sequential nodes are accepted by `LocalPlacer`,
 - multi-output sequential nodes are rejected until graph edges become port-aware,
 - unsupported sequential primitives such as `DLatch` are rejected,
@@ -65,8 +68,8 @@ The first implementation supports only one exposed sequential output in the top-
 ## Remaining Work
 
 - Make graph edges port-aware so `q` and `nq` can drive different consumers.
-- Replace the first RS latch hardcoded macro with generated candidates from a constrained feedback-core synthesizer.
-- Add more RS latch macro candidates with different port orientations and costs.
-- Extend macro placement to orientation and mirroring.
+- Replace the canonical RS latch seed with lower-level constrained search over torch/support pairs and feedback routes.
+- Add more RS latch topology seeds and cost ranking.
+- Reuse the RS latch feedback core when composing D latches and flip-flops.
 
 Run placement-related tests with `cargo test --release`.
