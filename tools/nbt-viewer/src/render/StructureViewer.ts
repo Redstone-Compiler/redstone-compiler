@@ -35,6 +35,8 @@ export class StructureViewer {
   private onSelect: SelectionHandler = () => undefined;
   private frame = 0;
   private dragPos?: vec2;
+  private lastFrameTime = 0;
+  private readonly movement = new Set<string>();
   private cPos = vec3.create();
   private cRot = vec2.fromValues(0.4, 0.6);
   private cDist = 10;
@@ -54,6 +56,8 @@ export class StructureViewer {
     canvas.addEventListener('pointerup', () => (this.dragPos = undefined));
     canvas.addEventListener('pointerleave', () => (this.dragPos = undefined));
     canvas.addEventListener('wheel', event => this.onWheel(event), { passive: false });
+    window.addEventListener('keydown', event => this.onKeyDown(event));
+    window.addEventListener('keyup', event => this.onKeyUp(event));
     window.addEventListener('resize', () => this.render());
 
     void this.initialize();
@@ -114,6 +118,26 @@ export class StructureViewer {
     this.render();
   }
 
+  private onKeyDown(event: KeyboardEvent): void {
+    if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) return;
+    if (!this.isMovementKey(event.code)) return;
+
+    event.preventDefault();
+    this.movement.add(event.code);
+    this.render();
+  }
+
+  private onKeyUp(event: KeyboardEvent): void {
+    if (!this.isMovementKey(event.code)) return;
+
+    event.preventDefault();
+    this.movement.delete(event.code);
+  }
+
+  private isMovementKey(code: string): boolean {
+    return ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space', 'ShiftLeft', 'ShiftRight'].includes(code);
+  }
+
   private selectBlock(x: number, y: number): void {
     if (!this.renderer || !this.model) return;
 
@@ -164,10 +188,11 @@ export class StructureViewer {
   private render(): void {
     if (this.frame) return;
 
-    this.frame = requestAnimationFrame(() => {
+    this.frame = requestAnimationFrame(time => {
       this.frame = 0;
       if (!this.renderer) return;
 
+      this.updateMovement(time);
       this.resize();
       this.clearFrame();
       const viewMatrix = this.getViewMatrix();
@@ -176,16 +201,41 @@ export class StructureViewer {
       if (this.selectedBlock) {
         this.renderer.drawOutline(viewMatrix, this.selectedBlock);
       }
+
+      if (this.movement.size > 0) {
+        this.render();
+      }
     });
   }
 
   dispose(): void {
     if (this.frame) cancelAnimationFrame(this.frame);
+    this.movement.clear();
   }
 
   private clearFrame(): void {
     this.gl.clearColor(0.063, 0.075, 0.086, 1);
     this.gl.clearDepth(1);
     this.gl.clear(this.gl.COLOR_BUFFER_BIT | this.gl.DEPTH_BUFFER_BIT);
+  }
+
+  private updateMovement(time: number): void {
+    const delta = this.lastFrameTime === 0 ? 0 : Math.min(64, time - this.lastFrameTime);
+    this.lastFrameTime = time;
+    if (this.movement.size === 0 || delta === 0) return;
+
+    const direction = vec3.fromValues(0, 0, 0);
+    if (this.movement.has('KeyW')) direction[2] += 1;
+    if (this.movement.has('KeyS')) direction[2] -= 1;
+    if (this.movement.has('KeyA')) direction[0] += 1;
+    if (this.movement.has('KeyD')) direction[0] -= 1;
+    if (this.movement.has('Space')) direction[1] -= 1;
+    if (this.movement.has('ShiftLeft') || this.movement.has('ShiftRight')) direction[1] += 1;
+    if (vec3.squaredLength(direction) === 0) return;
+
+    vec3.normalize(direction, direction);
+    vec3.scale(direction, direction, delta * Math.max(0.01, this.cDist * 0.0016));
+    vec3.rotateY(direction, direction, [0, 0, 0], -this.cRot[0]);
+    vec3.add(this.cPos, this.cPos, direction);
   }
 }
