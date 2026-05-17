@@ -161,7 +161,7 @@ fn nbt_block_name(block: &Block) -> (String, String, Option<NBTPaletteProperty>)
                         _ => unreachable!(),
                     },
                     facing,
-                    powered: is_on.then(|| "true".to_owned()),
+                    powered: Some(is_on.to_string()),
                     ..Default::default()
                 }),
             )
