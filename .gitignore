@@ -1,3 +1,6 @@
 /target
 /stubs
 .vscode/**
+tools/nbt-viewer/node_modules/
+tools/nbt-viewer/dist/
+tools/nbt-viewer/public/mcmeta/
