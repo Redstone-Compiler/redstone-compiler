@@ -51,7 +51,7 @@ The first implementation supports only one exposed sequential output in the top-
 
 `src/sequential/layout.rs` defines the initial `SequentialMacro` interface and one simulator-validated RS latch macro candidate. RS latch macro candidates are gated by successful recognition of the RS latch feedback core in the primitive `inner_graph`.
 
-`LocalPlacer` now prefers a gate-level RS latch path when the primitive exposes a recognized RS latch core. That path places the two NOT torches with the normal torch/support helper, then routes the cross-coupled feedback and external `s`/`r` inputs with existing OR-route helpers. The macro candidate remains as a fallback interface and as a simulator-validated reference layout; it is not the only way the RS latch NBT test is generated.
+`LocalPlacer` now attempts a gate-level RS latch path when the primitive exposes a recognized RS latch core. That path places the two NOT torches with the normal torch/support helper, then tries to route each `OR(input, feedback)` branch into the corresponding NOT support. If the searched gate-level path cannot produce a candidate, the simulator-validated macro candidate is used as a fallback so invalid NBT fixtures are not written.
 
 Tests currently validate:
 
@@ -64,14 +64,14 @@ Tests currently validate:
 - unsupported sequential primitives such as `DLatch` are rejected,
 - macro output ports are registered in placement state,
 - existing source positions can be routed into macro input ports,
-- the RS latch macro satisfies reset, hold, set, and reset sequences under `Simulator`.
-- RS latch local placement can generate an NBT fixture from searched gate-level placements and routes.
+- the RS latch macro satisfies reset, hold, set, and reset sequences under `Simulator`,
+- the RS latch NBT fixture is saved only from a candidate that passes reset, hold, set, and reset sequences under `Simulator`.
 
 ## Remaining Work
 
 - Make graph edges port-aware so `q` and `nq` can drive different consumers.
+- Make the searched gate-level RS latch path produce simulator-valid candidates without relying on the macro fallback.
 - Broaden direct local placer support beyond the first RS latch feedback-core shape.
-- Add stronger behavior validation for searched sequential layouts, not only for the reference macro.
 - Reuse the RS latch feedback core when composing D latches and flip-flops.
 
 Run placement-related tests with `cargo test --release`.
