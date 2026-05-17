@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::ops::Index;
 
 use eyre::ensure;
 use indicatif::{ParallelProgressIterator, ProgressStyle};
@@ -13,6 +14,8 @@ use crate::graph::logic::LogicGraph;
 use crate::graph::world::WorldGraph;
 use crate::graph::{GraphNode, GraphNodeId, GraphNodeKind};
 use crate::logic::LogicType;
+use crate::sequential::layout::SequentialMacro;
+use crate::sequential::SequentialPrimitive;
 use crate::transform::place_and_route::estimate::world_compact_cost;
 use crate::transform::place_and_route::place_bound::PropagateType;
 use crate::world::block::{Block, BlockKind, Direction};
@@ -139,7 +142,61 @@ impl LocalPlacerConfig {
 
 pub const K_MAX_LOCAL_PLACE_NODE_COUNT: usize = 40;
 
-type PlacerQueue = Vec<(World3D, HashMap<GraphNodeId, Position>)>;
+type PlacerQueue = Vec<(World3D, PlacementState)>;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum PlacementEndpoint {
+    Node(GraphNodeId),
+    Port(GraphNodeId, String),
+}
+
+#[derive(Debug, Clone, Default)]
+struct PlacementState {
+    positions: HashMap<PlacementEndpoint, Position>,
+}
+
+impl PlacementState {
+    fn node_position(&self, node_id: GraphNodeId) -> Option<Position> {
+        self.positions
+            .get(&PlacementEndpoint::Node(node_id))
+            .copied()
+    }
+
+    #[allow(dead_code)]
+    fn port_position(&self, node_id: GraphNodeId, port: &str) -> Option<Position> {
+        self.positions
+            .get(&PlacementEndpoint::Port(node_id, port.to_owned()))
+            .copied()
+    }
+
+    fn set_node_position(&mut self, node_id: GraphNodeId, position: Position) {
+        self.positions
+            .insert(PlacementEndpoint::Node(node_id), position);
+    }
+
+    fn set_port_position(&mut self, node_id: GraphNodeId, port: String, position: Position) {
+        self.positions
+            .insert(PlacementEndpoint::Port(node_id, port), position);
+    }
+}
+
+impl FromIterator<(GraphNodeId, Position)> for PlacementState {
+    fn from_iter<T: IntoIterator<Item = (GraphNodeId, Position)>>(iter: T) -> Self {
+        let mut state = PlacementState::default();
+        for (node_id, position) in iter {
+            state.set_node_position(node_id, position);
+        }
+        state
+    }
+}
+
+impl Index<&GraphNodeId> for PlacementState {
+    type Output = Position;
+
+    fn index(&self, index: &GraphNodeId) -> &Self::Output {
+        &self.positions[&PlacementEndpoint::Node(*index)]
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct LocalPlacerDebug {
@@ -294,15 +351,21 @@ impl LocalPlacer {
         for node_id in &self.graph.nodes {
             let kind = &self.graph.find_node_by_id(node_id.id).unwrap().kind;
             ensure!(
-                !kind.is_sequential(),
-                "sequential primitive placement is not implemented"
-            );
-            ensure!(
-                kind.is_input() || kind.is_output() || kind.is_logic(),
+                kind.is_input() || kind.is_output() || kind.is_logic() || kind.is_sequential(),
                 "cannot place"
             );
             if let Some(logic) = kind.as_logic() {
                 ensure!(logic.is_not() || logic.is_or(), "cannot place");
+            }
+            if let Some(sequential) = kind.as_sequential() {
+                ensure!(
+                    !SequentialMacro::candidates(sequential).is_empty(),
+                    "sequential primitive placement is not implemented"
+                );
+                ensure!(
+                    sequential.output_ports.len() == 1,
+                    "local placer currently supports only one exposed sequential output"
+                );
             }
         }
 
@@ -362,10 +425,10 @@ impl LocalPlacer {
 
         let input_positions = queue
             .first()
-            .map(|(_, positions)| {
+            .map(|(_, state)| {
                 node.inputs
                     .iter()
-                    .filter_map(|id| positions.get(id).copied().map(|pos| (*id, pos)))
+                    .filter_map(|id| state.node_position(*id).map(|pos| (*id, pos)))
                     .collect_vec()
             })
             .unwrap_or_default();
@@ -375,18 +438,9 @@ impl LocalPlacer {
             .into_par_iter()
             .panic_fuse()
             .progress_with_style(progress_style(step + 1, self.visit_orders.len()))
-            .map(|(world, pos)| {
-                let generation = self.generate_place_and_route(node, world, &pos);
-                let items = generation
-                    .items
-                    .into_iter()
-                    .map(|(world, place_position)| {
-                        let mut nodes_position = pos.clone();
-                        nodes_position.insert(node.id, place_position);
-                        (world, nodes_position)
-                    })
-                    .collect_vec();
-                (items, generation.route_debug)
+            .map(|(world, state)| {
+                let generation = self.generate_place_and_route(node, world, &state);
+                (generation.items, generation.route_debug)
             })
             .collect::<Vec<_>>();
 
@@ -424,16 +478,24 @@ impl LocalPlacer {
         &self,
         node: &GraphNode,
         world: World3D,
-        positions: &HashMap<GraphNodeId, Position>,
+        state: &PlacementState,
     ) -> PlacementGeneration {
         let mut route_debug = None;
         let items = match node.kind {
             GraphNodeKind::Input(_) => input_node_kind()
                 .into_iter()
                 .flat_map(|kind| generate_inputs(&self.config, &world, kind))
+                .map(|(world, position)| {
+                    let mut state = state.clone();
+                    state.set_node_position(node.id, position);
+                    (world, state)
+                })
                 .collect(),
             GraphNodeKind::Output(_) => {
-                vec![(world.clone(), positions[&node.inputs[0]])]
+                let position = state[&node.inputs[0]];
+                let mut state = state.clone();
+                state.set_node_position(node.id, position);
+                vec![(world.clone(), state)]
             }
             GraphNodeKind::Logic(logic) => match logic.logic_type {
                 LogicType::Not => not_node_kind()
@@ -442,9 +504,14 @@ impl LocalPlacer {
                         generate_place_and_routes(
                             &self.config,
                             &world,
-                            positions[&node.inputs[0]],
+                            state[&node.inputs[0]],
                             kind,
                         )
+                    })
+                    .map(|(world, position)| {
+                        let mut state = state.clone();
+                        state.set_node_position(node.id, position);
+                        (world, state)
                     })
                     .collect(),
                 LogicType::Or => {
@@ -452,8 +519,8 @@ impl LocalPlacer {
                     let result = generate_or_routes(
                         &self.config,
                         &world,
-                        positions[&node.inputs[0]],
-                        positions[&node.inputs[1]],
+                        state[&node.inputs[0]],
+                        state[&node.inputs[1]],
                     );
                     route_debug = Some(result.debug);
                     result
@@ -462,13 +529,20 @@ impl LocalPlacer {
                         .flat_map(|(world, positions)| {
                             positions
                                 .into_iter()
-                                .map(|pos| (world.clone(), pos))
+                                .map(|position| {
+                                    let mut state = state.clone();
+                                    state.set_node_position(node.id, position);
+                                    (world.clone(), state)
+                                })
                                 .collect_vec()
                         })
                         .collect()
                 }
                 _ => unreachable!(),
             },
+            GraphNodeKind::Sequential(ref sequential) => {
+                generate_sequential_macro_routes(&self.config, node, sequential, &world, state)
+            }
             _ => unreachable!(),
         };
 
@@ -537,24 +611,19 @@ impl LocalPlacer {
         best
     }
 
-    fn placement_cost(
-        &self,
-        step: usize,
-        world: &World3D,
-        positions: &HashMap<GraphNodeId, Position>,
-    ) -> usize {
+    fn placement_cost(&self, step: usize, world: &World3D, state: &PlacementState) -> usize {
         let current_node_id = self.visit_orders[step];
         let mut cost = world_compact_cost(world);
 
-        if let Some(&position) = positions.get(&current_node_id) {
+        if let Some(position) = state.node_position(current_node_id) {
             cost += local_density(world, position) * 3;
         }
 
         for (a, b) in &self.cost_join_pairs_by_step[step] {
-            let (Some(a), Some(b)) = (positions.get(a), positions.get(b)) else {
+            let (Some(a), Some(b)) = (state.node_position(*a), state.node_position(*b)) else {
                 continue;
             };
-            cost += a.manhattan_distance(b) * 8;
+            cost += a.manhattan_distance(&b) * 8;
         }
 
         cost
@@ -600,13 +669,134 @@ fn local_density(world: &World3D, position: Position) -> usize {
         .count()
 }
 
+fn generate_sequential_macro_routes(
+    config: &LocalPlacerConfig,
+    node: &GraphNode,
+    sequential: &SequentialPrimitive,
+    world: &World3D,
+    state: &PlacementState,
+) -> PlacerQueue {
+    SequentialMacro::candidates(sequential)
+        .into_iter()
+        .flat_map(|candidate| {
+            iproduct!(0..world.size.0, 0..world.size.1, 0..world.size.2)
+                .map(|(x, y, z)| Position(x, y, z))
+                .filter_map(move |anchor| place_sequential_macro(world, &candidate, anchor))
+                .flat_map(|placed| {
+                    route_sequential_inputs(config, node, sequential, state, &placed)
+                        .into_iter()
+                        .map(|world| {
+                            let mut state = state.clone();
+                            for output_port in &sequential.output_ports {
+                                if let Some(position) = placed.output_ports.get(output_port) {
+                                    state.set_port_position(
+                                        node.id,
+                                        output_port.to_owned(),
+                                        *position,
+                                    );
+                                }
+                            }
+                            let primary_output = sequential
+                                .output_ports
+                                .first()
+                                .unwrap_or(&placed.primary_output_port);
+                            let primary_position = placed.output_ports[primary_output];
+                            state.set_node_position(node.id, primary_position);
+                            (world, state)
+                        })
+                        .collect_vec()
+                })
+                .collect_vec()
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone)]
+struct PlacedSequentialMacro {
+    world: World3D,
+    input_ports: HashMap<String, Position>,
+    output_ports: HashMap<String, Position>,
+    primary_output_port: String,
+}
+
+fn place_sequential_macro(
+    world: &World3D,
+    candidate: &SequentialMacro,
+    anchor: Position,
+) -> Option<PlacedSequentialMacro> {
+    let mut new_world = world.clone();
+    for (relative, block) in candidate.world.iter_block() {
+        let position = translate_position(anchor, relative)?;
+        if !world.size.bound_on(position) || !world[position].kind.is_air() {
+            return None;
+        }
+        new_world[position] = block;
+    }
+    new_world.initialize_redstone_states();
+
+    Some(PlacedSequentialMacro {
+        world: new_world,
+        input_ports: translate_ports(anchor, &candidate.input_ports)?,
+        output_ports: translate_ports(anchor, &candidate.output_ports)?,
+        primary_output_port: candidate.primary_output_port.clone(),
+    })
+}
+
+fn route_sequential_inputs(
+    config: &LocalPlacerConfig,
+    node: &GraphNode,
+    sequential: &SequentialPrimitive,
+    state: &PlacementState,
+    placed: &PlacedSequentialMacro,
+) -> Vec<World3D> {
+    let mut worlds = vec![placed.world.clone()];
+    for (input_node, input_port) in node.inputs.iter().zip(&sequential.input_ports) {
+        let Some(source) = state.node_position(*input_node) else {
+            return Vec::new();
+        };
+        let Some(&target) = placed.input_ports.get(input_port) else {
+            return Vec::new();
+        };
+
+        worlds = worlds
+            .into_iter()
+            .flat_map(|world| {
+                generate_or_routes(config, &world, source, target)
+                    .routes
+                    .into_iter()
+                    .map(|(world, _)| world)
+                    .collect_vec()
+            })
+            .collect_vec();
+    }
+    worlds
+}
+
+fn translate_ports(
+    anchor: Position,
+    ports: &HashMap<String, Position>,
+) -> Option<HashMap<String, Position>> {
+    ports
+        .iter()
+        .map(|(port, position)| Some((port.clone(), translate_position(anchor, *position)?)))
+        .collect()
+}
+
+fn translate_position(anchor: Position, relative: Position) -> Option<Position> {
+    Some(Position(
+        anchor.0.checked_add(relative.0)?,
+        anchor.1.checked_add(relative.1)?,
+        anchor.2.checked_add(relative.2)?,
+    ))
+}
+
 struct StepResult {
     queue: PlacerQueue,
     debug: StepDebug,
 }
 
 struct PlacementGeneration {
-    items: Vec<(World3D, Position)>,
+    items: PlacerQueue,
     route_debug: Option<RouteDebug>,
 }
 

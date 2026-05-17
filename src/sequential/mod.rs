@@ -1,3 +1,8 @@
+use crate::graph::{Graph, GraphNode, GraphNodeKind};
+use crate::logic::{Logic, LogicType};
+
+pub mod layout;
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum SequentialType {
     RsLatch,
@@ -15,11 +20,33 @@ impl SequentialType {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone)]
 pub struct SequentialPrimitive {
     pub sequential_type: SequentialType,
     pub input_ports: Vec<String>,
     pub output_ports: Vec<String>,
+    pub inner_graph: Box<Graph>,
+}
+
+impl PartialEq for SequentialPrimitive {
+    fn eq(&self, other: &Self) -> bool {
+        self.sequential_type == other.sequential_type
+            && self.input_ports == other.input_ports
+            && self.output_ports == other.output_ports
+    }
+}
+
+impl Eq for SequentialPrimitive {}
+
+impl Default for SequentialPrimitive {
+    fn default() -> Self {
+        Self {
+            sequential_type: SequentialType::RsLatch,
+            input_ports: Vec::new(),
+            output_ports: Vec::new(),
+            inner_graph: Box::default(),
+        }
+    }
 }
 
 impl SequentialPrimitive {
@@ -32,10 +59,134 @@ impl SequentialPrimitive {
             sequential_type,
             input_ports,
             output_ports,
+            inner_graph: Box::new(default_inner_graph(sequential_type)),
         }
+    }
+
+    pub fn rs_latch() -> Self {
+        Self::new(
+            SequentialType::RsLatch,
+            vec!["s".to_owned(), "r".to_owned()],
+            vec!["q".to_owned(), "nq".to_owned()],
+        )
     }
 
     pub fn name(&self) -> String {
         self.sequential_type.name()
+    }
+}
+
+fn default_inner_graph(sequential_type: SequentialType) -> Graph {
+    match sequential_type {
+        SequentialType::RsLatch => rs_latch_inner_graph(),
+        SequentialType::DLatch | SequentialType::DFlipFlop => Graph::default(),
+    }
+}
+
+fn rs_latch_inner_graph() -> Graph {
+    // q = ~(s | nq), nq = ~(r | q)
+    let mut graph = Graph {
+        nodes: vec![
+            GraphNode {
+                id: 0,
+                kind: GraphNodeKind::Input("s".to_owned()),
+                ..Default::default()
+            },
+            GraphNode {
+                id: 1,
+                kind: GraphNodeKind::Input("r".to_owned()),
+                ..Default::default()
+            },
+            GraphNode {
+                id: 2,
+                kind: GraphNodeKind::Logic(Logic {
+                    logic_type: LogicType::Or,
+                }),
+                inputs: vec![0, 5],
+                ..Default::default()
+            },
+            GraphNode {
+                id: 3,
+                kind: GraphNodeKind::Logic(Logic {
+                    logic_type: LogicType::Not,
+                }),
+                inputs: vec![2],
+                ..Default::default()
+            },
+            GraphNode {
+                id: 4,
+                kind: GraphNodeKind::Logic(Logic {
+                    logic_type: LogicType::Or,
+                }),
+                inputs: vec![1, 3],
+                ..Default::default()
+            },
+            GraphNode {
+                id: 5,
+                kind: GraphNodeKind::Logic(Logic {
+                    logic_type: LogicType::Not,
+                }),
+                inputs: vec![4],
+                ..Default::default()
+            },
+            GraphNode {
+                id: 6,
+                kind: GraphNodeKind::Output("q".to_owned()),
+                inputs: vec![3],
+                ..Default::default()
+            },
+            GraphNode {
+                id: 7,
+                kind: GraphNodeKind::Output("nq".to_owned()),
+                inputs: vec![5],
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    graph.build_outputs();
+    graph.build_producers();
+    graph.build_consumers();
+    graph.verify().unwrap();
+    graph
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rs_latch_contains_cyclic_gate_level_inner_graph() {
+        let primitive = SequentialPrimitive::rs_latch();
+
+        assert_eq!(primitive.input_ports, vec!["s".to_owned(), "r".to_owned()]);
+        assert_eq!(
+            primitive.output_ports,
+            vec!["q".to_owned(), "nq".to_owned()]
+        );
+        assert!(primitive.inner_graph.has_cycle());
+        assert!(primitive
+            .inner_graph
+            .nodes
+            .iter()
+            .any(|node| matches!(&node.kind, GraphNodeKind::Output(name) if name == "q")));
+        assert!(primitive
+            .inner_graph
+            .nodes
+            .iter()
+            .any(|node| matches!(&node.kind, GraphNodeKind::Output(name) if name == "nq")));
+        primitive.inner_graph.verify().unwrap();
+    }
+
+    #[test]
+    fn sequential_equality_ignores_inner_graph_identity() {
+        let left = SequentialPrimitive::rs_latch();
+        let right = SequentialPrimitive::new(
+            SequentialType::RsLatch,
+            vec!["s".to_owned(), "r".to_owned()],
+            vec!["q".to_owned(), "nq".to_owned()],
+        );
+
+        assert_eq!(left, right);
     }
 }
