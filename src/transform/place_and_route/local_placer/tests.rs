@@ -1,4 +1,6 @@
 use super::*;
+use crate::graph::logic::LogicGraph;
+use crate::graph::GraphNodeKind;
 use crate::world::block::{Block, BlockKind, Direction};
 use crate::world::position::{DimSize, Position};
 use crate::world::World3D;
@@ -23,13 +25,17 @@ fn torch(direction: Direction) -> Block {
 
 fn config(max_route_step: usize) -> LocalPlacerConfig {
     LocalPlacerConfig {
+        random_seed: 42,
         greedy_input_generation: true,
         input_placement_strategy: InputPlacementStrategy::Boundary,
         step_sampling_policy: SamplingPolicy::None,
+        placement_sampling_policy: PlacementSamplingPolicy::StepPolicy,
         leak_sampling: false,
         route_torch_directly: true,
         torch_placement_strategy: TorchPlacementStrategy::DirectOnly,
         not_route_strategy: NotRouteStrategy::DirectOnly,
+        max_not_route_step: max_route_step,
+        not_route_step_sampling_policy: SamplingPolicy::None,
         max_route_step,
         route_step_sampling_policy: SamplingPolicy::None,
     }
@@ -57,6 +63,92 @@ fn generate_inputs_can_search_anywhere() {
     let generated = generate_inputs(&config, &world, BlockKind::Switch { is_on: false });
 
     assert_eq!(generated.len(), 18);
+}
+
+#[test]
+fn placement_cost_penalizes_spread_future_join_inputs() -> eyre::Result<()> {
+    let graph = LogicGraph::from_stmt("a|b", "c")?.prepare_place()?;
+    let placer = LocalPlacer::new(graph.clone(), config(1))?;
+    let input_a = graph
+        .nodes
+        .iter()
+        .find(|node| matches!(&node.kind, GraphNodeKind::Input(name) if name == "a"))
+        .unwrap()
+        .id;
+    let input_b = graph
+        .nodes
+        .iter()
+        .find(|node| matches!(&node.kind, GraphNodeKind::Input(name) if name == "b"))
+        .unwrap()
+        .id;
+    let step = placer
+        .visit_orders
+        .iter()
+        .position(|id| *id == input_a)
+        .unwrap()
+        .max(
+            placer
+                .visit_orders
+                .iter()
+                .position(|id| *id == input_b)
+                .unwrap(),
+        );
+    let world = empty_world();
+
+    let near = [(input_a, Position(1, 1, 1)), (input_b, Position(2, 1, 1))]
+        .into_iter()
+        .collect();
+    let far = [(input_a, Position(1, 1, 1)), (input_b, Position(5, 5, 1))]
+        .into_iter()
+        .collect();
+
+    assert!(placer.placement_cost(step, &world, &far) > placer.placement_cost(step, &world, &near));
+
+    Ok(())
+}
+
+#[test]
+fn cost_sampling_keeps_lower_cost_candidates() -> eyre::Result<()> {
+    let graph = LogicGraph::from_stmt("a|b", "c")?.prepare_place()?;
+    let placer = LocalPlacer::new(graph.clone(), config(1))?;
+    let input_a = graph
+        .nodes
+        .iter()
+        .find(|node| matches!(&node.kind, GraphNodeKind::Input(name) if name == "a"))
+        .unwrap()
+        .id;
+    let input_b = graph
+        .nodes
+        .iter()
+        .find(|node| matches!(&node.kind, GraphNodeKind::Input(name) if name == "b"))
+        .unwrap()
+        .id;
+    let step = placer
+        .visit_orders
+        .iter()
+        .position(|id| *id == input_a)
+        .unwrap()
+        .max(
+            placer
+                .visit_orders
+                .iter()
+                .position(|id| *id == input_b)
+                .unwrap(),
+        );
+    let world = empty_world();
+    let near = [(input_a, Position(1, 1, 1)), (input_b, Position(2, 1, 1))]
+        .into_iter()
+        .collect();
+    let far = [(input_a, Position(1, 1, 1)), (input_b, Position(5, 5, 1))]
+        .into_iter()
+        .collect();
+
+    let sampled = placer.sample_by_cost(step, vec![(world.clone(), far), (world, near)], 1, 0);
+
+    assert_eq!(sampled.len(), 1);
+    assert_eq!(sampled[0].1[&input_b], Position(2, 1, 1));
+
+    Ok(())
 }
 
 #[test]
@@ -112,15 +204,41 @@ fn generate_routes_to_cobble_can_use_redstone_route() {
 }
 
 #[test]
+fn generate_routes_to_cobble_skips_redstone_route_for_non_diode_source() {
+    let mut world = empty_world();
+    let source = Position(1, 1, 1);
+    let torch_pos = Position(3, 1, 1);
+    let cobble_pos = Position(3, 1, 0);
+    let mut config = config(1);
+    config.not_route_strategy = NotRouteStrategy::DirectAndRedstone;
+    place_node(&mut world, PlacedNode::new_cobble(Position(1, 1, 0)));
+    place_node(&mut world, PlacedNode::new_redstone(source));
+    place_node(&mut world, PlacedNode::new_cobble(cobble_pos));
+    place_node(
+        &mut world,
+        PlacedNode::new(torch_pos, torch(Direction::Bottom)),
+    );
+
+    let routes = generate_routes_to_cobble(&config, &world, source, torch_pos, cobble_pos);
+
+    assert!(routes.is_empty());
+}
+
+#[test]
 fn exhaustive_config_disables_search_reduction_knobs() {
     let config = LocalPlacerConfig::exhaustive(12);
 
+    assert_eq!(config.random_seed, 42);
     assert!(!config.greedy_input_generation);
     assert_eq!(
         config.input_placement_strategy,
         InputPlacementStrategy::Anywhere
     );
     assert_eq!(config.step_sampling_policy, SamplingPolicy::None);
+    assert_eq!(
+        config.placement_sampling_policy,
+        PlacementSamplingPolicy::StepPolicy
+    );
     assert!(!config.route_torch_directly);
     assert_eq!(
         config.torch_placement_strategy,
@@ -130,8 +248,22 @@ fn exhaustive_config_disables_search_reduction_knobs() {
         config.not_route_strategy,
         NotRouteStrategy::DirectAndRedstone
     );
+    assert_eq!(config.max_not_route_step, 12);
+    assert_eq!(config.not_route_step_sampling_policy, SamplingPolicy::None);
     assert_eq!(config.max_route_step, 12);
     assert_eq!(config.route_step_sampling_policy, SamplingPolicy::None);
+}
+
+#[test]
+fn random_sampling_uses_explicit_seed() {
+    let src = (0..32).collect::<Vec<_>>();
+
+    let first = SamplingPolicy::Random(8).sample_with_seed(src.clone(), 7);
+    let second = SamplingPolicy::Random(8).sample_with_seed(src.clone(), 7);
+    let different_seed = SamplingPolicy::Random(8).sample_with_seed(src, 8);
+
+    assert_eq!(first, second);
+    assert_ne!(first, different_seed);
 }
 
 #[test]

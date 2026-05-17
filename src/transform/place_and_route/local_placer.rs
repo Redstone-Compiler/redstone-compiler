@@ -22,22 +22,47 @@ pub struct LocalPlacer {
     graph: LogicGraph,
     config: LocalPlacerConfig,
     visit_orders: Vec<GraphNodeId>,
+    cost_join_pairs_by_step: Vec<Vec<(GraphNodeId, GraphNodeId)>>,
 }
 
-#[derive(Default)]
+#[derive(Copy, Clone)]
 pub struct LocalPlacerConfig {
+    pub random_seed: u64,
     pub greedy_input_generation: bool,
     pub input_placement_strategy: InputPlacementStrategy,
     pub step_sampling_policy: SamplingPolicy,
+    pub placement_sampling_policy: PlacementSamplingPolicy,
     // dealloc 시간을 줄이기 위해 generation들을 leak 시킨다
     pub leak_sampling: bool,
     // torch place시 input과 direct로 연결되도록 강제한다.
     pub route_torch_directly: bool,
     pub torch_placement_strategy: TorchPlacementStrategy,
     pub not_route_strategy: NotRouteStrategy,
+    pub max_not_route_step: usize,
+    pub not_route_step_sampling_policy: SamplingPolicy,
     // 최대 routing 거리를 지정한다.
     pub max_route_step: usize,
     pub route_step_sampling_policy: SamplingPolicy,
+}
+
+impl Default for LocalPlacerConfig {
+    fn default() -> Self {
+        Self {
+            random_seed: 42,
+            greedy_input_generation: false,
+            input_placement_strategy: InputPlacementStrategy::default(),
+            step_sampling_policy: SamplingPolicy::default(),
+            placement_sampling_policy: PlacementSamplingPolicy::default(),
+            leak_sampling: false,
+            route_torch_directly: false,
+            torch_placement_strategy: TorchPlacementStrategy::default(),
+            not_route_strategy: NotRouteStrategy::default(),
+            max_not_route_step: 0,
+            not_route_step_sampling_policy: SamplingPolicy::default(),
+            max_route_step: 0,
+            route_step_sampling_policy: SamplingPolicy::default(),
+        }
+    }
 }
 
 #[derive(Default, Debug, Copy, Clone, PartialEq, Eq)]
@@ -62,19 +87,52 @@ pub enum NotRouteStrategy {
     DirectAndRedstone,
 }
 
+#[derive(Default, Debug, Copy, Clone, PartialEq, Eq)]
+pub enum PlacementSamplingPolicy {
+    #[default]
+    StepPolicy,
+    Cost {
+        count: usize,
+        random_count: usize,
+        start_step: usize,
+    },
+}
+
 impl LocalPlacerConfig {
     pub fn exhaustive(max_route_step: usize) -> Self {
         Self {
+            random_seed: 42,
             greedy_input_generation: false,
             input_placement_strategy: InputPlacementStrategy::Anywhere,
             step_sampling_policy: SamplingPolicy::None,
+            placement_sampling_policy: PlacementSamplingPolicy::StepPolicy,
             leak_sampling: false,
             route_torch_directly: false,
             torch_placement_strategy: TorchPlacementStrategy::AnywhereNonAdjacent,
             not_route_strategy: NotRouteStrategy::DirectAndRedstone,
+            max_not_route_step: max_route_step,
+            not_route_step_sampling_policy: SamplingPolicy::None,
             max_route_step,
             route_step_sampling_policy: SamplingPolicy::None,
         }
+    }
+
+    pub fn cost_sampling(
+        count: usize,
+        random_count: usize,
+        start_step: usize,
+    ) -> PlacementSamplingPolicy {
+        PlacementSamplingPolicy::Cost {
+            count,
+            random_count,
+            start_step,
+        }
+    }
+
+    fn sampling_seed(self, scope: u64, step: usize) -> u64 {
+        self.random_seed
+            ^ scope.wrapping_mul(0x9e37_79b9_7f4a_7c15)
+            ^ (step as u64).wrapping_mul(0xbf58_476d_1ce4_e5b9)
     }
 }
 
@@ -214,10 +272,12 @@ pub struct RouteDepthDebug {
 impl LocalPlacer {
     pub fn new(graph: LogicGraph, config: LocalPlacerConfig) -> eyre::Result<Self> {
         let visit_orders = graph.topological_order();
+        let cost_join_pairs_by_step = build_cost_join_pairs_by_step(&graph, &visit_orders);
         let result = Self {
             graph,
             config,
             visit_orders,
+            cost_join_pairs_by_step,
         };
         result.verify()?;
         Ok(result)
@@ -275,7 +335,7 @@ impl LocalPlacer {
             let result = self.do_step(step, queue);
             let next_len = result.queue.len();
 
-            queue = self.sample(result.queue);
+            queue = self.sample(step, result.queue);
             let sampled_len = queue.len();
             if let Some(debug) = debug.as_deref_mut() {
                 let mut step_debug = result.debug;
@@ -410,15 +470,129 @@ impl LocalPlacer {
         PlacementGeneration { items, route_debug }
     }
 
-    fn sample(&self, queue: PlacerQueue) -> PlacerQueue {
-        if self.config.leak_sampling && queue.len() > 10_000 {
-            // TODO: deallocate on other thread
-            let leak = Box::leak(Box::new(queue));
-            self.config.step_sampling_policy.sample_with_taking(leak)
-        } else {
-            self.config.step_sampling_policy.sample(queue)
+    fn sample(&self, step: usize, queue: PlacerQueue) -> PlacerQueue {
+        match self.config.placement_sampling_policy {
+            PlacementSamplingPolicy::StepPolicy => {
+                if self.config.leak_sampling && queue.len() > 10_000 {
+                    // TODO: deallocate on other thread
+                    let leak = Box::leak(Box::new(queue));
+                    self.config
+                        .step_sampling_policy
+                        .sample_with_taking_seed(leak, self.config.sampling_seed(1, step))
+                } else {
+                    self.config
+                        .step_sampling_policy
+                        .sample_with_seed(queue, self.config.sampling_seed(1, step))
+                }
+            }
+            PlacementSamplingPolicy::Cost {
+                count,
+                random_count,
+                start_step,
+            } => {
+                if step < start_step {
+                    self.config
+                        .step_sampling_policy
+                        .sample_with_seed(queue, self.config.sampling_seed(1, step))
+                } else {
+                    self.sample_by_cost(step, queue, count, random_count)
+                }
+            }
         }
     }
+
+    fn sample_by_cost(
+        &self,
+        step: usize,
+        queue: PlacerQueue,
+        count: usize,
+        random_count: usize,
+    ) -> PlacerQueue {
+        if queue.len() <= count + random_count {
+            return queue;
+        }
+
+        let mut scored = queue
+            .into_iter()
+            .map(|item| (self.placement_cost(step, &item.0, &item.1), item))
+            .collect_vec();
+
+        let best_count = count.min(scored.len());
+        if best_count < scored.len() {
+            scored.select_nth_unstable_by_key(best_count, |(cost, _)| *cost);
+        }
+
+        let rest = scored.split_off(best_count);
+        let mut best = scored.into_iter().map(|(_, item)| item).collect_vec();
+        let rest = rest.into_iter().map(|(_, item)| item).collect_vec();
+        best.extend(
+            SamplingPolicy::Random(random_count)
+                .sample_with_seed(rest, self.config.sampling_seed(2, step)),
+        );
+        best
+    }
+
+    fn placement_cost(
+        &self,
+        step: usize,
+        world: &World3D,
+        positions: &HashMap<GraphNodeId, Position>,
+    ) -> usize {
+        let current_node_id = self.visit_orders[step];
+        let mut cost = world.iter_block().len();
+
+        if let Some(&position) = positions.get(&current_node_id) {
+            cost += local_density(world, position) * 3;
+        }
+
+        for (a, b) in &self.cost_join_pairs_by_step[step] {
+            let (Some(a), Some(b)) = (positions.get(a), positions.get(b)) else {
+                continue;
+            };
+            cost += a.manhattan_distance(b) * 8;
+        }
+
+        cost
+    }
+}
+
+fn build_cost_join_pairs_by_step(
+    graph: &LogicGraph,
+    visit_orders: &[GraphNodeId],
+) -> Vec<Vec<(GraphNodeId, GraphNodeId)>> {
+    let mut order_index = HashMap::new();
+    for (index, node_id) in visit_orders.iter().copied().enumerate() {
+        order_index.insert(node_id, index);
+    }
+
+    visit_orders
+        .iter()
+        .enumerate()
+        .map(|(step, _)| {
+            graph
+                .nodes
+                .iter()
+                .filter(|node| order_index[&node.id] > step)
+                .flat_map(|node| {
+                    node.inputs
+                        .iter()
+                        .copied()
+                        .filter(|input| order_index.get(input).is_some_and(|index| *index <= step))
+                        .tuple_combinations()
+                        .collect_vec()
+                })
+                .collect_vec()
+        })
+        .collect_vec()
+}
+
+fn local_density(world: &World3D, position: Position) -> usize {
+    position
+        .forwards()
+        .into_iter()
+        .filter(|&pos| world.size.bound_on(pos))
+        .filter(|&pos| !world[pos].kind.is_air())
+        .count()
 }
 
 struct StepResult {
@@ -617,9 +791,15 @@ fn generate_routes_to_cobble(
     if matches!(
         config.not_route_strategy,
         NotRouteStrategy::RedstoneOnly | NotRouteStrategy::DirectAndRedstone
-    ) {
+    ) && source_node.is_diode()
+    {
+        let route_config = LocalPlacerConfig {
+            max_route_step: config.max_not_route_step,
+            route_step_sampling_policy: config.not_route_step_sampling_policy,
+            ..*config
+        };
         route_candidates.extend(
-            generate_or_routes(config, world, source, torch_pos)
+            generate_or_routes(&route_config, world, source, torch_pos)
                 .routes
                 .into_iter()
                 .map(|(world, positions)| {
@@ -696,7 +876,9 @@ fn generate_or_routes(
         }
 
         depth_debug.next_frontier_before_sampling = next_queue.len();
-        queue = config.route_step_sampling_policy.sample(next_queue);
+        queue = config
+            .route_step_sampling_policy
+            .sample_with_seed(next_queue, config.sampling_seed(3, step));
         depth_debug.next_frontier_after_sampling = queue.len();
         debug.depths.push(depth_debug);
         step += 1;
@@ -851,7 +1033,7 @@ mod tests {
     use crate::nbt::{NBTRoot, ToNBT};
     use crate::transform::place_and_route::local_placer::{
         InputPlacementStrategy, LocalPlacer, LocalPlacerConfig, LocalPlacerDebug, NotRouteStrategy,
-        SamplingPolicy, TorchPlacementStrategy,
+        PlacementSamplingPolicy, SamplingPolicy, TorchPlacementStrategy,
     };
     use crate::transform::place_and_route::utils::{
         equivalent_logic_with_world3d, equivalent_logic_with_world3ds, world3d_to_logic,
@@ -863,13 +1045,17 @@ mod tests {
     fn test_generate_component_and_shortest() -> eyre::Result<()> {
         let logic_graph = predefined_logics::and_graph()?;
         let config = LocalPlacerConfig {
+            random_seed: 42,
             greedy_input_generation: true,
             input_placement_strategy: InputPlacementStrategy::Boundary,
             step_sampling_policy: SamplingPolicy::None,
+            placement_sampling_policy: PlacementSamplingPolicy::StepPolicy,
             leak_sampling: false,
             route_torch_directly: true,
             torch_placement_strategy: TorchPlacementStrategy::DirectOnly,
             not_route_strategy: NotRouteStrategy::DirectOnly,
+            max_not_route_step: 1,
+            not_route_step_sampling_policy: SamplingPolicy::None,
             max_route_step: 1,
             route_step_sampling_policy: SamplingPolicy::Random(100),
         };
@@ -892,13 +1078,17 @@ mod tests {
         tracing_subscriber::fmt::init();
 
         let config = LocalPlacerConfig {
+            random_seed: 42,
             greedy_input_generation: false,
             input_placement_strategy: InputPlacementStrategy::Boundary,
             step_sampling_policy: SamplingPolicy::Random(100),
+            placement_sampling_policy: PlacementSamplingPolicy::StepPolicy,
             leak_sampling: false,
             route_torch_directly: true,
             torch_placement_strategy: TorchPlacementStrategy::DirectOnly,
             not_route_strategy: NotRouteStrategy::DirectOnly,
+            max_not_route_step: 5,
+            not_route_step_sampling_policy: SamplingPolicy::Random(100),
             max_route_step: 5,
             route_step_sampling_policy: SamplingPolicy::Random(100),
         };
@@ -919,13 +1109,17 @@ mod tests {
     fn test_generate_component_xor_complex() -> eyre::Result<()> {
         tracing_subscriber::fmt::init();
         let config = LocalPlacerConfig {
+            random_seed: 42,
             greedy_input_generation: false,
             input_placement_strategy: InputPlacementStrategy::Boundary,
             step_sampling_policy: SamplingPolicy::Random(1000),
+            placement_sampling_policy: PlacementSamplingPolicy::StepPolicy,
             leak_sampling: true,
             route_torch_directly: true,
             torch_placement_strategy: TorchPlacementStrategy::DirectOnly,
             not_route_strategy: NotRouteStrategy::DirectOnly,
+            max_not_route_step: 3,
+            not_route_step_sampling_policy: SamplingPolicy::Random(1000),
             max_route_step: 3,
             route_step_sampling_policy: SamplingPolicy::Random(1000),
         };
@@ -952,13 +1146,17 @@ mod tests {
         //     .unwrap();
 
         let config = LocalPlacerConfig {
+            random_seed: 42,
             greedy_input_generation: true,
             input_placement_strategy: InputPlacementStrategy::Boundary,
             step_sampling_policy: SamplingPolicy::Random(10000),
+            placement_sampling_policy: PlacementSamplingPolicy::StepPolicy,
             leak_sampling: true,
             route_torch_directly: true,
             torch_placement_strategy: TorchPlacementStrategy::DirectOnly,
             not_route_strategy: NotRouteStrategy::DirectOnly,
+            max_not_route_step: 1,
+            not_route_step_sampling_policy: SamplingPolicy::Random(1000),
             max_route_step: 1,
             route_step_sampling_policy: SamplingPolicy::Random(1000),
         };
@@ -990,13 +1188,17 @@ mod tests {
         tracing_subscriber::fmt::init();
 
         let config = LocalPlacerConfig {
+            random_seed: 42,
             greedy_input_generation: true,
             input_placement_strategy: InputPlacementStrategy::Boundary,
             step_sampling_policy: SamplingPolicy::Random(10000),
+            placement_sampling_policy: PlacementSamplingPolicy::StepPolicy,
             leak_sampling: false,
             route_torch_directly: true,
             torch_placement_strategy: TorchPlacementStrategy::DirectOnly,
             not_route_strategy: NotRouteStrategy::DirectOnly,
+            max_not_route_step: 3,
+            not_route_step_sampling_policy: SamplingPolicy::Random(100),
             max_route_step: 3,
             route_step_sampling_policy: SamplingPolicy::Random(100),
         };
@@ -1021,13 +1223,17 @@ mod tests {
         tracing_subscriber::fmt::init();
 
         let config = LocalPlacerConfig {
+            random_seed: 42,
             greedy_input_generation: true,
             input_placement_strategy: InputPlacementStrategy::Boundary,
             step_sampling_policy: SamplingPolicy::Random(10000),
+            placement_sampling_policy: PlacementSamplingPolicy::StepPolicy,
             leak_sampling: false,
             route_torch_directly: true,
             torch_placement_strategy: TorchPlacementStrategy::DirectOnly,
             not_route_strategy: NotRouteStrategy::DirectOnly,
+            max_not_route_step: 8,
+            not_route_step_sampling_policy: SamplingPolicy::Random(100),
             max_route_step: 8,
             route_step_sampling_policy: SamplingPolicy::Random(100),
         };
@@ -1052,13 +1258,17 @@ mod tests {
         tracing_subscriber::fmt::init();
 
         let config = LocalPlacerConfig {
+            random_seed: 42,
             greedy_input_generation: true,
             input_placement_strategy: InputPlacementStrategy::Boundary,
             step_sampling_policy: SamplingPolicy::Random(10000),
+            placement_sampling_policy: PlacementSamplingPolicy::StepPolicy,
             leak_sampling: false,
             route_torch_directly: true,
             torch_placement_strategy: TorchPlacementStrategy::DirectOnly,
             not_route_strategy: NotRouteStrategy::DirectOnly,
+            max_not_route_step: 8,
+            not_route_step_sampling_policy: SamplingPolicy::Random(100),
             max_route_step: 8,
             route_step_sampling_policy: SamplingPolicy::Random(100),
         };
@@ -1080,6 +1290,100 @@ mod tests {
             );
         }
         println!("worlds generated: {}", worlds.len());
+
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "debug-only: compare full adder local placer search knobs"]
+    fn debug_full_adder_with_not_redstone_routes() -> eyre::Result<()> {
+        tracing_subscriber::fmt::init();
+
+        let config = LocalPlacerConfig {
+            random_seed: 42,
+            greedy_input_generation: true,
+            input_placement_strategy: InputPlacementStrategy::Boundary,
+            step_sampling_policy: SamplingPolicy::Random(10000),
+            placement_sampling_policy: PlacementSamplingPolicy::StepPolicy,
+            leak_sampling: false,
+            route_torch_directly: true,
+            torch_placement_strategy: TorchPlacementStrategy::DirectOnly,
+            not_route_strategy: NotRouteStrategy::DirectAndRedstone,
+            max_not_route_step: 1,
+            not_route_step_sampling_policy: SamplingPolicy::Random(8),
+            max_route_step: 8,
+            route_step_sampling_policy: SamplingPolicy::Random(100),
+        };
+
+        let fa_graph = predefined_logics::buffered_full_adder_graph()?;
+        let placer = LocalPlacer::new(fa_graph, config)?;
+        let mut debug = LocalPlacerDebug::default();
+        let worlds = placer.generate_with_debug(DimSize(10, 10, 5), None, &mut debug);
+
+        debug.print_summary();
+        if let Some(step) = debug.first_empty_step() {
+            println!(
+                "first empty step: step={} node={} kind={} inputs={:?} input_positions={:?}",
+                step.step + 1,
+                step.node_id,
+                step.node_kind,
+                step.input_node_ids,
+                step.input_positions,
+            );
+        }
+        println!("worlds generated: {}", worlds.len());
+
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "debug-only: compare full adder local placer cost sampling"]
+    fn debug_full_adder_with_cost_sampling() -> eyre::Result<()> {
+        tracing_subscriber::fmt::init();
+
+        let config = LocalPlacerConfig {
+            random_seed: 42,
+            greedy_input_generation: true,
+            input_placement_strategy: InputPlacementStrategy::Boundary,
+            step_sampling_policy: SamplingPolicy::Random(10000),
+            placement_sampling_policy: PlacementSamplingPolicy::Cost {
+                count: 9000,
+                random_count: 1000,
+                start_step: 28,
+            },
+            leak_sampling: false,
+            route_torch_directly: true,
+            torch_placement_strategy: TorchPlacementStrategy::DirectOnly,
+            not_route_strategy: NotRouteStrategy::DirectOnly,
+            max_not_route_step: 8,
+            not_route_step_sampling_policy: SamplingPolicy::Random(100),
+            max_route_step: 8,
+            route_step_sampling_policy: SamplingPolicy::Random(100),
+        };
+
+        let fa_graph = predefined_logics::buffered_full_adder_graph()?;
+        let placer = LocalPlacer::new(fa_graph, config)?;
+        let mut debug = LocalPlacerDebug::default();
+        let worlds = placer.generate_with_debug(DimSize(10, 10, 5), None, &mut debug);
+
+        debug.print_summary();
+        if let Some(step) = debug.first_empty_step() {
+            println!(
+                "first empty step: step={} node={} kind={} inputs={:?} input_positions={:?}",
+                step.step + 1,
+                step.node_id,
+                step.node_kind,
+                step.input_node_ids,
+                step.input_positions,
+            );
+        }
+        println!("worlds generated: {}", worlds.len());
+        if !worlds.is_empty() {
+            save_worlds_to_nbt(
+                SamplingPolicy::Take(1).sample(worlds),
+                "test/full-adder.nbt",
+            )?;
+        }
 
         Ok(())
     }
