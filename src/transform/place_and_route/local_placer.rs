@@ -41,6 +41,140 @@ pub const K_MAX_LOCAL_PLACE_NODE_COUNT: usize = 40;
 
 type PlacerQueue = Vec<(World3D, HashMap<GraphNodeId, Position>)>;
 
+#[derive(Debug, Default)]
+pub struct LocalPlacerDebug {
+    pub steps: Vec<StepDebug>,
+}
+
+impl LocalPlacerDebug {
+    pub fn print_summary(&self) {
+        for step in &self.steps {
+            println!(
+                "[{}/{}] node={} kind={} inputs={:?} queue={} generated={} sampled={}",
+                step.step + 1,
+                step.total_steps,
+                step.node_id,
+                step.node_kind,
+                step.input_node_ids,
+                step.input_queue_len,
+                step.generated_len,
+                step.sampled_len,
+            );
+            if let Some(route) = &step.route_debug {
+                println!(
+                    "  routes={} candidates={} initial_states={} samples={:?}",
+                    route.route_calls,
+                    route.candidates_found,
+                    route.initial_states,
+                    route.route_samples
+                );
+                println!("  rejected={:?}", route.rejected);
+                for depth in &route.depths {
+                    println!(
+                        "  depth {}: frontier={} bounds={} accepted={} next_pre_sample={} next_post_sample={}",
+                        depth.depth,
+                        depth.frontier_len,
+                        depth.bounds_checked,
+                        depth.accepted_routes,
+                        depth.next_frontier_before_sampling,
+                        depth.next_frontier_after_sampling,
+                    );
+                }
+            }
+        }
+    }
+
+    pub fn first_empty_step(&self) -> Option<&StepDebug> {
+        self.steps
+            .iter()
+            .find(|step| step.input_queue_len > 0 && step.generated_len == 0)
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct StepDebug {
+    pub step: usize,
+    pub total_steps: usize,
+    pub node_id: GraphNodeId,
+    pub node_kind: String,
+    pub input_node_ids: Vec<GraphNodeId>,
+    pub input_positions: Vec<(GraphNodeId, Position)>,
+    pub input_queue_len: usize,
+    pub generated_len: usize,
+    pub sampled_len: usize,
+    pub route_debug: Option<RouteDebug>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RouteRejectReason {
+    InitInputTopCobbleConflict,
+    InitOutputTopCobbleConflict,
+    OutOfBounds,
+    NoBottomForCobble,
+    CobbleConflict,
+    RedstoneConflict,
+    ShortCircuit,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct RouteDebug {
+    pub route_calls: usize,
+    pub route_samples: Vec<(Position, Position)>,
+    pub initial_states: usize,
+    pub candidates_found: usize,
+    pub rejected: HashMap<RouteRejectReason, usize>,
+    pub depths: Vec<RouteDepthDebug>,
+}
+
+impl RouteDebug {
+    fn merge(&mut self, other: RouteDebug) {
+        self.route_calls += other.route_calls;
+        self.initial_states += other.initial_states;
+        self.candidates_found += other.candidates_found;
+        if self.route_samples.len() < 8 {
+            let remaining = 8 - self.route_samples.len();
+            self.route_samples
+                .extend(other.route_samples.into_iter().take(remaining));
+        }
+        for (reason, count) in other.rejected {
+            *self.rejected.entry(reason).or_default() += count;
+        }
+        if self.depths.len() < other.depths.len() {
+            self.depths
+                .resize_with(other.depths.len(), RouteDepthDebug::default);
+        }
+        for (depth, other_depth) in other.depths.into_iter().enumerate() {
+            self.depths[depth].depth = depth;
+            self.depths[depth].frontier_len += other_depth.frontier_len;
+            self.depths[depth].bounds_checked += other_depth.bounds_checked;
+            self.depths[depth].accepted_routes += other_depth.accepted_routes;
+            self.depths[depth].next_frontier_before_sampling +=
+                other_depth.next_frontier_before_sampling;
+            self.depths[depth].next_frontier_after_sampling +=
+                other_depth.next_frontier_after_sampling;
+        }
+    }
+
+    fn reject(&mut self, reason: RouteRejectReason) {
+        *self.rejected.entry(reason).or_default() += 1;
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct RouteDepthDebug {
+    pub depth: usize,
+    pub frontier_len: usize,
+    pub bounds_checked: usize,
+    pub accepted_routes: usize,
+    pub next_frontier_before_sampling: usize,
+    pub next_frontier_after_sampling: usize,
+}
+
+#[derive(Default)]
+struct GenerationDebug {
+    route_debug: Option<RouteDebug>,
+}
+
 impl LocalPlacer {
     pub fn new(graph: LogicGraph, config: LocalPlacerConfig) -> eyre::Result<Self> {
         let visit_orders = graph.topological_order();
@@ -103,6 +237,38 @@ impl LocalPlacer {
         queue.into_iter().map(|(world, _)| world).collect()
     }
 
+    pub fn generate_with_debug(
+        &self,
+        dim: DimSize,
+        finish_step: Option<usize>,
+        debug: &mut LocalPlacerDebug,
+    ) -> Vec<World3D> {
+        tracing::info!("generate starts");
+
+        let mut queue = PlacerQueue::new();
+        queue.push((World3D::new(dim), Default::default()));
+
+        let mut step = 0;
+        while step < self.visit_orders.len() && Some(step) != finish_step {
+            let prev_len = queue.len();
+            let (next_queue, mut step_debug) = self.do_step_debug(step, queue);
+            let next_len = next_queue.len();
+
+            queue = self.sample(next_queue);
+            step_debug.sampled_len = queue.len();
+
+            step += 1;
+            tracing::info!(
+                "from {prev_len} -> generated {next_len} -> sampled {}",
+                queue.len()
+            );
+            debug.steps.push(step_debug);
+        }
+
+        tracing::info!("generate complete");
+        queue.into_iter().map(|(world, _)| world).collect()
+    }
+
     fn do_step(&self, step: usize, queue: PlacerQueue) -> PlacerQueue {
         let node = self.graph.find_node_by_id(self.visit_orders[step]).unwrap();
         tracing::info!("[{}/{}] {node}", step + 1, self.visit_orders.len());
@@ -122,6 +288,67 @@ impl LocalPlacer {
                     .collect_vec()
             })
             .collect()
+    }
+
+    fn do_step_debug(&self, step: usize, queue: PlacerQueue) -> (PlacerQueue, StepDebug) {
+        let node = self.graph.find_node_by_id(self.visit_orders[step]).unwrap();
+        tracing::info!("[{}/{}] {node}", step + 1, self.visit_orders.len());
+
+        let input_positions = queue
+            .first()
+            .map(|(_, positions)| {
+                node.inputs
+                    .iter()
+                    .filter_map(|id| positions.get(id).copied().map(|pos| (*id, pos)))
+                    .collect_vec()
+            })
+            .unwrap_or_default();
+        let input_queue_len = queue.len();
+
+        let generated = queue
+            .into_par_iter()
+            .panic_fuse()
+            .progress_with_style(progress_style(step + 1, self.visit_orders.len()))
+            .map(|(world, pos)| {
+                let generation = self.generate_place_and_route_debug(node, world, &pos);
+                let items = generation
+                    .items
+                    .into_iter()
+                    .map(|(world, place_position)| {
+                        let mut nodes_position = pos.clone();
+                        nodes_position.insert(node.id, place_position);
+                        (world, nodes_position)
+                    })
+                    .collect_vec();
+                (items, generation.debug)
+            })
+            .collect::<Vec<_>>();
+
+        let mut next_queue = Vec::new();
+        let mut route_debug = RouteDebug::default();
+        let mut has_route_debug = false;
+        for (items, debug) in generated {
+            next_queue.extend(items);
+            if let Some(route) = debug.route_debug {
+                has_route_debug = true;
+                route_debug.merge(route);
+            }
+        }
+
+        let step_debug = StepDebug {
+            step,
+            total_steps: self.visit_orders.len(),
+            node_id: node.id,
+            node_kind: format!("{:?}", node.kind),
+            input_node_ids: node.inputs.clone(),
+            input_positions,
+            input_queue_len,
+            generated_len: next_queue.len(),
+            sampled_len: 0,
+            route_debug: has_route_debug.then_some(route_debug),
+        };
+
+        (next_queue, step_debug)
     }
 
     fn generate_place_and_route(
@@ -175,6 +402,60 @@ impl LocalPlacer {
         }
     }
 
+    fn generate_place_and_route_debug(
+        &self,
+        node: &GraphNode,
+        world: World3D,
+        positions: &HashMap<GraphNodeId, Position>,
+    ) -> PlacementGeneration {
+        let mut debug = GenerationDebug::default();
+        let items = match node.kind {
+            GraphNodeKind::Input(_) => input_node_kind()
+                .into_iter()
+                .flat_map(|kind| generate_inputs(&self.config, &world, kind))
+                .collect(),
+            GraphNodeKind::Output(_) => {
+                vec![(world.clone(), positions[&node.inputs[0]])]
+            }
+            GraphNodeKind::Logic(logic) => match logic.logic_type {
+                LogicType::Not => not_node_kind()
+                    .into_iter()
+                    .flat_map(|kind| {
+                        generate_place_and_routes(
+                            &self.config,
+                            &world,
+                            positions[&node.inputs[0]],
+                            kind,
+                        )
+                    })
+                    .collect(),
+                LogicType::Or => {
+                    assert_eq!(node.inputs.len(), 2);
+                    let (routes, route_debug) = generate_or_routes_debug(
+                        &self.config,
+                        &world,
+                        positions[&node.inputs[0]],
+                        positions[&node.inputs[1]],
+                    );
+                    debug.route_debug = Some(route_debug);
+                    routes
+                        .into_iter()
+                        .flat_map(|(world, positions)| {
+                            positions
+                                .into_iter()
+                                .map(|pos| (world.clone(), pos))
+                                .collect_vec()
+                        })
+                        .collect()
+                }
+                _ => unreachable!(),
+            },
+            _ => unreachable!(),
+        };
+
+        PlacementGeneration { items, debug }
+    }
+
     fn sample(&self, queue: PlacerQueue) -> PlacerQueue {
         if self.config.leak_sampling && queue.len() > 10_000 {
             // TODO: deallocate on other thread
@@ -184,6 +465,11 @@ impl LocalPlacer {
             self.config.step_sampling_policy.sample(queue)
         }
     }
+}
+
+struct PlacementGeneration {
+    items: Vec<(World3D, Position)>,
+    debug: GenerationDebug,
 }
 
 fn progress_style(step: usize, len: usize) -> ProgressStyle {
@@ -403,6 +689,71 @@ fn generate_or_routes(
     candidates
 }
 
+fn generate_or_routes_debug(
+    config: &LocalPlacerConfig,
+    world: &World3D,
+    from: Position,
+    to: Position,
+) -> (Vec<(World3D, Vec<Position>)>, RouteDebug) {
+    let (mut queue, mut debug) = generate_or_routes_init_states_debug(world, from, to);
+    debug.route_calls = 1;
+    debug.route_samples.push((from, to));
+    debug.initial_states = queue.len();
+
+    let mut candidates = Vec::new();
+    let mut step = 0;
+
+    while step < config.max_route_step && !queue.is_empty() {
+        let frontier_len = queue.len();
+        let mut next_queue = vec![];
+        let mut depth_debug = RouteDepthDebug {
+            depth: step,
+            frontier_len,
+            ..Default::default()
+        };
+
+        for (world, prevs, bounds) in queue {
+            let prev_pos = prevs.last().copied().unwrap();
+            for bound in bounds {
+                depth_debug.bounds_checked += 1;
+                if !world.size.bound_on(bound.position()) {
+                    debug.reject(RouteRejectReason::OutOfBounds);
+                    continue;
+                }
+
+                let Some((new_world, redstone_node)) =
+                    place_redstone_with_cobble_debug(&world, bound, prev_pos, to, &mut debug)
+                else {
+                    continue;
+                };
+
+                let new_prevs = prevs
+                    .iter()
+                    .copied()
+                    .chain([redstone_node.position])
+                    .collect();
+
+                if redstone_node.has_connection_with(&world, to) {
+                    depth_debug.accepted_routes += 1;
+                    candidates.push((new_world, new_prevs));
+                } else {
+                    let nexts = redstone_node.propagation_bound(Some(&new_world));
+                    next_queue.push((new_world, new_prevs, nexts));
+                }
+            }
+        }
+
+        depth_debug.next_frontier_before_sampling = next_queue.len();
+        queue = config.route_step_sampling_policy.sample(next_queue);
+        depth_debug.next_frontier_after_sampling = queue.len();
+        debug.depths.push(depth_debug);
+        step += 1;
+    }
+
+    debug.candidates_found = candidates.len();
+    (candidates, debug)
+}
+
 fn generate_or_routes_init_states(
     world: &World3D,
     from: Position,
@@ -445,6 +796,57 @@ fn generate_or_routes_init_states(
             Some((new_world.into_owned(), vec![from], bounds))
         })
         .collect()
+}
+
+fn generate_or_routes_init_states_debug(
+    world: &World3D,
+    from: Position,
+    to: Position,
+) -> (Vec<(World3D, Vec<Position>, Vec<PlaceBound>)>, RouteDebug) {
+    let from_node = PlacedNode::new(from, world[from]);
+    let to_node = PlacedNode::new(to, world[to]);
+    assert!(from_node.is_diode() && to_node.is_diode());
+
+    let mut debug = RouteDebug::default();
+    let boolean_comb = [false, true];
+    let mut states = Vec::new();
+
+    for input_top_cobble in boolean_comb {
+        for output_top_cobble in boolean_comb {
+            let mut new_world = Cow::Borrowed(world);
+
+            if input_top_cobble {
+                let Some(cobble_node) = try_generate_cobble_node(world, from.up(), &[from]) else {
+                    debug.reject(RouteRejectReason::InitInputTopCobbleConflict);
+                    continue;
+                };
+                place_node(new_world.to_mut(), cobble_node);
+            }
+
+            if output_top_cobble {
+                let Some(cobble_node) = try_generate_cobble_node(world, to.up(), &[to]) else {
+                    debug.reject(RouteRejectReason::InitOutputTopCobbleConflict);
+                    continue;
+                };
+                place_node(new_world.to_mut(), cobble_node);
+            }
+
+            let bounds = if input_top_cobble {
+                from.up()
+                    .cardinal()
+                    .into_iter()
+                    .chain(Some(from.up().up()))
+                    .map(|pos| PlaceBound(PropagateType::Soft, pos, pos.diff(from)))
+                    .collect_vec()
+            } else {
+                from_node.propagation_bound(Some(world))
+            };
+
+            states.push((new_world.into_owned(), vec![from], bounds));
+        }
+    }
+
+    (states, debug)
 }
 
 fn try_generate_cobble_node(
@@ -490,6 +892,51 @@ fn place_redstone_with_cobble(
     Some((new_world, redstone_node))
 }
 
+fn place_redstone_with_cobble_debug(
+    world: &World3D,
+    bound: PlaceBound,
+    prev: Position,
+    to: Position,
+    debug: &mut RouteDebug,
+) -> Option<(World3D, PlacedNode)> {
+    let Some(cobble_pos) = bound.position().walk(Direction::Bottom) else {
+        debug.reject(RouteRejectReason::NoBottomForCobble);
+        return None;
+    };
+    let cobble_except = (world[prev].kind.is_torch())
+        .then_some(vec![cobble_pos, prev])
+        .unwrap_or_default();
+    let Some(cobble_node) = try_generate_cobble_node(world, cobble_pos, &cobble_except) else {
+        debug.reject(RouteRejectReason::CobbleConflict);
+        return None;
+    };
+    let mut new_world = world.clone();
+    place_node(&mut new_world, cobble_node);
+
+    let bound_pos = bound.position();
+    let Some(bound_back_pos) = bound_pos.walk(bound.direction()) else {
+        debug.reject(RouteRejectReason::RedstoneConflict);
+        return None;
+    };
+    let redstone_node = PlacedNode::new_redstone(bound_pos);
+    let except = [prev, bound_back_pos, bound_pos, to, to.up()]
+        .into_iter()
+        .collect();
+    if redstone_node.has_conflict(&new_world, &except) {
+        debug.reject(RouteRejectReason::RedstoneConflict);
+        return None;
+    }
+    if redstone_node.has_short(world, &except) {
+        debug.reject(RouteRejectReason::ShortCircuit);
+        return None;
+    }
+
+    place_node(&mut new_world, redstone_node);
+    new_world.update_redstone_states(prev);
+
+    Some((new_world, redstone_node))
+}
+
 pub struct LocalPlacerCostEstimator<'a> {
     graph: &'a WorldGraph,
 }
@@ -513,7 +960,7 @@ mod tests {
     use crate::graph::logic::predefined_logics;
     use crate::nbt::{NBTRoot, ToNBT};
     use crate::transform::place_and_route::local_placer::{
-        LocalPlacer, LocalPlacerConfig, SamplingPolicy,
+        LocalPlacer, LocalPlacerConfig, LocalPlacerDebug, SamplingPolicy,
     };
     use crate::transform::place_and_route::utils::{
         equivalent_logic_with_world3d, equivalent_logic_with_world3ds, world3d_to_logic,
@@ -686,6 +1133,41 @@ mod tests {
         println!("{}", sample_logic.to_graphviz());
 
         save_worlds_to_nbt(sampled_worlds, "test/full-adder.nbt")?;
+
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "debug-only: full adder local placer failure analysis"]
+    fn debug_full_adder_local_placer_failure() -> eyre::Result<()> {
+        tracing_subscriber::fmt::init();
+
+        let config = LocalPlacerConfig {
+            greedy_input_generation: true,
+            step_sampling_policy: SamplingPolicy::Random(10000),
+            leak_sampling: false,
+            route_torch_directly: true,
+            max_route_step: 8,
+            route_step_sampling_policy: SamplingPolicy::Random(100),
+        };
+
+        let fa_graph = predefined_logics::buffered_full_adder_graph()?;
+        let placer = LocalPlacer::new(fa_graph, config)?;
+        let mut debug = LocalPlacerDebug::default();
+        let worlds = placer.generate_with_debug(DimSize(10, 10, 5), None, &mut debug);
+
+        debug.print_summary();
+        if let Some(step) = debug.first_empty_step() {
+            println!(
+                "first empty step: step={} node={} kind={} inputs={:?} input_positions={:?}",
+                step.step + 1,
+                step.node_id,
+                step.node_kind,
+                step.input_node_ids,
+                step.input_positions,
+            );
+        }
+        println!("worlds generated: {}", worlds.len());
 
         Ok(())
     }
