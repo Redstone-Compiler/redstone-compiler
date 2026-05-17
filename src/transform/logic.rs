@@ -413,6 +413,9 @@ impl LogicGraphTransformer {
 
                     format!("{}({})", logic.logic_type.name(), inputs.join(", "))
                 }
+                GraphNodeKind::Sequential(sequential) => {
+                    format!("Sequential#{}({})", node.id, sequential.name())
+                }
                 GraphNodeKind::Output(_) => continue,
                 _ => continue,
             };
@@ -519,6 +522,7 @@ mod tests {
     use super::*;
     use crate::graph::analysis::equivalent_expression_groups;
     use crate::graph::logic::predefined_logics;
+    use crate::sequential::{SequentialPrimitive, SequentialType};
 
     fn has_duplicate_expression(graph: &LogicGraph, expression: &str) -> bool {
         equivalent_expression_groups(graph)
@@ -591,6 +595,73 @@ mod tests {
         assert!(!has_duplicate_expression(&graph, "Not(Input(a))"));
         assert!(!has_duplicate_expression(&graph, "Not(Input(b))"));
         assert!(!has_duplicate_expression(&graph, "Not(Input(cin))"));
+        graph.graph.verify()?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn prepare_place_preserves_sequential_boundaries() -> eyre::Result<()> {
+        let mut graph = Graph {
+            nodes: vec![
+                GraphNode {
+                    id: 0,
+                    kind: GraphNodeKind::Input("s".to_owned()),
+                    outputs: vec![2],
+                    ..Default::default()
+                },
+                GraphNode {
+                    id: 1,
+                    kind: GraphNodeKind::Input("r".to_owned()),
+                    outputs: vec![2],
+                    ..Default::default()
+                },
+                GraphNode {
+                    id: 2,
+                    kind: GraphNodeKind::Sequential(SequentialPrimitive::new(
+                        SequentialType::RsLatch,
+                        vec!["s".to_owned(), "r".to_owned()],
+                        vec!["q".to_owned()],
+                    )),
+                    inputs: vec![0, 1],
+                    outputs: vec![3],
+                    ..Default::default()
+                },
+                GraphNode {
+                    id: 3,
+                    kind: GraphNodeKind::Logic(Logic {
+                        logic_type: LogicType::Not,
+                    }),
+                    inputs: vec![2],
+                    outputs: vec![4],
+                    ..Default::default()
+                },
+                GraphNode {
+                    id: 4,
+                    kind: GraphNodeKind::Output("not_q".to_owned()),
+                    inputs: vec![3],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        graph.build_inputs();
+        graph.build_outputs();
+
+        let graph = LogicGraph { graph }.prepare_place()?;
+
+        assert_eq!(
+            graph
+                .nodes
+                .iter()
+                .filter(|node| node.kind.is_sequential())
+                .count(),
+            1
+        );
+        assert!(graph.nodes.iter().any(|node| matches!(
+            &node.kind,
+            GraphNodeKind::Logic(logic) if logic.logic_type == LogicType::Not
+        )));
         graph.graph.verify()?;
 
         Ok(())

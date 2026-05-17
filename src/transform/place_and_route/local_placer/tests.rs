@@ -1,6 +1,7 @@
 use super::*;
 use crate::graph::logic::LogicGraph;
-use crate::graph::GraphNodeKind;
+use crate::graph::{Graph, GraphNode, GraphNodeKind};
+use crate::sequential::{SequentialPrimitive, SequentialType};
 use crate::world::block::{Block, BlockKind, Direction};
 use crate::world::position::{DimSize, Position};
 use crate::world::World3D;
@@ -346,4 +347,53 @@ fn generate_or_routes_finds_adjacent_torch_route() {
     assert!(!result.routes.is_empty());
     assert!(result.debug.candidates_found > 0);
     assert_eq!(result.debug.route_calls, 1);
+}
+
+#[test]
+fn local_placer_rejects_sequential_primitives_until_macro_support_exists() {
+    let mut graph = Graph {
+        nodes: vec![
+            GraphNode {
+                id: 0,
+                kind: GraphNodeKind::Input("s".to_owned()),
+                outputs: vec![2],
+                ..Default::default()
+            },
+            GraphNode {
+                id: 1,
+                kind: GraphNodeKind::Input("r".to_owned()),
+                outputs: vec![2],
+                ..Default::default()
+            },
+            GraphNode {
+                id: 2,
+                kind: GraphNodeKind::Sequential(SequentialPrimitive::new(
+                    SequentialType::RsLatch,
+                    vec!["s".to_owned(), "r".to_owned()],
+                    vec!["q".to_owned()],
+                )),
+                inputs: vec![0, 1],
+                outputs: vec![3],
+                ..Default::default()
+            },
+            GraphNode {
+                id: 3,
+                kind: GraphNodeKind::Output("q".to_owned()),
+                inputs: vec![2],
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    graph.build_inputs();
+    graph.build_outputs();
+
+    let err = match LocalPlacer::new(LogicGraph { graph }, config(1)) {
+        Ok(_) => panic!("expected local placer to reject sequential primitives"),
+        Err(err) => err,
+    };
+
+    assert!(err
+        .to_string()
+        .contains("sequential primitive placement is not implemented"));
 }

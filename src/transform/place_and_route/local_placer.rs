@@ -294,6 +294,10 @@ impl LocalPlacer {
         for node_id in &self.graph.nodes {
             let kind = &self.graph.find_node_by_id(node_id.id).unwrap().kind;
             ensure!(
+                !kind.is_sequential(),
+                "sequential primitive placement is not implemented"
+            );
+            ensure!(
                 kind.is_input() || kind.is_output() || kind.is_logic(),
                 "cannot place"
             );

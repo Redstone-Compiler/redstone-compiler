@@ -10,6 +10,7 @@ use self::cluster::ClusteredGraph;
 use self::module::GraphModule;
 use crate::cluster::{Clustered, ClusteredType};
 use crate::logic::Logic;
+use crate::sequential::SequentialPrimitive;
 use crate::world::block::Block;
 
 pub mod analysis;
@@ -28,6 +29,7 @@ pub enum GraphNodeKind {
     Input(String),
     Block(Block),
     Logic(Logic),
+    Sequential(SequentialPrimitive),
     Output(String),
     Clustered(Clustered),
 }
@@ -39,6 +41,7 @@ impl GraphNodeKind {
             GraphNodeKind::Input(input) => format!("Input {input}"),
             GraphNodeKind::Block(block) => block.kind.name(),
             GraphNodeKind::Logic(logic) => logic.logic_type.name(),
+            GraphNodeKind::Sequential(sequential) => sequential.name(),
             GraphNodeKind::Output(output) => format!("Output {output}"),
             GraphNodeKind::Clustered(clustered) => clustered.clustered_type.name(),
         }
@@ -84,9 +87,20 @@ impl GraphNodeKind {
         matches!(self, GraphNodeKind::Logic(_))
     }
 
+    pub fn is_sequential(&self) -> bool {
+        matches!(self, GraphNodeKind::Sequential(_))
+    }
+
     pub fn as_logic(&self) -> Option<&Logic> {
         match self {
             GraphNodeKind::Logic(inner) => Some(inner),
+            _ => None,
+        }
+    }
+
+    pub fn as_sequential(&self) -> Option<&SequentialPrimitive> {
+        match self {
+            GraphNodeKind::Sequential(inner) => Some(inner),
             _ => None,
         }
     }
@@ -1045,6 +1059,7 @@ pub fn subgraphs_to_clustered_graph(graph: &Graph, subgraphs: &[SubGraph]) -> Cl
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sequential::{SequentialPrimitive, SequentialType};
 
     #[test]
     fn build_inputs_and_outputs_are_sorted() {
@@ -1081,5 +1096,57 @@ mod tests {
         assert_eq!(graph.find_node_by_id(0).unwrap().outputs, vec![3]);
         assert_eq!(graph.find_node_by_id(1).unwrap().outputs, vec![3]);
         assert_eq!(graph.find_node_by_id(2).unwrap().outputs, vec![3]);
+    }
+
+    #[test]
+    fn sequential_node_kind_is_named_and_verified() -> eyre::Result<()> {
+        let mut graph = Graph {
+            nodes: vec![
+                GraphNode {
+                    id: 0,
+                    kind: GraphNodeKind::Input("s".to_owned()),
+                    outputs: vec![2],
+                    ..Default::default()
+                },
+                GraphNode {
+                    id: 1,
+                    kind: GraphNodeKind::Input("r".to_owned()),
+                    outputs: vec![2],
+                    ..Default::default()
+                },
+                GraphNode {
+                    id: 2,
+                    kind: GraphNodeKind::Sequential(SequentialPrimitive::new(
+                        SequentialType::RsLatch,
+                        vec!["s".to_owned(), "r".to_owned()],
+                        vec!["q".to_owned()],
+                    )),
+                    inputs: vec![0, 1],
+                    outputs: vec![3],
+                    ..Default::default()
+                },
+                GraphNode {
+                    id: 3,
+                    kind: GraphNodeKind::Output("q".to_owned()),
+                    inputs: vec![2],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        graph.build_inputs();
+        graph.build_outputs();
+        graph.verify()?;
+
+        let latch = graph.find_node_by_id(2).unwrap();
+        assert!(latch.kind.is_sequential());
+        assert_eq!(latch.kind.name(), "RsLatch");
+        assert_eq!(
+            latch.kind.as_sequential().unwrap().output_ports,
+            vec!["q".to_owned()]
+        );
+
+        Ok(())
     }
 }
