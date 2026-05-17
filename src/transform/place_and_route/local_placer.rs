@@ -1316,7 +1316,7 @@ mod tests {
         graph.build_consumers();
 
         let placer = LocalPlacer::new(LogicGraph { graph }, config)?;
-        let worlds = placer.generate(DimSize(10, 10, 3), None);
+        let worlds = placer.generate(DimSize(8, 6, 3), None);
         assert!(!worlds.is_empty());
         assert!(worlds.iter().any(|world| world.iter_block().len() >= 20));
         assert!(worlds.iter().any(|world| {

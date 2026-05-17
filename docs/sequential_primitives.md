@@ -47,9 +47,9 @@ Port(rs_latch_node, "nq")
 
 The first implementation supports only one exposed sequential output in the top-level graph. This is intentional because graph edges do not yet encode the source output port. The RS latch macro exposes both `q` and `nq` internally, but only q-only top-level use is accepted by `LocalPlacer`.
 
-## Current RS Latch Synthesis
+## Current RS Latch Macro
 
-`src/sequential/layout.rs` defines the `SequentialMacro` interface. `src/sequential/synthesis.rs` generates the current RS latch macro candidates from the recognized RS latch feedback core. The first synthesizer still starts from one canonical physical latch, but it returns multiple rotated/mirrored candidates and runs `Simulator` set/reset/hold verification before exposing them to the local placer.
+`src/sequential/layout.rs` defines the initial `SequentialMacro` interface and one simulator-validated RS latch macro candidate. RS latch macro candidates are gated by successful recognition of the RS latch feedback core in the primitive `inner_graph`.
 
 Tests currently validate:
 
@@ -57,7 +57,6 @@ Tests currently validate:
 - port positions are unique,
 - port positions are in bounds and non-air,
 - RS latch feedback SCC/core recognition,
-- RS latch macro synthesis returns multiple simulator-verified oriented candidates,
 - q-only sequential nodes are accepted by `LocalPlacer`,
 - multi-output sequential nodes are rejected until graph edges become port-aware,
 - unsupported sequential primitives such as `DLatch` are rejected,
@@ -68,8 +67,8 @@ Tests currently validate:
 ## Remaining Work
 
 - Make graph edges port-aware so `q` and `nq` can drive different consumers.
-- Replace the canonical RS latch seed with lower-level constrained search over torch/support pairs and feedback routes.
-- Add more RS latch topology seeds and cost ranking.
+- Replace the first RS latch hardcoded macro with direct local placer support for cyclic gate SCC placement.
+- Reuse local placer route/place helpers for RS latch gate-level placement instead of physical macro synthesis.
 - Reuse the RS latch feedback core when composing D latches and flip-flops.
 
 Run placement-related tests with `cargo test --release`.

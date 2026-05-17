@@ -3,7 +3,6 @@ use crate::logic::{Logic, LogicType};
 
 pub mod core;
 pub mod layout;
-pub mod synthesis;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum SequentialType {
