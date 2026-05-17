@@ -2,7 +2,7 @@
   font-family:
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   color: #e7ecef;
-  background: #111417;
+  background: #101316;
 }
 
 * {
@@ -13,6 +13,7 @@ body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
+  overflow: hidden;
 }
 
 button,
@@ -20,59 +21,13 @@ input {
   font: inherit;
 }
 
-.app-shell {
-  display: grid;
-  grid-template-rows: auto 1fr;
-  min-height: 100vh;
-  background: #111417;
-}
-
-.topbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 20px;
-  padding: 18px 22px;
-  border-bottom: 1px solid #2a3036;
-  background: #171b1f;
-}
-
-h1 {
-  margin: 0;
-  font-size: 20px;
-  font-weight: 650;
-}
-
-p {
-  margin: 4px 0 0;
-  color: #9ea9b3;
-  font-size: 13px;
-}
-
-.file-button {
-  display: inline-grid;
-  place-items: center;
-  min-width: 112px;
-  height: 36px;
-  border: 1px solid #46515a;
-  border-radius: 6px;
-  background: #25313a;
-  color: #f2f6f8;
-  cursor: pointer;
-}
-
-.file-button:hover {
-  background: #2d3b45;
-}
-
-.file-button input {
-  display: none;
-}
-
-.workspace {
-  display: grid;
-  grid-template-columns: minmax(280px, 360px) minmax(0, 1fr) minmax(260px, 340px);
+.app-shell,
+.workspace,
+.viewer-panel {
+  width: 100vw;
+  height: 100vh;
   min-height: 0;
+  background: #101316;
 }
 
 .workspace.dragging {
@@ -80,30 +35,100 @@ p {
   outline-offset: -2px;
 }
 
-.panel {
-  min-height: 0;
-  border-right: 1px solid #2a3036;
-  background: #15191d;
+.viewer-panel {
+  position: relative;
 }
 
-.inspector-panel {
-  border-right: 0;
-  border-left: 1px solid #2a3036;
+#structure-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 
-.panel-header {
+.floating-actions {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  z-index: 4;
+  display: flex;
+  gap: 8px;
+}
+
+.file-button {
+  display: inline-grid;
+  place-items: center;
+  min-width: 104px;
+  height: 34px;
+  border: 1px solid rgb(154 164 173 / 42%);
+  border-radius: 6px;
+  background: rgb(22 27 31 / 82%);
+  color: #f2f6f8;
+  cursor: pointer;
+  backdrop-filter: blur(14px);
+  box-shadow: 0 10px 30px rgb(0 0 0 / 24%);
+}
+
+.file-button:hover {
+  background: rgb(38 47 55 / 88%);
+}
+
+.file-button input {
+  display: none;
+}
+
+.floating-panel {
+  position: absolute;
+  z-index: 3;
+  border: 1px solid rgb(154 164 173 / 28%);
+  border-radius: 7px;
+  background: rgb(18 22 26 / 82%);
+  box-shadow: 0 16px 44px rgb(0 0 0 / 28%);
+  backdrop-filter: blur(14px);
+}
+
+.tree-panel {
+  top: 16px;
+  left: 16px;
+  width: min(420px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  overflow: hidden;
+}
+
+.tree-panel summary {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  min-height: 42px;
-  padding: 10px 12px;
-  border-bottom: 1px solid #2a3036;
+  min-height: 38px;
+  padding: 9px 12px;
   color: #dce3e7;
   font-size: 13px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.tree-panel summary::-webkit-details-marker {
+  display: none;
+}
+
+.tree-panel summary::before {
+  content: "+";
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border: 1px solid rgb(154 164 173 / 34%);
+  border-radius: 4px;
+  color: #cbd4db;
+  flex: 0 0 auto;
+}
+
+.tree-panel[open] summary::before {
+  content: "-";
 }
 
 #file-meta {
+  min-width: 0;
   overflow: hidden;
   color: #9ea9b3;
   text-overflow: ellipsis;
@@ -111,15 +136,17 @@ p {
 }
 
 .tree-root {
-  height: calc(100vh - 101px);
+  max-height: calc(100vh - 84px);
   overflow: auto;
-  padding: 10px 12px 40px;
+  padding: 10px 12px 18px;
+  border-top: 1px solid rgb(154 164 173 / 18%);
   font-family: "Cascadia Mono", Consolas, monospace;
   font-size: 12px;
 }
 
 .tree-root.empty {
   display: grid;
+  min-height: 160px;
   place-items: center;
   color: #7f8992;
   font-family: inherit;
@@ -139,7 +166,7 @@ p {
 
 .tree-node summary:hover,
 .tree-leaf:hover {
-  background: #20262b;
+  background: rgb(255 255 255 / 7%);
 }
 
 .tree-key {
@@ -156,22 +183,39 @@ p {
   word-break: break-word;
 }
 
-.viewer-panel {
-  position: relative;
-  min-width: 0;
-  min-height: 0;
-  background: #101316;
+.inspector-panel {
+  right: 16px;
+  bottom: 16px;
+  width: min(360px, calc(100vw - 32px));
+  max-height: min(42vh, 360px);
+  overflow: hidden;
 }
 
-#structure-canvas {
-  display: block;
-  width: 100%;
-  height: 100%;
+.panel-header {
+  display: flex;
+  align-items: center;
+  min-height: 36px;
+  padding: 9px 12px;
+  border-bottom: 1px solid rgb(154 164 173 / 18%);
+  color: #dce3e7;
+  font-size: 13px;
+}
+
+#inspector {
+  max-height: calc(min(42vh, 360px) - 36px);
+  margin: 0;
+  overflow: auto;
+  padding: 12px;
+  color: #dce3e7;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
 }
 
 .viewer-empty {
   position: absolute;
   inset: 0;
+  z-index: 1;
   display: grid;
   place-items: center;
   padding: 24px;
@@ -184,31 +228,26 @@ p {
   display: none;
 }
 
-#inspector {
-  height: calc(100vh - 101px);
-  margin: 0;
-  overflow: auto;
-  padding: 12px;
-  color: #dce3e7;
-  font-family: "Cascadia Mono", Consolas, monospace;
-  font-size: 12px;
-  white-space: pre-wrap;
-}
-
-@media (max-width: 980px) {
-  .workspace {
-    grid-template-columns: 1fr;
-    grid-template-rows: 280px minmax(360px, 1fr) 260px;
+@media (max-width: 720px) {
+  .floating-actions {
+    top: 12px;
+    right: 12px;
   }
 
-  .panel,
+  .tree-panel {
+    top: 58px;
+    left: 12px;
+    width: calc(100vw - 24px);
+  }
+
   .inspector-panel {
-    border: 0;
-    border-bottom: 1px solid #2a3036;
+    right: 12px;
+    bottom: 12px;
+    width: calc(100vw - 24px);
+    max-height: 32vh;
   }
 
-  .tree-root,
   #inspector {
-    height: 217px;
+    max-height: calc(32vh - 36px);
   }
 }

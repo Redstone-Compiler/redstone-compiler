@@ -7,34 +7,30 @@ import type { StructureBlock } from './types';
 
 document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
   <main class="app-shell">
-    <section class="topbar">
-      <div>
-        <h1>Redstone NBT Viewer</h1>
-        <p>Open a Minecraft structure NBT file locally and inspect its tags or 3D block layout.</p>
-      </div>
-      <label class="file-button">
-        Open NBT
-        <input id="file-input" type="file" accept=".nbt,.dat,.schem,.schematic,.litematic,.mcstructure" />
-      </label>
-    </section>
     <section id="drop-zone" class="workspace">
-      <aside class="panel tree-panel">
-        <div class="panel-header">
-          <strong>NBT Tree</strong>
-          <span id="file-meta">No file loaded</span>
-        </div>
-        <div id="tree-root" class="tree-root empty">Drop an .nbt file here.</div>
-      </aside>
       <section class="viewer-panel">
         <canvas id="structure-canvas"></canvas>
-        <div id="viewer-empty" class="viewer-empty">Structure preview appears here when size, palette, and blocks are present.</div>
-      </section>
-      <aside class="panel inspector-panel">
-        <div class="panel-header">
-          <strong>Inspector</strong>
+        <div class="floating-actions">
+          <label class="file-button">
+            Open NBT
+            <input id="file-input" type="file" accept=".nbt,.dat,.schem,.schematic,.litematic,.mcstructure" />
+          </label>
         </div>
-        <pre id="inspector">Select a block in the 3D view.</pre>
-      </aside>
+        <details id="tree-panel" class="floating-panel tree-panel">
+          <summary>
+            <span>NBT Tree</span>
+            <span id="file-meta">No file loaded</span>
+          </summary>
+          <div id="tree-root" class="tree-root empty">Drop an .nbt file here.</div>
+        </details>
+        <aside class="floating-panel inspector-panel">
+          <div class="panel-header">
+            <strong>Inspector</strong>
+          </div>
+          <pre id="inspector">Select a block in the 3D view.</pre>
+        </aside>
+        <div id="viewer-empty" class="viewer-empty">Drop an .nbt file or use Open NBT.</div>
+      </section>
     </section>
   </main>
 `;
