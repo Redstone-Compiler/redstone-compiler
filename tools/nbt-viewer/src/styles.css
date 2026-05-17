@@ -94,16 +94,7 @@ input {
   overflow: hidden;
 }
 
-.tree-panel {
-  top: 62px;
-  left: 16px;
-  width: min(420px, calc(100vw - 32px));
-  max-height: calc(100vh - 78px);
-  overflow: hidden;
-}
-
-.files-panel summary,
-.tree-panel summary {
+.files-panel summary {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -116,13 +107,11 @@ input {
   list-style: none;
 }
 
-.files-panel summary::-webkit-details-marker,
-.tree-panel summary::-webkit-details-marker {
+.files-panel summary::-webkit-details-marker {
   display: none;
 }
 
-.files-panel summary::before,
-.tree-panel summary::before {
+.files-panel summary::before {
   content: "+";
   display: inline-grid;
   place-items: center;
@@ -134,13 +123,11 @@ input {
   flex: 0 0 auto;
 }
 
-.files-panel[open] summary::before,
-.tree-panel[open] summary::before {
+.files-panel[open] summary::before {
   content: "-";
 }
 
-#files-count,
-#file-meta {
+#files-count {
   min-width: 0;
   overflow: hidden;
   color: #9ea9b3;
@@ -166,7 +153,9 @@ input {
 }
 
 .file-entry {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: 10px;
   width: 100%;
   min-height: 28px;
   margin: 0;
@@ -179,9 +168,21 @@ input {
   font-family: "Cascadia Mono", Consolas, monospace;
   font-size: 12px;
   text-align: left;
+  cursor: pointer;
+}
+
+.file-entry-name {
+  min-width: 0;
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  cursor: pointer;
+}
+
+.file-entry-size {
+  margin-left: auto;
+  color: #9ea9b3;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .file-entry:hover {
@@ -193,52 +194,8 @@ input {
   color: #fff;
 }
 
-.tree-root {
-  max-height: calc(100vh - 84px);
-  overflow: auto;
-  padding: 10px 12px 18px;
-  border-top: 1px solid rgb(154 164 173 / 18%);
-  font-family: "Cascadia Mono", Consolas, monospace;
-  font-size: 12px;
-}
-
-.tree-root.empty {
-  display: grid;
-  min-height: 160px;
-  place-items: center;
-  color: #7f8992;
-  font-family: inherit;
-}
-
-.tree-node,
-.tree-leaf {
-  margin-left: 12px;
-}
-
-.tree-node summary,
-.tree-leaf {
-  min-height: 24px;
-  padding: 3px 4px;
-  border-radius: 4px;
-}
-
-.tree-node summary:hover,
-.tree-leaf:hover {
-  background: rgb(255 255 255 / 7%);
-}
-
-.tree-key {
-  color: #ff7676;
-  margin-right: 8px;
-}
-
-.tree-value {
-  color: #9ea9b3;
-}
-
-.tree-value.primitive {
-  color: #dce3e7;
-  word-break: break-word;
+.file-entry.selected .file-entry-size {
+  color: #ffd0d0;
 }
 
 .inspector-panel {
@@ -290,12 +247,6 @@ input {
   .floating-actions {
     top: 12px;
     right: 12px;
-  }
-
-  .tree-panel {
-    top: 104px;
-    left: 12px;
-    width: calc(100vw - 24px);
   }
 
   .files-panel {

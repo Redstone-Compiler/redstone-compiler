@@ -2,7 +2,6 @@ import './styles.css';
 import { loadNbtFile, stringifyNbt } from './nbt/loadNbt';
 import { toStructureModel } from './nbt/toStructure';
 import { StructureViewer } from './render/StructureViewer';
-import { renderTree } from './ui/TreeView';
 import type { StructureBlock } from './types';
 
 document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
@@ -27,13 +26,6 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
           </summary>
           <div id="files-list" class="files-list empty">Open a folder to browse NBT files.</div>
         </details>
-        <details id="tree-panel" class="floating-panel tree-panel">
-          <summary>
-            <span>NBT Tree</span>
-            <span id="file-meta">No file loaded</span>
-          </summary>
-          <div id="tree-root" class="tree-root empty">Drop an .nbt file here.</div>
-        </details>
         <aside class="floating-panel inspector-panel">
           <div class="panel-header">
             <strong>Inspector</strong>
@@ -52,8 +44,6 @@ const dropZone = document.querySelector<HTMLElement>('#drop-zone')!;
 const filesPanel = document.querySelector<HTMLDetailsElement>('#files-panel')!;
 const filesList = document.querySelector<HTMLElement>('#files-list')!;
 const filesCount = document.querySelector<HTMLElement>('#files-count')!;
-const treeRoot = document.querySelector<HTMLElement>('#tree-root')!;
-const fileMeta = document.querySelector<HTMLElement>('#file-meta')!;
 const canvas = document.querySelector<HTMLCanvasElement>('#structure-canvas')!;
 const viewerEmpty = document.querySelector<HTMLElement>('#viewer-empty')!;
 const inspector = document.querySelector<HTMLElement>('#inspector')!;
@@ -110,7 +100,13 @@ function renderFileBrowser(files: File[]): void {
     const button = document.createElement('button');
     button.className = 'file-entry';
     button.type = 'button';
-    button.textContent = getDisplayPath(file);
+    const name = document.createElement('span');
+    name.className = 'file-entry-name';
+    name.textContent = getDisplayPath(file);
+    const size = document.createElement('span');
+    size.className = 'file-entry-size';
+    size.textContent = formatBytes(file.size);
+    button.append(name, size);
     button.addEventListener('click', () => void openFile(file, button));
     filesList.append(button);
   }
@@ -123,9 +119,6 @@ async function openFile(file: File, selectedEntry?: Element | null): Promise<voi
     const parsed = await loadNbtFile(file);
     const structure = toStructureModel(parsed.root);
 
-    treeRoot.classList.remove('empty');
-    renderTree(treeRoot, parsed.root);
-    fileMeta.textContent = `${getDisplayPath(file)} · ${formatBytes(parsed.byteLength)} · ${parsed.parseType}`;
     markSelectedFile(selectedEntry);
 
     if (structure) {
@@ -141,10 +134,8 @@ async function openFile(file: File, selectedEntry?: Element | null): Promise<voi
       inspector.textContent = 'This NBT file does not look like a Minecraft structure file.';
     }
   } catch (error) {
-    treeRoot.classList.add('empty');
-    treeRoot.textContent = error instanceof Error ? error.message : String(error);
-    fileMeta.textContent = 'Parse failed';
     viewerEmpty.classList.remove('hidden');
+    inspector.textContent = error instanceof Error ? error.message : String(error);
   }
 }
 

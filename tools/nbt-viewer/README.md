@@ -1,8 +1,8 @@
 # Redstone NBT Viewer
 
-A lightweight local web viewer for Minecraft NBT files. It can inspect NBT tags,
-render structure-like block data in 3D, and browse multiple local NBT files from
-a selected folder.
+A lightweight local web viewer for Minecraft NBT files. It can render
+structure-like block data in 3D and browse multiple local NBT files from a
+selected folder.
 
 ## Setup
 
@@ -53,7 +53,6 @@ NBT viewer extension so it can populate its cache, then run
 - Use `Open NBT` to load a single local `.nbt`, `.dat`, `.schem`,
   `.schematic`, `.litematic`, or `.mcstructure` file.
 - Use `Open Folder` to browse supported NBT-like files from a local directory.
-- Use the floating `NBT Tree` panel when tag inspection is needed.
 - Use the mouse to rotate the 3D view, the wheel to zoom, and `W/A/S/D`,
   `Space`, and `Shift` to move the camera.
 
