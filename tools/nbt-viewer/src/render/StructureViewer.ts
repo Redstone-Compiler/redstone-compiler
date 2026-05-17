@@ -5,6 +5,7 @@ import type { StructureBlock, StructureModel } from '../types';
 import { MinecraftResources } from './mcmeta';
 
 type SelectionHandler = (block: StructureBlock | undefined) => void;
+type DragMode = 'move' | 'rotate';
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
@@ -34,6 +35,7 @@ export class StructureViewer {
   private selectedBlock?: vec3;
   private onSelect: SelectionHandler = () => undefined;
   private frame = 0;
+  private dragMode?: DragMode;
   private dragPos?: vec2;
   private lastFrameTime = 0;
   private readonly movement = new Set<string>();
@@ -53,8 +55,8 @@ export class StructureViewer {
     canvas.addEventListener('contextmenu', event => event.preventDefault());
     canvas.addEventListener('pointerdown', event => this.onPointerDown(event));
     canvas.addEventListener('pointermove', event => this.onPointerMove(event));
-    canvas.addEventListener('pointerup', () => (this.dragPos = undefined));
-    canvas.addEventListener('pointerleave', () => (this.dragPos = undefined));
+    canvas.addEventListener('pointerup', event => this.onPointerUp(event));
+    canvas.addEventListener('pointerleave', () => this.endDrag());
     canvas.addEventListener('wheel', event => this.onWheel(event), { passive: false });
     window.addEventListener('keydown', event => this.onKeyDown(event));
     window.addEventListener('keyup', event => this.onKeyUp(event));
@@ -92,7 +94,11 @@ export class StructureViewer {
   }
 
   private onPointerDown(event: PointerEvent): void {
+    if (event.button !== 0 && event.button !== 2) return;
+
+    event.preventDefault();
     this.canvas.setPointerCapture(event.pointerId);
+    this.dragMode = event.button === 2 ? 'move' : 'rotate';
     this.dragPos = vec2.fromValues(event.clientX, event.clientY);
 
     if (event.button === 0) {
@@ -107,9 +113,27 @@ export class StructureViewer {
     const dy = (event.clientY - this.dragPos[1]) / 100;
     vec2.set(this.dragPos, event.clientX, event.clientY);
 
+    if (this.dragMode === 'move') {
+      this.moveCameraByDrag(dx * 100, dy * 100);
+      this.render();
+      return;
+    }
+
     this.cRot[0] = (this.cRot[0] + dx) % (Math.PI * 2);
     this.cRot[1] = clamp(this.cRot[1] + dy, -Math.PI / 2, Math.PI / 2);
     this.render();
+  }
+
+  private onPointerUp(event: PointerEvent): void {
+    this.endDrag();
+    if (this.canvas.hasPointerCapture(event.pointerId)) {
+      this.canvas.releasePointerCapture(event.pointerId);
+    }
+  }
+
+  private endDrag(): void {
+    this.dragMode = undefined;
+    this.dragPos = undefined;
   }
 
   private onWheel(event: WheelEvent): void {
@@ -235,6 +259,15 @@ export class StructureViewer {
 
     vec3.normalize(direction, direction);
     vec3.scale(direction, direction, delta * Math.max(0.01, this.cDist * 0.0016));
+    vec3.rotateY(direction, direction, [0, 0, 0], -this.cRot[0]);
+    vec3.add(this.cPos, this.cPos, direction);
+  }
+
+  private moveCameraByDrag(dx: number, dy: number): void {
+    const direction = vec3.fromValues(dx, 0, dy);
+    if (vec3.squaredLength(direction) === 0) return;
+
+    vec3.scale(direction, direction, Math.max(0.01, this.cDist * 0.002));
     vec3.rotateY(direction, direction, [0, 0, 0], -this.cRot[0]);
     vec3.add(this.cPos, this.cPos, direction);
   }
