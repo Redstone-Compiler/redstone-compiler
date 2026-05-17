@@ -3,6 +3,7 @@
 ## Project Notes
 
 - Local placer improvement context: `docs/local_placer_improvement.md`
+- Hierarchical placer design and SCC/primitive layout strategy: `docs/hierarchical_placer_design.md`
 
 ## Documentation
 
