@@ -1029,6 +1029,7 @@ mod unit_tests;
 #[cfg(test)]
 mod tests {
 
+    use crate::graph::analysis::equivalent_expression_groups;
     use crate::graph::graphviz::ToGraphvizGraph;
     use crate::graph::logic::predefined_logics;
     use crate::nbt::{NBTRoot, ToNBT};
@@ -1280,6 +1281,12 @@ mod tests {
         };
 
         let fa_graph = predefined_logics::buffered_full_adder_graph()?;
+        for group in equivalent_expression_groups(&fa_graph).into_iter().take(12) {
+            println!(
+                "duplicate expression: {} nodes={:?}",
+                group.expression, group.node_ids
+            );
+        }
         let placer = LocalPlacer::new(fa_graph, config)?;
         let mut debug = LocalPlacerDebug::default();
         let worlds = placer.generate_with_debug(DimSize(10, 10, 5), None, &mut debug);

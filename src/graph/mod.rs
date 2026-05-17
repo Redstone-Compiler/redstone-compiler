@@ -12,6 +12,7 @@ use crate::cluster::{Clustered, ClusteredType};
 use crate::logic::Logic;
 use crate::world::block::Block;
 
+pub mod analysis;
 mod cluster;
 pub mod graphviz;
 pub mod logic;
