@@ -1225,8 +1225,10 @@ mod tests {
 
     use crate::graph::analysis::equivalent_expression_groups;
     use crate::graph::graphviz::ToGraphvizGraph;
-    use crate::graph::logic::predefined_logics;
+    use crate::graph::logic::{predefined_logics, LogicGraph};
+    use crate::graph::{Graph, GraphNode, GraphNodeKind};
     use crate::nbt::{NBTRoot, ToNBT};
+    use crate::sequential::{SequentialPrimitive, SequentialType};
     use crate::transform::place_and_route::estimate::world_compact_cost;
     use crate::transform::place_and_route::local_placer::{
         InputPlacementStrategy, LocalPlacer, LocalPlacerConfig, LocalPlacerDebug, NotRouteStrategy,
@@ -1235,6 +1237,7 @@ mod tests {
     use crate::transform::place_and_route::utils::{
         equivalent_logic_with_world3d, equivalent_logic_with_world3ds, world3d_to_logic,
     };
+    use crate::world::block::BlockKind;
     use crate::world::position::DimSize;
     use crate::world::World3D;
 
@@ -1267,6 +1270,64 @@ mod tests {
         let concated_world = World3D::concat_tiled(worlds);
         let nbt: NBTRoot = concated_world.to_nbt();
         nbt.save(path);
+        Ok(())
+    }
+
+    #[test]
+    fn test_generate_component_rs_latch() -> eyre::Result<()> {
+        let config = LocalPlacerConfig {
+            random_seed: 42,
+            greedy_input_generation: true,
+            input_placement_strategy: InputPlacementStrategy::Boundary,
+            step_sampling_policy: SamplingPolicy::None,
+            placement_sampling_policy: PlacementSamplingPolicy::StepPolicy,
+            leak_sampling: false,
+            route_torch_directly: true,
+            torch_placement_strategy: TorchPlacementStrategy::DirectOnly,
+            not_route_strategy: NotRouteStrategy::DirectOnly,
+            max_not_route_step: 1,
+            not_route_step_sampling_policy: SamplingPolicy::None,
+            max_route_step: 1,
+            route_step_sampling_policy: SamplingPolicy::None,
+        };
+        let mut graph = Graph {
+            nodes: vec![
+                GraphNode {
+                    id: 0,
+                    kind: GraphNodeKind::Sequential(SequentialPrimitive::new(
+                        SequentialType::RsLatch,
+                        Vec::new(),
+                        vec!["q".to_owned()],
+                    )),
+                    ..Default::default()
+                },
+                GraphNode {
+                    id: 1,
+                    kind: GraphNodeKind::Output("q".to_owned()),
+                    inputs: vec![0],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        graph.build_outputs();
+        graph.build_inputs();
+        graph.build_producers();
+        graph.build_consumers();
+
+        let placer = LocalPlacer::new(LogicGraph { graph }, config)?;
+        let worlds = placer.generate(DimSize(8, 6, 3), None);
+        assert!(!worlds.is_empty());
+        assert!(worlds.iter().any(|world| world.iter_block().len() >= 20));
+        assert!(worlds.iter().any(|world| {
+            world
+                .iter_block()
+                .into_iter()
+                .any(|(_, block)| matches!(block.kind, BlockKind::Torch { .. }))
+        }));
+
+        save_worlds_to_nbt(vec![worlds[0].clone()], "test/rs-latch.nbt")?;
+
         Ok(())
     }
 

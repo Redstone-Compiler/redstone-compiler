@@ -18,7 +18,10 @@ pub struct SequentialMacro {
 impl SequentialMacro {
     pub fn candidates(primitive: &SequentialPrimitive) -> Vec<Self> {
         match primitive.sequential_type {
-            SequentialType::RsLatch => vec![rs_latch_macro()],
+            SequentialType::RsLatch if primitive.rs_latch_core().is_some() => {
+                vec![rs_latch_macro()]
+            }
+            SequentialType::RsLatch => Vec::new(),
             SequentialType::DLatch | SequentialType::DFlipFlop => Vec::new(),
         }
     }
@@ -174,21 +177,30 @@ mod tests {
         is_on
     }
 
+    fn rs_latch_macro_preview_world(candidate: &SequentialMacro) -> World3D {
+        let mut world = candidate.world.clone();
+        world[Position(0, 2, 1)] = Block {
+            kind: BlockKind::Switch { is_on: false },
+            direction: Direction::East,
+        };
+        world[Position(6, 2, 1)] = Block {
+            kind: BlockKind::Switch { is_on: false },
+            direction: Direction::West,
+        };
+        world.initialize_redstone_states();
+        world
+    }
+
     #[test]
     fn rs_latch_macro_satisfies_set_reset_hold_behavior() -> eyre::Result<()> {
         let primitive = SequentialPrimitive::rs_latch();
         let candidate = SequentialMacro::candidates(&primitive).remove(0);
-        let mut candidate_world = candidate.world.clone();
+        let mut candidate_world = rs_latch_macro_preview_world(&candidate);
         let s = Position(6, 2, 1);
         let r = Position(0, 2, 1);
         let q = candidate.output_ports["q"];
         let nq = candidate.output_ports["nq"];
         candidate_world[r].kind = BlockKind::Switch { is_on: true };
-        candidate_world[r].direction = Direction::East;
-        candidate_world[s] = Block {
-            kind: BlockKind::Switch { is_on: false },
-            direction: Direction::West,
-        };
         let world = World::from(&candidate_world);
         let mut sim = Simulator::from_with_limits_and_trace(&world, 64, 20_000, 0)
             .map_err(|error| eyre::eyre!(error.message().to_owned()))?;

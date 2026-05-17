@@ -193,6 +193,38 @@ impl Graph {
             .collect_vec()
     }
 
+    pub fn strongly_connected_components(&self) -> Vec<Vec<GraphNodeId>> {
+        let node_ids: HashSet<GraphNodeId> = self.nodes.iter().map(|node| node.id).collect();
+        let mut seen = HashSet::new();
+        let mut components = petgraph::algo::kosaraju_scc(&self.to_petgraph_only_edges())
+            .into_iter()
+            .filter_map(|component| {
+                let mut component = component
+                    .into_iter()
+                    .map(|index| index.index())
+                    .filter(|id| node_ids.contains(id))
+                    .collect_vec();
+                component.sort();
+                if component.is_empty() {
+                    return None;
+                }
+                seen.extend(component.iter().copied());
+                Some(component)
+            })
+            .collect_vec();
+        components.extend(
+            node_ids
+                .difference(&seen)
+                .copied()
+                .map(|node_id| vec![node_id]),
+        );
+        for component in &mut components {
+            component.sort();
+        }
+        components.sort();
+        components
+    }
+
     pub fn dominators(
         &self,
         target_root: GraphNodeId,
@@ -1096,6 +1128,18 @@ mod tests {
         assert_eq!(graph.find_node_by_id(0).unwrap().outputs, vec![3]);
         assert_eq!(graph.find_node_by_id(1).unwrap().outputs, vec![3]);
         assert_eq!(graph.find_node_by_id(2).unwrap().outputs, vec![3]);
+    }
+
+    #[test]
+    fn strongly_connected_components_include_feedback_loop() {
+        let primitive = SequentialPrimitive::rs_latch();
+        let components = primitive.inner_graph.strongly_connected_components();
+
+        assert!(components
+            .iter()
+            .any(|component| component == &vec![2, 3, 4, 5]));
+        assert!(components.iter().any(|component| component == &vec![0]));
+        assert!(components.iter().any(|component| component == &vec![7]));
     }
 
     #[test]

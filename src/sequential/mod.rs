@@ -1,6 +1,7 @@
 use crate::graph::{Graph, GraphNode, GraphNodeKind};
 use crate::logic::{Logic, LogicType};
 
+pub mod core;
 pub mod layout;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -73,6 +74,14 @@ impl SequentialPrimitive {
 
     pub fn name(&self) -> String {
         self.sequential_type.name()
+    }
+
+    pub fn feedback_cores(&self) -> Vec<core::FeedbackCore> {
+        core::feedback_cores(&self.inner_graph)
+    }
+
+    pub fn rs_latch_core(&self) -> Option<core::RsLatchCore> {
+        core::recognize_rs_latch_core(&self.inner_graph)
     }
 }
 
@@ -188,5 +197,16 @@ mod tests {
         );
 
         assert_eq!(left, right);
+    }
+
+    #[test]
+    fn sequential_primitive_reports_feedback_core() {
+        let primitive = SequentialPrimitive::rs_latch();
+
+        assert!(matches!(
+            primitive.feedback_cores().as_slice(),
+            [core::FeedbackCore::RsLatch(_)]
+        ));
+        assert!(primitive.rs_latch_core().is_some());
     }
 }
