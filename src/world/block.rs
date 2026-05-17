@@ -253,13 +253,16 @@ impl Block {
                 on_base_count,
             } => {
                 eyre::ensure!(on_count > 0, "On count must higher than zero");
+                if is_base {
+                    eyre::ensure!(on_base_count > 0, "On base count must higher than zero");
+                }
 
                 cnt = on_count - 1;
 
                 BlockKind::Cobble {
                     on_count: cnt,
                     on_base_count: if is_base {
-                        on_base_count + 1
+                        on_base_count - 1
                     } else {
                         on_base_count
                     },

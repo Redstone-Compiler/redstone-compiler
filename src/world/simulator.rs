@@ -1,10 +1,13 @@
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
+use std::fmt;
 
 use super::block::{Block, BlockKind, Direction};
 use super::position::Position;
 use super::{World, World3D};
 
-#[derive(Clone, Debug)]
+const DEFAULT_TRACE_LIMIT: usize = 0;
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum EventType {
     // targeting redstone, repeater
     SoftOff,
@@ -20,13 +23,33 @@ enum EventType {
     RepeaterOff { delay: usize },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct EventKey {
+    event_type: EventType,
+    target_position: Position,
+    direction: Direction,
+}
+
+impl EventKey {
+    fn from_event(event: &Event) -> Self {
+        Self {
+            event_type: event.event_type.clone(),
+            target_position: event.target_position,
+            direction: event.direction,
+        }
+    }
+}
+
 impl EventType {
     fn is_hard(&self) -> bool {
         matches!(self, EventType::HardOn | EventType::HardOff)
     }
 
     fn is_on(&self) -> bool {
-        matches!(self, EventType::SoftOn | EventType::HardOn)
+        matches!(
+            self,
+            EventType::SoftOn | EventType::HardOn | EventType::TorchOn
+        )
     }
 
     fn is_redstone(&self) -> bool {
@@ -50,29 +73,157 @@ pub struct Simulator {
     world: World3D,
     cycle: usize,
     event_id_count: usize,
+    soft_power_sources: HashSet<(Position, Position)>,
+    hard_power_sources: HashSet<(Position, Position)>,
+    trace: Vec<SimulationTraceEntry>,
+    snapshots: Vec<SimulationSnapshot>,
+    trace_limit: usize,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct SimulationTraceEntry {
+    pub cycle: usize,
+    pub event_id: Option<usize>,
+    pub from_event_id: Option<usize>,
+    pub event_type: String,
+    pub target_position: [usize; 3],
+    pub direction: String,
+    pub block_before: String,
+    pub current_queue_len: usize,
+    pub next_queue_len: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct SimulationSnapshot {
+    pub cycle: usize,
+    pub world: World3D,
+}
+
+#[derive(Clone, Debug)]
+pub struct SimulationTraceError {
+    message: String,
+    trace: Vec<SimulationTraceEntry>,
+    snapshots: Vec<SimulationSnapshot>,
+}
+
+impl SimulationTraceError {
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    pub fn trace(&self) -> &[SimulationTraceEntry] {
+        &self.trace
+    }
+
+    pub fn snapshots(&self) -> &[SimulationSnapshot] {
+        &self.snapshots
+    }
+}
+
+impl fmt::Display for SimulationTraceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.message.fmt(f)
+    }
+}
+
+impl std::error::Error for SimulationTraceError {}
+
+#[derive(Copy, Clone, Debug)]
+struct SimulationLimits {
+    max_cycles: Option<usize>,
+    max_events: Option<usize>,
+}
+
+impl SimulationLimits {
+    fn cycles(max_cycles: Option<usize>) -> Self {
+        Self {
+            max_cycles,
+            max_events: None,
+        }
+    }
 }
 
 impl Simulator {
     pub fn from(world: &World) -> eyre::Result<Self> {
-        let mut sim = Self {
-            queue: VecDeque::new(),
-            world: world.into(),
-            cycle: 0,
-            event_id_count: 0,
+        Self::from_inner(world, SimulationLimits::cycles(None), DEFAULT_TRACE_LIMIT)
+    }
+
+    pub fn from_with_max_cycles(world: &World, max_cycles: usize) -> eyre::Result<Self> {
+        Self::from_inner(
+            world,
+            SimulationLimits::cycles(Some(max_cycles)),
+            DEFAULT_TRACE_LIMIT,
+        )
+    }
+
+    pub fn from_with_limits_and_trace(
+        world: &World,
+        max_cycles: usize,
+        max_events: usize,
+        trace_limit: usize,
+    ) -> Result<Self, SimulationTraceError> {
+        let mut sim = Self::new(world, trace_limit);
+        let limits = SimulationLimits {
+            max_cycles: Some(max_cycles),
+            max_events: Some(max_events),
         };
 
         tracing::info!("Simulation target\n{:?}", sim.world);
 
         sim.queue.push_back(VecDeque::new());
         sim.world.initialize_redstone_states();
-        sim.init(world);
+        sim.normalize_torches_on();
+        sim.init();
 
         tracing::debug!("queue: {:?}", sim.queue);
 
         sim.fill_event_id();
-        sim.run()?;
+
+        if let Err(error) = sim.run_inner(limits) {
+            return Err(SimulationTraceError {
+                message: error.to_string(),
+                trace: sim.trace,
+                snapshots: sim.snapshots,
+            });
+        }
 
         Ok(sim)
+    }
+
+    fn from_inner(
+        world: &World,
+        limits: SimulationLimits,
+        trace_limit: usize,
+    ) -> eyre::Result<Self> {
+        let mut sim = Self::new(world, trace_limit);
+
+        tracing::info!("Simulation target\n{:?}", sim.world);
+
+        sim.queue.push_back(VecDeque::new());
+        sim.world.initialize_redstone_states();
+        sim.normalize_torches_on();
+        sim.init();
+
+        tracing::debug!("queue: {:?}", sim.queue);
+
+        sim.fill_event_id();
+        sim.run_inner(limits)?;
+
+        Ok(sim)
+    }
+
+    fn new(world: &World, trace_limit: usize) -> Self {
+        Self {
+            queue: VecDeque::new(),
+            world: world.into(),
+            cycle: 0,
+            event_id_count: 0,
+            soft_power_sources: HashSet::new(),
+            hard_power_sources: HashSet::new(),
+            trace: Vec::new(),
+            snapshots: Vec::new(),
+            trace_limit,
+        }
     }
 
     fn fill_event_id(&mut self) {
@@ -89,6 +240,37 @@ impl Simulator {
     }
 
     pub fn change_state(&mut self, states: Vec<(Position, bool)>) -> eyre::Result<()> {
+        self.change_state_inner(states, SimulationLimits::cycles(None))
+    }
+
+    pub fn change_state_with_max_cycles(
+        &mut self,
+        states: Vec<(Position, bool)>,
+        max_cycles: usize,
+    ) -> eyre::Result<()> {
+        self.change_state_inner(states, SimulationLimits::cycles(Some(max_cycles)))
+    }
+
+    pub fn change_state_with_limits(
+        &mut self,
+        states: Vec<(Position, bool)>,
+        max_cycles: usize,
+        max_events: usize,
+    ) -> eyre::Result<()> {
+        self.change_state_inner(
+            states,
+            SimulationLimits {
+                max_cycles: Some(max_cycles),
+                max_events: Some(max_events),
+            },
+        )
+    }
+
+    fn change_state_inner(
+        &mut self,
+        states: Vec<(Position, bool)>,
+        limits: SimulationLimits,
+    ) -> eyre::Result<()> {
         self.queue.push_back(VecDeque::new());
 
         for (pos, value) in states {
@@ -139,17 +321,51 @@ impl Simulator {
 
         self.fill_event_id();
 
-        self.run()?;
+        self.run_inner(limits)?;
 
         Ok(())
     }
 
+    pub fn world(&self) -> &World3D {
+        &self.world
+    }
+
+    pub fn trace(&self) -> &[SimulationTraceEntry] {
+        &self.trace
+    }
+
+    pub fn snapshots(&self) -> &[SimulationSnapshot] {
+        &self.snapshots
+    }
+
+    pub fn clear_trace(&mut self) {
+        self.trace.clear();
+        self.snapshots.clear();
+    }
+
     pub fn run(&mut self) -> eyre::Result<usize> {
+        self.run_inner(SimulationLimits::cycles(None))
+    }
+
+    pub fn run_with_max_cycles(&mut self, max_cycles: usize) -> eyre::Result<usize> {
+        self.run_inner(SimulationLimits::cycles(Some(max_cycles)))
+    }
+
+    fn run_inner(&mut self, limits: SimulationLimits) -> eyre::Result<usize> {
         let mut local_cycle = 0;
+        let mut local_events = 0;
 
         while !self.queue.is_empty() {
-            self.consume_events()?;
+            if limits
+                .max_cycles
+                .is_some_and(|max_cycles| local_cycle >= max_cycles)
+            {
+                eyre::bail!("simulation exceeded max cycle limit ({local_cycle})");
+            }
+
+            self.consume_events(limits.max_events, &mut local_events)?;
             local_cycle += 1;
+            self.record_snapshot();
             tracing::info!("simulator cycle: {local_cycle}/{}", self.cycle);
         }
 
@@ -168,8 +384,16 @@ impl Simulator {
         self.queue.back_mut().unwrap().push_back(event);
     }
 
-    fn init(&mut self, world: &World) {
-        for (pos, block) in world.blocks.iter().copied() {
+    fn normalize_torches_on(&mut self) {
+        for pos in self.world.iter_pos() {
+            if matches!(self.world[pos].kind, BlockKind::Torch { .. }) {
+                self.world[pos].kind = BlockKind::Torch { is_on: true };
+            }
+        }
+    }
+
+    fn init(&mut self) {
+        for (pos, block) in self.world.iter_block() {
             match block.kind {
                 BlockKind::Torch { is_on } if is_on => {
                     self.init_torch_event(block.direction, pos);
@@ -260,15 +484,29 @@ impl Simulator {
         self.queue[0].extend(events)
     }
 
-    fn consume_events(&mut self) -> eyre::Result<()> {
+    fn consume_events(
+        &mut self,
+        max_events: Option<usize>,
+        local_events: &mut usize,
+    ) -> eyre::Result<()> {
         self.cycle += 1;
 
         self.queue.push_back(VecDeque::new());
-
+        let mut seen_events = HashSet::new();
         while let Some(event) = self.queue.front_mut().unwrap().pop_front() {
+            if !seen_events.insert(EventKey::from_event(&event)) {
+                continue;
+            }
+
+            if max_events.is_some_and(|max_events| *local_events >= max_events) {
+                eyre::bail!("simulation exceeded max event limit ({local_events})");
+            }
+            *local_events += 1;
+
             tracing::debug!("consume event: {:?}", event);
 
             let mut block = self.world[event.target_position];
+            self.record_trace(&event, &block);
 
             match block.kind {
                 BlockKind::Air | BlockKind::Switch { .. } | BlockKind::RedstoneBlock => (),
@@ -301,6 +539,43 @@ impl Simulator {
         Ok(())
     }
 
+    fn record_trace(&mut self, event: &Event, block: &Block) {
+        if self.trace_limit == 0 {
+            return;
+        }
+
+        if self.trace.len() == self.trace_limit {
+            self.trace.remove(0);
+        }
+
+        self.trace.push(SimulationTraceEntry {
+            cycle: self.cycle,
+            event_id: event.id,
+            from_event_id: event.from_id,
+            event_type: format!("{:?}", event.event_type),
+            target_position: [
+                event.target_position.0,
+                event.target_position.1,
+                event.target_position.2,
+            ],
+            direction: format!("{:?}", event.direction),
+            block_before: format!("{:?}", block.kind),
+            current_queue_len: self.queue.front().map_or(0, VecDeque::len),
+            next_queue_len: self.queue.back().map_or(0, VecDeque::len),
+        });
+    }
+
+    fn record_snapshot(&mut self) {
+        if self.trace_limit == 0 {
+            return;
+        }
+
+        self.snapshots.push(SimulationSnapshot {
+            cycle: self.cycle,
+            world: self.world.clone(),
+        });
+    }
+
     fn propgate_cobble_event(&mut self, block: &mut Block, event: &Event) -> eyre::Result<()> {
         tracing::debug!("consume cobble event: {:?}", block);
 
@@ -309,10 +584,40 @@ impl Simulator {
         }
 
         let is_hard = matches!(event.event_type, EventType::HardOn | EventType::HardOff);
+        let source_position = event
+            .target_position
+            .walk(event.direction)
+            .unwrap_or(event.target_position);
+        let source_key = (event.target_position, source_position);
+        let power_sources = if is_hard {
+            &mut self.hard_power_sources
+        } else {
+            &mut self.soft_power_sources
+        };
 
         if event.event_type.is_on() {
+            if !power_sources.insert(source_key) {
+                return Ok(());
+            }
+
             block.count_up(event.event_type.is_hard())?;
         } else {
+            let BlockKind::Cobble {
+                on_count,
+                on_base_count,
+            } = block.kind
+            else {
+                unreachable!()
+            };
+
+            if !power_sources.remove(&source_key) {
+                return Ok(());
+            }
+
+            if on_count == 0 || (is_hard && on_base_count == 0) {
+                return Ok(());
+            }
+
             block.count_down(event.event_type.is_hard())?;
         }
 
@@ -427,13 +732,15 @@ impl Simulator {
                             direction: pos.diff(event.target_position),
                         });
 
-                        self.push_event_to_current_tick(Event {
-                            id: None,
-                            from_id: event.id,
-                            event_type: EventType::RedstoneOn { strength: 14 },
-                            target_position: pos,
-                            direction: Direction::None,
-                        });
+                        if self.world[pos].kind.is_redstone() {
+                            self.push_event_to_current_tick(Event {
+                                id: None,
+                                from_id: event.id,
+                                event_type: EventType::RedstoneOn { strength: 14 },
+                                target_position: pos,
+                                direction: Direction::None,
+                            });
+                        }
                     });
                 }
             }
@@ -444,6 +751,10 @@ impl Simulator {
                 else {
                     eyre::bail!("unreachable");
                 };
+
+                if *on_count == 0 {
+                    return Ok(());
+                }
 
                 *on_count -= 1;
 
@@ -461,27 +772,50 @@ impl Simulator {
                             direction: pos.diff(event.target_position),
                         });
 
-                        self.push_event_to_current_tick(Event {
-                            id: None,
-                            from_id: event.id,
-                            event_type: EventType::RedstoneOff,
-                            target_position: pos,
-                            direction: Direction::None,
-                        });
+                        if self.world[pos].kind.is_redstone() {
+                            self.push_event_to_current_tick(Event {
+                                id: None,
+                                from_id: event.id,
+                                event_type: EventType::RedstoneOff,
+                                target_position: pos,
+                                direction: Direction::None,
+                            });
+                        }
                     });
                 }
             }
             EventType::RedstoneOn { strength } => {
                 let event_strength = strength;
 
+                if event.direction != Direction::None {
+                    let Some(source_pos) = event.target_position.walk(event.direction) else {
+                        return Ok(());
+                    };
+                    if let BlockKind::Redstone {
+                        strength: source_strength,
+                        ..
+                    } = self.world[source_pos].kind
+                    {
+                        if source_strength <= event_strength {
+                            return Ok(());
+                        }
+                    }
+                }
+
                 let BlockKind::Redstone { strength, .. } = &mut block.kind else {
                     eyre::bail!("unreachable");
                 };
 
-                if event_strength > *strength && *strength > 0 {
+                if event_strength > 0 && event_strength > *strength {
                     *strength = event_strength;
 
                     propagate_targets.into_iter().for_each(|pos| {
+                        if event.direction != Direction::None
+                            && event.target_position.walk(event.direction) == Some(pos)
+                        {
+                            return;
+                        }
+
                         if !self.world[pos].kind.is_redstone() {
                             self.push_event_to_current_tick(Event {
                                 id: None,
@@ -492,21 +826,38 @@ impl Simulator {
                             });
                         }
 
-                        self.push_event_to_current_tick(Event {
-                            id: None,
-                            from_id: event.id,
-                            event_type: EventType::RedstoneOn {
-                                strength: *strength - 1,
-                            },
-                            target_position: pos,
-                            direction: pos.diff(event.target_position),
-                        });
+                        if self.world[pos].kind.is_redstone() && *strength > 1 {
+                            self.push_event_to_current_tick(Event {
+                                id: None,
+                                from_id: event.id,
+                                event_type: EventType::RedstoneOn {
+                                    strength: *strength - 1,
+                                },
+                                target_position: pos,
+                                direction: pos.diff(event.target_position),
+                            });
+                        }
                     });
 
                     tracing::info!("trigger redstone event: {event:?}, {block:?}");
                 }
             }
             EventType::RedstoneOff => {
+                if event.direction != Direction::None {
+                    let Some(source_pos) = event.target_position.walk(event.direction) else {
+                        return Ok(());
+                    };
+                    if let BlockKind::Redstone {
+                        strength: source_strength,
+                        ..
+                    } = self.world[source_pos].kind
+                    {
+                        if source_strength > 0 {
+                            return Ok(());
+                        }
+                    }
+                }
+
                 let BlockKind::Redstone {
                     on_count, strength, ..
                 } = &mut block.kind
@@ -514,10 +865,20 @@ impl Simulator {
                     eyre::bail!("unreachable");
                 };
 
+                if *strength == 0 {
+                    return Ok(());
+                }
+
                 if *on_count == 0 {
                     *strength = 0;
 
                     propagate_targets.into_iter().for_each(|pos| {
+                        if event.direction != Direction::None
+                            && event.target_position.walk(event.direction) == Some(pos)
+                        {
+                            return;
+                        }
+
                         if !self.world[pos].kind.is_redstone() {
                             self.push_event_to_current_tick(Event {
                                 id: None,
@@ -528,13 +889,15 @@ impl Simulator {
                             });
                         }
 
-                        self.push_event_to_current_tick(Event {
-                            id: None,
-                            from_id: event.id,
-                            event_type: EventType::RedstoneOff,
-                            target_position: pos,
-                            direction: pos.diff(event.target_position),
-                        });
+                        if self.world[pos].kind.is_redstone() {
+                            self.push_event_to_current_tick(Event {
+                                id: None,
+                                from_id: event.id,
+                                event_type: EventType::RedstoneOff,
+                                target_position: pos,
+                                direction: pos.diff(event.target_position),
+                            });
+                        }
                     });
                 } else {
                     propagate_targets.into_iter().for_each(|pos| {
@@ -548,13 +911,15 @@ impl Simulator {
                             });
                         }
 
-                        self.push_event_to_current_tick(Event {
-                            id: None,
-                            from_id: event.id,
-                            event_type: EventType::RedstoneOn { strength: 14 },
-                            target_position: pos,
-                            direction: pos.diff(event.target_position),
-                        });
+                        if self.world[pos].kind.is_redstone() {
+                            self.push_event_to_current_tick(Event {
+                                id: None,
+                                from_id: event.id,
+                                event_type: EventType::RedstoneOn { strength: 14 },
+                                target_position: pos,
+                                direction: pos.diff(event.target_position),
+                            });
+                        }
                     });
                 }
 
@@ -568,7 +933,6 @@ impl Simulator {
     fn propgate_torch_event(&mut self, block: &mut Block, event: &Event) -> eyre::Result<()> {
         tracing::debug!("consume torch event: {:?}", block);
 
-        // Cobble로부터 온 이벤트가 아닌 경우
         if !self.world[event.target_position.walk(event.direction).unwrap()]
             .kind
             .is_cobble()
@@ -576,7 +940,7 @@ impl Simulator {
             return Ok(());
         }
 
-        // Cobble에 붙어있지 않은 경우
+        // Cobble??遺숈뼱?덉? ?딆? 寃쎌슦
         if event.direction != block.direction {
             return Ok(());
         }
@@ -585,7 +949,12 @@ impl Simulator {
             eyre::bail!("unreachable");
         };
 
-        *is_on = !event.event_type.is_on();
+        let next_is_on = !event.event_type.is_on();
+        if *is_on == next_is_on {
+            return Ok(());
+        }
+
+        *is_on = next_is_on;
 
         match block.direction {
             Direction::Bottom => event.target_position.cardinal(),
@@ -776,15 +1145,14 @@ impl Simulator {
 
 #[cfg(test)]
 mod test {
-    use std::collections::VecDeque;
-
     use super::*;
+    use crate::nbt::NBTRoot;
     use crate::world::block::RedstoneState;
     use crate::world::position::DimSize;
 
     #[test]
     pub fn unittest_simulator_init_states() {
-        tracing_subscriber::fmt::init();
+        let _ = tracing_subscriber::fmt::try_init();
 
         let default_restone = Block {
             kind: BlockKind::Redstone {
@@ -811,12 +1179,8 @@ mod test {
             ],
         };
 
-        let sim = Simulator {
-            queue: VecDeque::new(),
-            world: (&mock_world).into(),
-            cycle: 0,
-            event_id_count: 0,
-        };
+        let mut sim = Simulator::new(&mock_world, DEFAULT_TRACE_LIMIT);
+        sim.world.initialize_redstone_states();
 
         let BlockKind::Redstone { state, .. } = sim.world.map[0][1][1].kind else {
             unreachable!();
@@ -832,7 +1196,7 @@ mod test {
 
     #[test]
     fn unittest_simulator_redstone_init() {
-        tracing_subscriber::fmt::init();
+        let _ = tracing_subscriber::fmt::try_init();
 
         let default_restone = Block {
             kind: BlockKind::Redstone {
@@ -870,7 +1234,7 @@ mod test {
 
     #[test]
     fn unittest_simulator_cobble() {
-        tracing_subscriber::fmt::init();
+        let _ = tracing_subscriber::fmt::try_init();
 
         let default_restone = Block {
             kind: BlockKind::Redstone {
@@ -920,8 +1284,95 @@ mod test {
     }
 
     #[test]
+    fn unittest_simulator_cobble_deduplicates_same_soft_power_source() -> eyre::Result<()> {
+        let target = Position(1, 1, 0);
+        let mock_world = World {
+            size: DimSize(3, 3, 2),
+            blocks: vec![(
+                target,
+                Block {
+                    kind: BlockKind::Cobble {
+                        on_count: 0,
+                        on_base_count: 0,
+                    },
+                    direction: Direction::None,
+                },
+            )],
+        };
+        let event = Event {
+            id: None,
+            from_id: None,
+            event_type: EventType::SoftOn,
+            target_position: target,
+            direction: Direction::South,
+        };
+        let mut sim = Simulator::new(&mock_world, DEFAULT_TRACE_LIMIT);
+        sim.queue.push_back(VecDeque::new());
+        let mut block = sim.world[target];
+
+        sim.propgate_cobble_event(&mut block, &event)?;
+        sim.propgate_cobble_event(&mut block, &event)?;
+
+        assert!(matches!(
+            block.kind,
+            BlockKind::Cobble {
+                on_count: 1,
+                on_base_count: 0
+            }
+        ));
+
+        let event = Event {
+            event_type: EventType::SoftOff,
+            ..event
+        };
+        sim.propgate_cobble_event(&mut block, &event)?;
+        sim.propgate_cobble_event(&mut block, &event)?;
+
+        assert!(matches!(
+            block.kind,
+            BlockKind::Cobble {
+                on_count: 0,
+                on_base_count: 0
+            }
+        ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn unittest_simulator_full_adder_all_on_recomputes_wall_torch() -> eyre::Result<()> {
+        let nbt = NBTRoot::from_nbt_bytes(&std::fs::read("test/full-adder.nbt")?)?;
+        let world = nbt.to_world();
+        let mut sim = Simulator::from_with_limits_and_trace(&world, 256, 50_000, 0)
+            .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
+        let states = world
+            .blocks
+            .iter()
+            .filter_map(|(pos, block)| {
+                matches!(block.kind, BlockKind::Switch { .. }).then_some((*pos, true))
+            })
+            .collect::<Vec<_>>();
+
+        sim.change_state_with_limits(states, 256, 50_000)?;
+
+        assert!(matches!(
+            sim.world[Position(8, 2, 3)].kind,
+            BlockKind::Torch { is_on: true }
+        ));
+        assert!(matches!(
+            sim.world[Position(7, 2, 3)].kind,
+            BlockKind::Cobble {
+                on_count: 0,
+                on_base_count: 0
+            }
+        ));
+
+        Ok(())
+    }
+
+    #[test]
     fn unittest_simulator_repeater() {
-        tracing_subscriber::fmt::init();
+        let _ = tracing_subscriber::fmt::try_init();
 
         let default_restone = Block {
             kind: BlockKind::Redstone {
@@ -973,7 +1424,7 @@ mod test {
 
     #[test]
     pub fn unittest_simulator_torch() {
-        tracing_subscriber::fmt::init();
+        let _ = tracing_subscriber::fmt::try_init();
 
         let default_restone = Block {
             kind: BlockKind::Redstone {
@@ -1045,7 +1496,7 @@ mod test {
 
     #[test]
     pub fn unittest_simulator_and_gate() {
-        tracing_subscriber::fmt::init();
+        let _ = tracing_subscriber::fmt::try_init();
 
         let default_restone = Block {
             kind: BlockKind::Redstone {

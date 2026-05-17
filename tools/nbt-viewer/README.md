@@ -18,6 +18,12 @@ Prepare Minecraft block assets:
 npm.cmd run prepare:mcmeta
 ```
 
+Build the optional Rust simulator WASM package:
+
+```powershell
+npm.cmd run build:wasm
+```
+
 Start the development server:
 
 ```powershell
@@ -62,5 +68,6 @@ NBT files to a server.
 ## Build
 
 ```powershell
+npm.cmd run build:wasm
 npm.cmd run build
 ```

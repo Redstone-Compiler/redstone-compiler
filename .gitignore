@@ -1,6 +1,10 @@
 /target
 /stubs
 .vscode/**
+.playwright-mcp/
+.worktrees/
+dummy/
 tools/nbt-viewer/node_modules/
 tools/nbt-viewer/dist/
 tools/nbt-viewer/public/mcmeta/
+tools/nbt-viewer/public/wasm/

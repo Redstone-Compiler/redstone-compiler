@@ -2,6 +2,7 @@ use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
 use crate::graph::logic::LogicGraph;
 use crate::graph::world::WorldGraph;
+use crate::transform::logic::LogicGraphTransformer;
 use crate::transform::world_to_logic::WorldToLogicTransformer;
 use crate::world::{World, World3D};
 
@@ -12,8 +13,7 @@ pub fn world3d_to_logic(world3d: &World3D) -> eyre::Result<LogicGraph> {
 pub fn world_to_logic(world: &World) -> eyre::Result<LogicGraph> {
     let world_graph = WorldGraph::from(world);
     let logic_graph = WorldToLogicTransformer::new(world_graph, true)?.transform()?;
-    logic_graph.verify()?;
-    Ok(logic_graph)
+    normalize_logic_graph(logic_graph)
 }
 
 pub fn equivalent_graph(src: &LogicGraph, tar: &LogicGraph) -> bool {
@@ -70,4 +70,13 @@ fn outputs_removed(graph: &LogicGraph) -> LogicGraph {
     graph.graph.build_outputs();
     graph.graph.build_producers();
     graph
+}
+
+fn normalize_logic_graph(graph: LogicGraph) -> eyre::Result<LogicGraph> {
+    let mut transform = LogicGraphTransformer::new(graph);
+    transform.remove_double_neg_expression();
+    transform.optimize_cse()?;
+    let graph = transform.finish();
+    graph.verify()?;
+    Ok(graph)
 }

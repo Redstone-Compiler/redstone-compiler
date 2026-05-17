@@ -177,7 +177,7 @@ mod test {
 
     #[test]
     fn unittest_worldgraph_and_gate() {
-        tracing_subscriber::fmt::init();
+        let _ = tracing_subscriber::fmt::try_init();
 
         let default_restone = Block {
             kind: BlockKind::Redstone {
@@ -250,7 +250,7 @@ mod test {
 
     #[test]
     fn unittest_worldgraph_cobble() {
-        tracing_subscriber::fmt::init();
+        let _ = tracing_subscriber::fmt::try_init();
 
         let default_restone = Block {
             kind: BlockKind::Redstone {
@@ -305,7 +305,7 @@ mod test {
 
     #[test]
     fn unittest_worldgraph_recursive() {
-        tracing_subscriber::fmt::init();
+        let _ = tracing_subscriber::fmt::try_init();
 
         let default_restone = Block {
             kind: BlockKind::Redstone {

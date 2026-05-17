@@ -206,14 +206,118 @@ input {
   overflow: hidden;
 }
 
+.trace-panel {
+  left: 16px;
+  bottom: 16px;
+  width: min(720px, calc(100vw - 408px));
+  max-height: min(34vh, 300px);
+  overflow: hidden;
+}
+
+.trace-panel summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 34px;
+  padding: 8px 12px;
+  color: #dce3e7;
+  cursor: pointer;
+  font-size: 13px;
+  list-style: none;
+}
+
+.trace-panel summary::-webkit-details-marker {
+  display: none;
+}
+
+#trace-count {
+  color: #9ea9b3;
+  font-size: 12px;
+}
+
+.trace-controls {
+  display: grid;
+  grid-template-columns: auto minmax(120px, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-top: 1px solid rgb(154 164 173 / 18%);
+}
+
+.trace-controls button {
+  min-width: 52px;
+  height: 24px;
+  border: 1px solid rgb(154 164 173 / 34%);
+  border-radius: 4px;
+  background: rgb(22 27 31 / 82%);
+  color: #dce3e7;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.trace-controls button:disabled,
+.trace-controls input:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+#trace-cycle {
+  width: 100%;
+  accent-color: #d33232;
+}
+
+#trace-cycle-label {
+  min-width: 112px;
+  color: #cbd4db;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 11px;
+  text-align: right;
+  white-space: nowrap;
+}
+
+#trace-output {
+  max-height: calc(min(34vh, 300px) - 76px);
+  margin: 0;
+  overflow: auto;
+  padding: 10px 12px;
+  border-top: 1px solid rgb(154 164 173 / 18%);
+  color: #dce3e7;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre;
+}
+
 .panel-header {
   display: flex;
   align-items: center;
+  justify-content: space-between;
+  gap: 10px;
   min-height: 36px;
   padding: 9px 12px;
   border-bottom: 1px solid rgb(154 164 173 / 18%);
   color: #dce3e7;
   font-size: 13px;
+}
+
+.panel-action {
+  min-height: 24px;
+  padding: 3px 8px;
+  border: 1px solid rgb(154 164 173 / 34%);
+  border-radius: 4px;
+  background: rgb(211 50 50 / 24%);
+  color: #fff;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.panel-action:hover {
+  background: rgb(211 50 50 / 38%);
+}
+
+.panel-action.hidden {
+  display: none;
 }
 
 #inspector {
@@ -264,5 +368,16 @@ input {
 
   #inspector {
     max-height: calc(32vh - 36px);
+  }
+
+  .trace-panel {
+    left: 12px;
+    bottom: calc(32vh + 24px);
+    width: calc(100vw - 24px);
+    max-height: 28vh;
+  }
+
+  #trace-output {
+    max-height: calc(28vh - 76px);
   }
 }

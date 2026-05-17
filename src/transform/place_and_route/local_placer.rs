@@ -1078,7 +1078,7 @@ mod tests {
 
     #[test]
     fn test_generate_component_xor_simple() -> eyre::Result<()> {
-        tracing_subscriber::fmt::init();
+        let _ = tracing_subscriber::fmt::try_init();
 
         let config = LocalPlacerConfig {
             random_seed: 42,
@@ -1110,7 +1110,7 @@ mod tests {
 
     #[test]
     fn test_generate_component_xor_complex() -> eyre::Result<()> {
-        tracing_subscriber::fmt::init();
+        let _ = tracing_subscriber::fmt::try_init();
         let config = LocalPlacerConfig {
             random_seed: 42,
             greedy_input_generation: false,
@@ -1142,7 +1142,7 @@ mod tests {
 
     #[test]
     fn test_generate_component_xor_shortest() -> eyre::Result<()> {
-        tracing_subscriber::fmt::init();
+        let _ = tracing_subscriber::fmt::try_init();
         // rayon::ThreadPoolBuilder::new()
         //     .num_threads(1)
         //     .build_global()
@@ -1188,7 +1188,7 @@ mod tests {
 
     #[test]
     fn test_generate_component_half_adder() -> eyre::Result<()> {
-        tracing_subscriber::fmt::init();
+        let _ = tracing_subscriber::fmt::try_init();
 
         let config = LocalPlacerConfig {
             random_seed: 42,
@@ -1223,7 +1223,7 @@ mod tests {
     #[test]
     #[ignore = "cannot route last or gate inputs"]
     fn test_generate_component_full_adder() -> eyre::Result<()> {
-        tracing_subscriber::fmt::init();
+        let _ = tracing_subscriber::fmt::try_init();
 
         let config = LocalPlacerConfig {
             random_seed: 42,
@@ -1258,7 +1258,7 @@ mod tests {
     #[test]
     #[ignore = "debug-only: compare full adder local placer cost sampling"]
     fn debug_full_adder_with_cost_sampling() -> eyre::Result<()> {
-        tracing_subscriber::fmt::init();
+        let _ = tracing_subscriber::fmt::try_init();
 
         let config = LocalPlacerConfig {
             random_seed: 42,
