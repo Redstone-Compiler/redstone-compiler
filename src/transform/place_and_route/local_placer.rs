@@ -28,11 +28,11 @@ pub struct LocalPlacer {
 pub struct LocalPlacerConfig {
     greedy_input_generation: bool,
     step_sampling_policy: SamplingPolicy,
-    // dealloc 시간을 줄이기 위해 generation들을 leak 시킨다
+    // Leak large generations to reduce deallocation cost.
     leak_sampling: bool,
-    // torch place시 input과 direct로 연결되도록 강제한다.
+    // Force torch placement to connect directly to the input.
     route_torch_directly: bool,
-    // 최대 routing 거리를 지정한다.
+    // Maximum routing distance.
     max_route_step: usize,
     route_step_sampling_policy: SamplingPolicy,
 }
@@ -170,11 +170,6 @@ pub struct RouteDepthDebug {
     pub next_frontier_after_sampling: usize,
 }
 
-#[derive(Default)]
-struct GenerationDebug {
-    route_debug: Option<RouteDebug>,
-}
-
 impl LocalPlacer {
     pub fn new(graph: LogicGraph, config: LocalPlacerConfig) -> eyre::Result<Self> {
         let visit_orders = graph.topological_order();
@@ -210,31 +205,7 @@ impl LocalPlacer {
 
     #[allow(clippy::vec_init_then_push)]
     pub fn generate(&self, dim: DimSize, finish_step: Option<usize>) -> Vec<World3D> {
-        tracing::info!("generate starts");
-
-        let mut queue = PlacerQueue::new();
-        queue.push((World3D::new(dim), Default::default()));
-
-        let mut step = 0;
-        while step < self.visit_orders.len() && Some(step) != finish_step {
-            let prev_len = queue.len();
-
-            // 1. Generate places and routes
-            let next_queue = self.do_step(step, queue);
-            let next_len = next_queue.len();
-
-            // 2. Sampling
-            queue = self.sample(next_queue);
-
-            step += 1;
-            tracing::info!(
-                "from {prev_len} -> generated {next_len} -> sampled {}",
-                queue.len()
-            );
-        }
-
-        tracing::info!("generate complete");
-        queue.into_iter().map(|(world, _)| world).collect()
+        self.generate_inner(dim, finish_step, None)
     }
 
     pub fn generate_with_debug(
@@ -242,6 +213,15 @@ impl LocalPlacer {
         dim: DimSize,
         finish_step: Option<usize>,
         debug: &mut LocalPlacerDebug,
+    ) -> Vec<World3D> {
+        self.generate_inner(dim, finish_step, Some(debug))
+    }
+
+    fn generate_inner(
+        &self,
+        dim: DimSize,
+        finish_step: Option<usize>,
+        mut debug: Option<&mut LocalPlacerDebug>,
     ) -> Vec<World3D> {
         tracing::info!("generate starts");
 
@@ -251,46 +231,26 @@ impl LocalPlacer {
         let mut step = 0;
         while step < self.visit_orders.len() && Some(step) != finish_step {
             let prev_len = queue.len();
-            let (next_queue, mut step_debug) = self.do_step_debug(step, queue);
-            let next_len = next_queue.len();
+            let result = self.do_step(step, queue);
+            let next_len = result.queue.len();
 
-            queue = self.sample(next_queue);
-            step_debug.sampled_len = queue.len();
+            queue = self.sample(result.queue);
+            let sampled_len = queue.len();
+            if let Some(debug) = debug.as_deref_mut() {
+                let mut step_debug = result.debug;
+                step_debug.sampled_len = sampled_len;
+                debug.steps.push(step_debug);
+            }
 
             step += 1;
-            tracing::info!(
-                "from {prev_len} -> generated {next_len} -> sampled {}",
-                queue.len()
-            );
-            debug.steps.push(step_debug);
+            tracing::info!("from {prev_len} -> generated {next_len} -> sampled {sampled_len}");
         }
 
         tracing::info!("generate complete");
         queue.into_iter().map(|(world, _)| world).collect()
     }
 
-    fn do_step(&self, step: usize, queue: PlacerQueue) -> PlacerQueue {
-        let node = self.graph.find_node_by_id(self.visit_orders[step]).unwrap();
-        tracing::info!("[{}/{}] {node}", step + 1, self.visit_orders.len());
-
-        queue
-            .into_par_iter()
-            .panic_fuse()
-            .progress_with_style(progress_style(step + 1, self.visit_orders.len()))
-            .flat_map(|(world, pos)| {
-                self.generate_place_and_route(node, world, &pos)
-                    .into_iter()
-                    .map(|(world, place_position)| {
-                        let mut nodes_position = pos.clone();
-                        nodes_position.insert(node.id, place_position);
-                        (world, nodes_position)
-                    })
-                    .collect_vec()
-            })
-            .collect()
-    }
-
-    fn do_step_debug(&self, step: usize, queue: PlacerQueue) -> (PlacerQueue, StepDebug) {
+    fn do_step(&self, step: usize, queue: PlacerQueue) -> StepResult {
         let node = self.graph.find_node_by_id(self.visit_orders[step]).unwrap();
         tracing::info!("[{}/{}] {node}", step + 1, self.visit_orders.len());
 
@@ -310,7 +270,7 @@ impl LocalPlacer {
             .panic_fuse()
             .progress_with_style(progress_style(step + 1, self.visit_orders.len()))
             .map(|(world, pos)| {
-                let generation = self.generate_place_and_route_debug(node, world, &pos);
+                let generation = self.generate_place_and_route(node, world, &pos);
                 let items = generation
                     .items
                     .into_iter()
@@ -320,7 +280,7 @@ impl LocalPlacer {
                         (world, nodes_position)
                     })
                     .collect_vec();
-                (items, generation.debug)
+                (items, generation.route_debug)
             })
             .collect::<Vec<_>>();
 
@@ -329,7 +289,7 @@ impl LocalPlacer {
         let mut has_route_debug = false;
         for (items, debug) in generated {
             next_queue.extend(items);
-            if let Some(route) = debug.route_debug {
+            if let Some(route) = debug {
                 has_route_debug = true;
                 route_debug.merge(route);
             }
@@ -348,7 +308,10 @@ impl LocalPlacer {
             route_debug: has_route_debug.then_some(route_debug),
         };
 
-        (next_queue, step_debug)
+        StepResult {
+            queue: next_queue,
+            debug: step_debug,
+        }
     }
 
     fn generate_place_and_route(
@@ -356,59 +319,8 @@ impl LocalPlacer {
         node: &GraphNode,
         world: World3D,
         positions: &HashMap<GraphNodeId, Position>,
-    ) -> Vec<(World3D, Position)> {
-        match node.kind {
-            GraphNodeKind::Input(_) => input_node_kind()
-                .into_iter()
-                .flat_map(|kind| generate_inputs(&self.config, &world, kind))
-                .collect(),
-            GraphNodeKind::Output(_) => {
-                // Noop
-                vec![(world.clone(), positions[&node.inputs[0]])]
-            }
-            GraphNodeKind::Logic(logic) => match logic.logic_type {
-                LogicType::Not => not_node_kind()
-                    .into_iter()
-                    .flat_map(|kind| {
-                        generate_place_and_routes(
-                            &self.config,
-                            &world,
-                            positions[&node.inputs[0]],
-                            kind,
-                        )
-                    })
-                    .collect(),
-                LogicType::Or => {
-                    assert_eq!(node.inputs.len(), 2);
-                    generate_or_routes(
-                        &self.config,
-                        &world,
-                        positions[&node.inputs[0]],
-                        positions[&node.inputs[1]],
-                    )
-                    .into_iter()
-                    .flat_map(|(world, positions)| {
-                        // TODO: Optimize using Cow
-                        positions
-                            .into_iter()
-                            .map(|pos| (world.clone(), pos))
-                            .collect_vec()
-                    })
-                    .collect()
-                }
-                _ => unreachable!(),
-            },
-            _ => unreachable!(),
-        }
-    }
-
-    fn generate_place_and_route_debug(
-        &self,
-        node: &GraphNode,
-        world: World3D,
-        positions: &HashMap<GraphNodeId, Position>,
     ) -> PlacementGeneration {
-        let mut debug = GenerationDebug::default();
+        let mut route_debug = None;
         let items = match node.kind {
             GraphNodeKind::Input(_) => input_node_kind()
                 .into_iter()
@@ -431,14 +343,15 @@ impl LocalPlacer {
                     .collect(),
                 LogicType::Or => {
                     assert_eq!(node.inputs.len(), 2);
-                    let (routes, route_debug) = generate_or_routes_debug(
+                    let result = generate_or_routes(
                         &self.config,
                         &world,
                         positions[&node.inputs[0]],
                         positions[&node.inputs[1]],
                     );
-                    debug.route_debug = Some(route_debug);
-                    routes
+                    route_debug = Some(result.debug);
+                    result
+                        .routes
                         .into_iter()
                         .flat_map(|(world, positions)| {
                             positions
@@ -453,7 +366,7 @@ impl LocalPlacer {
             _ => unreachable!(),
         };
 
-        PlacementGeneration { items, debug }
+        PlacementGeneration { items, route_debug }
     }
 
     fn sample(&self, queue: PlacerQueue) -> PlacerQueue {
@@ -467,9 +380,14 @@ impl LocalPlacer {
     }
 }
 
+struct StepResult {
+    queue: PlacerQueue,
+    debug: StepDebug,
+}
+
 struct PlacementGeneration {
     items: Vec<(World3D, Position)>,
-    debug: GenerationDebug,
+    route_debug: Option<RouteDebug>,
 }
 
 fn progress_style(step: usize, len: usize) -> ProgressStyle {
@@ -569,7 +487,7 @@ fn generate_torch_place_and_routes(
 
     let place_strategy = iproduct!(0..world.size.0, 0..world.size.1, 0..world.size.2)
         .map(|(x, y, z)| Position(x, y, z))
-        // start에서 최소 두 칸 떨어진 곳에 위치시킨다.
+        // Place at least one block away from the start.
         .filter(|pos| source.manhattan_distance(pos) > 1)
         .filter(|pos| !config.route_torch_directly || source.manhattan_distance(pos) == 2);
 
@@ -623,9 +541,9 @@ fn generate_routes_to_cobble(
         let directly_connected = start.position() == cobble_pos
             && matches!(
                 start.propagation_type(),
-                // TODO: 조건 삭제 가능한지 확인
-                // Hard: Switch -> Torch 연결
-                // Soft: Redstone -> Torch 연결
+                // TODO: Verify when this direct-connection condition is valid.
+                // Hard: switch -> torch
+                // Soft: redstone -> torch
                 PropagateType::Hard | PropagateType::Soft
             );
 
@@ -648,54 +566,14 @@ fn generate_routes_to_cobble(
         .collect()
 }
 
-// 두 torch를 연결하는 redstone routes를 생성한다.
+// Generate redstone routes that connect two diode-like nodes.
 fn generate_or_routes(
     config: &LocalPlacerConfig,
     world: &World3D,
     from: Position,
     to: Position,
-) -> Vec<(World3D, Vec<Position>)> {
-    let mut queue = generate_or_routes_init_states(world, from, to);
-    let mut candidates = Vec::new();
-    let mut step = 0;
-
-    while step < config.max_route_step && !queue.is_empty() {
-        let mut next_queue = vec![];
-        for (world, prevs, bounds) in queue {
-            let prev_pos = prevs.last().copied().unwrap();
-            for (new_world, redstone_node) in bounds
-                .into_iter()
-                .filter(|bound| world.size.bound_on(bound.position()))
-                .flat_map(|bound| place_redstone_with_cobble(&world, bound, prev_pos, to))
-            {
-                let new_prevs = prevs
-                    .iter()
-                    .copied()
-                    .chain([redstone_node.position])
-                    .collect();
-
-                if redstone_node.has_connection_with(&world, to) {
-                    candidates.push((new_world, new_prevs));
-                } else {
-                    let nexts = redstone_node.propagation_bound(Some(&new_world));
-                    next_queue.push((new_world, new_prevs, nexts));
-                }
-            }
-        }
-        queue = config.route_step_sampling_policy.sample(next_queue);
-        step += 1;
-    }
-
-    candidates
-}
-
-fn generate_or_routes_debug(
-    config: &LocalPlacerConfig,
-    world: &World3D,
-    from: Position,
-    to: Position,
-) -> (Vec<(World3D, Vec<Position>)>, RouteDebug) {
-    let (mut queue, mut debug) = generate_or_routes_init_states_debug(world, from, to);
+) -> RouteResult {
+    let (mut queue, mut debug) = generate_or_routes_init_states(world, from, to);
     debug.route_calls = 1;
     debug.route_samples.push((from, to));
     debug.initial_states = queue.len();
@@ -721,11 +599,16 @@ fn generate_or_routes_debug(
                     continue;
                 }
 
-                let Some((new_world, redstone_node)) =
-                    place_redstone_with_cobble_debug(&world, bound, prev_pos, to, &mut debug)
-                else {
-                    continue;
-                };
+                let (new_world, redstone_node) =
+                    match place_redstone_with_cobble(&world, bound, prev_pos, to) {
+                        PlaceRedstoneResult::Placed(new_world, redstone_node) => {
+                            (new_world, redstone_node)
+                        }
+                        PlaceRedstoneResult::Rejected(reason) => {
+                            debug.reject(reason);
+                            continue;
+                        }
+                    };
 
                 let new_prevs = prevs
                     .iter()
@@ -751,54 +634,18 @@ fn generate_or_routes_debug(
     }
 
     debug.candidates_found = candidates.len();
-    (candidates, debug)
+    RouteResult {
+        routes: candidates,
+        debug,
+    }
+}
+
+struct RouteResult {
+    routes: Vec<(World3D, Vec<Position>)>,
+    debug: RouteDebug,
 }
 
 fn generate_or_routes_init_states(
-    world: &World3D,
-    from: Position,
-    to: Position,
-) -> Vec<(World3D, Vec<Position>, Vec<PlaceBound>)> {
-    let from_node = PlacedNode::new(from, world[from]);
-    let to_node = PlacedNode::new(to, world[to]);
-    assert!(from_node.is_diode() && to_node.is_diode());
-
-    let boolean_comb = [false, true];
-
-    boolean_comb
-        .iter()
-        .cartesian_product(boolean_comb.iter())
-        .flat_map(|(input_top_cobble, output_top_cobble)| {
-            let mut new_world = Cow::Borrowed(world);
-
-            if *input_top_cobble {
-                let cobble_node = try_generate_cobble_node(world, from.up(), &[from])?;
-                place_node(new_world.to_mut(), cobble_node);
-            }
-
-            if *output_top_cobble {
-                let cobble_node = try_generate_cobble_node(world, to.up(), &[to])?;
-                place_node(new_world.to_mut(), cobble_node);
-            }
-
-            let bounds = if *input_top_cobble {
-                from.up()
-                    .cardinal()
-                    .into_iter()
-                    // Cobble 위쪽에 redstone을 배치하는 케이스
-                    .chain(Some(from.up().up()))
-                    .map(|pos| PlaceBound(PropagateType::Soft, pos, pos.diff(from)))
-                    .collect_vec()
-            } else {
-                from_node.propagation_bound(Some(world))
-            };
-
-            Some((new_world.into_owned(), vec![from], bounds))
-        })
-        .collect()
-}
-
-fn generate_or_routes_init_states_debug(
     world: &World3D,
     from: Position,
     to: Position,
@@ -867,74 +714,43 @@ fn place_redstone_with_cobble(
     bound: PlaceBound,
     prev: Position,
     to: Position,
-) -> Option<(World3D, PlacedNode)> {
-    let cobble_pos = bound.position().walk(Direction::Bottom)?;
-    // 첫 번째 step에서 torch 위쪽에 cobble + redstone이 놓인 경우 예외처리
-    let cobble_except = (world[prev].kind.is_torch())
-        .then_some(vec![cobble_pos, prev])
-        .unwrap_or_default();
-    let cobble_node = try_generate_cobble_node(world, cobble_pos, &cobble_except)?;
-    let mut new_world = world.clone();
-    place_node(&mut new_world, cobble_node);
-
-    let bound_pos = bound.position();
-    let bound_back_pos = bound_pos.walk(bound.direction()).unwrap();
-    let redstone_node = PlacedNode::new_redstone(bound_pos);
-    let except = [prev, bound_back_pos, bound_pos, to, to.up()]
-        .into_iter()
-        .collect();
-    if redstone_node.has_conflict(&new_world, &except) || redstone_node.has_short(world, &except) {
-        return None;
-    }
-    place_node(&mut new_world, redstone_node);
-    new_world.update_redstone_states(prev);
-
-    Some((new_world, redstone_node))
-}
-
-fn place_redstone_with_cobble_debug(
-    world: &World3D,
-    bound: PlaceBound,
-    prev: Position,
-    to: Position,
-    debug: &mut RouteDebug,
-) -> Option<(World3D, PlacedNode)> {
+) -> PlaceRedstoneResult {
     let Some(cobble_pos) = bound.position().walk(Direction::Bottom) else {
-        debug.reject(RouteRejectReason::NoBottomForCobble);
-        return None;
+        return PlaceRedstoneResult::Rejected(RouteRejectReason::NoBottomForCobble);
     };
+    // Allow the first step to place cobble and redstone adjacent to a torch.
     let cobble_except = (world[prev].kind.is_torch())
         .then_some(vec![cobble_pos, prev])
         .unwrap_or_default();
     let Some(cobble_node) = try_generate_cobble_node(world, cobble_pos, &cobble_except) else {
-        debug.reject(RouteRejectReason::CobbleConflict);
-        return None;
+        return PlaceRedstoneResult::Rejected(RouteRejectReason::CobbleConflict);
     };
     let mut new_world = world.clone();
     place_node(&mut new_world, cobble_node);
 
     let bound_pos = bound.position();
     let Some(bound_back_pos) = bound_pos.walk(bound.direction()) else {
-        debug.reject(RouteRejectReason::RedstoneConflict);
-        return None;
+        return PlaceRedstoneResult::Rejected(RouteRejectReason::RedstoneConflict);
     };
     let redstone_node = PlacedNode::new_redstone(bound_pos);
     let except = [prev, bound_back_pos, bound_pos, to, to.up()]
         .into_iter()
         .collect();
     if redstone_node.has_conflict(&new_world, &except) {
-        debug.reject(RouteRejectReason::RedstoneConflict);
-        return None;
+        return PlaceRedstoneResult::Rejected(RouteRejectReason::RedstoneConflict);
     }
     if redstone_node.has_short(world, &except) {
-        debug.reject(RouteRejectReason::ShortCircuit);
-        return None;
+        return PlaceRedstoneResult::Rejected(RouteRejectReason::ShortCircuit);
     }
-
     place_node(&mut new_world, redstone_node);
     new_world.update_redstone_states(prev);
 
-    Some((new_world, redstone_node))
+    PlaceRedstoneResult::Placed(new_world, redstone_node)
+}
+
+enum PlaceRedstoneResult {
+    Placed(World3D, PlacedNode),
+    Rejected(RouteRejectReason),
 }
 
 pub struct LocalPlacerCostEstimator<'a> {
