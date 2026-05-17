@@ -4,6 +4,46 @@ import { toStructureModel } from './nbt/toStructure';
 import { StructureViewer } from './render/StructureViewer';
 import type { StructureBlock } from './types';
 
+interface DroppedFileSystemEntry {
+  readonly fullPath: string;
+  readonly isDirectory: boolean;
+  readonly isFile: boolean;
+  readonly name: string;
+}
+
+interface DroppedFileSystemFileEntry extends DroppedFileSystemEntry {
+  readonly isDirectory: false;
+  readonly isFile: true;
+  file(successCallback: (file: File) => void, errorCallback?: (error: DOMException) => void): void;
+}
+
+interface DroppedFileSystemDirectoryEntry extends DroppedFileSystemEntry {
+  readonly isDirectory: true;
+  readonly isFile: false;
+  createReader(): DroppedFileSystemDirectoryReader;
+}
+
+interface DroppedFileSystemDirectoryReader {
+  readEntries(
+    successCallback: (entries: DroppedFileSystemEntry[]) => void,
+    errorCallback?: (error: DOMException) => void,
+  ): void;
+}
+
+interface DroppedFileSystemFileHandle {
+  readonly kind: 'file';
+  readonly name: string;
+  getFile(): Promise<File>;
+}
+
+interface DroppedFileSystemDirectoryHandle {
+  readonly kind: 'directory';
+  readonly name: string;
+  values(): AsyncIterable<DroppedFileSystemHandle>;
+}
+
+type DroppedFileSystemHandle = DroppedFileSystemFileHandle | DroppedFileSystemDirectoryHandle;
+
 document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
   <main class="app-shell">
     <section id="drop-zone" class="workspace">
@@ -73,13 +113,149 @@ dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragging
 dropZone.addEventListener('drop', event => {
   event.preventDefault();
   dropZone.classList.remove('dragging');
-  const files = Array.from(event.dataTransfer?.files ?? []);
-  if (files.length > 1) {
-    renderFileBrowser(files);
-  } else if (files[0]) {
-    void openFile(files[0]);
-  }
+  void handleDrop(event).catch(error => {
+    viewerEmpty.classList.remove('hidden');
+    inspector.textContent = error instanceof Error ? error.message : String(error);
+  });
 });
+
+async function handleDrop(event: DragEvent): Promise<void> {
+  const dropped = await collectDroppedFiles(event.dataTransfer);
+  if (dropped.containsDirectory || dropped.files.length > 1) {
+    renderFileBrowser(dropped.files);
+  } else if (dropped.files[0]) {
+    void openFile(dropped.files[0]);
+  }
+}
+
+async function collectDroppedFiles(dataTransfer: DataTransfer | null): Promise<{
+  containsDirectory: boolean;
+  files: File[];
+}> {
+  if (!dataTransfer) return { containsDirectory: false, files: [] };
+
+  const fallbackFiles = Array.from(dataTransfer.files ?? []);
+  const items = Array.from(dataTransfer.items ?? []);
+
+  try {
+    const entries = items
+      .map(getDroppedEntry)
+      .filter((entry): entry is DroppedFileSystemEntry => Boolean(entry));
+
+    if (entries.length === 0) {
+      return { containsDirectory: false, files: fallbackFiles };
+    }
+
+    const files = await Promise.all(entries.map(entry => readDroppedEntry(entry)));
+    return {
+      containsDirectory: entries.some(entry => entry.isDirectory),
+      files: files.flat(),
+    };
+  } catch (error) {
+    console.warn('Falling back to dropped files after directory read failed.', error);
+  }
+
+  try {
+    const handleDrop = await collectDroppedFileSystemHandles(items);
+    if (handleDrop.files.length > 0) return handleDrop;
+  } catch (error) {
+    console.warn('File system handle drop failed.', error);
+  }
+
+  return { containsDirectory: false, files: fallbackFiles };
+}
+
+async function collectDroppedFileSystemHandles(items: DataTransferItem[]): Promise<{
+  containsDirectory: boolean;
+  files: File[];
+}> {
+  const handlePromises = items
+    .map(item => {
+      const itemWithHandle = item as unknown as {
+        getAsFileSystemHandle?: () => Promise<DroppedFileSystemHandle | null>;
+      };
+      return itemWithHandle.getAsFileSystemHandle?.call(item);
+    })
+    .filter((promise): promise is Promise<DroppedFileSystemHandle | null> => Boolean(promise));
+
+  if (handlePromises.length === 0) return { containsDirectory: false, files: [] };
+
+  const handles = (await Promise.all(handlePromises)).filter(
+    (handle): handle is DroppedFileSystemHandle => Boolean(handle),
+  );
+  const files = await Promise.all(handles.map(handle => readDroppedHandle(handle)));
+  return {
+    containsDirectory: handles.some(handle => handle.kind === 'directory'),
+    files: files.flat(),
+  };
+}
+
+async function readDroppedHandle(handle: DroppedFileSystemHandle, parentPath = ''): Promise<File[]> {
+  const path = parentPath ? `${parentPath}/${handle.name}` : handle.name;
+
+  if (handle.kind === 'file') {
+    const file = await handle.getFile();
+    setDroppedFilePath(file, path);
+    return [file];
+  }
+
+  const files: File[] = [];
+  for await (const child of handle.values()) {
+    files.push(...(await readDroppedHandle(child, path)));
+  }
+  return files;
+}
+
+function getDroppedEntry(item: DataTransferItem): DroppedFileSystemEntry | null {
+  const itemWithEntry = item as unknown as {
+    webkitGetAsEntry?: () => DroppedFileSystemEntry | null;
+  };
+  return itemWithEntry.webkitGetAsEntry?.call(item) ?? null;
+}
+
+async function readDroppedEntry(entry: DroppedFileSystemEntry, parentPath = ''): Promise<File[]> {
+  const path = parentPath ? `${parentPath}/${entry.name}` : entry.name;
+
+  if (entry.isFile) {
+    const file = await readDroppedFile(entry as DroppedFileSystemFileEntry);
+    setDroppedFilePath(file, path);
+    return [file];
+  }
+
+  if (!entry.isDirectory) return [];
+
+  const children = await readDroppedDirectory(entry as DroppedFileSystemDirectoryEntry);
+  const files = await Promise.all(children.map(child => readDroppedEntry(child, path)));
+  return files.flat();
+}
+
+function readDroppedFile(entry: DroppedFileSystemFileEntry): Promise<File> {
+  return new Promise((resolve, reject) => entry.file(resolve, reject));
+}
+
+async function readDroppedDirectory(entry: DroppedFileSystemDirectoryEntry): Promise<DroppedFileSystemEntry[]> {
+  const reader = entry.createReader();
+  const entries: DroppedFileSystemEntry[] = [];
+
+  while (true) {
+    const batch = await new Promise<DroppedFileSystemEntry[]>((resolve, reject) => {
+      reader.readEntries(resolve, reject);
+    });
+    if (batch.length === 0) return entries;
+    entries.push(...batch);
+  }
+}
+
+function setDroppedFilePath(file: File, path: string): void {
+  try {
+    Object.defineProperty(file, 'webkitRelativePath', {
+      configurable: true,
+      value: path,
+    });
+  } catch {
+    // Some browser File objects are not extensible. Falling back to file.name is fine.
+  }
+}
 
 function renderFileBrowser(files: File[]): void {
   const nbtFiles = files
