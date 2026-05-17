@@ -277,6 +277,15 @@ pub mod predefined_logics {
         ha.prepare_place()
     }
 
+    pub fn buffered_binary_half_adder_graph() -> eyre::Result<LogicGraph> {
+        let c = LogicGraph::from_stmt("a&b", "c")?;
+        let s = LogicGraph::from_stmt("(~(c|~a))|(~(c|~b))", "s")?;
+
+        let mut ha = c.clone();
+        ha.graph.merge(s.graph);
+        ha.prepare_place()
+    }
+
     pub fn buffered_half_adder_graph() -> eyre::Result<LogicGraph> {
         let and_0 = LogicGraph::from_stmt("a&b", "c")?;
         let xor_o = LogicGraph::from_stmt("(~(c|~a))|(~(c|~b))", "i")?;

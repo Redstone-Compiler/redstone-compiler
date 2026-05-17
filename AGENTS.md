@@ -4,6 +4,7 @@
 
 - Local placer improvement context: `docs/local_placer_improvement.md`
 - Hierarchical placer design and SCC/primitive layout strategy: `docs/hierarchical_placer_design.md`
+- Physical global P&R rebuild plan: `docs/superpowers/plans/2026-05-17-physical-global-pnr.md`
 
 ## Documentation
 

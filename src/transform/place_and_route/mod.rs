@@ -1,6 +1,9 @@
 pub mod estimate;
+pub mod io_panel;
 pub mod local_placer;
+pub mod macro_candidate;
 pub mod place_bound;
 pub mod placed_node;
+pub mod physical;
 pub mod sampling;
 pub mod utils;

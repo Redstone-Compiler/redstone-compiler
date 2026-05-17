@@ -141,6 +141,12 @@ pub const K_MAX_LOCAL_PLACE_NODE_COUNT: usize = 40;
 
 type PlacerQueue = Vec<(World3D, HashMap<GraphNodeId, Position>)>;
 
+#[derive(Debug, Clone)]
+pub struct LocalPlacement {
+    pub world: World3D,
+    pub node_positions: HashMap<GraphNodeId, Position>,
+}
+
 #[derive(Debug, Default)]
 pub struct LocalPlacerDebug {
     pub steps: Vec<StepDebug>,
@@ -319,12 +325,26 @@ impl LocalPlacer {
         self.generate_inner(dim, finish_step, Some(debug))
     }
 
-    fn generate_inner(
+    pub fn generate_placements(
+        &self,
+        dim: DimSize,
+        finish_step: Option<usize>,
+    ) -> Vec<LocalPlacement> {
+        self.generate_states_inner(dim, finish_step, None)
+            .into_iter()
+            .map(|(world, node_positions)| LocalPlacement {
+                world,
+                node_positions,
+            })
+            .collect()
+    }
+
+    fn generate_states_inner(
         &self,
         dim: DimSize,
         finish_step: Option<usize>,
         mut debug: Option<&mut LocalPlacerDebug>,
-    ) -> Vec<World3D> {
+    ) -> PlacerQueue {
         tracing::info!("generate starts");
 
         let mut queue = PlacerQueue::new();
@@ -349,7 +369,19 @@ impl LocalPlacer {
         }
 
         tracing::info!("generate complete");
-        queue.into_iter().map(|(world, _)| world).collect()
+        queue
+    }
+
+    fn generate_inner(
+        &self,
+        dim: DimSize,
+        finish_step: Option<usize>,
+        debug: Option<&mut LocalPlacerDebug>,
+    ) -> Vec<World3D> {
+        self.generate_states_inner(dim, finish_step, debug)
+            .into_iter()
+            .map(|(world, _)| world)
+            .collect()
     }
 
     fn do_step(&self, step: usize, queue: PlacerQueue) -> StepResult {
