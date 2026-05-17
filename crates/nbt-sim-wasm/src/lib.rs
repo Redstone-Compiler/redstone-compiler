@@ -5,6 +5,8 @@ use redstone_compiler::world::simulator::Simulator;
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
+const MAX_SIMULATION_CYCLES: usize = 512;
+
 #[derive(Serialize)]
 struct SwitchInfo {
     pos: [usize; 3],
@@ -19,10 +21,11 @@ pub struct NbtSimulator {
 #[wasm_bindgen]
 impl NbtSimulator {
     #[wasm_bindgen(constructor)]
-    pub fn new(gzip_nbt: &[u8]) -> Result<NbtSimulator, JsValue> {
-        let nbt = NBTRoot::from_gzip_bytes(gzip_nbt).map_err(to_js_error)?;
+    pub fn new(nbt_bytes: &[u8]) -> Result<NbtSimulator, JsValue> {
+        let nbt = NBTRoot::from_nbt_bytes(nbt_bytes).map_err(to_js_error)?;
         let world = nbt.to_world();
-        let sim = Simulator::from(&world).map_err(to_js_error)?;
+        let sim =
+            Simulator::from_with_max_cycles(&world, MAX_SIMULATION_CYCLES).map_err(to_js_error)?;
 
         Ok(Self { sim })
     }
@@ -56,7 +59,7 @@ impl NbtSimulator {
         is_on: bool,
     ) -> Result<JsValue, JsValue> {
         self.sim
-            .change_state(vec![(Position(x, y, z), is_on)])
+            .change_state_with_max_cycles(vec![(Position(x, y, z), is_on)], MAX_SIMULATION_CYCLES)
             .map_err(to_js_error)?;
         self.structure()
     }

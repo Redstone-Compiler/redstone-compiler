@@ -209,11 +209,32 @@ input {
 .panel-header {
   display: flex;
   align-items: center;
+  justify-content: space-between;
+  gap: 10px;
   min-height: 36px;
   padding: 9px 12px;
   border-bottom: 1px solid rgb(154 164 173 / 18%);
   color: #dce3e7;
   font-size: 13px;
+}
+
+.panel-action {
+  min-height: 24px;
+  padding: 3px 8px;
+  border: 1px solid rgb(154 164 173 / 34%);
+  border-radius: 4px;
+  background: rgb(211 50 50 / 24%);
+  color: #fff;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.panel-action:hover {
+  background: rgb(211 50 50 / 38%);
+}
+
+.panel-action.hidden {
+  display: none;
 }
 
 #inspector {

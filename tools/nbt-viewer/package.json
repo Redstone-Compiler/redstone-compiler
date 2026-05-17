@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "build:wasm": "node scripts/build-wasm.mjs",
     "dev": "vite --host 127.0.0.1",
     "build": "tsc && vite build",
     "prepare:mcmeta": "node scripts/prepare-mcmeta-from-vscode-cache.mjs",

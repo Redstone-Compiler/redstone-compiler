@@ -26,7 +26,14 @@ impl EventType {
     }
 
     fn is_on(&self) -> bool {
-        matches!(self, EventType::SoftOn | EventType::HardOn)
+        matches!(
+            self,
+            EventType::SoftOn
+                | EventType::HardOn
+                | EventType::TorchOn
+                | EventType::RedstoneOn { .. }
+                | EventType::RepeaterOn { .. }
+        )
     }
 
     fn is_redstone(&self) -> bool {
@@ -54,6 +61,14 @@ pub struct Simulator {
 
 impl Simulator {
     pub fn from(world: &World) -> eyre::Result<Self> {
+        Self::from_inner(world, None)
+    }
+
+    pub fn from_with_max_cycles(world: &World, max_cycles: usize) -> eyre::Result<Self> {
+        Self::from_inner(world, Some(max_cycles))
+    }
+
+    fn from_inner(world: &World, max_cycles: Option<usize>) -> eyre::Result<Self> {
         let mut sim = Self {
             queue: VecDeque::new(),
             world: world.into(),
@@ -70,7 +85,7 @@ impl Simulator {
         tracing::debug!("queue: {:?}", sim.queue);
 
         sim.fill_event_id();
-        sim.run()?;
+        sim.run_inner(max_cycles)?;
 
         Ok(sim)
     }
@@ -89,6 +104,22 @@ impl Simulator {
     }
 
     pub fn change_state(&mut self, states: Vec<(Position, bool)>) -> eyre::Result<()> {
+        self.change_state_inner(states, None)
+    }
+
+    pub fn change_state_with_max_cycles(
+        &mut self,
+        states: Vec<(Position, bool)>,
+        max_cycles: usize,
+    ) -> eyre::Result<()> {
+        self.change_state_inner(states, Some(max_cycles))
+    }
+
+    fn change_state_inner(
+        &mut self,
+        states: Vec<(Position, bool)>,
+        max_cycles: Option<usize>,
+    ) -> eyre::Result<()> {
         self.queue.push_back(VecDeque::new());
 
         for (pos, value) in states {
@@ -139,7 +170,7 @@ impl Simulator {
 
         self.fill_event_id();
 
-        self.run()?;
+        self.run_inner(max_cycles)?;
 
         Ok(())
     }
@@ -149,9 +180,21 @@ impl Simulator {
     }
 
     pub fn run(&mut self) -> eyre::Result<usize> {
+        self.run_inner(None)
+    }
+
+    pub fn run_with_max_cycles(&mut self, max_cycles: usize) -> eyre::Result<usize> {
+        self.run_inner(Some(max_cycles))
+    }
+
+    fn run_inner(&mut self, max_cycles: Option<usize>) -> eyre::Result<usize> {
         let mut local_cycle = 0;
 
         while !self.queue.is_empty() {
+            if max_cycles.is_some_and(|max_cycles| local_cycle >= max_cycles) {
+                eyre::bail!("simulation exceeded max cycle limit ({local_cycle})");
+            }
+
             self.consume_events()?;
             local_cycle += 1;
             tracing::info!("simulator cycle: {local_cycle}/{}", self.cycle);
@@ -317,6 +360,18 @@ impl Simulator {
         if event.event_type.is_on() {
             block.count_up(event.event_type.is_hard())?;
         } else {
+            let BlockKind::Cobble {
+                on_count,
+                on_base_count,
+            } = block.kind
+            else {
+                unreachable!()
+            };
+
+            if on_count == 0 || (is_hard && on_base_count == 0) {
+                return Ok(());
+            }
+
             block.count_down(event.event_type.is_hard())?;
         }
 
@@ -449,6 +504,10 @@ impl Simulator {
                     eyre::bail!("unreachable");
                 };
 
+                if *on_count == 0 {
+                    return Ok(());
+                }
+
                 *on_count -= 1;
 
                 if *on_count == 0 {
@@ -517,6 +576,10 @@ impl Simulator {
                 else {
                     eyre::bail!("unreachable");
                 };
+
+                if *strength == 0 {
+                    return Ok(());
+                }
 
                 if *on_count == 0 {
                     *strength = 0;
@@ -589,7 +652,12 @@ impl Simulator {
             eyre::bail!("unreachable");
         };
 
-        *is_on = !event.event_type.is_on();
+        let next_is_on = !event.event_type.is_on();
+        if *is_on == next_is_on {
+            return Ok(());
+        }
+
+        *is_on = next_is_on;
 
         match block.direction {
             Direction::Bottom => event.target_position.cardinal(),

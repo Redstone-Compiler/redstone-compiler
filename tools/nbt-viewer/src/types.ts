@@ -1,6 +1,7 @@
 export type ParsedNbt = {
   fileName: string;
   byteLength: number;
+  bytes: Uint8Array;
   parseType: string;
   root: unknown;
 };

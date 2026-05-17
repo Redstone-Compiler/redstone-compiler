@@ -3,7 +3,7 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
-use flate2::read::GzDecoder;
+use flate2::read::{GzDecoder, ZlibDecoder};
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use itertools::Itertools;
@@ -80,6 +80,22 @@ impl From<&World3D> for NBTRoot {
 }
 
 impl NBTRoot {
+    pub fn from_nbt_bytes(bytes: &[u8]) -> eyre::Result<NBTRoot> {
+        if let Ok(root) = fastnbt::from_bytes(bytes) {
+            return Ok(root);
+        }
+
+        if let Ok(root) = Self::from_gzip_bytes(bytes) {
+            return Ok(root);
+        }
+
+        let mut decoder = ZlibDecoder::new(bytes);
+        let mut decoded = vec![];
+        decoder.read_to_end(&mut decoded)?;
+
+        Ok(fastnbt::from_bytes(&decoded)?)
+    }
+
     pub fn from_gzip_bytes(bytes: &[u8]) -> eyre::Result<NBTRoot> {
         let mut decoder = GzDecoder::new(bytes);
         let mut decoded = vec![];
@@ -164,9 +180,16 @@ fn nbt_block_name(block: &Block) -> (String, String, Option<NBTPaletteProperty>)
                 ..Default::default()
             }),
         ),
-        BlockKind::Torch { .. } => {
+        BlockKind::Torch { is_on } => {
             if matches!(block.direction, Direction::Bottom) {
-                ("redstone_torch", "redstone_torch".to_owned(), None)
+                (
+                    "redstone_torch",
+                    format!("redstone_torch_{is_on}"),
+                    Some(NBTPaletteProperty {
+                        lit: Some(is_on.to_string()),
+                        ..Default::default()
+                    }),
+                )
             } else {
                 let facing = match block.direction {
                     Direction::East => "north",
@@ -179,9 +202,10 @@ fn nbt_block_name(block: &Block) -> (String, String, Option<NBTPaletteProperty>)
 
                 (
                     "redstone_wall_torch",
-                    format!("redstone_wall_torch_{facing}"),
+                    format!("redstone_wall_torch_{facing}_{is_on}"),
                     Some(NBTPaletteProperty {
                         facing: Some(facing),
+                        lit: Some(is_on.to_string()),
                         ..Default::default()
                     }),
                 )
@@ -258,6 +282,19 @@ fn world3d_to_nbt(world: &World3D) -> NBTRoot {
 }
 
 fn nbt_palette_to_block(palette: &NBTPalette) -> (BlockKind, Direction) {
+    let bool_property_or = |name: &str, default: bool| {
+        palette
+            .properties
+            .as_ref()
+            .and_then(|properties| match name {
+                "lit" => properties.lit.as_ref(),
+                "locked" => properties.locked.as_ref(),
+                "powered" => properties.powered.as_ref(),
+                _ => None,
+            })
+            .map_or(default, |value| value == "true")
+    };
+
     match &palette.name[..] {
         "minecraft:air" => (BlockKind::Air, Direction::None),
         "minecraft:stone"
@@ -280,11 +317,7 @@ fn nbt_palette_to_block(palette: &NBTPalette) -> (BlockKind, Direction) {
         ),
         "minecraft:lever" => (
             BlockKind::Switch {
-                is_on: palette
-                    .properties
-                    .as_ref()
-                    .and_then(|p| p.powered.as_ref().map(|p| p.eq("true").then_some(0)))
-                    .is_some(),
+                is_on: bool_property_or("powered", false),
             },
             if let Some(face) = &palette.properties.as_ref().unwrap().face {
                 match &face[..] {
@@ -342,21 +375,22 @@ fn nbt_palette_to_block(palette: &NBTPalette) -> (BlockKind, Direction) {
             (
                 BlockKind::Redstone {
                     on_count: 0,
-                    strength: if let Some(power) =
-                        palette.properties.as_ref().unwrap().power.as_ref()
-                    {
-                        power.parse().unwrap()
-                    } else {
-                        0
-                    },
+                    strength: 0,
                     state,
                 },
                 Direction::None,
             )
         }
-        "minecraft:redstone_torch" => (BlockKind::Torch { is_on: false }, Direction::Bottom),
+        "minecraft:redstone_torch" => (
+            BlockKind::Torch {
+                is_on: bool_property_or("lit", true),
+            },
+            Direction::Bottom,
+        ),
         "minecraft:redstone_wall_torch" => (
-            BlockKind::Torch { is_on: false },
+            BlockKind::Torch {
+                is_on: bool_property_or("lit", true),
+            },
             match &palette
                 .properties
                 .as_ref()
