@@ -24,6 +24,97 @@ impl LogicGraph {
         transform.optimize_cse()?;
         Ok(transform.finish())
     }
+
+    pub fn truth_table(&self) -> eyre::Result<LogicTruthTable> {
+        LogicTruthTable::from_graph(self)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogicTruthTable {
+    pub input_names: Vec<String>,
+    pub output_tables: HashMap<String, Vec<bool>>,
+}
+
+impl LogicTruthTable {
+    fn from_graph(graph: &LogicGraph) -> eyre::Result<Self> {
+        let mut inputs = graph
+            .nodes
+            .iter()
+            .filter_map(|node| match &node.kind {
+                GraphNodeKind::Input(name) => Some((node.id, name.clone())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        inputs.sort_by(|(_, a), (_, b)| a.cmp(b));
+
+        let mut outputs = graph
+            .nodes
+            .iter()
+            .filter_map(|node| match &node.kind {
+                GraphNodeKind::Output(name) => Some((node.id, name.clone())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        outputs.sort_by(|(_, a), (_, b)| a.cmp(b));
+
+        let mut output_tables = outputs
+            .iter()
+            .map(|(_, name)| (name.clone(), Vec::new()))
+            .collect::<HashMap<_, _>>();
+
+        for mask in 0..(1usize << inputs.len()) {
+            let mut values = HashMap::<GraphNodeId, bool>::new();
+            for (index, (input_id, _)) in inputs.iter().enumerate() {
+                values.insert(*input_id, (mask & (1 << index)) != 0);
+            }
+
+            for node_id in graph.topological_order() {
+                if values.contains_key(&node_id) {
+                    continue;
+                }
+
+                let node = graph.find_node_by_id(node_id).unwrap();
+                let value = match &node.kind {
+                    GraphNodeKind::Input(_) => continue,
+                    GraphNodeKind::Logic(logic) => match logic.logic_type {
+                        LogicType::Not => !values[&node.inputs[0]],
+                        LogicType::And => node.inputs.iter().all(|input| values[input]),
+                        LogicType::Or => node.inputs.iter().any(|input| values[input]),
+                        LogicType::Xor => {
+                            node.inputs.iter().filter(|input| values[input]).count() % 2 == 1
+                        }
+                    },
+                    GraphNodeKind::Output(_) => values[&node.inputs[0]],
+                    _ => eyre::bail!("unsupported node kind in truth table: {:?}", node.kind),
+                };
+                values.insert(node_id, value);
+            }
+
+            for (output_id, output_name) in &outputs {
+                output_tables
+                    .get_mut(output_name)
+                    .unwrap()
+                    .push(values[output_id]);
+            }
+        }
+
+        Ok(Self {
+            input_names: inputs.into_iter().map(|(_, name)| name).collect(),
+            output_tables,
+        })
+    }
+
+    pub fn output_table_set(&self) -> std::collections::HashSet<Vec<bool>> {
+        self.output_tables.values().cloned().collect()
+    }
+
+    pub fn contains_output_tables(&self, expected: &LogicTruthTable) -> bool {
+        self.input_names.len() == expected.input_names.len()
+            && self
+                .output_table_set()
+                .is_superset(&expected.output_table_set())
+    }
 }
 
 #[derive(Default)]
@@ -324,6 +415,46 @@ mod tests {
     use crate::graph::logic::LogicGraph;
     use crate::graph::Graph;
     use crate::transform::logic::LogicGraphTransformer;
+
+    #[test]
+    fn truth_table_reports_xor_output() -> eyre::Result<()> {
+        let graph = LogicGraph::from_stmt("a^b", "s")?;
+        let table = graph.truth_table()?;
+
+        assert_eq!(table.input_names, vec!["a", "b"]);
+        assert_eq!(table.output_tables["s"], vec![false, true, true, false]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn truth_table_can_compare_full_adder_outputs_by_function() -> eyre::Result<()> {
+        let graph = super::predefined_logics::buffered_full_adder_graph()?;
+        let table = graph.truth_table()?;
+        let sum = (0..8)
+            .map(|mask: usize| mask.count_ones() % 2 == 1)
+            .collect::<Vec<_>>();
+        let carry = (0..8)
+            .map(|mask: usize| mask.count_ones() >= 2)
+            .collect::<Vec<_>>();
+
+        assert!(table.output_table_set().contains(&sum));
+        assert!(table.output_table_set().contains(&carry));
+
+        Ok(())
+    }
+
+    #[test]
+    fn truth_table_can_check_required_output_tables() -> eyre::Result<()> {
+        let graph = super::predefined_logics::buffered_xor_graph()?;
+        let required = LogicGraph::from_stmt("a^b", "s")?;
+
+        assert!(graph
+            .truth_table()?
+            .contains_output_tables(&required.truth_table()?));
+
+        Ok(())
+    }
 
     #[test]
     fn unittest_logicgraph_full_adder() -> eyre::Result<()> {
