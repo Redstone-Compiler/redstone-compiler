@@ -95,8 +95,9 @@ input {
 }
 
 .switches-panel {
-  top: 58px;
+  top: 50%;
   right: 16px;
+  transform: translateY(-50%);
   width: min(320px, calc(100vw - 32px));
   max-height: min(38vh, 320px);
   overflow: hidden;
@@ -419,6 +420,7 @@ input {
   .switches-panel {
     top: 104px;
     right: 12px;
+    transform: none;
     width: calc(100vw - 24px);
     max-height: 28vh;
   }

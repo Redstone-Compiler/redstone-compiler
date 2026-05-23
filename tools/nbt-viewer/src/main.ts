@@ -126,6 +126,7 @@ const traceCycleInput = document.querySelector<HTMLInputElement>('#trace-cycle')
 const traceCycleLabel = document.querySelector<HTMLElement>('#trace-cycle-label')!;
 const tracePrevButton = document.querySelector<HTMLButtonElement>('#trace-prev')!;
 const traceNextButton = document.querySelector<HTMLButtonElement>('#trace-next')!;
+const switchesPanel = document.querySelector<HTMLDetailsElement>('#switches-panel')!;
 const switchesList = document.querySelector<HTMLElement>('#switches-list')!;
 const switchesCount = document.querySelector<HTMLElement>('#switches-count')!;
 
@@ -467,11 +468,13 @@ function renderSwitches(structure?: StructureModel): void {
   switchesCount.textContent = switches.length === 0 ? 'No switches' : `${switches.length} switches`;
 
   if (switches.length === 0) {
+    switchesPanel.open = false;
     switchesList.className = 'switches-list empty';
     switchesList.textContent = structure ? 'No switches in this NBT file.' : 'Open an NBT file to control switches.';
     return;
   }
 
+  switchesPanel.open = true;
   switchesList.className = 'switches-list';
   switches.forEach((block, index) => {
     const row = document.createElement('button');
