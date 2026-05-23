@@ -333,19 +333,33 @@ export class StructureViewer {
     this.lastFrameTime = time;
     if (this.movement.size === 0 || delta === 0) return;
 
-    const direction = vec3.fromValues(0, 0, 0);
-    if (this.movement.has('KeyW')) direction[2] += 1;
-    if (this.movement.has('KeyS')) direction[2] -= 1;
-    if (this.movement.has('KeyA')) direction[0] += 1;
-    if (this.movement.has('KeyD')) direction[0] -= 1;
-    if (this.movement.has('Space')) direction[1] -= 1;
-    if (this.movement.has('ShiftLeft') || this.movement.has('ShiftRight')) direction[1] += 1;
+    const direction = this.getKeyboardMovementDirection();
     if (vec3.squaredLength(direction) === 0) return;
 
     vec3.normalize(direction, direction);
     vec3.scale(direction, direction, delta * Math.max(0.01, this.cDist * 0.0016));
-    vec3.rotateY(direction, direction, [0, 0, 0], -this.cRot[0]);
     vec3.add(this.cPos, this.cPos, direction);
+  }
+
+  private getKeyboardMovementDirection(): vec3 {
+    const direction = vec3.create();
+    const cameraDirection = vec3.create();
+
+    if (this.movement.has('KeyW')) cameraDirection[2] += 1;
+    if (this.movement.has('KeyS')) cameraDirection[2] -= 1;
+    if (this.movement.has('KeyA')) cameraDirection[0] += 1;
+    if (this.movement.has('KeyD')) cameraDirection[0] -= 1;
+    if (vec3.squaredLength(cameraDirection) > 0) {
+      vec3.normalize(cameraDirection, cameraDirection);
+      vec3.rotateX(cameraDirection, cameraDirection, [0, 0, 0], -this.cRot[1]);
+      vec3.rotateY(cameraDirection, cameraDirection, [0, 0, 0], -this.cRot[0]);
+      vec3.add(direction, direction, cameraDirection);
+    }
+
+    if (this.movement.has('Space')) direction[1] -= 1;
+    if (this.movement.has('ShiftLeft') || this.movement.has('ShiftRight')) direction[1] += 1;
+
+    return direction;
   }
 
   private moveCameraByDrag(dx: number, dy: number): void {
