@@ -42,6 +42,7 @@ export class StructureViewer {
   private frame = 0;
   private dragMode?: DragMode;
   private dragPos?: vec2;
+  private readonly activePointers = new Map<number, vec2>();
   private lastFrameTime = 0;
   private readonly movement = new Set<string>();
   private cPos = vec3.create();
@@ -61,7 +62,8 @@ export class StructureViewer {
     canvas.addEventListener('pointerdown', event => this.onPointerDown(event));
     canvas.addEventListener('pointermove', event => this.onPointerMove(event));
     canvas.addEventListener('pointerup', event => this.onPointerUp(event));
-    canvas.addEventListener('pointerleave', () => this.endDrag());
+    canvas.addEventListener('pointercancel', event => this.onPointerUp(event));
+    canvas.addEventListener('pointerleave', event => this.onPointerUp(event));
     canvas.addEventListener('wheel', event => this.onWheel(event), { passive: false });
     window.addEventListener('keydown', event => this.onKeyDown(event));
     window.addEventListener('keyup', event => this.onKeyUp(event));
@@ -116,19 +118,54 @@ export class StructureViewer {
   }
 
   private onPointerDown(event: PointerEvent): void {
-    if (event.button !== 0 && event.button !== 2) return;
+    if (event.pointerType === 'mouse' && event.button !== 0 && event.button !== 2) return;
 
     event.preventDefault();
-    this.canvas.setPointerCapture(event.pointerId);
-    this.dragMode = event.button === 2 ? 'move' : 'rotate';
-    this.dragPos = vec2.fromValues(event.clientX, event.clientY);
+    try {
+      this.canvas.setPointerCapture(event.pointerId);
+    } catch {
+      // Synthetic pointer events used by tests may not have a browser-managed active pointer.
+    }
+    const pos = vec2.fromValues(event.clientX, event.clientY);
+    this.activePointers.set(event.pointerId, pos);
 
-    if (event.button === 0) {
+    if (this.activePointers.size === 1) {
+      this.dragMode = event.button === 2 ? 'move' : 'rotate';
+      this.dragPos = vec2.clone(pos);
+    } else {
+      this.dragMode = 'move';
+      this.dragPos = undefined;
+    }
+
+    if (event.button === 0 && this.activePointers.size === 1) {
       this.selectBlock(event.offsetX, event.offsetY);
     }
   }
 
   private onPointerMove(event: PointerEvent): void {
+    const currentPos = this.activePointers.get(event.pointerId);
+    if (!currentPos) return;
+
+    event.preventDefault();
+
+    const previousGesture = this.getTouchGesture();
+    vec2.set(currentPos, event.clientX, event.clientY);
+    const currentGesture = this.getTouchGesture();
+
+    if (previousGesture && currentGesture) {
+      const previousDistance = vec2.distance(previousGesture[0], previousGesture[1]);
+      const currentDistance = vec2.distance(currentGesture[0], currentGesture[1]);
+      const previousCenter = this.midpoint(previousGesture[0], previousGesture[1]);
+      const currentCenter = this.midpoint(currentGesture[0], currentGesture[1]);
+
+      if (previousDistance > 0 && currentDistance > 0) {
+        this.cDist = clamp(this.cDist * (previousDistance / currentDistance), 2, 400);
+      }
+      this.moveCameraByDrag(currentCenter[0] - previousCenter[0], currentCenter[1] - previousCenter[1]);
+      this.render();
+      return;
+    }
+
     if (!this.dragPos) return;
 
     const dx = (event.clientX - this.dragPos[0]) / 100;
@@ -147,15 +184,38 @@ export class StructureViewer {
   }
 
   private onPointerUp(event: PointerEvent): void {
-    this.endDrag();
+    this.activePointers.delete(event.pointerId);
     if (this.canvas.hasPointerCapture(event.pointerId)) {
       this.canvas.releasePointerCapture(event.pointerId);
+    }
+
+    if (this.activePointers.size === 0) {
+      this.endDrag();
+      return;
+    }
+
+    const remainingPointer = this.activePointers.values().next().value as vec2 | undefined;
+    if (remainingPointer) {
+      this.dragMode = 'rotate';
+      this.dragPos = vec2.clone(remainingPointer);
     }
   }
 
   private endDrag(): void {
+    this.activePointers.clear();
     this.dragMode = undefined;
     this.dragPos = undefined;
+  }
+
+  private getTouchGesture(): [vec2, vec2] | undefined {
+    if (this.activePointers.size < 2) return undefined;
+
+    const [first, second] = Array.from(this.activePointers.values());
+    return [vec2.clone(first), vec2.clone(second)];
+  }
+
+  private midpoint(a: vec2, b: vec2): vec2 {
+    return vec2.fromValues((a[0] + b[0]) / 2, (a[1] + b[1]) / 2);
   }
 
   private onWheel(event: WheelEvent): void {
