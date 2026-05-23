@@ -5,8 +5,9 @@
   "type": "module",
   "scripts": {
     "build:wasm": "node scripts/build-wasm.mjs",
-    "dev": "vite --host 127.0.0.1",
-    "build": "tsc && vite build",
+    "dev": "npm run prepare:examples && vite --host 127.0.0.1",
+    "build": "npm run prepare:examples && tsc && vite build",
+    "prepare:examples": "node scripts/prepare-examples.mjs",
     "prepare:mcmeta": "node scripts/prepare-mcmeta-from-vscode-cache.mjs",
     "preview": "vite preview --host 127.0.0.1"
   },
