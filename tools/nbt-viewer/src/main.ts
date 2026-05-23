@@ -77,7 +77,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
           </div>
           <button id="open-graphs" class="file-button graph-button" type="button">Graphs</button>
         </div>
-        <details id="switches-panel" class="floating-panel switches-panel">
+        <details id="switches-panel" class="floating-panel switches-panel" open>
           <summary>
             <span>Switches</span>
             <span id="switches-count">No switches</span>
@@ -241,6 +241,12 @@ openGraphsButton.addEventListener('click', () => {
 
 closeGraphsButton.addEventListener('click', () => {
   graphDialog.close();
+});
+
+graphDialog.addEventListener('click', event => {
+  if (event.target === graphDialog) {
+    graphDialog.close();
+  }
 });
 
 graphWorldTab.addEventListener('click', () => {
@@ -746,7 +752,7 @@ function renderSwitches(structure?: StructureModel): void {
   switchesCount.textContent = switches.length === 0 ? 'No switches' : `${switches.length} switches`;
 
   if (switches.length === 0) {
-    switchesPanel.open = false;
+    switchesPanel.open = !structure;
     switchesList.className = 'switches-list empty';
     switchesList.textContent = structure ? 'No switches in this NBT file.' : 'Open an NBT file to control switches.';
     return;
