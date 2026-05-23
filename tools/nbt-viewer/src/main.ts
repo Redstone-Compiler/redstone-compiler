@@ -1,8 +1,15 @@
 import './styles.css';
+import type { Viz } from '@viz-js/viz';
 import { loadNbtFile, stringifyNbt } from './nbt/loadNbt';
 import { toStructureModel } from './nbt/toStructure';
 import { StructureViewer } from './render/StructureViewer';
-import { NbtSimulation, NbtSimulationError, type SnapshotInfo, type TraceEntry } from './sim/NbtSimulation';
+import {
+  NbtSimulation,
+  NbtSimulationError,
+  type GraphDotInfo,
+  type SnapshotInfo,
+  type TraceEntry,
+} from './sim/NbtSimulation';
 import type { StructureBlock, StructureModel, StructurePaletteEntry } from './types';
 
 interface DroppedFileSystemEntry {
@@ -48,6 +55,7 @@ type TraceAnimation = {
   timer: number;
   token: number;
 };
+type GraphTab = 'world' | 'logic';
 
 const TRACE_ANIMATION_INTERVAL_MS = 50;
 
@@ -57,14 +65,17 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
       <section class="viewer-panel">
         <canvas id="structure-canvas"></canvas>
         <div class="floating-actions">
-          <label class="file-button">
-            Open Folder
-            <input id="folder-input" type="file" multiple />
-          </label>
-          <label class="file-button">
-            Open NBT
-            <input id="file-input" type="file" accept=".nbt,.dat,.schem,.schematic,.litematic,.mcstructure" />
-          </label>
+          <div class="file-actions-row">
+            <label class="file-button">
+              Open Folder
+              <input id="folder-input" type="file" multiple />
+            </label>
+            <label class="file-button">
+              Open NBT
+              <input id="file-input" type="file" accept=".nbt,.dat,.schem,.schematic,.litematic,.mcstructure" />
+            </label>
+          </div>
+          <button id="open-graphs" class="file-button graph-button" type="button">Graphs</button>
         </div>
         <details id="switches-panel" class="floating-panel switches-panel">
           <summary>
@@ -106,6 +117,31 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
         <div id="viewer-empty" class="viewer-empty">Drop an .nbt file or use Open NBT.</div>
       </section>
     </section>
+    <dialog id="graph-dialog" class="graph-dialog">
+      <div class="graph-dialog-surface">
+        <header class="graph-dialog-header">
+          <strong>Graphs</strong>
+          <button id="close-graphs" class="panel-action" type="button">Close</button>
+        </header>
+        <div class="graph-tabs" role="tablist" aria-label="Graph views">
+          <button id="graph-world-tab" class="graph-tab active" type="button" role="tab">World Graph</button>
+          <button id="graph-logic-tab" class="graph-tab" type="button" role="tab">Logic Graph</button>
+          <div class="graph-zoom-controls" aria-label="Graph zoom">
+            <button id="graph-zoom-out" class="graph-zoom-button" type="button" aria-label="Zoom out">-</button>
+            <button id="graph-zoom-reset" class="graph-zoom-value" type="button" aria-label="Reset zoom">100%</button>
+            <button id="graph-zoom-in" class="graph-zoom-button" type="button" aria-label="Zoom in">+</button>
+          </div>
+        </div>
+        <div id="graph-status" class="graph-status">Open an NBT file to inspect graphs.</div>
+        <div class="graph-viewer">
+          <div id="graph-output" class="graph-output"></div>
+          <div id="graph-minimap" class="graph-minimap hidden" aria-hidden="true">
+            <div id="graph-minimap-content" class="graph-minimap-content"></div>
+            <div id="graph-minimap-viewport" class="graph-minimap-viewport"></div>
+          </div>
+        </div>
+      </div>
+    </dialog>
   </main>
 `;
 
@@ -129,6 +165,19 @@ const traceNextButton = document.querySelector<HTMLButtonElement>('#trace-next')
 const switchesPanel = document.querySelector<HTMLDetailsElement>('#switches-panel')!;
 const switchesList = document.querySelector<HTMLElement>('#switches-list')!;
 const switchesCount = document.querySelector<HTMLElement>('#switches-count')!;
+const openGraphsButton = document.querySelector<HTMLButtonElement>('#open-graphs')!;
+const closeGraphsButton = document.querySelector<HTMLButtonElement>('#close-graphs')!;
+const graphDialog = document.querySelector<HTMLDialogElement>('#graph-dialog')!;
+const graphWorldTab = document.querySelector<HTMLButtonElement>('#graph-world-tab')!;
+const graphLogicTab = document.querySelector<HTMLButtonElement>('#graph-logic-tab')!;
+const graphZoomOutButton = document.querySelector<HTMLButtonElement>('#graph-zoom-out')!;
+const graphZoomResetButton = document.querySelector<HTMLButtonElement>('#graph-zoom-reset')!;
+const graphZoomInButton = document.querySelector<HTMLButtonElement>('#graph-zoom-in')!;
+const graphStatus = document.querySelector<HTMLElement>('#graph-status')!;
+const graphOutput = document.querySelector<HTMLElement>('#graph-output')!;
+const graphMinimap = document.querySelector<HTMLElement>('#graph-minimap')!;
+const graphMinimapContent = document.querySelector<HTMLElement>('#graph-minimap-content')!;
+const graphMinimapViewport = document.querySelector<HTMLElement>('#graph-minimap-viewport')!;
 
 const viewer = new StructureViewer(canvas);
 viewer.setSelectionHandler(renderSelection);
@@ -144,6 +193,12 @@ let traceBaseRoot: unknown;
 let isTracePreviewActive = false;
 let traceAnimation: TraceAnimation | undefined;
 let traceAnimationToken = 0;
+let graphDot: GraphDotInfo | undefined;
+let graphTab: GraphTab = 'world';
+let vizPromise: Promise<Viz> | undefined;
+let graphMinimapScale = 1;
+let isDraggingGraphMinimap = false;
+let graphZoom = 1;
 
 folderInput.setAttribute('webkitdirectory', '');
 folderInput.setAttribute('directory', '');
@@ -179,6 +234,225 @@ traceNextButton.addEventListener('click', () => {
   traceCycleInput.value = String(Math.min(traceCycles.length - 1, Number(traceCycleInput.value) + 1));
   void renderTraceCycle(Number(traceCycleInput.value));
 });
+
+openGraphsButton.addEventListener('click', () => {
+  void openGraphDialog();
+});
+
+closeGraphsButton.addEventListener('click', () => {
+  graphDialog.close();
+});
+
+graphWorldTab.addEventListener('click', () => {
+  void setGraphTab('world');
+});
+
+graphLogicTab.addEventListener('click', () => {
+  void setGraphTab('logic');
+});
+
+graphZoomOutButton.addEventListener('click', () => {
+  setGraphZoom(graphZoom - 0.25);
+});
+
+graphZoomResetButton.addEventListener('click', () => {
+  setGraphZoom(1);
+});
+
+graphZoomInButton.addEventListener('click', () => {
+  setGraphZoom(graphZoom + 0.25);
+});
+
+graphOutput.addEventListener('scroll', () => {
+  updateGraphMinimapViewport();
+});
+
+graphMinimap.addEventListener('pointerdown', event => {
+  if (graphMinimap.classList.contains('hidden')) return;
+
+  isDraggingGraphMinimap = true;
+  graphMinimap.setPointerCapture(event.pointerId);
+  scrollGraphFromMinimap(event);
+});
+
+graphMinimap.addEventListener('pointermove', event => {
+  if (!isDraggingGraphMinimap) return;
+
+  scrollGraphFromMinimap(event);
+});
+
+graphMinimap.addEventListener('pointerup', event => {
+  isDraggingGraphMinimap = false;
+  graphMinimap.releasePointerCapture(event.pointerId);
+});
+
+graphMinimap.addEventListener('pointercancel', event => {
+  isDraggingGraphMinimap = false;
+  graphMinimap.releasePointerCapture(event.pointerId);
+});
+
+async function openGraphDialog(): Promise<void> {
+  if (!graphDialog.open) graphDialog.showModal();
+
+  if (!currentNbtBytes) {
+    graphDot = undefined;
+    graphOutput.replaceChildren();
+    graphStatus.textContent = 'Open an NBT file before viewing graphs.';
+    updateGraphTabs();
+    return;
+  }
+
+  if (!graphDot) {
+    graphOutput.replaceChildren();
+    graphStatus.textContent = 'Generating graphs...';
+    try {
+      graphDot = await NbtSimulation.graphDot(currentNbtBytes);
+    } catch (error) {
+      graphStatus.textContent = error instanceof Error ? error.message : String(error);
+      return;
+    }
+  }
+
+  await renderGraphTab();
+}
+
+async function setGraphTab(nextTab: GraphTab): Promise<void> {
+  graphTab = nextTab;
+  updateGraphTabs();
+  await renderGraphTab();
+}
+
+async function renderGraphTab(): Promise<void> {
+  updateGraphTabs();
+  graphOutput.replaceChildren();
+  clearGraphMinimap();
+
+  if (!graphDot) {
+    graphStatus.textContent = currentNbtBytes ? 'Generating graphs...' : 'Open an NBT file before viewing graphs.';
+    return;
+  }
+
+  graphStatus.textContent = graphTab === 'logic' ? 'Logic Graph' : 'World Graph';
+
+  try {
+    const dot = graphTab === 'logic' ? graphDot.logicDot : graphDot.worldDot;
+    const viz = await loadViz();
+    const svg = viz.renderSVGElement(dot, { engine: 'dot' });
+    graphOutput.append(svg);
+    applyGraphZoom();
+    renderGraphMinimap(svg);
+  } catch (error) {
+    graphStatus.textContent = error instanceof Error ? error.message : String(error);
+  }
+}
+
+async function loadViz(): Promise<Viz> {
+  vizPromise ??= import('@viz-js/viz').then(module => module.instance());
+  return vizPromise;
+}
+
+function setGraphZoom(nextZoom: number): void {
+  graphZoom = Math.max(0.25, Math.min(3, nextZoom));
+  applyGraphZoom({ refreshMinimap: true });
+}
+
+function applyGraphZoom(options: { refreshMinimap?: boolean } = {}): void {
+  graphZoomResetButton.textContent = `${Math.round(graphZoom * 100)}%`;
+  graphZoomOutButton.disabled = graphZoom <= 0.25;
+  graphZoomInButton.disabled = graphZoom >= 3;
+
+  const svg = graphOutput.querySelector<SVGSVGElement>('svg');
+  if (svg) {
+    const baseWidth = readGraphBaseSize(svg, 'width');
+    const baseHeight = readGraphBaseSize(svg, 'height');
+    svg.style.width = `${baseWidth * graphZoom}px`;
+    svg.style.height = `${baseHeight * graphZoom}px`;
+    requestAnimationFrame(() => {
+      if (options.refreshMinimap) {
+        renderGraphMinimap(svg);
+      } else {
+        updateGraphMinimapViewport();
+      }
+    });
+    return;
+  }
+
+}
+
+function readGraphBaseSize(svg: SVGSVGElement, dimension: 'width' | 'height'): number {
+  const dataKey = `base${dimension[0].toUpperCase()}${dimension.slice(1)}`;
+  const cached = Number(svg.dataset[dataKey]);
+  if (Number.isFinite(cached) && cached > 0) return cached;
+
+  const rect = svg.getBoundingClientRect();
+  const measured = dimension === 'width' ? rect.width : rect.height;
+  const fallback = dimension === 'width' ? graphOutput.clientWidth : graphOutput.clientHeight;
+  const value = Math.max(measured / graphZoom, fallback, 1);
+  svg.dataset[dataKey] = String(value);
+  return value;
+}
+
+function renderGraphMinimap(svg: SVGSVGElement): void {
+  graphMinimapContent.replaceChildren();
+  const clone = svg.cloneNode(true) as SVGSVGElement;
+  graphMinimapContent.append(clone);
+  graphMinimap.classList.remove('hidden');
+
+  requestAnimationFrame(() => {
+    const contentWidth = Math.max(graphOutput.scrollWidth, 1);
+    const contentHeight = Math.max(graphOutput.scrollHeight, 1);
+    const minimapWidth = graphMinimapContent.clientWidth;
+    const minimapHeight = graphMinimapContent.clientHeight;
+    graphMinimapScale = Math.min(minimapWidth / contentWidth, minimapHeight / contentHeight);
+
+    clone.style.width = `${contentWidth * graphMinimapScale}px`;
+    clone.style.height = `${contentHeight * graphMinimapScale}px`;
+    updateGraphMinimapViewport();
+  });
+}
+
+function updateGraphMinimapViewport(): void {
+  if (graphMinimap.classList.contains('hidden')) return;
+
+  graphMinimapViewport.style.width = `${graphOutput.clientWidth * graphMinimapScale}px`;
+  graphMinimapViewport.style.height = `${graphOutput.clientHeight * graphMinimapScale}px`;
+  graphMinimapViewport.style.transform = `translate(${graphOutput.scrollLeft * graphMinimapScale}px, ${
+    graphOutput.scrollTop * graphMinimapScale
+  }px)`;
+}
+
+function scrollGraphFromMinimap(event: PointerEvent): void {
+  event.preventDefault();
+  if (graphMinimapScale <= 0) return;
+
+  const minimapContentBox = graphMinimapContent.getBoundingClientRect();
+  const x = Math.max(0, Math.min(minimapContentBox.width, event.clientX - minimapContentBox.left));
+  const y = Math.max(0, Math.min(minimapContentBox.height, event.clientY - minimapContentBox.top));
+  graphOutput.scrollLeft = x / graphMinimapScale - graphOutput.clientWidth / 2;
+  graphOutput.scrollTop = y / graphMinimapScale - graphOutput.clientHeight / 2;
+  updateGraphMinimapViewport();
+}
+
+function clearGraphMinimap(): void {
+  graphMinimap.classList.add('hidden');
+  graphMinimapContent.replaceChildren();
+  graphMinimapViewport.removeAttribute('style');
+  graphMinimapScale = 1;
+  isDraggingGraphMinimap = false;
+}
+
+function updateGraphTabs(): void {
+  const tabs: Array<[HTMLButtonElement, GraphTab]> = [
+    [graphWorldTab, 'world'],
+    [graphLogicTab, 'logic'],
+  ];
+
+  for (const [button, tab] of tabs) {
+    const active = tab === graphTab;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-selected', String(active));
+  }
+}
 
 async function toggleSelectedSwitch(): Promise<void> {
   if (!selectedBlock || !currentNbtBytes) return;
@@ -402,6 +676,8 @@ async function openFile(file: File, selectedEntry?: Element | null): Promise<voi
     simulation = undefined;
     currentNbtBytes = parsed.bytes;
     currentRoot = parsed.root;
+    graphDot = undefined;
+    graphTab = 'world';
 
     markSelectedFile(selectedEntry);
 
@@ -425,6 +701,8 @@ async function openFile(file: File, selectedEntry?: Element | null): Promise<voi
     simulation = undefined;
     currentNbtBytes = undefined;
     currentRoot = undefined;
+    graphDot = undefined;
+    graphTab = 'world';
     selectedBlock = undefined;
     toggleSwitchButton.classList.add('hidden');
     viewerEmpty.classList.remove('hidden');

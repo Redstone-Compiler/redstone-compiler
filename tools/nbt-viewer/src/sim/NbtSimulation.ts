@@ -4,6 +4,7 @@ type WasmModule = {
   default: (moduleOrPath?: string | URL | Request | Response | WebAssembly.Module) => Promise<unknown>;
   NbtSimulator: {
     new (nbtBytes: Uint8Array): WasmSimulator;
+    graph_dot(nbtBytes: Uint8Array): RawGraphDotInfo;
     trace_init(nbtBytes: Uint8Array): TraceReport;
   };
 };
@@ -44,6 +45,16 @@ export type SnapshotInfo = {
   root: unknown;
 };
 
+type RawGraphDotInfo = {
+  world_dot: string;
+  logic_dot: string;
+};
+
+export type GraphDotInfo = {
+  worldDot: string;
+  logicDot: string;
+};
+
 export class NbtSimulationError extends Error {
   constructor(message: string, readonly trace: TraceEntry[], readonly snapshots: SnapshotInfo[]) {
     super(message);
@@ -75,6 +86,17 @@ function samePos(a: [number, number, number], b: [number, number, number]): bool
 
 export class NbtSimulation {
   private constructor(private readonly sim: WasmSimulator) {}
+
+  static async graphDot(nbtBytes: Uint8Array): Promise<GraphDotInfo> {
+    const wasm = await loadWasmModule();
+    await wasm.default(resolveAssetPath(wasmBinaryPath));
+    const graphDot = wasm.NbtSimulator.graph_dot(nbtBytes);
+
+    return {
+      worldDot: graphDot.world_dot,
+      logicDot: graphDot.logic_dot,
+    };
+  }
 
   static async create(nbtBytes: Uint8Array): Promise<NbtSimulation> {
     const wasm = await loadWasmModule();
