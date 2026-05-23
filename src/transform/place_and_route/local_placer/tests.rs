@@ -1,6 +1,8 @@
 use super::*;
 use crate::graph::logic::LogicGraph;
-use crate::graph::GraphNodeKind;
+use crate::graph::{Graph, GraphNode, GraphNodeKind};
+use crate::sequential::layout::SequentialMacro;
+use crate::sequential::{SequentialPrimitive, SequentialType};
 use crate::world::block::{Block, BlockKind, Direction};
 use crate::world::position::{DimSize, Position};
 use crate::world::World3D;
@@ -184,8 +186,8 @@ fn generate_routes_to_cobble_accepts_direct_hard_connection() {
 fn generate_routes_to_cobble_can_use_redstone_route() {
     let mut world = empty_world();
     let source = Position(1, 1, 1);
-    let torch_pos = Position(3, 1, 1);
-    let cobble_pos = Position(3, 1, 0);
+    let torch_pos = Position(4, 1, 1);
+    let cobble_pos = Position(3, 1, 1);
     let mut config = config(1);
     config.not_route_strategy = NotRouteStrategy::RedstoneOnly;
     place_node(
@@ -193,35 +195,33 @@ fn generate_routes_to_cobble_can_use_redstone_route() {
         PlacedNode::new(source, torch(Direction::Bottom)),
     );
     place_node(&mut world, PlacedNode::new_cobble(cobble_pos));
-    place_node(
-        &mut world,
-        PlacedNode::new(torch_pos, torch(Direction::Bottom)),
-    );
 
     let routes = generate_routes_to_cobble(&config, &world, source, torch_pos, cobble_pos);
 
-    assert!(routes.iter().any(|(_, pos)| *pos == Position(2, 1, 1)));
+    assert!(routes.iter().any(|(world, pos)| {
+        world[*pos].kind.is_redstone()
+            && PlacedNode::new(*pos, world[*pos]).has_connection_with(world, cobble_pos)
+    }));
 }
 
 #[test]
-fn generate_routes_to_cobble_skips_redstone_route_for_non_diode_source() {
+fn generate_routes_to_cobble_can_extend_redstone_source() {
     let mut world = empty_world();
     let source = Position(1, 1, 1);
-    let torch_pos = Position(3, 1, 1);
-    let cobble_pos = Position(3, 1, 0);
+    let torch_pos = Position(4, 1, 1);
+    let cobble_pos = Position(3, 1, 1);
     let mut config = config(1);
     config.not_route_strategy = NotRouteStrategy::DirectAndRedstone;
     place_node(&mut world, PlacedNode::new_cobble(Position(1, 1, 0)));
     place_node(&mut world, PlacedNode::new_redstone(source));
     place_node(&mut world, PlacedNode::new_cobble(cobble_pos));
-    place_node(
-        &mut world,
-        PlacedNode::new(torch_pos, torch(Direction::Bottom)),
-    );
 
     let routes = generate_routes_to_cobble(&config, &world, source, torch_pos, cobble_pos);
 
-    assert!(routes.is_empty());
+    assert!(routes.iter().any(|(world, pos)| {
+        world[*pos].kind.is_redstone()
+            && PlacedNode::new(*pos, world[*pos]).has_connection_with(world, cobble_pos)
+    }));
 }
 
 #[test]
@@ -346,4 +346,162 @@ fn generate_or_routes_finds_adjacent_torch_route() {
     assert!(!result.routes.is_empty());
     assert!(result.debug.candidates_found > 0);
     assert_eq!(result.debug.route_calls, 1);
+}
+
+#[test]
+fn local_placer_accepts_q_only_sequential_primitives_with_macro_candidates() {
+    let mut graph = Graph {
+        nodes: vec![
+            GraphNode {
+                id: 0,
+                kind: GraphNodeKind::Input("s".to_owned()),
+                outputs: vec![2],
+                ..Default::default()
+            },
+            GraphNode {
+                id: 1,
+                kind: GraphNodeKind::Input("r".to_owned()),
+                outputs: vec![2],
+                ..Default::default()
+            },
+            GraphNode {
+                id: 2,
+                kind: GraphNodeKind::Sequential(SequentialPrimitive::new(
+                    SequentialType::RsLatch,
+                    vec!["s".to_owned(), "r".to_owned()],
+                    vec!["q".to_owned()],
+                )),
+                inputs: vec![0, 1],
+                outputs: vec![3],
+                ..Default::default()
+            },
+            GraphNode {
+                id: 3,
+                kind: GraphNodeKind::Output("q".to_owned()),
+                inputs: vec![2],
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    graph.build_inputs();
+    graph.build_outputs();
+
+    let placer = LocalPlacer::new(LogicGraph { graph }, config(1));
+
+    assert!(placer.is_ok());
+}
+
+#[test]
+fn local_placer_rejects_multi_output_sequential_primitives_until_edges_are_port_aware() {
+    let mut graph = Graph {
+        nodes: vec![GraphNode {
+            id: 0,
+            kind: GraphNodeKind::Sequential(SequentialPrimitive::rs_latch()),
+            outputs: vec![1],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    graph.build_inputs();
+    graph.build_outputs();
+
+    let err = match LocalPlacer::new(LogicGraph { graph }, config(1)) {
+        Ok(_) => panic!("expected multi-output sequential primitive to be rejected"),
+        Err(err) => err,
+    };
+
+    assert!(err
+        .to_string()
+        .contains("only one exposed sequential output"));
+}
+
+#[test]
+fn local_placer_rejects_sequential_primitives_without_macro_candidates() {
+    let mut graph = Graph {
+        nodes: vec![GraphNode {
+            id: 0,
+            kind: GraphNodeKind::Sequential(SequentialPrimitive::new(
+                SequentialType::DLatch,
+                Vec::new(),
+                vec!["q".to_owned()],
+            )),
+            outputs: vec![1],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    graph.build_inputs();
+    graph.build_outputs();
+
+    let err = match LocalPlacer::new(LogicGraph { graph }, config(1)) {
+        Ok(_) => panic!("expected unsupported sequential primitive to be rejected"),
+        Err(err) => err,
+    };
+
+    assert!(err
+        .to_string()
+        .contains("sequential primitive placement is not implemented"));
+}
+
+#[test]
+fn sequential_macro_generation_registers_output_port_positions() {
+    let node = GraphNode {
+        id: 7,
+        kind: GraphNodeKind::Sequential(SequentialPrimitive::new(
+            SequentialType::RsLatch,
+            Vec::new(),
+            vec!["q".to_owned()],
+        )),
+        ..Default::default()
+    };
+    let GraphNodeKind::Sequential(sequential) = &node.kind else {
+        panic!("expected sequential node");
+    };
+
+    let generated = generate_sequential_macro_routes(
+        &config(1),
+        &node,
+        sequential,
+        &World3D::new(DimSize(8, 8, 4)),
+        &PlacementState::default(),
+    );
+
+    assert!(!generated.is_empty());
+    assert!(generated[0].1.node_position(node.id).is_some());
+    assert!(generated[0].1.port_position(node.id, "q").is_some());
+}
+
+#[test]
+fn sequential_macro_routes_input_ports_from_existing_sources() {
+    let mut world = World3D::new(DimSize(12, 9, 4));
+    let source_s = Position(11, 3, 1);
+    let source_r = Position(0, 3, 1);
+    place_node(
+        &mut world,
+        PlacedNode::new(source_s, switch(Direction::West)),
+    );
+    place_node(
+        &mut world,
+        PlacedNode::new(source_r, switch(Direction::East)),
+    );
+
+    let sequential = SequentialPrimitive::new(
+        SequentialType::RsLatch,
+        vec!["s".to_owned(), "r".to_owned()],
+        vec!["q".to_owned()],
+    );
+    let node = GraphNode {
+        id: 2,
+        kind: GraphNodeKind::Sequential(sequential.clone()),
+        inputs: vec![0, 1],
+        ..Default::default()
+    };
+    let candidate = SequentialMacro::candidates(&sequential).remove(0);
+    let placed = place_sequential_macro(&world, &candidate, Position(2, 1, 0)).unwrap();
+    let state = [(0, source_s), (1, source_r)].into_iter().collect();
+
+    let routed = route_sequential_inputs(&config(4), &node, &sequential, &state, &placed);
+
+    assert!(!routed.is_empty());
 }

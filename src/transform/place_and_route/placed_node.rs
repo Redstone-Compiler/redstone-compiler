@@ -146,7 +146,13 @@ impl PlacedNode {
 
     pub fn has_connection_with(&self, world: &World3D, target: Position) -> bool {
         assert!(self.block.kind.is_redstone());
-        assert!(world[target].kind.is_stick_to_redstone());
+        assert!(world[target].kind.is_stick_to_redstone() || world[target].kind.is_cobble());
+
+        if world[target].kind.is_cobble()
+            && (target.cardinal().contains(&self.position) || target.up() == self.position)
+        {
+            return true;
+        }
 
         self.propagated_from(world)
             .into_iter()

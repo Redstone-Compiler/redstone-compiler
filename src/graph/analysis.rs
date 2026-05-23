@@ -75,6 +75,9 @@ fn canonical_expression(
 
             format!("{}({})", logic.logic_type.name(), inputs.join(", "))
         }
+        GraphNodeKind::Sequential(sequential) => {
+            format!("Sequential#{}({})", node.id, sequential.name())
+        }
         GraphNodeKind::Output(name) => {
             if node.inputs.len() == 1 {
                 canonical_expression(graph, node.inputs[0], memo)?

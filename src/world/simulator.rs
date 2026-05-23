@@ -1,4 +1,4 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 
 use super::block::{Block, BlockKind, Direction};
@@ -6,6 +6,11 @@ use super::position::Position;
 use super::{World, World3D};
 
 const DEFAULT_TRACE_LIMIT: usize = 0;
+// Approximate Minecraft redstone torch burnout so feedback loops can settle
+// instead of producing simulator events forever. These are simulator cycles,
+// not exact game ticks or redstone ticks.
+const TORCH_BURNOUT_WINDOW_CYCLES: usize = 60;
+const TORCH_BURNOUT_TOGGLE_LIMIT: usize = 8;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum EventType {
@@ -75,6 +80,8 @@ pub struct Simulator {
     event_id_count: usize,
     soft_power_sources: HashSet<(Position, Position)>,
     hard_power_sources: HashSet<(Position, Position)>,
+    torch_toggle_cycles: HashMap<Position, VecDeque<usize>>,
+    burned_out_torches: HashSet<Position>,
     trace: Vec<SimulationTraceEntry>,
     snapshots: Vec<SimulationSnapshot>,
     trace_limit: usize,
@@ -186,6 +193,7 @@ impl Simulator {
                 snapshots: sim.snapshots,
             });
         }
+        sim.clear_transient_torch_burnout();
 
         Ok(sim)
     }
@@ -208,6 +216,7 @@ impl Simulator {
 
         sim.fill_event_id();
         sim.run_inner(limits)?;
+        sim.clear_transient_torch_burnout();
 
         Ok(sim)
     }
@@ -220,6 +229,8 @@ impl Simulator {
             event_id_count: 0,
             soft_power_sources: HashSet::new(),
             hard_power_sources: HashSet::new(),
+            torch_toggle_cycles: HashMap::new(),
+            burned_out_torches: HashSet::new(),
             trace: Vec::new(),
             snapshots: Vec::new(),
             trace_limit,
@@ -272,6 +283,7 @@ impl Simulator {
         limits: SimulationLimits,
     ) -> eyre::Result<()> {
         self.queue.push_back(VecDeque::new());
+        let mut changed = false;
 
         for (pos, value) in states {
             let BlockKind::Switch { is_on } = &mut self.world[pos].kind else {
@@ -283,6 +295,7 @@ impl Simulator {
             }
 
             *is_on = value;
+            changed = true;
 
             pos.forwards_except(self.world[pos].direction)
                 .into_iter()
@@ -322,6 +335,12 @@ impl Simulator {
         self.fill_event_id();
 
         self.run_inner(limits)?;
+        if changed {
+            self.enqueue_torch_reevaluations();
+            self.fill_event_id();
+            self.run_inner(limits)?;
+            self.clear_transient_torch_burnout();
+        }
 
         Ok(())
     }
@@ -341,6 +360,11 @@ impl Simulator {
     pub fn clear_trace(&mut self) {
         self.trace.clear();
         self.snapshots.clear();
+    }
+
+    fn clear_transient_torch_burnout(&mut self) {
+        self.torch_toggle_cycles.clear();
+        self.burned_out_torches.clear();
     }
 
     pub fn run(&mut self) -> eyre::Result<usize> {
@@ -442,6 +466,42 @@ impl Simulator {
         self.queue[0].extend(events);
     }
 
+    fn enqueue_torch_reevaluations(&mut self) {
+        let events = self
+            .world
+            .iter_block()
+            .into_iter()
+            .filter_map(|(pos, block)| {
+                if !matches!(block.kind, BlockKind::Torch { .. }) {
+                    return None;
+                }
+                let support = pos.walk(block.direction)?;
+                if !self.world.size.bound_on(support) || !self.world[support].kind.is_cobble() {
+                    return None;
+                }
+                let BlockKind::Cobble { on_count, .. } = self.world[support].kind else {
+                    return None;
+                };
+                Some(Event {
+                    id: None,
+                    from_id: None,
+                    event_type: if on_count > 0 {
+                        EventType::SoftOn
+                    } else {
+                        EventType::SoftOff
+                    },
+                    target_position: pos,
+                    direction: block.direction,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        if events.is_empty() {
+            return;
+        }
+        self.queue.push_back(events.into());
+    }
+
     fn init_switch_event(&mut self, dir: Direction, pos: Position) {
         tracing::debug!("produce switch event: {:?}, {:?}", dir, pos);
 
@@ -494,6 +554,9 @@ impl Simulator {
         self.queue.push_back(VecDeque::new());
         let mut seen_events = HashSet::new();
         while let Some(event) = self.queue.front_mut().unwrap().pop_front() {
+            if !self.world.size.bound_on(event.target_position) {
+                continue;
+            }
             if !seen_events.insert(EventKey::from_event(&event)) {
                 continue;
             }
@@ -642,6 +705,7 @@ impl Simulator {
             .target_position
             .forwards()
             .into_iter()
+            .filter(|&pos| self.world.size.bound_on(pos))
             .filter(|&pos| !self.world[pos].kind.is_cobble())
             .map(|pos_src| Event {
                 id: None,
@@ -681,8 +745,15 @@ impl Simulator {
         propagate_targets.extend(event.target_position.cardinal_redstone(*state));
 
         let up_pos = event.target_position.up();
-        if !self.world[up_pos].kind.is_cobble() {
-            propagate_targets.extend(up_pos.cardinal_redstone(*state));
+        if self.world.size.bound_on(up_pos) && !self.world[up_pos].kind.is_cobble() {
+            propagate_targets.extend(
+                up_pos
+                    .cardinal_redstone(*state)
+                    .into_iter()
+                    .filter(|&pos| {
+                        self.world.size.bound_on(pos) && self.world[pos].kind.is_redstone()
+                    }),
+            );
         }
 
         if let Some(down_pos) = event.target_position.down() {
@@ -697,9 +768,12 @@ impl Simulator {
                     .target_position
                     .cardinal_redstone(*state)
                     .into_iter()
+                    .filter(|&pos| self.world.size.bound_on(pos))
                     .filter(|&pos| !self.world[pos].kind.is_cobble())
                     .filter_map(|pos| pos.walk(Direction::Bottom))
-                    .filter(|&pos| !self.world[pos].kind.is_cobble()),
+                    .filter(|&pos| {
+                        self.world.size.bound_on(pos) && self.world[pos].kind.is_redstone()
+                    }),
             );
         }
 
@@ -933,7 +1007,10 @@ impl Simulator {
     fn propgate_torch_event(&mut self, block: &mut Block, event: &Event) -> eyre::Result<()> {
         tracing::debug!("consume torch event: {:?}", block);
 
-        if !self.world[event.target_position.walk(event.direction).unwrap()]
+        let Some(support_position) = event.target_position.walk(event.direction) else {
+            return Ok(());
+        };
+        if !self.world[support_position]
             .kind
             .is_cobble()
         {
@@ -953,8 +1030,22 @@ impl Simulator {
         if *is_on == next_is_on {
             return Ok(());
         }
-
-        *is_on = next_is_on;
+        if next_is_on && self.burned_out_torches.contains(&event.target_position) {
+            if self.torch_is_still_burned_out(event.target_position) {
+                return Ok(());
+            }
+            self.burned_out_torches.remove(&event.target_position);
+        }
+        let burned_out = self.record_torch_toggle(event.target_position);
+        if burned_out {
+            self.burned_out_torches.insert(event.target_position);
+            if !*is_on {
+                return Ok(());
+            }
+            *is_on = false;
+        } else {
+            *is_on = next_is_on;
+        }
 
         match block.direction {
             Direction::Bottom => event.target_position.cardinal(),
@@ -995,6 +1086,32 @@ impl Simulator {
         tracing::info!("trigger torch event: {event:?}, {block:?}");
 
         Ok(())
+    }
+
+    fn record_torch_toggle(&mut self, position: Position) -> bool {
+        self.prune_torch_toggle_history(position);
+        let history = self.torch_toggle_cycles.entry(position).or_default();
+        history.push_back(self.cycle);
+        history.len() >= TORCH_BURNOUT_TOGGLE_LIMIT
+    }
+
+    fn torch_is_still_burned_out(&mut self, position: Position) -> bool {
+        self.prune_torch_toggle_history(position);
+        self.torch_toggle_cycles
+            .get(&position)
+            .is_some_and(|history| history.len() >= TORCH_BURNOUT_TOGGLE_LIMIT)
+    }
+
+    fn prune_torch_toggle_history(&mut self, position: Position) {
+        let Some(history) = self.torch_toggle_cycles.get_mut(&position) else {
+            return;
+        };
+        while history
+            .front()
+            .is_some_and(|cycle| self.cycle.saturating_sub(*cycle) > TORCH_BURNOUT_WINDOW_CYCLES)
+        {
+            history.pop_front();
+        }
     }
 
     fn propgate_repeater_event(&mut self, block: &mut Block, event: &Event) -> eyre::Result<()> {
@@ -1147,6 +1264,8 @@ impl Simulator {
 mod test {
     use super::*;
     use crate::nbt::NBTRoot;
+    use crate::sequential::layout::SequentialMacro;
+    use crate::sequential::SequentialPrimitive;
     use crate::world::block::RedstoneState;
     use crate::world::position::DimSize;
 
@@ -1340,6 +1459,86 @@ mod test {
     }
 
     #[test]
+    fn unittest_simulator_cobble_event_ignores_out_of_bounds_neighbors() -> eyre::Result<()> {
+        let target = Position(1, 1, 0);
+        let mock_world = World {
+            size: DimSize(2, 2, 1),
+            blocks: vec![(
+                target,
+                Block {
+                    kind: BlockKind::Cobble {
+                        on_count: 0,
+                        on_base_count: 0,
+                    },
+                    direction: Direction::None,
+                },
+            )],
+        };
+        let event = Event {
+            id: None,
+            from_id: None,
+            event_type: EventType::SoftOn,
+            target_position: target,
+            direction: Direction::South,
+        };
+        let mut sim = Simulator::new(&mock_world, DEFAULT_TRACE_LIMIT);
+        sim.queue.push_back(VecDeque::new());
+        let mut block = sim.world[target];
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            sim.propgate_cobble_event(&mut block, &event)
+        }));
+
+        assert!(result.is_ok(), "cobble event should not panic at world edge");
+        result.unwrap()?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn unittest_simulator_ignores_out_of_bounds_events() -> eyre::Result<()> {
+        let mock_world = World {
+            size: DimSize(1, 1, 1),
+            blocks: Vec::new(),
+        };
+        let mut sim = Simulator::new(&mock_world, DEFAULT_TRACE_LIMIT);
+        sim.queue.push_back(VecDeque::from([Event {
+            id: None,
+            from_id: None,
+            event_type: EventType::SoftOn,
+            target_position: Position(1, 0, 0),
+            direction: Direction::East,
+        }]));
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            sim.run_with_max_cycles(1)
+        }));
+
+        assert!(result.is_ok(), "simulator should not panic on out-of-bounds events");
+        result.unwrap()?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn unittest_simulator_uninitialized_rs_latch_does_not_exceed_event_limit() {
+        let primitive = SequentialPrimitive::rs_latch();
+        let candidate = SequentialMacro::candidates(&primitive)
+            .into_iter()
+            .next()
+            .unwrap();
+        let world = World::from(&candidate.world);
+
+        let result = Simulator::from_with_limits_and_trace(&world, 128, 50_000, 0);
+
+        assert!(
+            result.is_ok(),
+            "uninitialized RS latch should settle or burn out instead of running forever: {:?}",
+            result.err().map(|error| error.message().to_owned())
+        );
+    }
+
+    #[test]
     fn unittest_simulator_full_adder_all_on_recomputes_wall_torch() -> eyre::Result<()> {
         let nbt = NBTRoot::from_nbt_bytes(&std::fs::read("test/full-adder.nbt")?)?;
         let world = nbt.to_world();
@@ -1366,6 +1565,61 @@ mod test {
                 on_base_count: 0
             }
         ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn unittest_simulator_xor_generated_truth_table() -> eyre::Result<()> {
+        let nbt = NBTRoot::from_nbt_bytes(&std::fs::read("test/xor-generated.nbt")?)?;
+        let world = nbt.to_world();
+        let switches = [Position(0, 6, 0), Position(0, 6, 3)];
+        let output = Position(4, 7, 2);
+
+        for mask in 0..4 {
+            let mut sim = Simulator::from_with_limits_and_trace(&world, 256, 50_000, 0)
+                .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
+            sim.change_state_with_limits(
+                switches
+                    .iter()
+                    .enumerate()
+                    .map(|(index, pos)| (*pos, (mask & (1 << index)) != 0))
+                    .collect(),
+                256,
+                50_000,
+            )?;
+
+            let BlockKind::Redstone { strength, .. } = sim.world[output].kind else {
+                panic!("xor output should be redstone");
+            };
+            assert_eq!(
+                strength > 0,
+                mask == 1 || mask == 2,
+                "xor-generated output mismatch for mask {mask:02b}"
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn unittest_simulator_full_adder_toggle_does_not_burn_out_output_torch() -> eyre::Result<()> {
+        let nbt = NBTRoot::from_nbt_bytes(&std::fs::read("test/full-adder.nbt")?)?;
+        let world = nbt.to_world();
+        let mut sim = Simulator::from_with_limits_and_trace(&world, 256, 50_000, 50_000)
+            .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
+
+        sim.change_state_with_limits(vec![(Position(0, 5, 1), true)], 256, 50_000)?;
+        sim.change_state_with_limits(vec![(Position(0, 7, 2), true)], 256, 50_000)?;
+        sim.change_state_with_limits(vec![(Position(2, 0, 3), true)], 256, 50_000)?;
+        sim.clear_trace();
+        sim.change_state_with_limits(vec![(Position(0, 7, 2), false)], 256, 50_000)?;
+
+        assert!(
+            sim.trace().len() < 1_000,
+            "full-adder final toggle should settle without long torch flicker, got {} events",
+            sim.trace().len()
+        );
 
         Ok(())
     }
