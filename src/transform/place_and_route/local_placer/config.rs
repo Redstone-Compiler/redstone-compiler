@@ -71,6 +71,11 @@ pub enum PlacementSamplingPolicy {
         random_count: usize,
         start_step: usize,
     },
+    Ranked {
+        count: usize,
+        random_count: usize,
+        start_step: usize,
+    },
 }
 
 impl LocalPlacerConfig {
@@ -98,6 +103,18 @@ impl LocalPlacerConfig {
         start_step: usize,
     ) -> PlacementSamplingPolicy {
         PlacementSamplingPolicy::Cost {
+            count,
+            random_count,
+            start_step,
+        }
+    }
+
+    pub fn ranked_sampling(
+        count: usize,
+        random_count: usize,
+        start_step: usize,
+    ) -> PlacementSamplingPolicy {
+        PlacementSamplingPolicy::Ranked {
             count,
             random_count,
             start_step,

@@ -110,6 +110,82 @@ fn placement_cost_penalizes_spread_future_join_inputs() -> eyre::Result<()> {
 }
 
 #[test]
+fn future_join_cost_weights_pairs_with_remaining_fanout() {
+    let mut graph = Graph {
+        nodes: vec![
+            GraphNode {
+                id: 0,
+                kind: GraphNodeKind::Input("a".to_owned()),
+                ..Default::default()
+            },
+            GraphNode {
+                id: 1,
+                kind: GraphNodeKind::Input("b".to_owned()),
+                ..Default::default()
+            },
+            GraphNode {
+                id: 2,
+                kind: GraphNodeKind::Input("c".to_owned()),
+                ..Default::default()
+            },
+            GraphNode {
+                id: 3,
+                kind: GraphNodeKind::Input("d".to_owned()),
+                ..Default::default()
+            },
+            GraphNode {
+                id: 4,
+                kind: GraphNodeKind::Input("e".to_owned()),
+                ..Default::default()
+            },
+            GraphNode {
+                id: 5,
+                kind: GraphNodeKind::Logic(crate::logic::Logic {
+                    logic_type: LogicType::Or,
+                }),
+                inputs: vec![0, 1],
+                ..Default::default()
+            },
+            GraphNode {
+                id: 6,
+                kind: GraphNodeKind::Logic(crate::logic::Logic {
+                    logic_type: LogicType::Or,
+                }),
+                inputs: vec![0, 2],
+                ..Default::default()
+            },
+            GraphNode {
+                id: 7,
+                kind: GraphNodeKind::Logic(crate::logic::Logic {
+                    logic_type: LogicType::Or,
+                }),
+                inputs: vec![3, 4],
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    graph.build_outputs();
+    let graph = LogicGraph { graph };
+    let visit_orders = vec![0, 1, 2, 3, 4, 5, 6, 7];
+    let step_after_inputs = 4;
+
+    let pairs = build_cost_join_pairs_by_step(&graph, &visit_orders);
+    let pairs = &pairs[step_after_inputs];
+    let fanout_pair = pairs
+        .iter()
+        .find(|pair| pair.a == 0 && pair.b == 1)
+        .unwrap();
+    let simple_pair = pairs
+        .iter()
+        .find(|pair| pair.a == 3 && pair.b == 4)
+        .unwrap();
+
+    assert_eq!(fanout_pair.weight, 2);
+    assert_eq!(simple_pair.weight, 1);
+}
+
+#[test]
 fn cost_sampling_keeps_lower_cost_candidates() -> eyre::Result<()> {
     let graph = LogicGraph::from_stmt("a|b", "c")?.prepare_place()?;
     let placer = LocalPlacer::new(graph.clone(), config(1))?;
@@ -146,6 +222,59 @@ fn cost_sampling_keeps_lower_cost_candidates() -> eyre::Result<()> {
         .collect();
 
     let sampled = placer.sample_by_cost(step, vec![(world.clone(), far), (world, near)], 1, 0);
+
+    assert_eq!(sampled.len(), 1);
+    assert_eq!(sampled[0].1[&input_b], Position(2, 1, 1));
+
+    Ok(())
+}
+
+#[test]
+fn ranked_sampling_keeps_lower_cost_candidates() -> eyre::Result<()> {
+    let graph = LogicGraph::from_stmt("a|b", "c")?.prepare_place()?;
+    let placer = LocalPlacer::new(graph.clone(), config(1))?;
+    let input_a = graph
+        .nodes
+        .iter()
+        .find(|node| matches!(&node.kind, GraphNodeKind::Input(name) if name == "a"))
+        .unwrap()
+        .id;
+    let input_b = graph
+        .nodes
+        .iter()
+        .find(|node| matches!(&node.kind, GraphNodeKind::Input(name) if name == "b"))
+        .unwrap()
+        .id;
+    let step = placer
+        .visit_orders
+        .iter()
+        .position(|id| *id == input_a)
+        .unwrap()
+        .max(
+            placer
+                .visit_orders
+                .iter()
+                .position(|id| *id == input_b)
+                .unwrap(),
+        );
+    let world = empty_world();
+    let near = [(input_a, Position(1, 1, 1)), (input_b, Position(2, 1, 1))]
+        .into_iter()
+        .collect();
+    let far = [(input_a, Position(1, 1, 1)), (input_b, Position(5, 5, 1))]
+        .into_iter()
+        .collect();
+    let ranked_config = LocalPlacerConfig {
+        placement_sampling_policy: PlacementSamplingPolicy::Ranked {
+            count: 1,
+            random_count: 0,
+            start_step: 0,
+        },
+        ..placer.config
+    };
+
+    let ranked = LocalPlacer::new(graph, ranked_config)?;
+    let sampled = ranked.sample(step, vec![(world.clone(), far), (world, near)]);
 
     assert_eq!(sampled.len(), 1);
     assert_eq!(sampled[0].1[&input_b], Position(2, 1, 1));

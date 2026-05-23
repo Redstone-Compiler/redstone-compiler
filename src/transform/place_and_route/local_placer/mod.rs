@@ -51,7 +51,7 @@ pub struct LocalPlacer {
     graph: LogicGraph,
     config: LocalPlacerConfig,
     visit_orders: Vec<GraphNodeId>,
-    cost_join_pairs_by_step: Vec<Vec<(GraphNodeId, GraphNodeId)>>,
+    cost_join_pairs_by_step: Vec<Vec<FutureJoinPair>>,
 }
 
 type PlacerQueue = Vec<(World3D, PlacementState)>;
@@ -316,6 +316,11 @@ impl LocalPlacer {
                 count,
                 random_count,
                 start_step,
+            }
+            | PlacementSamplingPolicy::Ranked {
+                count,
+                random_count,
+                start_step,
             } => {
                 if step < start_step {
                     self.config
@@ -367,21 +372,29 @@ impl LocalPlacer {
             cost += local_density(world, position) * 3;
         }
 
-        for (a, b) in &self.cost_join_pairs_by_step[step] {
-            let (Some(a), Some(b)) = (state.node_position(*a), state.node_position(*b)) else {
+        for pair in &self.cost_join_pairs_by_step[step] {
+            let (Some(a), Some(b)) = (state.node_position(pair.a), state.node_position(pair.b))
+            else {
                 continue;
             };
-            cost += a.manhattan_distance(&b) * 8;
+            cost += a.manhattan_distance(&b) * pair.weight * 8;
         }
 
         cost
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FutureJoinPair {
+    a: GraphNodeId,
+    b: GraphNodeId,
+    weight: usize,
+}
+
 fn build_cost_join_pairs_by_step(
     graph: &LogicGraph,
     visit_orders: &[GraphNodeId],
-) -> Vec<Vec<(GraphNodeId, GraphNodeId)>> {
+) -> Vec<Vec<FutureJoinPair>> {
     let mut order_index = HashMap::new();
     for (index, node_id) in visit_orders.iter().copied().enumerate() {
         order_index.insert(node_id, index);
@@ -391,21 +404,63 @@ fn build_cost_join_pairs_by_step(
         .iter()
         .enumerate()
         .map(|(step, _)| {
-            graph
+            let remaining_uses = remaining_use_counts_by_node(graph, &order_index, step);
+            let mut pair_weights = HashMap::<(GraphNodeId, GraphNodeId), usize>::new();
+
+            for node in graph
                 .nodes
                 .iter()
                 .filter(|node| order_index[&node.id] > step)
-                .flat_map(|node| {
-                    node.inputs
-                        .iter()
-                        .copied()
-                        .filter(|input| order_index.get(input).is_some_and(|index| *index <= step))
-                        .tuple_combinations()
-                        .collect_vec()
-                })
+            {
+                for (a, b) in node
+                    .inputs
+                    .iter()
+                    .copied()
+                    .filter(|input| order_index.get(input).is_some_and(|index| *index <= step))
+                    .tuple_combinations()
+                {
+                    let weight = 1
+                        + remaining_uses
+                            .get(&a)
+                            .copied()
+                            .unwrap_or_default()
+                            .saturating_sub(1)
+                        + remaining_uses
+                            .get(&b)
+                            .copied()
+                            .unwrap_or_default()
+                            .saturating_sub(1);
+                    *pair_weights.entry((a, b)).or_default() += weight;
+                }
+            }
+
+            pair_weights
+                .into_iter()
+                .map(|((a, b), weight)| FutureJoinPair { a, b, weight })
+                .sorted_by_key(|pair| (pair.a, pair.b))
                 .collect_vec()
         })
         .collect_vec()
+}
+
+fn remaining_use_counts_by_node(
+    graph: &LogicGraph,
+    order_index: &HashMap<GraphNodeId, usize>,
+    step: usize,
+) -> HashMap<GraphNodeId, usize> {
+    let mut counts = HashMap::new();
+    for node in graph
+        .nodes
+        .iter()
+        .filter(|node| order_index[&node.id] > step)
+    {
+        for input in &node.inputs {
+            if order_index.get(input).is_some_and(|index| *index <= step) {
+                *counts.entry(*input).or_default() += 1;
+            }
+        }
+    }
+    counts
 }
 
 fn local_density(world: &World3D, position: Position) -> usize {

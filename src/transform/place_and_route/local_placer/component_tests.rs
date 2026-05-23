@@ -570,7 +570,7 @@ fn test_generate_component_half_adder() -> eyre::Result<()> {
 }
 
 #[test]
-#[ignore = "cannot route last or gate inputs"]
+#[ignore = "search-heavy generated fixture"]
 fn test_generate_component_full_adder() -> eyre::Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
 
@@ -579,14 +579,14 @@ fn test_generate_component_full_adder() -> eyre::Result<()> {
         greedy_input_generation: true,
         input_placement_strategy: InputPlacementStrategy::Boundary,
         step_sampling_policy: SamplingPolicy::Random(10000),
-        placement_sampling_policy: PlacementSamplingPolicy::StepPolicy,
+        placement_sampling_policy: LocalPlacerConfig::ranked_sampling(9000, 1000, 0),
         leak_sampling: false,
         route_torch_directly: true,
         torch_placement_strategy: TorchPlacementStrategy::DirectOnly,
         not_route_strategy: NotRouteStrategy::DirectOnly,
         max_not_route_step: 8,
         not_route_step_sampling_policy: SamplingPolicy::Random(100),
-        max_route_step: 4,
+        max_route_step: 6,
         route_step_sampling_policy: SamplingPolicy::Random(100),
     };
 
