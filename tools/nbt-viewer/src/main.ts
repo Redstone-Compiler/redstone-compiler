@@ -44,6 +44,12 @@ interface DroppedFileSystemDirectoryHandle {
 }
 
 type DroppedFileSystemHandle = DroppedFileSystemFileHandle | DroppedFileSystemDirectoryHandle;
+type TraceAnimation = {
+  timer: number;
+  token: number;
+};
+
+const TRACE_ANIMATION_INTERVAL_MS = 100;
 
 document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
   <main class="app-shell">
@@ -126,6 +132,8 @@ let traceCycles: number[] = [];
 let currentSnapshots: SnapshotInfo[] = [];
 let traceBaseRoot: unknown;
 let isTracePreviewActive = false;
+let traceAnimation: TraceAnimation | undefined;
+let traceAnimationToken = 0;
 
 folderInput.setAttribute('webkitdirectory', '');
 folderInput.setAttribute('directory', '');
@@ -146,15 +154,18 @@ toggleSwitchButton.addEventListener('click', () => {
 });
 
 traceCycleInput.addEventListener('input', () => {
+  cancelTraceAnimation();
   void renderTraceCycle(Number(traceCycleInput.value));
 });
 
 tracePrevButton.addEventListener('click', () => {
+  cancelTraceAnimation();
   traceCycleInput.value = String(Math.max(0, Number(traceCycleInput.value) - 1));
   void renderTraceCycle(Number(traceCycleInput.value));
 });
 
 traceNextButton.addEventListener('click', () => {
+  cancelTraceAnimation();
   traceCycleInput.value = String(Math.min(traceCycles.length - 1, Number(traceCycleInput.value) + 1));
   void renderTraceCycle(Number(traceCycleInput.value));
 });
@@ -175,7 +186,7 @@ async function toggleSelectedSwitch(): Promise<void> {
 
   await viewer.setStructure(structure, { preserveSelection: true, preserveView: true });
   renderSelection(structure.blocks.find(block => samePos(block.pos, selectedPos)));
-  renderTrace(simulation.trace(), simulation.snapshots(), baseRoot, { select: 'last' });
+  renderTrace(simulation.trace(), simulation.snapshots(), baseRoot, { animateTo: 'last' });
 }
 
 dropZone.addEventListener('dragover', event => {
@@ -451,15 +462,16 @@ function renderTrace(
   trace: TraceEntry[],
   snapshots: SnapshotInfo[],
   baseRoot: unknown,
-  options: { open?: boolean; select?: 'first' | 'last' } = {},
+  options: { animateTo?: 'last'; open?: boolean; select?: 'first' | 'last' } = {},
 ): void {
+  cancelTraceAnimation();
   currentTrace = trace;
   currentSnapshots = snapshots;
   traceBaseRoot = baseRoot;
   traceCycles = Array.from(new Set(trace.map(entry => entry.cycle))).sort((a, b) => a - b);
   traceCount.textContent = trace.length === 0 ? 'No events' : `${trace.length} events`;
   traceCycleInput.max = String(Math.max(0, traceCycles.length - 1));
-  const selectedIndex = options.select === 'last' ? traceCycles.length - 1 : 0;
+  const selectedIndex = options.animateTo === 'last' ? 0 : options.select === 'last' ? traceCycles.length - 1 : 0;
   traceCycleInput.value = String(Math.max(0, selectedIndex));
   traceCycleInput.disabled = traceCycles.length === 0;
   tracePrevButton.disabled = traceCycles.length === 0;
@@ -468,6 +480,37 @@ function renderTrace(
   if (options.open || trace.length > 0) {
     tracePanel.open = true;
   }
+  if (options.animateTo === 'last') {
+    startTraceAnimation(traceCycles.length - 1);
+  }
+}
+
+function cancelTraceAnimation(): void {
+  if (!traceAnimation) return;
+
+  window.clearInterval(traceAnimation.timer);
+  traceAnimation = undefined;
+  traceAnimationToken += 1;
+}
+
+function startTraceAnimation(targetIndex: number): void {
+  if (targetIndex <= 0) return;
+
+  const token = traceAnimationToken + 1;
+  traceAnimationToken = token;
+  traceAnimation = {
+    token,
+    timer: window.setInterval(() => {
+      if (!traceAnimation || traceAnimation.token !== token) return;
+
+      const currentIndex = Number(traceCycleInput.value);
+      const nextIndex = Math.min(targetIndex, currentIndex + 1);
+      void renderTraceCycle(nextIndex);
+      if (nextIndex >= targetIndex) {
+        cancelTraceAnimation();
+      }
+    }, TRACE_ANIMATION_INTERVAL_MS),
+  };
 }
 
 async function renderTraceCycle(index: number): Promise<void> {
