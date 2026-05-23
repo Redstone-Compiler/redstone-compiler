@@ -161,6 +161,7 @@ async function toggleSelectedSwitch(): Promise<void> {
 
   simulation ??= await NbtSimulation.create(currentNbtBytes);
 
+  const selectedPos = selectedBlock.pos;
   const baseRoot = currentRoot;
   const nextRoot = simulation.toggleSwitch(selectedBlock);
   if (!nextRoot) return;
@@ -169,16 +170,9 @@ async function toggleSelectedSwitch(): Promise<void> {
   const structure = toStructureModel(currentRoot);
   if (!structure) throw new Error('Simulator returned a structure that the viewer could not render.');
 
-  await viewer.setStructure(structure);
-  selectedBlock = undefined;
-  renderSelection(undefined);
+  await viewer.setStructure(structure, { preserveSelection: true, preserveView: true });
+  renderSelection(structure.blocks.find(block => samePos(block.pos, selectedPos)));
   renderTrace(simulation.trace(), simulation.snapshots(), baseRoot);
-  inspector.textContent = [
-    `updated by simulator`,
-    `size: ${structure.size.join(' x ')}`,
-    `palette: ${structure.palette.length}`,
-    `blocks: ${structure.blocks.length}`,
-  ].join('\n');
 }
 
 dropZone.addEventListener('dragover', event => {
@@ -434,6 +428,10 @@ function renderSelection(block: StructureBlock | undefined): void {
 
 function getLeverPowered(block: StructureBlock | undefined): boolean {
   return block?.palette.properties?.powered === 'true';
+}
+
+function samePos(a: [number, number, number], b: [number, number, number]): boolean {
+  return a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
 }
 
 function renderSimulationError(error: unknown): void {
