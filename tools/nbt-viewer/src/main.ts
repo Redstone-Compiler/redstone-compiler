@@ -49,7 +49,7 @@ type TraceAnimation = {
   token: number;
 };
 
-const TRACE_ANIMATION_INTERVAL_MS = 100;
+const TRACE_ANIMATION_INTERVAL_MS = 50;
 
 document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
   <main class="app-shell">
