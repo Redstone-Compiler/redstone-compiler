@@ -175,7 +175,7 @@ async function toggleSelectedSwitch(): Promise<void> {
 
   await viewer.setStructure(structure, { preserveSelection: true, preserveView: true });
   renderSelection(structure.blocks.find(block => samePos(block.pos, selectedPos)));
-  renderTrace(simulation.trace(), simulation.snapshots(), baseRoot);
+  renderTrace(simulation.trace(), simulation.snapshots(), baseRoot, { select: 'last' });
 }
 
 dropZone.addEventListener('dragover', event => {
@@ -440,26 +440,32 @@ function samePos(a: [number, number, number], b: [number, number, number]): bool
 function renderSimulationError(error: unknown): void {
   if (error instanceof NbtSimulationError) {
     inspector.textContent = error.message;
-    renderTrace(error.trace, error.snapshots, currentRoot, true);
+    renderTrace(error.trace, error.snapshots, currentRoot, { open: true });
     return;
   }
 
   inspector.textContent = error instanceof Error ? error.message : String(error);
 }
 
-function renderTrace(trace: TraceEntry[], snapshots: SnapshotInfo[], baseRoot: unknown, open = false): void {
+function renderTrace(
+  trace: TraceEntry[],
+  snapshots: SnapshotInfo[],
+  baseRoot: unknown,
+  options: { open?: boolean; select?: 'first' | 'last' } = {},
+): void {
   currentTrace = trace;
   currentSnapshots = snapshots;
   traceBaseRoot = baseRoot;
   traceCycles = Array.from(new Set(trace.map(entry => entry.cycle))).sort((a, b) => a - b);
   traceCount.textContent = trace.length === 0 ? 'No events' : `${trace.length} events`;
   traceCycleInput.max = String(Math.max(0, traceCycles.length - 1));
-  traceCycleInput.value = '0';
+  const selectedIndex = options.select === 'last' ? traceCycles.length - 1 : 0;
+  traceCycleInput.value = String(Math.max(0, selectedIndex));
   traceCycleInput.disabled = traceCycles.length === 0;
   tracePrevButton.disabled = traceCycles.length === 0;
   traceNextButton.disabled = traceCycles.length === 0;
-  void renderTraceCycle(traceCycles.length === 0 ? -1 : 0);
-  if (open || trace.length > 0) {
+  void renderTraceCycle(traceCycles.length === 0 ? -1 : selectedIndex);
+  if (options.open || trace.length > 0) {
     tracePanel.open = true;
   }
 }
