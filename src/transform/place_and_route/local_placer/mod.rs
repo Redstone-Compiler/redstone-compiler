@@ -372,6 +372,10 @@ impl LocalPlacer {
         best
     }
 
+    // 확장된 placement 후보들을 beam search처럼 줄인다. cost sampling과 같은
+    // heuristic cost를 쓰되, beam 일부는 기하적으로 다른 후보를 위해 남긴다.
+    // 이렇게 해야 compact하지만 거의 같은 후보들만 살아남아 후반 join/fanout
+    // route를 막는 상황을 줄일 수 있다.
     fn sample_by_ranked(
         &self,
         step: usize,
@@ -383,18 +387,27 @@ impl LocalPlacer {
             return queue;
         }
 
+        // 확장된 모든 후보에 점수를 매긴다. `index`는 deterministic tie-breaker라서,
+        // cost가 같은 후보들은 기존 queue 순서를 유지한다.
         let mut scored = queue
             .into_iter()
             .enumerate()
             .map(|(index, item)| ScoredPlacement {
                 cost: self.placement_cost(step, &item.0, &item.1),
-                signature: placement_diversity_signature(&item.1),
+                // diversity 보존용 coarse geometry bucket이다. 완전한 placement
+                // identity가 아니므로 semantic deduplication 용도로 쓰면 안 된다.
+                signature: bounding_box_of_positions(item.1.node_positions())
+                    .map(|bounds| bounds.manhattan_span() / 4)
+                    .unwrap_or_default(),
                 index,
                 item,
             })
             .collect_vec();
         scored.sort_unstable_by_key(|item| (item.cost, item.index));
 
+        // beam 대부분은 cost가 낮은 후보로 채우고, 25%는 diversity bucket용으로
+        // 남긴다. 25% 비율은 heuristic이므로, 컴포넌트별 튜닝이 필요해지면
+        // config knob으로 드러내는 것이 좋다.
         let ranked_count = count.min(scored.len());
         let diversity_count = if ranked_count > 1 {
             (ranked_count / 4).max(1)
@@ -411,6 +424,8 @@ impl LocalPlacer {
             .collect::<HashSet<_>>();
         let mut overflow = Vec::new();
 
+        // 남겨둔 beam slot에는 아직 선택되지 않은 geometry signature별 최저 cost
+        // 후보를 먼저 넣고, 부족하면 일반 cost 순서 후보로 채운다.
         for item in rest {
             if selected.len() < ranked_count && selected_signatures.insert(item.signature) {
                 selected.push(item);
@@ -419,6 +434,8 @@ impl LocalPlacer {
             }
         }
 
+        // distinct signature 개수가 남겨둔 slot보다 적으면, 남은 beam은 overflow에서
+        // cost 순서대로 채운다.
         let mut overflow = overflow.into_iter();
         while selected.len() < ranked_count {
             let Some(item) = overflow.next() else {
@@ -427,6 +444,9 @@ impl LocalPlacer {
             selected.push(item);
         }
 
+        // deterministic beam 선택 뒤에 작은 stochastic tail을 붙인다. diversity
+        // 보존과는 별개로, deterministic ranking이 나쁜 방향으로 굳었을 때 빠져나갈
+        // 기회를 남기는 용도다.
         let mut best = selected.into_iter().map(|item| item.item).collect_vec();
         let random_pool = overflow.map(|item| item.item).collect_vec();
         best.extend(
@@ -458,24 +478,9 @@ impl LocalPlacer {
 
 struct ScoredPlacement {
     cost: usize,
-    signature: PlacementDiversitySignature,
+    signature: usize,
     index: usize,
     item: (World3D, PlacementState),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-struct PlacementDiversitySignature {
-    span_bucket: usize,
-}
-
-fn placement_diversity_signature(state: &PlacementState) -> PlacementDiversitySignature {
-    let Some(bounds) = bounding_box_of_positions(state.node_positions()) else {
-        return PlacementDiversitySignature { span_bucket: 0 };
-    };
-
-    PlacementDiversitySignature {
-        span_bucket: bounds.manhattan_span() / 4,
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -498,7 +503,7 @@ fn build_cost_join_pairs_by_step(
         .iter()
         .enumerate()
         .map(|(step, _)| {
-            let remaining_uses = remaining_use_counts_by_node(graph, &order_index, step);
+            let remaining_fanouts = remaining_fanout_counts_by_node(graph, &order_index, step);
             let mut pair_weights = HashMap::<(GraphNodeId, GraphNodeId), usize>::new();
 
             for node in graph
@@ -514,12 +519,12 @@ fn build_cost_join_pairs_by_step(
                     .tuple_combinations()
                 {
                     let weight = 1
-                        + remaining_uses
+                        + remaining_fanouts
                             .get(&a)
                             .copied()
                             .unwrap_or_default()
                             .saturating_sub(1)
-                        + remaining_uses
+                        + remaining_fanouts
                             .get(&b)
                             .copied()
                             .unwrap_or_default()
@@ -537,7 +542,7 @@ fn build_cost_join_pairs_by_step(
         .collect_vec()
 }
 
-fn remaining_use_counts_by_node(
+fn remaining_fanout_counts_by_node(
     graph: &LogicGraph,
     order_index: &HashMap<GraphNodeId, usize>,
     step: usize,
