@@ -51,14 +51,10 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
       <section class="viewer-panel">
         <canvas id="structure-canvas"></canvas>
         <div class="floating-actions">
-          <label class="file-button">
-            Open Folder
-            <input id="folder-input" type="file" multiple />
-          </label>
-          <label class="file-button">
-            Open NBT
-            <input id="file-input" type="file" accept=".nbt,.dat,.schem,.schematic,.litematic,.mcstructure" />
-          </label>
+          <button id="open-folder" class="file-button" type="button">Open Folder</button>
+          <button id="open-file" class="file-button" type="button">Open NBT</button>
+          <input id="folder-input" class="hidden-file-input" type="file" multiple />
+          <input id="file-input" class="hidden-file-input" type="file" accept=".nbt,.dat,.schem,.schematic,.litematic,.mcstructure" />
         </div>
         <details id="files-panel" class="floating-panel files-panel">
           <summary>
@@ -95,6 +91,8 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
 
 const input = document.querySelector<HTMLInputElement>('#file-input')!;
 const folderInput = document.querySelector<HTMLInputElement>('#folder-input')!;
+const openFileButton = document.querySelector<HTMLButtonElement>('#open-file')!;
+const openFolderButton = document.querySelector<HTMLButtonElement>('#open-folder')!;
 const dropZone = document.querySelector<HTMLElement>('#drop-zone')!;
 const filesPanel = document.querySelector<HTMLDetailsElement>('#files-panel')!;
 const filesList = document.querySelector<HTMLElement>('#files-list')!;
@@ -126,6 +124,16 @@ let isTracePreviewActive = false;
 
 folderInput.setAttribute('webkitdirectory', '');
 folderInput.setAttribute('directory', '');
+
+openFileButton.addEventListener('click', () => {
+  input.value = '';
+  input.click();
+});
+
+openFolderButton.addEventListener('click', () => {
+  folderInput.value = '';
+  folderInput.click();
+});
 
 input.addEventListener('change', () => {
   const file = input.files?.[0];
