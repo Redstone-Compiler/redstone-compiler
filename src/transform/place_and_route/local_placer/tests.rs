@@ -422,7 +422,7 @@ fn local_placer_rejects_sequential_primitives_without_macro_candidates() {
         nodes: vec![GraphNode {
             id: 0,
             kind: GraphNodeKind::Sequential(SequentialPrimitive::new(
-                SequentialType::DLatch,
+                SequentialType::DFlipFlop,
                 Vec::new(),
                 vec!["q".to_owned()],
             )),
