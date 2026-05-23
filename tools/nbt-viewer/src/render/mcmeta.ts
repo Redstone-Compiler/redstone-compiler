@@ -41,6 +41,10 @@ async function loadImageData(url: string): Promise<ImageData> {
   return context.getImageData(0, 0, canvas.width, canvas.height);
 }
 
+function resolveAssetPath(path: string): string {
+  return new URL(`${import.meta.env.BASE_URL}${path}`, window.location.origin).href;
+}
+
 function upperPowerOfTwo(value: number): number {
   let result = 1;
   while (result < value) result *= 2;
@@ -78,13 +82,16 @@ export class MinecraftResources {
 
   static async load(version = '1.18.2'): Promise<MinecraftResources> {
     const [blocks, assets, uvMapping, atlasImage] = await Promise.all([
-      fetchStringifiedJson<BlocksData>(`/mcmeta/${version}-blocks`, 'stringifiedBlocks'),
-      fetchStringifiedJson<Omit<McmetaAssets, 'textures'>>(`/mcmeta/${version}-assets`, 'stringifiedAssets'),
+      fetchStringifiedJson<BlocksData>(resolveAssetPath(`mcmeta/${version}-blocks`), 'stringifiedBlocks'),
+      fetchStringifiedJson<Omit<McmetaAssets, 'textures'>>(
+        resolveAssetPath(`mcmeta/${version}-assets`),
+        'stringifiedAssets',
+      ),
       fetchStringifiedJson<Record<string, [number, number, number, number]>>(
-        `/mcmeta/${version}-uvmapping`,
+        resolveAssetPath(`mcmeta/${version}-uvmapping`),
         'stringifiedUvmapping',
       ),
-      loadImageData(`/mcmeta/${version}-atlas`),
+      loadImageData(resolveAssetPath(`mcmeta/${version}-atlas`)),
     ]);
 
     const idMap: Record<string, [number, number, number, number]> = {};

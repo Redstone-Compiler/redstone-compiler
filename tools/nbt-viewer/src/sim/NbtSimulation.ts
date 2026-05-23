@@ -51,13 +51,17 @@ export class NbtSimulationError extends Error {
   }
 }
 
-const wasmModulePath = '/wasm/nbt-sim/nbt_sim_wasm.js';
-const wasmBinaryPath = '/wasm/nbt-sim/nbt_sim_wasm_bg.wasm';
+const wasmModulePath = 'wasm/nbt-sim/nbt_sim_wasm.js';
+const wasmBinaryPath = 'wasm/nbt-sim/nbt_sim_wasm_bg.wasm';
 
 let wasmModulePromise: Promise<WasmModule> | undefined;
 
+function resolveAssetPath(path: string): string {
+  return new URL(`${import.meta.env.BASE_URL}${path}`, window.location.origin).href;
+}
+
 function loadWasmModule(): Promise<WasmModule> {
-  wasmModulePromise ??= import(/* @vite-ignore */ new URL(wasmModulePath, window.location.origin).href) as Promise<WasmModule>;
+  wasmModulePromise ??= import(/* @vite-ignore */ resolveAssetPath(wasmModulePath)) as Promise<WasmModule>;
   return wasmModulePromise;
 }
 
@@ -74,7 +78,7 @@ export class NbtSimulation {
 
   static async create(nbtBytes: Uint8Array): Promise<NbtSimulation> {
     const wasm = await loadWasmModule();
-    await wasm.default(wasmBinaryPath);
+    await wasm.default(resolveAssetPath(wasmBinaryPath));
 
     try {
       return new NbtSimulation(new wasm.NbtSimulator(nbtBytes));

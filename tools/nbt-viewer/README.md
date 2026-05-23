@@ -71,3 +71,20 @@ NBT files to a server.
 npm.cmd run build:wasm
 npm.cmd run build
 ```
+
+## GitHub Pages
+
+The viewer can be deployed as a static GitHub Pages artifact. The deployment
+workflow builds the Rust simulator WASM first, then runs the Vite production
+build so these generated files are included under `dist/wasm/nbt-sim`.
+
+For repository Pages, build with the repository subpath as the Vite base:
+
+```powershell
+$env:VITE_BASE_PATH = "/redstone-compiler/"
+npm.cmd run build:wasm
+npm.cmd run build
+```
+
+The GitHub Actions workflow uses the same base path and publishes
+`tools/nbt-viewer/dist`.
