@@ -143,7 +143,9 @@ impl LocalPlacer {
             let result = self.do_step(step, queue);
             let next_len = result.queue.len();
 
-            queue = self.sample(step, result.queue);
+            let compacted = self.compact_queue_after_step(step, result.queue);
+            let compacted_len = compacted.len();
+            queue = self.sample(step, compacted);
             let sampled_len = queue.len();
             if let Some(debug) = debug.as_deref_mut() {
                 let mut step_debug = result.debug;
@@ -152,7 +154,9 @@ impl LocalPlacer {
             }
 
             step += 1;
-            tracing::info!("from {prev_len} -> generated {next_len} -> sampled {sampled_len}");
+            tracing::info!(
+                "from {prev_len} -> generated {next_len} -> compacted {compacted_len} -> sampled {sampled_len}"
+            );
         }
 
         tracing::info!("generate complete");
@@ -232,10 +236,7 @@ impl LocalPlacer {
                 })
                 .collect(),
             GraphNodeKind::Output(_) => {
-                let position = state[&node.inputs[0]];
-                let mut state = state.clone();
-                state.set_node_position(node.id, position);
-                vec![(world.clone(), state)]
+                vec![(world.clone(), state.clone())]
             }
             GraphNodeKind::Logic(logic) => match logic.logic_type {
                 LogicType::Not => not_node_kind()
@@ -339,6 +340,30 @@ impl LocalPlacer {
                 }
             }
         }
+    }
+
+    // OR 라우트는 같은 블록 배치에서도 route 위의 여러 tap 위치를
+    // PlacementState에 남길 수 있다. 이후 실제 배치될 노드가 그 위치에서
+    // 다시 라우팅해야 할 때만 tap 차이를 보존하고, 아니면 같은 후보로 본다.
+    fn compact_queue_after_step(&self, step: usize, queue: PlacerQueue) -> PlacerQueue {
+        let mut queue = queue;
+        let live_node_ids = self
+            .visit_orders
+            .iter()
+            .skip(step + 1)
+            .filter_map(|node_id| self.graph.find_node_by_id(*node_id))
+            .filter(|node| !matches!(node.kind, GraphNodeKind::Output(_)))
+            .flat_map(|node| node.inputs.iter().copied())
+            .collect::<HashSet<_>>();
+
+        for (_, state) in &mut queue {
+            state.retain_nodes(&live_node_ids);
+        }
+
+        queue
+            .into_iter()
+            .unique_by(|(world, state)| (world.iter_block(), state.endpoint_positions()))
+            .collect()
     }
 
     fn sample_by_cost(

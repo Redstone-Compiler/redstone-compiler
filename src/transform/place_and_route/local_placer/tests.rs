@@ -1,6 +1,7 @@
 use super::*;
 use crate::graph::logic::LogicGraph;
 use crate::graph::{Graph, GraphNode, GraphNodeKind};
+use crate::logic::LogicType;
 use crate::sequential::layout::SequentialMacro;
 use crate::sequential::{SequentialPrimitive, SequentialType};
 use crate::world::block::{Block, BlockKind, Direction};
@@ -118,6 +119,107 @@ fn placement_cost_penalizes_spread_future_join_inputs() -> eyre::Result<()> {
 
     assert!(placer.placement_cost(step, &world, &far) > placer.placement_cost(step, &world, &near));
 
+    Ok(())
+}
+
+#[test]
+fn compact_queue_keeps_positions_needed_by_future_logic() -> eyre::Result<()> {
+    let graph = LogicGraph::from_stmt("a|b", "c")?.prepare_place()?;
+    let placer = LocalPlacer::new(graph.clone(), config(1))?;
+    let input_a = graph
+        .nodes
+        .iter()
+        .find(|node| matches!(&node.kind, GraphNodeKind::Input(name) if name == "a"))
+        .unwrap()
+        .id;
+    let or_id = graph
+        .nodes
+        .iter()
+        .find(|node| {
+            matches!(&node.kind, GraphNodeKind::Logic(logic) if logic.logic_type == LogicType::Or)
+        })
+        .unwrap()
+        .id;
+    let or_step = placer
+        .visit_orders
+        .iter()
+        .position(|id| *id == or_id)
+        .unwrap();
+    let world = empty_world();
+    let queue = vec![
+        (
+            world.clone(),
+            [(input_a, Position(1, 1, 1))].into_iter().collect(),
+        ),
+        (world, [(input_a, Position(2, 1, 1))].into_iter().collect()),
+    ];
+
+    let compacted = placer.compact_queue_after_step(or_step - 1, queue);
+
+    assert_eq!(compacted.len(), 2);
+    Ok(())
+}
+
+#[test]
+fn compact_queue_drops_positions_used_only_by_outputs() -> eyre::Result<()> {
+    let graph = LogicGraph::from_stmt("a|b", "c")?.prepare_place()?;
+    let placer = LocalPlacer::new(graph.clone(), config(1))?;
+    let or_id = graph
+        .nodes
+        .iter()
+        .find(|node| {
+            matches!(&node.kind, GraphNodeKind::Logic(logic) if logic.logic_type == LogicType::Or)
+        })
+        .unwrap()
+        .id;
+    let or_step = placer
+        .visit_orders
+        .iter()
+        .position(|id| *id == or_id)
+        .unwrap();
+    let world = empty_world();
+    let queue = vec![
+        (
+            world.clone(),
+            [(or_id, Position(1, 1, 1))].into_iter().collect(),
+        ),
+        (world, [(or_id, Position(2, 1, 1))].into_iter().collect()),
+    ];
+
+    let compacted = placer.compact_queue_after_step(or_step, queue);
+
+    assert_eq!(compacted.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn output_step_does_not_extend_placement_state() -> eyre::Result<()> {
+    let graph = LogicGraph::from_stmt("a|b", "c")?.prepare_place()?;
+    let placer = LocalPlacer::new(graph.clone(), config(1))?;
+    let or_id = graph
+        .nodes
+        .iter()
+        .find(|node| {
+            matches!(&node.kind, GraphNodeKind::Logic(logic) if logic.logic_type == LogicType::Or)
+        })
+        .unwrap()
+        .id;
+    let output_id = graph
+        .nodes
+        .iter()
+        .find(|node| matches!(&node.kind, GraphNodeKind::Output(name) if name == "c"))
+        .unwrap()
+        .id;
+    let output_step = placer
+        .visit_orders
+        .iter()
+        .position(|id| *id == output_id)
+        .unwrap();
+    let state = [(or_id, Position(1, 1, 1))].into_iter().collect();
+
+    let result = placer.do_step(output_step, vec![(empty_world(), state)]);
+
+    assert_eq!(result.queue[0].1.endpoint_positions().len(), 1);
     Ok(())
 }
 

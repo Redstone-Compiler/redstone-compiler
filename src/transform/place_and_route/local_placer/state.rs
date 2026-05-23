@@ -1,10 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Index;
 
 use crate::graph::GraphNodeId;
 use crate::world::position::Position;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(super) enum PlacementEndpoint {
     Node(GraphNodeId),
     Port(GraphNodeId, String),
@@ -26,6 +26,24 @@ impl PlacementState {
         self.positions.iter().filter_map(|(endpoint, position)| {
             matches!(endpoint, PlacementEndpoint::Node(_)).then_some(*position)
         })
+    }
+
+    pub(super) fn retain_nodes(&mut self, node_ids: &HashSet<GraphNodeId>) {
+        self.positions.retain(|endpoint, _| match endpoint {
+            PlacementEndpoint::Node(node_id) | PlacementEndpoint::Port(node_id, _) => {
+                node_ids.contains(node_id)
+            }
+        });
+    }
+
+    pub(super) fn endpoint_positions(&self) -> Vec<(PlacementEndpoint, Position)> {
+        let mut positions = self
+            .positions
+            .iter()
+            .map(|(endpoint, position)| (endpoint.clone(), *position))
+            .collect::<Vec<_>>();
+        positions.sort();
+        positions
     }
 
     #[allow(dead_code)]
