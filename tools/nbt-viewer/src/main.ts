@@ -56,8 +56,17 @@ type TraceAnimation = {
   token: number;
 };
 type GraphTab = 'world' | 'logic';
+type ExampleFile = {
+  name: string;
+  path: string;
+  size: number;
+};
 
 const TRACE_ANIMATION_INTERVAL_MS = 50;
+
+function resolveAssetPath(path: string): string {
+  return new URL(`${import.meta.env.BASE_URL}${path}`, window.location.origin).href;
+}
 
 document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
   <main class="app-shell">
@@ -202,6 +211,8 @@ let graphZoom = 1;
 
 folderInput.setAttribute('webkitdirectory', '');
 folderInput.setAttribute('directory', '');
+
+void loadExamples();
 
 input.addEventListener('change', () => {
   const file = input.files?.[0];
@@ -673,6 +684,57 @@ function renderFileBrowser(files: File[]): void {
   }
 
   void openFile(nbtFiles[0], filesList.querySelector('.file-entry'));
+}
+
+async function loadExamples(): Promise<void> {
+  try {
+    const response = await fetch(resolveAssetPath('examples/manifest.json'));
+    if (!response.ok) throw new Error(`Failed to load examples: ${response.status}`);
+    const examples = (await response.json()) as ExampleFile[];
+    renderExampleBrowser(examples);
+    if (examples[0]) {
+      await openExample(examples[0], filesList.querySelector('.file-entry'));
+    }
+  } catch (error) {
+    filesList.classList.add('empty');
+    filesCount.textContent = 'No examples';
+    filesPanel.open = true;
+    filesList.textContent = error instanceof Error ? error.message : String(error);
+  }
+}
+
+function renderExampleBrowser(examples: ExampleFile[]): void {
+  filesList.replaceChildren();
+  filesList.classList.toggle('empty', examples.length === 0);
+  filesCount.textContent = examples.length === 0 ? 'No NBT files' : `${examples.length} files`;
+  filesPanel.open = true;
+
+  if (examples.length === 0) {
+    filesList.textContent = 'No supported NBT files found.';
+    return;
+  }
+
+  for (const example of examples) {
+    const button = document.createElement('button');
+    button.className = 'file-entry';
+    button.type = 'button';
+    const name = document.createElement('span');
+    name.className = 'file-entry-name';
+    name.textContent = example.name;
+    const size = document.createElement('span');
+    size.className = 'file-entry-size';
+    size.textContent = formatBytes(example.size);
+    button.append(name, size);
+    button.addEventListener('click', () => void openExample(example, button));
+    filesList.append(button);
+  }
+}
+
+async function openExample(example: ExampleFile, selectedEntry?: Element | null): Promise<void> {
+  const response = await fetch(resolveAssetPath(example.path));
+  if (!response.ok) throw new Error(`Failed to load ${example.path}: ${response.status}`);
+  const file = new File([await response.arrayBuffer()], example.name, { type: 'application/octet-stream' });
+  await openFile(file, selectedEntry);
 }
 
 async function openFile(file: File, selectedEntry?: Element | null): Promise<void> {

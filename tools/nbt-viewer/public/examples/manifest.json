@@ -1,0 +1,62 @@
+[
+  {
+    "name": "alu-export.nbt",
+    "file": "alu-export.nbt",
+    "path": "examples/alu-export.nbt",
+    "size": 3386
+  },
+  {
+    "name": "alu.nbt",
+    "file": "alu.nbt",
+    "path": "examples/alu.nbt",
+    "size": 11304
+  },
+  {
+    "name": "and-gate.nbt",
+    "file": "and-gate.nbt",
+    "path": "examples/and-gate.nbt",
+    "size": 292
+  },
+  {
+    "name": "full-adder.nbt",
+    "file": "full-adder.nbt",
+    "path": "examples/full-adder.nbt",
+    "size": 636
+  },
+  {
+    "name": "half-adder-generated.nbt",
+    "file": "half-adder-generated.nbt",
+    "path": "examples/half-adder-generated.nbt",
+    "size": 553
+  },
+  {
+    "name": "test-fix.nbt",
+    "file": "test-fix.nbt",
+    "path": "examples/test-fix.nbt",
+    "size": 673
+  },
+  {
+    "name": "test-repeater.nbt",
+    "file": "test-repeater.nbt",
+    "path": "examples/test-repeater.nbt",
+    "size": 553
+  },
+  {
+    "name": "test.nbt",
+    "file": "test.nbt",
+    "path": "examples/test.nbt",
+    "size": 4146
+  },
+  {
+    "name": "xor-generated.nbt",
+    "file": "xor-generated.nbt",
+    "path": "examples/xor-generated.nbt",
+    "size": 353
+  },
+  {
+    "name": "xor.nbt",
+    "file": "xor.nbt",
+    "path": "examples/xor.nbt",
+    "size": 581
+  }
+]
