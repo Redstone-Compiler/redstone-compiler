@@ -6,6 +6,9 @@ use super::position::Position;
 use super::{World, World3D};
 
 const DEFAULT_TRACE_LIMIT: usize = 0;
+// Approximate Minecraft redstone torch burnout so feedback loops can settle
+// instead of producing simulator events forever. These are simulator cycles,
+// not exact game ticks or redstone ticks.
 const TORCH_BURNOUT_WINDOW_CYCLES: usize = 60;
 const TORCH_BURNOUT_TOGGLE_LIMIT: usize = 8;
 
