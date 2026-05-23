@@ -10,7 +10,6 @@ use super::place_bound::PlaceBound;
 use super::placed_node::PlacedNode;
 use super::sampling::SamplingPolicy;
 use crate::graph::logic::LogicGraph;
-use crate::graph::world::WorldGraph;
 use crate::graph::{GraphNode, GraphNodeId, GraphNodeKind};
 use crate::logic::LogicType;
 use crate::sequential::layout::SequentialMacro;
@@ -434,22 +433,6 @@ fn progress_style(step: usize, len: usize) -> ProgressStyle {
     )
     .unwrap()
     .progress_chars("#>-")
-}
-
-pub struct LocalPlacerCostEstimator<'a> {
-    graph: &'a WorldGraph,
-}
-
-impl<'a> LocalPlacerCostEstimator<'a> {
-    pub fn new(graph: &'a WorldGraph) -> Self {
-        Self { graph }
-    }
-
-    pub fn cost(&self) -> usize {
-        let _buffer_depth = self.graph.graph.critical_path().len();
-
-        todo!()
-    }
 }
 
 #[cfg(test)]
