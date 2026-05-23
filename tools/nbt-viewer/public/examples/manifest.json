@@ -30,6 +30,24 @@
     "size": 553
   },
   {
+    "name": "half-adder.nbt",
+    "file": "half-adder.nbt",
+    "path": "examples/half-adder.nbt",
+    "size": 21800
+  },
+  {
+    "name": "level.nbt",
+    "file": "level.nbt",
+    "path": "examples/level.nbt",
+    "size": 1900
+  },
+  {
+    "name": "rs-latch.nbt",
+    "file": "rs-latch.nbt",
+    "path": "examples/rs-latch.nbt",
+    "size": 368
+  },
+  {
     "name": "test-fix.nbt",
     "file": "test-fix.nbt",
     "path": "examples/test-fix.nbt",
@@ -46,6 +64,24 @@
     "file": "test.nbt",
     "path": "examples/test.nbt",
     "size": 4146
+  },
+  {
+    "name": "xor-gate-complex.nbt",
+    "file": "xor-gate-complex.nbt",
+    "path": "examples/xor-gate-complex.nbt",
+    "size": 12595
+  },
+  {
+    "name": "xor-gate-shortest.nbt",
+    "file": "xor-gate-shortest.nbt",
+    "path": "examples/xor-gate-shortest.nbt",
+    "size": 7269
+  },
+  {
+    "name": "xor-gate-simple.nbt",
+    "file": "xor-gate-simple.nbt",
+    "path": "examples/xor-gate-simple.nbt",
+    "size": 11128
   },
   {
     "name": "xor-generated.nbt",

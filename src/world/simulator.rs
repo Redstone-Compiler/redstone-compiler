@@ -482,10 +482,12 @@ impl Simulator {
                 let BlockKind::Cobble { on_count, .. } = self.world[support].kind else {
                     return None;
                 };
+                let support_is_powered =
+                    on_count > 0 || self.redstone_currently_powers(support, Some(pos));
                 Some(Event {
                     id: None,
                     from_id: None,
-                    event_type: if on_count > 0 {
+                    event_type: if support_is_powered {
                         EventType::SoftOn
                     } else {
                         EventType::SoftOff
@@ -500,6 +502,157 @@ impl Simulator {
             return;
         }
         self.queue.push_back(events.into());
+    }
+
+    fn redstone_currently_powers(&self, target: Position, ignored_torch: Option<Position>) -> bool {
+        self.world
+            .iter_block()
+            .into_iter()
+            .any(|(pos, block)| match block.kind {
+                BlockKind::Redstone {
+                    state, strength, ..
+                } if strength > 0 => {
+                    self.redstone_is_powered_independently_of(pos, ignored_torch)
+                        && self
+                            .redstone_propagate_targets(pos, state)
+                            .into_iter()
+                            .any(|redstone_target| redstone_target == target)
+                }
+                _ => false,
+            })
+    }
+
+    fn redstone_is_powered_independently_of(
+        &self,
+        pos: Position,
+        ignored_torch: Option<Position>,
+    ) -> bool {
+        self.redstone_is_powered_independently_of_inner(pos, ignored_torch, &mut HashSet::new())
+    }
+
+    fn redstone_is_powered_independently_of_inner(
+        &self,
+        pos: Position,
+        ignored_torch: Option<Position>,
+        visited: &mut HashSet<Position>,
+    ) -> bool {
+        if !visited.insert(pos) {
+            return false;
+        }
+
+        let BlockKind::Redstone {
+            on_count, strength, ..
+        } = self.world[pos].kind
+        else {
+            return false;
+        };
+
+        if strength == 0 {
+            return false;
+        }
+
+        if on_count > 0 && !self.is_torch_direct_redstone_output(ignored_torch, pos) {
+            return true;
+        }
+
+        self.world
+            .iter_block()
+            .into_iter()
+            .any(|(source_pos, source_block)| match source_block.kind {
+                BlockKind::Redstone {
+                    state,
+                    strength: source_strength,
+                    ..
+                } if source_strength > strength
+                    && self
+                        .redstone_propagate_targets(source_pos, state)
+                        .contains(&pos) =>
+                {
+                    let mut branch_visited = visited.clone();
+                    self.redstone_is_powered_independently_of_inner(
+                        source_pos,
+                        ignored_torch,
+                        &mut branch_visited,
+                    )
+                }
+                _ => false,
+            })
+    }
+
+    fn is_torch_direct_redstone_output(
+        &self,
+        ignored_torch: Option<Position>,
+        redstone_pos: Position,
+    ) -> bool {
+        let Some(torch_pos) = ignored_torch else {
+            return false;
+        };
+        if !self.world.size.bound_on(torch_pos) {
+            return false;
+        }
+        let torch = self.world[torch_pos];
+        if !torch.kind.is_torch() {
+            return false;
+        }
+
+        self.torch_output_targets(torch_pos, torch.direction)
+            .into_iter()
+            .any(|target| target == redstone_pos)
+    }
+
+    fn torch_output_targets(&self, pos: Position, direction: Direction) -> Vec<Position> {
+        let mut targets = match direction {
+            Direction::Bottom => pos.cardinal(),
+            Direction::East | Direction::West | Direction::South | Direction::North => {
+                let mut positions = pos.cardinal_except(direction);
+                positions.extend(pos.down());
+                positions
+            }
+            _ => Vec::new(),
+        };
+        targets.push(pos.up());
+        targets
+            .into_iter()
+            .filter(|&target| self.world.size.bound_on(target))
+            .filter(|&target| self.world[target].kind.is_redstone())
+            .collect()
+    }
+
+    fn redstone_propagate_targets(&self, pos: Position, state: usize) -> Vec<Position> {
+        let mut propagate_targets = Vec::new();
+
+        propagate_targets.extend(pos.cardinal_redstone(state));
+
+        let up_pos = pos.up();
+        if self.world.size.bound_on(up_pos) && !self.world[up_pos].kind.is_cobble() {
+            propagate_targets.extend(
+                up_pos
+                    .cardinal_redstone(state)
+                    .into_iter()
+                    .filter(|&pos| {
+                        self.world.size.bound_on(pos) && self.world[pos].kind.is_redstone()
+                    }),
+            );
+        }
+
+        if let Some(down_pos) = pos.down() {
+            if self.world[down_pos].kind.is_cobble() {
+                propagate_targets.push(down_pos);
+
+                propagate_targets.extend(
+                    pos.cardinal_redstone(state)
+                        .into_iter()
+                        .filter(|&pos| self.world.size.bound_on(pos))
+                        .filter(|&pos| !self.world[pos].kind.is_cobble())
+                        .filter_map(|pos| pos.walk(Direction::Bottom))
+                        .filter(|&pos| {
+                            self.world.size.bound_on(pos) && self.world[pos].kind.is_redstone()
+                        }),
+                );
+            }
+        }
+
+        propagate_targets
     }
 
     fn init_switch_event(&mut self, dir: Direction, pos: Position) {
@@ -1127,7 +1280,8 @@ impl Simulator {
             unreachable!()
         };
 
-        let lock_signal = event.direction.is_othogonal_plane(block.direction);
+        let lock_signal = event.direction.is_othogonal_plane(block.direction)
+            && self.is_repeater_lock_source(event);
 
         if event.direction != block.direction && !lock_signal {
             return Ok(());
@@ -1143,40 +1297,40 @@ impl Simulator {
             | EventType::HardOn
             | EventType::TorchOn
             | EventType::RedstoneOn { .. } => {
-                if !is_on {
-                    if lock_signal {
+                if lock_signal {
+                    if !is_locked {
                         block.kind.set_repeater_lock(true)?;
 
                         tracing::info!("trigger repeater event: {event:?}, {block:?}");
-                    } else {
-                        self.push_event_to_next_tick(Event {
-                            id: None,
-                            from_id: event.id,
-                            event_type: EventType::RepeaterOn { delay },
-                            target_position: event.target_position,
-                            direction: event.direction,
-                        });
                     }
+                } else if !is_on {
+                    self.push_event_to_next_tick(Event {
+                        id: None,
+                        from_id: event.id,
+                        event_type: EventType::RepeaterOn { delay },
+                        target_position: event.target_position,
+                        direction: event.direction,
+                    });
                 }
             }
             EventType::SoftOff
             | EventType::HardOff
             | EventType::TorchOff
             | EventType::RedstoneOff => {
-                if is_on {
-                    if lock_signal {
+                if lock_signal {
+                    if is_locked {
                         block.kind.set_repeater_lock(false)?;
 
                         tracing::info!("trigger repeater event: {event:?}, {block:?}");
-                    } else {
-                        self.push_event_to_next_tick(Event {
-                            id: None,
-                            from_id: event.id,
-                            event_type: EventType::RepeaterOff { delay },
-                            target_position: event.target_position,
-                            direction: event.direction,
-                        });
                     }
+                } else if is_on {
+                    self.push_event_to_next_tick(Event {
+                        id: None,
+                        from_id: event.id,
+                        event_type: EventType::RepeaterOff { delay },
+                        target_position: event.target_position,
+                        direction: event.direction,
+                    });
                 }
             }
             EventType::RepeaterOn { delay } => {
@@ -1257,6 +1411,14 @@ impl Simulator {
         }
 
         Ok(())
+    }
+
+    fn is_repeater_lock_source(&self, event: &Event) -> bool {
+        let Some(source_pos) = event.target_position.walk(event.direction) else {
+            return false;
+        };
+
+        self.world.size.bound_on(source_pos) && self.world[source_pos].kind.is_repeater()
     }
 }
 
@@ -1625,6 +1787,54 @@ mod test {
     }
 
     #[test]
+    fn unittest_simulator_full_adder_all_on_then_first_input_off_unpowers_output(
+    ) -> eyre::Result<()> {
+        let nbt = NBTRoot::from_nbt_bytes(&std::fs::read("test/full-adder.nbt")?)?;
+        let world = nbt.to_world();
+        let mut sim = Simulator::from_with_limits_and_trace(&world, 256, 50_000, 0)
+            .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
+
+        sim.change_state_with_limits(
+            vec![
+                (Position(0, 5, 1), true),
+                (Position(0, 7, 2), true),
+                (Position(2, 0, 3), true),
+            ],
+            256,
+            50_000,
+        )?;
+        sim.change_state_with_limits(vec![(Position(0, 5, 1), false)], 256, 50_000)?;
+
+        assert!(matches!(
+            sim.world[Position(8, 2, 3)].kind,
+            BlockKind::Torch { is_on: false }
+        ));
+        let BlockKind::Redstone { strength, .. } = sim.world[Position(8, 2, 2)].kind else {
+            panic!("full-adder output should be redstone");
+        };
+        assert_eq!(strength, 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn unittest_simulator_full_adder_middle_input_keeps_output_powered() -> eyre::Result<()> {
+        let nbt = NBTRoot::from_nbt_bytes(&std::fs::read("test/full-adder.nbt")?)?;
+        let world = nbt.to_world();
+        let mut sim = Simulator::from_with_limits_and_trace(&world, 256, 50_000, 0)
+            .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
+
+        sim.change_state_with_limits(vec![(Position(0, 7, 2), true)], 256, 50_000)?;
+
+        let BlockKind::Redstone { strength, .. } = sim.world[Position(8, 2, 2)].kind else {
+            panic!("full-adder output should be redstone");
+        };
+        assert!(strength > 0, "full-adder output should stay powered");
+
+        Ok(())
+    }
+
+    #[test]
     fn unittest_simulator_repeater() {
         let _ = tracing_subscriber::fmt::try_init();
 
@@ -1674,6 +1884,140 @@ mod test {
         };
 
         assert_eq!(strength, 14)
+    }
+
+    fn test_repeater(is_on: bool, is_locked: bool, direction: Direction) -> Block {
+        Block {
+            kind: BlockKind::Repeater {
+                is_on,
+                is_locked,
+                delay: 2,
+                lock_input1: None,
+                lock_input2: None,
+            },
+            direction,
+        }
+    }
+
+    fn test_cobble(on_count: usize, on_base_count: usize) -> Block {
+        Block {
+            kind: BlockKind::Cobble {
+                on_count,
+                on_base_count,
+            },
+            direction: Direction::None,
+        }
+    }
+
+    #[test]
+    fn unittest_simulator_repeater_side_hard_power_does_not_lock() -> eyre::Result<()> {
+        let target = Position(1, 1, 0);
+        let source = Position(2, 1, 0);
+        let mock_world = World {
+            size: DimSize(3, 3, 1),
+            blocks: vec![
+                (target, test_repeater(false, false, Direction::North)),
+                (source, test_cobble(1, 1)),
+            ],
+        };
+        let mut sim = Simulator::new(&mock_world, DEFAULT_TRACE_LIMIT);
+        sim.queue.push_back(VecDeque::new());
+        let mut block = sim.world[target];
+
+        sim.propgate_repeater_event(
+            &mut block,
+            &Event {
+                id: None,
+                from_id: None,
+                event_type: EventType::HardOn,
+                target_position: target,
+                direction: target.diff(source),
+            },
+        )?;
+
+        assert!(matches!(
+            block.kind,
+            BlockKind::Repeater {
+                is_locked: false,
+                ..
+            }
+        ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn unittest_simulator_repeater_side_repeater_power_locks() -> eyre::Result<()> {
+        let target = Position(1, 1, 0);
+        let source = Position(2, 1, 0);
+        let mock_world = World {
+            size: DimSize(3, 3, 1),
+            blocks: vec![
+                (target, test_repeater(true, false, Direction::North)),
+                (source, test_repeater(true, false, Direction::West)),
+            ],
+        };
+        let mut sim = Simulator::new(&mock_world, DEFAULT_TRACE_LIMIT);
+        sim.queue.push_back(VecDeque::new());
+        let mut block = sim.world[target];
+
+        sim.propgate_repeater_event(
+            &mut block,
+            &Event {
+                id: None,
+                from_id: None,
+                event_type: EventType::HardOn,
+                target_position: target,
+                direction: target.diff(source),
+            },
+        )?;
+
+        assert!(matches!(
+            block.kind,
+            BlockKind::Repeater {
+                is_locked: true,
+                ..
+            }
+        ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn unittest_simulator_repeater_side_repeater_power_off_unlocks() -> eyre::Result<()> {
+        let target = Position(1, 1, 0);
+        let source = Position(2, 1, 0);
+        let mock_world = World {
+            size: DimSize(3, 3, 1),
+            blocks: vec![
+                (target, test_repeater(false, true, Direction::North)),
+                (source, test_repeater(false, false, Direction::West)),
+            ],
+        };
+        let mut sim = Simulator::new(&mock_world, DEFAULT_TRACE_LIMIT);
+        sim.queue.push_back(VecDeque::new());
+        let mut block = sim.world[target];
+
+        sim.propgate_repeater_event(
+            &mut block,
+            &Event {
+                id: None,
+                from_id: None,
+                event_type: EventType::HardOff,
+                target_position: target,
+                direction: target.diff(source),
+            },
+        )?;
+
+        assert!(matches!(
+            block.kind,
+            BlockKind::Repeater {
+                is_locked: false,
+                ..
+            }
+        ));
+
+        Ok(())
     }
 
     #[test]
