@@ -1,4 +1,7 @@
+use redstone_compiler::graph::graphviz::ToGraphvizGraph;
+use redstone_compiler::graph::world::WorldGraphBuilder;
 use redstone_compiler::nbt::{NBTRoot, ToNBT};
+use redstone_compiler::transform::place_and_route::utils::world_to_logic;
 use redstone_compiler::world::block::BlockKind;
 use redstone_compiler::world::position::Position;
 use redstone_compiler::world::simulator::{SimulationSnapshot, SimulationTraceEntry, Simulator};
@@ -27,6 +30,12 @@ struct TraceReport {
 struct SnapshotInfo {
     cycle: usize,
     root: NBTRoot,
+}
+
+#[derive(Serialize)]
+struct GraphDotInfo {
+    world_dot: String,
+    logic_dot: String,
 }
 
 #[wasm_bindgen]
@@ -83,6 +92,19 @@ impl NbtSimulator {
         };
 
         serde_wasm_bindgen::to_value(&report).map_err(to_js_error)
+    }
+
+    pub fn graph_dot(nbt_bytes: &[u8]) -> Result<JsValue, JsValue> {
+        let nbt = NBTRoot::from_nbt_bytes(nbt_bytes).map_err(to_js_error)?;
+        let world = nbt.to_world();
+        let world_graph = WorldGraphBuilder::new(&world).build();
+        let logic_graph = world_to_logic(&world).map_err(to_js_error)?;
+        let graph_dot = GraphDotInfo {
+            world_dot: world_graph.to_graphviz(),
+            logic_dot: logic_graph.to_graphviz(),
+        };
+
+        serde_wasm_bindgen::to_value(&graph_dot).map_err(to_js_error)
     }
 
     pub fn switches(&self) -> Result<JsValue, JsValue> {

@@ -51,6 +51,13 @@ input {
   right: 16px;
   z-index: 4;
   display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.file-actions-row {
+  display: flex;
   gap: 8px;
 }
 
@@ -66,6 +73,10 @@ input {
   cursor: pointer;
   backdrop-filter: blur(14px);
   box-shadow: 0 10px 30px rgb(0 0 0 / 24%);
+}
+
+.graph-button {
+  width: 104px;
 }
 
 .file-button:hover {
@@ -94,7 +105,17 @@ input {
   overflow: hidden;
 }
 
-.files-panel summary {
+.switches-panel {
+  top: 50%;
+  right: 16px;
+  transform: translateY(-50%);
+  width: min(320px, calc(100vw - 32px));
+  max-height: min(38vh, 320px);
+  overflow: hidden;
+}
+
+.files-panel summary,
+.switches-panel summary {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -107,11 +128,13 @@ input {
   list-style: none;
 }
 
-.files-panel summary::-webkit-details-marker {
+.files-panel summary::-webkit-details-marker,
+.switches-panel summary::-webkit-details-marker {
   display: none;
 }
 
-.files-panel summary::before {
+.files-panel summary::before,
+.switches-panel summary::before {
   content: "+";
   display: inline-grid;
   place-items: center;
@@ -123,11 +146,13 @@ input {
   flex: 0 0 auto;
 }
 
-.files-panel[open] summary::before {
+.files-panel[open] summary::before,
+.switches-panel[open] summary::before {
   content: "-";
 }
 
-#files-count {
+#files-count,
+#switches-count {
   min-width: 0;
   overflow: hidden;
   color: #9ea9b3;
@@ -142,7 +167,15 @@ input {
   border-top: 1px solid rgb(154 164 173 / 18%);
 }
 
-.files-list.empty {
+.switches-list {
+  max-height: calc(min(38vh, 320px) - 38px);
+  overflow: auto;
+  padding: 6px;
+  border-top: 1px solid rgb(154 164 173 / 18%);
+}
+
+.files-list.empty,
+.switches-list.empty {
   display: grid;
   min-height: 120px;
   place-items: center;
@@ -152,7 +185,8 @@ input {
   text-align: center;
 }
 
-.file-entry {
+.file-entry,
+.switch-entry {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -171,30 +205,35 @@ input {
   cursor: pointer;
 }
 
-.file-entry-name {
+.file-entry-name,
+.switch-entry-label {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.file-entry-size {
+.file-entry-size,
+.switch-entry-state {
   margin-left: auto;
   color: #9ea9b3;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
-.file-entry:hover {
+.file-entry:hover,
+.switch-entry:hover {
   background: rgb(255 255 255 / 7%);
 }
 
-.file-entry.selected {
+.file-entry.selected,
+.switch-entry.selected {
   background: rgb(211 50 50 / 24%);
   color: #fff;
 }
 
-.file-entry.selected .file-entry-size {
+.file-entry.selected .file-entry-size,
+.switch-entry.selected .switch-entry-state {
   color: #ffd0d0;
 }
 
@@ -214,7 +253,7 @@ input {
   overflow: hidden;
 }
 
-.trace-panel summary {
+.trace-panel > summary {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -227,7 +266,8 @@ input {
   list-style: none;
 }
 
-.trace-panel summary::-webkit-details-marker {
+.trace-panel > summary::-webkit-details-marker,
+.trace-log summary::-webkit-details-marker {
   display: none;
 }
 
@@ -276,8 +316,37 @@ input {
   white-space: nowrap;
 }
 
+.trace-log {
+  border-top: 1px solid rgb(154 164 173 / 18%);
+}
+
+.trace-log summary {
+  min-height: 30px;
+  padding: 7px 12px;
+  color: #cbd4db;
+  cursor: pointer;
+  font-size: 12px;
+  list-style: none;
+}
+
+.trace-log summary::before {
+  content: "+";
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  margin-right: 8px;
+  border: 1px solid rgb(154 164 173 / 34%);
+  border-radius: 4px;
+  color: #cbd4db;
+}
+
+.trace-log[open] summary::before {
+  content: "-";
+}
+
 #trace-output {
-  max-height: calc(min(34vh, 300px) - 76px);
+  max-height: calc(min(34vh, 300px) - 106px);
   margin: 0;
   overflow: auto;
   padding: 10px 12px;
@@ -347,6 +416,180 @@ input {
   display: none;
 }
 
+.graph-dialog {
+  width: min(1800px, calc(100vw - 12px));
+  height: min(1200px, calc(100vh - 12px));
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid rgb(154 164 173 / 30%);
+  border-radius: 8px;
+  background: rgb(18 22 26 / 96%);
+  color: #e7ecef;
+  box-shadow: 0 24px 80px rgb(0 0 0 / 58%);
+}
+
+.graph-dialog::backdrop {
+  background: rgb(0 0 0 / 58%);
+}
+
+.graph-dialog-surface {
+  display: grid;
+  grid-template-rows: auto auto auto 1fr;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+
+.graph-dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 42px;
+  padding: 10px 12px;
+  border-bottom: 1px solid rgb(154 164 173 / 18%);
+  font-size: 13px;
+}
+
+.graph-tabs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 12px;
+  border-bottom: 1px solid rgb(154 164 173 / 18%);
+}
+
+.graph-tab {
+  min-height: 28px;
+  padding: 4px 10px;
+  border: 1px solid rgb(154 164 173 / 30%);
+  border-radius: 4px;
+  background: rgb(22 27 31 / 82%);
+  color: #dce3e7;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.graph-tab:hover,
+.graph-tab.active {
+  background: rgb(211 50 50 / 26%);
+  color: #fff;
+}
+
+.graph-zoom-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.graph-zoom-button,
+.graph-zoom-value {
+  height: 28px;
+  border: 1px solid rgb(154 164 173 / 30%);
+  border-radius: 4px;
+  background: rgb(22 27 31 / 82%);
+  color: #dce3e7;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.graph-zoom-button {
+  width: 30px;
+}
+
+.graph-zoom-value {
+  min-width: 54px;
+  padding: 0 8px;
+  font-variant-numeric: tabular-nums;
+}
+
+.graph-zoom-button:hover,
+.graph-zoom-value:hover {
+  background: rgb(38 47 55 / 88%);
+}
+
+.graph-zoom-button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.graph-status {
+  min-height: 30px;
+  padding: 8px 12px;
+  border-bottom: 1px solid rgb(154 164 173 / 18%);
+  color: #9ea9b3;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 12px;
+}
+
+.graph-viewer {
+  position: relative;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.graph-output {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow: auto;
+  background: #f7f9fb;
+  color: #111820;
+}
+
+.graph-output svg {
+  display: block;
+  max-width: none;
+  margin: 18px;
+}
+
+.graph-minimap {
+  position: absolute;
+  right: 14px;
+  bottom: 14px;
+  width: 220px;
+  height: 150px;
+  overflow: hidden;
+  border: 1px solid rgb(17 24 32 / 28%);
+  border-radius: 6px;
+  background: rgb(247 249 251 / 88%);
+  box-shadow: 0 12px 34px rgb(0 0 0 / 20%);
+  cursor: grab;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.graph-minimap:active {
+  cursor: grabbing;
+}
+
+.graph-minimap.hidden {
+  display: none;
+}
+
+.graph-minimap-content {
+  position: absolute;
+  inset: 8px;
+  overflow: hidden;
+}
+
+.graph-minimap-content svg {
+  display: block;
+  margin: 0;
+  transform-origin: top left;
+}
+
+.graph-minimap-viewport {
+  position: absolute;
+  left: 8px;
+  top: 8px;
+  min-width: 8px;
+  min-height: 8px;
+  border: 2px solid #d33232;
+  background: rgb(211 50 50 / 10%);
+}
+
 @media (max-width: 720px) {
   .floating-actions {
     top: 12px;
@@ -357,6 +600,14 @@ input {
     top: 58px;
     left: 12px;
     width: calc(100vw - 24px);
+  }
+
+  .switches-panel {
+    top: 104px;
+    right: 12px;
+    transform: none;
+    width: calc(100vw - 24px);
+    max-height: 28vh;
   }
 
   .inspector-panel {
@@ -379,5 +630,12 @@ input {
 
   #trace-output {
     max-height: calc(28vh - 76px);
+  }
+
+  .graph-minimap {
+    width: 150px;
+    height: 104px;
+    right: 10px;
+    bottom: 10px;
   }
 }
