@@ -11,6 +11,8 @@ type SetStructureOptions = {
   preserveSelection?: boolean;
 };
 
+const ROTATION_DRAG_SCALE = 300;
+
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
@@ -42,6 +44,7 @@ export class StructureViewer {
   private frame = 0;
   private dragMode?: DragMode;
   private dragPos?: vec2;
+  private readonly activePointers = new Map<number, vec2>();
   private lastFrameTime = 0;
   private readonly movement = new Set<string>();
   private cPos = vec3.create();
@@ -61,7 +64,8 @@ export class StructureViewer {
     canvas.addEventListener('pointerdown', event => this.onPointerDown(event));
     canvas.addEventListener('pointermove', event => this.onPointerMove(event));
     canvas.addEventListener('pointerup', event => this.onPointerUp(event));
-    canvas.addEventListener('pointerleave', () => this.endDrag());
+    canvas.addEventListener('pointercancel', event => this.onPointerUp(event));
+    canvas.addEventListener('pointerleave', event => this.onPointerUp(event));
     canvas.addEventListener('wheel', event => this.onWheel(event), { passive: false });
     window.addEventListener('keydown', event => this.onKeyDown(event));
     window.addEventListener('keyup', event => this.onKeyUp(event));
@@ -116,23 +120,58 @@ export class StructureViewer {
   }
 
   private onPointerDown(event: PointerEvent): void {
-    if (event.button !== 0 && event.button !== 2) return;
+    if (event.pointerType === 'mouse' && event.button !== 0 && event.button !== 2) return;
 
     event.preventDefault();
-    this.canvas.setPointerCapture(event.pointerId);
-    this.dragMode = event.button === 2 ? 'move' : 'rotate';
-    this.dragPos = vec2.fromValues(event.clientX, event.clientY);
+    try {
+      this.canvas.setPointerCapture(event.pointerId);
+    } catch {
+      // Synthetic pointer events used by tests may not have a browser-managed active pointer.
+    }
+    const pos = vec2.fromValues(event.clientX, event.clientY);
+    this.activePointers.set(event.pointerId, pos);
 
-    if (event.button === 0) {
+    if (this.activePointers.size === 1) {
+      this.dragMode = event.button === 2 ? 'move' : 'rotate';
+      this.dragPos = vec2.clone(pos);
+    } else {
+      this.dragMode = 'move';
+      this.dragPos = undefined;
+    }
+
+    if (event.button === 0 && this.activePointers.size === 1) {
       this.selectBlock(event.offsetX, event.offsetY);
     }
   }
 
   private onPointerMove(event: PointerEvent): void {
+    const currentPos = this.activePointers.get(event.pointerId);
+    if (!currentPos) return;
+
+    event.preventDefault();
+
+    const previousGesture = this.getTouchGesture();
+    vec2.set(currentPos, event.clientX, event.clientY);
+    const currentGesture = this.getTouchGesture();
+
+    if (previousGesture && currentGesture) {
+      const previousDistance = vec2.distance(previousGesture[0], previousGesture[1]);
+      const currentDistance = vec2.distance(currentGesture[0], currentGesture[1]);
+      const previousCenter = this.midpoint(previousGesture[0], previousGesture[1]);
+      const currentCenter = this.midpoint(currentGesture[0], currentGesture[1]);
+
+      if (previousDistance > 0 && currentDistance > 0) {
+        this.cDist = clamp(this.cDist * (previousDistance / currentDistance), 2, 400);
+      }
+      this.moveCameraByDrag(currentCenter[0] - previousCenter[0], currentCenter[1] - previousCenter[1]);
+      this.render();
+      return;
+    }
+
     if (!this.dragPos) return;
 
-    const dx = (event.clientX - this.dragPos[0]) / 100;
-    const dy = (event.clientY - this.dragPos[1]) / 100;
+    const dx = (event.clientX - this.dragPos[0]) / ROTATION_DRAG_SCALE;
+    const dy = (event.clientY - this.dragPos[1]) / ROTATION_DRAG_SCALE;
     vec2.set(this.dragPos, event.clientX, event.clientY);
 
     if (this.dragMode === 'move') {
@@ -141,21 +180,46 @@ export class StructureViewer {
       return;
     }
 
+    const cameraPosition = this.getCameraPosition();
     this.cRot[0] = (this.cRot[0] + dx) % (Math.PI * 2);
     this.cRot[1] = clamp(this.cRot[1] + dy, -Math.PI / 2, Math.PI / 2);
+    this.setCameraPosition(cameraPosition);
     this.render();
   }
 
   private onPointerUp(event: PointerEvent): void {
-    this.endDrag();
+    this.activePointers.delete(event.pointerId);
     if (this.canvas.hasPointerCapture(event.pointerId)) {
       this.canvas.releasePointerCapture(event.pointerId);
+    }
+
+    if (this.activePointers.size === 0) {
+      this.endDrag();
+      return;
+    }
+
+    const remainingPointer = this.activePointers.values().next().value as vec2 | undefined;
+    if (remainingPointer) {
+      this.dragMode = 'rotate';
+      this.dragPos = vec2.clone(remainingPointer);
     }
   }
 
   private endDrag(): void {
+    this.activePointers.clear();
     this.dragMode = undefined;
     this.dragPos = undefined;
+  }
+
+  private getTouchGesture(): [vec2, vec2] | undefined {
+    if (this.activePointers.size < 2) return undefined;
+
+    const [first, second] = Array.from(this.activePointers.values());
+    return [vec2.clone(first), vec2.clone(second)];
+  }
+
+  private midpoint(a: vec2, b: vec2): vec2 {
+    return vec2.fromValues((a[0] + b[0]) / 2, (a[1] + b[1]) / 2);
   }
 
   private onWheel(event: WheelEvent): void {
@@ -273,27 +337,64 @@ export class StructureViewer {
     this.lastFrameTime = time;
     if (this.movement.size === 0 || delta === 0) return;
 
-    const direction = vec3.fromValues(0, 0, 0);
-    if (this.movement.has('KeyW')) direction[2] += 1;
-    if (this.movement.has('KeyS')) direction[2] -= 1;
-    if (this.movement.has('KeyA')) direction[0] += 1;
-    if (this.movement.has('KeyD')) direction[0] -= 1;
-    if (this.movement.has('Space')) direction[1] -= 1;
-    if (this.movement.has('ShiftLeft') || this.movement.has('ShiftRight')) direction[1] += 1;
+    const direction = this.getKeyboardMovementDirection();
     if (vec3.squaredLength(direction) === 0) return;
 
     vec3.normalize(direction, direction);
     vec3.scale(direction, direction, delta * Math.max(0.01, this.cDist * 0.0016));
-    vec3.rotateY(direction, direction, [0, 0, 0], -this.cRot[0]);
-    vec3.add(this.cPos, this.cPos, direction);
+    this.moveCamera(direction);
+  }
+
+  private getKeyboardMovementDirection(): vec3 {
+    const direction = vec3.create();
+    const cameraDirection = vec3.create();
+
+    if (this.movement.has('KeyW')) cameraDirection[2] -= 1;
+    if (this.movement.has('KeyS')) cameraDirection[2] += 1;
+    if (this.movement.has('KeyA')) cameraDirection[0] -= 1;
+    if (this.movement.has('KeyD')) cameraDirection[0] += 1;
+    if (vec3.squaredLength(cameraDirection) > 0) {
+      vec3.normalize(cameraDirection, cameraDirection);
+      this.rotateCameraVector(cameraDirection);
+      vec3.add(direction, direction, cameraDirection);
+    }
+
+    if (this.movement.has('Space')) direction[1] += 1;
+    if (this.movement.has('ShiftLeft') || this.movement.has('ShiftRight')) direction[1] -= 1;
+
+    return direction;
   }
 
   private moveCameraByDrag(dx: number, dy: number): void {
-    const direction = vec3.fromValues(dx, 0, dy);
+    const direction = vec3.fromValues(dx, -dy, 0);
     if (vec3.squaredLength(direction) === 0) return;
 
     vec3.scale(direction, direction, Math.max(0.01, this.cDist * 0.002));
+    this.rotateCameraVector(direction);
+    vec3.negate(direction, direction);
+    this.moveCamera(direction);
+  }
+
+  private moveCamera(direction: vec3): void {
+    const cameraPosition = this.getCameraPosition();
+    vec3.add(cameraPosition, cameraPosition, direction);
+    this.setCameraPosition(cameraPosition);
+  }
+
+  private getCameraPosition(): vec3 {
+    const cameraOffset = vec3.fromValues(0, 0, this.cDist);
+    this.rotateCameraVector(cameraOffset);
+    return vec3.sub(cameraOffset, cameraOffset, this.cPos);
+  }
+
+  private setCameraPosition(cameraPosition: vec3): void {
+    const cameraOffset = vec3.fromValues(0, 0, this.cDist);
+    this.rotateCameraVector(cameraOffset);
+    vec3.sub(this.cPos, cameraOffset, cameraPosition);
+  }
+
+  private rotateCameraVector(direction: vec3): void {
+    vec3.rotateX(direction, direction, [0, 0, 0], -this.cRot[1]);
     vec3.rotateY(direction, direction, [0, 0, 0], -this.cRot[0]);
-    vec3.add(this.cPos, this.cPos, direction);
   }
 }
