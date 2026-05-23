@@ -72,7 +72,7 @@ input {
   background: rgb(38 47 55 / 88%);
 }
 
-.hidden-file-input {
+.file-button input {
   display: none;
 }
 
