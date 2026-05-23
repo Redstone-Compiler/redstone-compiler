@@ -69,6 +69,19 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Prepare Minecraft block assets
+        run: |
+          if [ -d "$MCMETA_SOURCE_DIR" ]; then
+            npm run prepare:mcmeta
+          elif [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "::warning::Skipping mcmeta asset preparation because $MCMETA_SOURCE_DIR does not exist."
+          else
+            echo "::error::Missing mcmeta asset source at $MCMETA_SOURCE_DIR."
+            exit 1
+          fi
+        env:
+          MCMETA_SOURCE_DIR: ${{ github.workspace }}/tools/nbt-viewer/public/mcmeta-source
+
       - name: Build WASM simulator
         run: npm run build:wasm
 
