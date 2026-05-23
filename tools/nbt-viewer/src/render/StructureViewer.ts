@@ -104,6 +104,11 @@ export class StructureViewer {
     this.render();
   }
 
+  setSelectedBlock(block: StructureBlock | undefined): void {
+    this.selectedBlock = block ? vec3.fromValues(block.pos[0], block.pos[1], block.pos[2]) : undefined;
+    this.render();
+  }
+
   private async initialize(): Promise<void> {
     const resources = await this.resourcesPromise;
     this.renderer = new StructureRenderer(this.gl, this.structure, resources);

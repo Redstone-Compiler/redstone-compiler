@@ -3,7 +3,7 @@ import { loadNbtFile, stringifyNbt } from './nbt/loadNbt';
 import { toStructureModel } from './nbt/toStructure';
 import { StructureViewer } from './render/StructureViewer';
 import { NbtSimulation, NbtSimulationError, type SnapshotInfo, type TraceEntry } from './sim/NbtSimulation';
-import type { StructureBlock, StructurePaletteEntry } from './types';
+import type { StructureBlock, StructureModel, StructurePaletteEntry } from './types';
 
 interface DroppedFileSystemEntry {
   readonly fullPath: string;
@@ -66,6 +66,13 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
             <input id="file-input" type="file" accept=".nbt,.dat,.schem,.schematic,.litematic,.mcstructure" />
           </label>
         </div>
+        <details id="switches-panel" class="floating-panel switches-panel">
+          <summary>
+            <span>Switches</span>
+            <span id="switches-count">No switches</span>
+          </summary>
+          <div id="switches-list" class="switches-list empty">Open an NBT file to control switches.</div>
+        </details>
         <details id="files-panel" class="floating-panel files-panel">
           <summary>
             <span>Files</span>
@@ -119,6 +126,8 @@ const traceCycleInput = document.querySelector<HTMLInputElement>('#trace-cycle')
 const traceCycleLabel = document.querySelector<HTMLElement>('#trace-cycle-label')!;
 const tracePrevButton = document.querySelector<HTMLButtonElement>('#trace-prev')!;
 const traceNextButton = document.querySelector<HTMLButtonElement>('#trace-next')!;
+const switchesList = document.querySelector<HTMLElement>('#switches-list')!;
+const switchesCount = document.querySelector<HTMLElement>('#switches-count')!;
 
 const viewer = new StructureViewer(canvas);
 viewer.setSelectionHandler(renderSelection);
@@ -173,11 +182,17 @@ traceNextButton.addEventListener('click', () => {
 async function toggleSelectedSwitch(): Promise<void> {
   if (!selectedBlock || !currentNbtBytes) return;
 
+  await toggleSwitchBlock(selectedBlock);
+}
+
+async function toggleSwitchBlock(block: StructureBlock): Promise<void> {
+  if (!currentNbtBytes) return;
+
   simulation ??= await NbtSimulation.create(currentNbtBytes);
 
-  const selectedPos = selectedBlock.pos;
+  const selectedPos = block.pos;
   const baseRoot = currentRoot;
-  const nextRoot = simulation.toggleSwitch(selectedBlock);
+  const nextRoot = simulation.toggleSwitch(block);
   if (!nextRoot) return;
 
   currentRoot = mergeSimulatedState(currentRoot, nextRoot);
@@ -185,7 +200,10 @@ async function toggleSelectedSwitch(): Promise<void> {
   if (!structure) throw new Error('Simulator returned a structure that the viewer could not render.');
 
   await viewer.setStructure(structure, { preserveSelection: true, preserveView: true });
-  renderSelection(structure.blocks.find(block => samePos(block.pos, selectedPos)));
+  const nextSelectedBlock = structure.blocks.find(block => samePos(block.pos, selectedPos));
+  viewer.setSelectedBlock(nextSelectedBlock);
+  renderSelection(nextSelectedBlock);
+  renderSwitches(structure);
   renderTrace(simulation.trace(), simulation.snapshots(), baseRoot, { animateTo: 'last' });
 }
 
@@ -388,6 +406,7 @@ async function openFile(file: File, selectedEntry?: Element | null): Promise<voi
 
     if (structure) {
       await viewer.setStructure(structure);
+      renderSwitches(structure);
       viewerEmpty.classList.add('hidden');
       inspector.textContent = [
         `size: ${structure.size.join(' x ')}`,
@@ -398,6 +417,7 @@ async function openFile(file: File, selectedEntry?: Element | null): Promise<voi
     } else {
       viewerEmpty.classList.remove('hidden');
       inspector.textContent = 'This NBT file does not look like a Minecraft structure file.';
+      renderSwitches();
       renderTrace([], [], undefined);
     }
   } catch (error) {
@@ -408,6 +428,7 @@ async function openFile(file: File, selectedEntry?: Element | null): Promise<voi
     toggleSwitchButton.classList.add('hidden');
     viewerEmpty.classList.remove('hidden');
     inspector.textContent = error instanceof Error ? error.message : String(error);
+    renderSwitches();
     renderTrace([], [], undefined);
   }
 }
@@ -437,6 +458,42 @@ function renderSelection(block: StructureBlock | undefined): void {
     name: block.palette.name,
     properties: block.palette.properties,
     nbt: block.nbt,
+  });
+}
+
+function renderSwitches(structure?: StructureModel): void {
+  switchesList.replaceChildren();
+  const switches = structure?.blocks.filter(block => block.palette.name === 'minecraft:lever') ?? [];
+  switchesCount.textContent = switches.length === 0 ? 'No switches' : `${switches.length} switches`;
+
+  if (switches.length === 0) {
+    switchesList.className = 'switches-list empty';
+    switchesList.textContent = structure ? 'No switches in this NBT file.' : 'Open an NBT file to control switches.';
+    return;
+  }
+
+  switchesList.className = 'switches-list';
+  switches.forEach((block, index) => {
+    const row = document.createElement('button');
+    row.className = 'switch-entry';
+    row.type = 'button';
+    if (selectedBlock && samePos(block.pos, selectedBlock.pos)) row.classList.add('selected');
+
+    const label = document.createElement('span');
+    label.className = 'switch-entry-label';
+    label.textContent = `#${index + 1}  ${block.pos.join(',')}`;
+
+    const state = document.createElement('span');
+    state.className = 'switch-entry-state';
+    state.textContent = (simulation?.getSwitch(block)?.is_on ?? getLeverPowered(block)) ? 'On' : 'Off';
+
+    row.append(label, state);
+    row.addEventListener('click', () => {
+      void toggleSwitchBlock(block).catch(error => {
+        renderSimulationError(error);
+      });
+    });
+    switchesList.append(row);
   });
 }
 

@@ -94,7 +94,16 @@ input {
   overflow: hidden;
 }
 
-.files-panel summary {
+.switches-panel {
+  top: 58px;
+  right: 16px;
+  width: min(320px, calc(100vw - 32px));
+  max-height: min(38vh, 320px);
+  overflow: hidden;
+}
+
+.files-panel summary,
+.switches-panel summary {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -107,11 +116,13 @@ input {
   list-style: none;
 }
 
-.files-panel summary::-webkit-details-marker {
+.files-panel summary::-webkit-details-marker,
+.switches-panel summary::-webkit-details-marker {
   display: none;
 }
 
-.files-panel summary::before {
+.files-panel summary::before,
+.switches-panel summary::before {
   content: "+";
   display: inline-grid;
   place-items: center;
@@ -123,11 +134,13 @@ input {
   flex: 0 0 auto;
 }
 
-.files-panel[open] summary::before {
+.files-panel[open] summary::before,
+.switches-panel[open] summary::before {
   content: "-";
 }
 
-#files-count {
+#files-count,
+#switches-count {
   min-width: 0;
   overflow: hidden;
   color: #9ea9b3;
@@ -142,7 +155,15 @@ input {
   border-top: 1px solid rgb(154 164 173 / 18%);
 }
 
-.files-list.empty {
+.switches-list {
+  max-height: calc(min(38vh, 320px) - 38px);
+  overflow: auto;
+  padding: 6px;
+  border-top: 1px solid rgb(154 164 173 / 18%);
+}
+
+.files-list.empty,
+.switches-list.empty {
   display: grid;
   min-height: 120px;
   place-items: center;
@@ -152,7 +173,8 @@ input {
   text-align: center;
 }
 
-.file-entry {
+.file-entry,
+.switch-entry {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -171,30 +193,35 @@ input {
   cursor: pointer;
 }
 
-.file-entry-name {
+.file-entry-name,
+.switch-entry-label {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.file-entry-size {
+.file-entry-size,
+.switch-entry-state {
   margin-left: auto;
   color: #9ea9b3;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
-.file-entry:hover {
+.file-entry:hover,
+.switch-entry:hover {
   background: rgb(255 255 255 / 7%);
 }
 
-.file-entry.selected {
+.file-entry.selected,
+.switch-entry.selected {
   background: rgb(211 50 50 / 24%);
   color: #fff;
 }
 
-.file-entry.selected .file-entry-size {
+.file-entry.selected .file-entry-size,
+.switch-entry.selected .switch-entry-state {
   color: #ffd0d0;
 }
 
@@ -387,6 +414,13 @@ input {
     top: 58px;
     left: 12px;
     width: calc(100vw - 24px);
+  }
+
+  .switches-panel {
+    top: 104px;
+    right: 12px;
+    width: calc(100vw - 24px);
+    max-height: 28vh;
   }
 
   .inspector-panel {
