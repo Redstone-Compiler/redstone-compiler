@@ -5,6 +5,7 @@ pub struct LocalPlacerConfig {
     pub random_seed: u64,
     pub greedy_input_generation: bool,
     pub input_placement_strategy: InputPlacementStrategy,
+    pub input_candidate_limit: Option<usize>,
     pub step_sampling_policy: SamplingPolicy,
     pub placement_sampling_policy: PlacementSamplingPolicy,
     // dealloc 시간을 줄이기 위해 generation을 leak 시킨다.
@@ -26,6 +27,7 @@ impl Default for LocalPlacerConfig {
             random_seed: 42,
             greedy_input_generation: false,
             input_placement_strategy: InputPlacementStrategy::default(),
+            input_candidate_limit: None,
             step_sampling_policy: SamplingPolicy::default(),
             placement_sampling_policy: PlacementSamplingPolicy::default(),
             leak_sampling: false,
@@ -94,6 +96,7 @@ impl LocalPlacerConfig {
             random_seed: 42,
             greedy_input_generation: false,
             input_placement_strategy: InputPlacementStrategy::Anywhere,
+            input_candidate_limit: None,
             step_sampling_policy: SamplingPolicy::None,
             placement_sampling_policy: PlacementSamplingPolicy::StepPolicy,
             leak_sampling: false,

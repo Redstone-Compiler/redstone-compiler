@@ -49,6 +49,7 @@ pub(super) fn generate_inputs(
         InputPlacementStrategy::Boundary => iproduct!(0..1, 0..world.size.1, 0..world.size.2)
             .chain(iproduct!(0..world.size.0, 0..1, 0..world.size.2))
             .map(|(x, y, z)| Position(x, y, z))
+            .unique()
             .collect_vec(),
         InputPlacementStrategy::Anywhere => {
             iproduct!(0..world.size.0, 0..world.size.1, 0..world.size.2)
@@ -57,7 +58,7 @@ pub(super) fn generate_inputs(
         }
     };
 
-    input_strategy
+    let mut generated = input_strategy
         .into_iter()
         .cartesian_product(place_strategy)
         // Place Input Node
@@ -71,7 +72,12 @@ pub(super) fn generate_inputs(
             place_node(&mut new_world, placed_node);
             Some((new_world, position))
         })
-        .collect_vec()
+        .collect_vec();
+
+    if let Some(limit) = config.input_candidate_limit {
+        generated.truncate(limit);
+    }
+    generated
 }
 
 pub(super) fn generate_place_and_routes(

@@ -30,6 +30,7 @@ fn config(max_route_step: usize) -> LocalPlacerConfig {
         random_seed: 42,
         greedy_input_generation: true,
         input_placement_strategy: InputPlacementStrategy::Boundary,
+        input_candidate_limit: None,
         step_sampling_policy: SamplingPolicy::None,
         placement_sampling_policy: PlacementSamplingPolicy::StepPolicy,
         leak_sampling: false,
@@ -48,7 +49,7 @@ fn generate_inputs_uses_greedy_boundary_switch_placements() {
     let world = World3D::new(DimSize(3, 3, 2));
     let generated = generate_inputs(&config(1), &world, BlockKind::Switch { is_on: false });
 
-    assert_eq!(generated.len(), 12);
+    assert_eq!(generated.len(), 10);
     for (world, position) in generated {
         assert!(position.0 == 0 || position.1 == 0);
         assert!(world[position].kind.is_switch());
@@ -65,6 +66,17 @@ fn generate_inputs_can_search_anywhere() {
     let generated = generate_inputs(&config, &world, BlockKind::Switch { is_on: false });
 
     assert_eq!(generated.len(), 18);
+}
+
+#[test]
+fn generate_inputs_limits_candidates_per_world() {
+    let world = World3D::new(DimSize(3, 3, 2));
+    let mut config = config(1);
+    config.input_candidate_limit = Some(4);
+
+    let generated = generate_inputs(&config, &world, BlockKind::Switch { is_on: false });
+
+    assert_eq!(generated.len(), 4);
 }
 
 #[test]
