@@ -570,7 +570,6 @@ fn test_generate_component_half_adder() -> eyre::Result<()> {
 }
 
 #[test]
-#[ignore = "search-heavy generated fixture"]
 fn test_generate_component_full_adder() -> eyre::Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
 
@@ -578,16 +577,16 @@ fn test_generate_component_full_adder() -> eyre::Result<()> {
         random_seed: 42,
         greedy_input_generation: true,
         input_placement_strategy: InputPlacementStrategy::Boundary,
-        step_sampling_policy: SamplingPolicy::Random(10000),
-        placement_sampling_policy: LocalPlacerConfig::ranked_sampling(4000, 1000, 0),
+        step_sampling_policy: SamplingPolicy::None,
+        placement_sampling_policy: LocalPlacerConfig::ranked_sampling(2000, 500, 0),
         leak_sampling: false,
         route_torch_directly: true,
         torch_placement_strategy: TorchPlacementStrategy::DirectOnly,
         not_route_strategy: NotRouteStrategy::DirectOnly,
-        max_not_route_step: 8,
-        not_route_step_sampling_policy: SamplingPolicy::Random(100),
-        max_route_step: 6,
-        route_step_sampling_policy: SamplingPolicy::Random(100),
+        max_not_route_step: 0,
+        not_route_step_sampling_policy: SamplingPolicy::Random(10),
+        max_route_step: 4,
+        route_step_sampling_policy: SamplingPolicy::Random(10),
     };
 
     let fa_graph = predefined_logics::buffered_full_adder_graph()?;
