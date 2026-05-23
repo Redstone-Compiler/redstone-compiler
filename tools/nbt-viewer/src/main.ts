@@ -85,7 +85,10 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
             <button id="trace-next" type="button" aria-label="Next cycle">Next</button>
             <span id="trace-cycle-label">cycle -</span>
           </div>
-          <pre id="trace-output">Run a simulation to inspect events.</pre>
+          <details class="trace-log">
+            <summary>Log</summary>
+            <pre id="trace-output">Run a simulation to inspect events.</pre>
+          </details>
         </details>
         <div id="viewer-empty" class="viewer-empty">Drop an .nbt file or use Open NBT.</div>
       </section>

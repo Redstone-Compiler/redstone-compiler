@@ -214,7 +214,7 @@ input {
   overflow: hidden;
 }
 
-.trace-panel summary {
+.trace-panel > summary {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -227,7 +227,8 @@ input {
   list-style: none;
 }
 
-.trace-panel summary::-webkit-details-marker {
+.trace-panel > summary::-webkit-details-marker,
+.trace-log summary::-webkit-details-marker {
   display: none;
 }
 
@@ -276,8 +277,37 @@ input {
   white-space: nowrap;
 }
 
+.trace-log {
+  border-top: 1px solid rgb(154 164 173 / 18%);
+}
+
+.trace-log summary {
+  min-height: 30px;
+  padding: 7px 12px;
+  color: #cbd4db;
+  cursor: pointer;
+  font-size: 12px;
+  list-style: none;
+}
+
+.trace-log summary::before {
+  content: "+";
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  margin-right: 8px;
+  border: 1px solid rgb(154 164 173 / 34%);
+  border-radius: 4px;
+  color: #cbd4db;
+}
+
+.trace-log[open] summary::before {
+  content: "-";
+}
+
 #trace-output {
-  max-height: calc(min(34vh, 300px) - 76px);
+  max-height: calc(min(34vh, 300px) - 106px);
   margin: 0;
   overflow: auto;
   padding: 10px 12px;
