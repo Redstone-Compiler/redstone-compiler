@@ -283,6 +283,69 @@ fn ranked_sampling_keeps_lower_cost_candidates() -> eyre::Result<()> {
 }
 
 #[test]
+fn ranked_sampling_preserves_diverse_geometry_candidates() -> eyre::Result<()> {
+    let graph = LogicGraph::from_stmt("a|b", "c")?.prepare_place()?;
+    let placer = LocalPlacer::new(graph.clone(), config(1))?;
+    let input_a = graph
+        .nodes
+        .iter()
+        .find(|node| matches!(&node.kind, GraphNodeKind::Input(name) if name == "a"))
+        .unwrap()
+        .id;
+    let input_b = graph
+        .nodes
+        .iter()
+        .find(|node| matches!(&node.kind, GraphNodeKind::Input(name) if name == "b"))
+        .unwrap()
+        .id;
+    let step = placer
+        .visit_orders
+        .iter()
+        .position(|id| *id == input_a)
+        .unwrap()
+        .max(
+            placer
+                .visit_orders
+                .iter()
+                .position(|id| *id == input_b)
+                .unwrap(),
+        );
+    let world = empty_world();
+    let compact_a = [(input_a, Position(1, 1, 1)), (input_b, Position(2, 1, 1))]
+        .into_iter()
+        .collect();
+    let compact_b = [(input_a, Position(1, 1, 1)), (input_b, Position(1, 2, 1))]
+        .into_iter()
+        .collect();
+    let spread = [(input_a, Position(1, 1, 1)), (input_b, Position(6, 6, 1))]
+        .into_iter()
+        .collect();
+    let ranked_config = LocalPlacerConfig {
+        placement_sampling_policy: LocalPlacerConfig::ranked_sampling(2, 0, 0),
+        ..placer.config
+    };
+
+    let ranked = LocalPlacer::new(graph, ranked_config)?;
+    let sampled = ranked.sample(
+        step,
+        vec![
+            (world.clone(), compact_a),
+            (world.clone(), compact_b),
+            (world, spread),
+        ],
+    );
+    let sampled_b_positions = sampled
+        .iter()
+        .map(|(_, state)| state[&input_b])
+        .collect_vec();
+
+    assert_eq!(sampled.len(), 2);
+    assert!(sampled_b_positions.contains(&Position(6, 6, 1)));
+
+    Ok(())
+}
+
+#[test]
 fn place_torch_with_cobble_places_support_block() {
     let world = empty_world();
     let torch_pos = Position(2, 1, 1);

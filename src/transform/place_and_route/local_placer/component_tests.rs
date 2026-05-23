@@ -579,7 +579,7 @@ fn test_generate_component_full_adder() -> eyre::Result<()> {
         greedy_input_generation: true,
         input_placement_strategy: InputPlacementStrategy::Boundary,
         step_sampling_policy: SamplingPolicy::Random(10000),
-        placement_sampling_policy: LocalPlacerConfig::ranked_sampling(9000, 1000, 0),
+        placement_sampling_policy: LocalPlacerConfig::ranked_sampling(4000, 1000, 0),
         leak_sampling: false,
         route_torch_directly: true,
         torch_placement_strategy: TorchPlacementStrategy::DirectOnly,

@@ -22,6 +22,12 @@ impl PlacementState {
             .copied()
     }
 
+    pub(super) fn node_positions(&self) -> impl Iterator<Item = Position> + '_ {
+        self.positions.iter().filter_map(|(endpoint, position)| {
+            matches!(endpoint, PlacementEndpoint::Node(_)).then_some(*position)
+        })
+    }
+
     #[allow(dead_code)]
     pub(super) fn port_position(&self, node_id: GraphNodeId, port: &str) -> Option<Position> {
         self.positions

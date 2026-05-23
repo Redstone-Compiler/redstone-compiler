@@ -316,8 +316,16 @@ impl LocalPlacer {
                 count,
                 random_count,
                 start_step,
+            } => {
+                if step < start_step {
+                    self.config
+                        .step_sampling_policy
+                        .sample_with_seed(queue, self.config.sampling_seed(1, step))
+                } else {
+                    self.sample_by_cost(step, queue, count, random_count)
+                }
             }
-            | PlacementSamplingPolicy::Ranked {
+            PlacementSamplingPolicy::Ranked {
                 count,
                 random_count,
                 start_step,
@@ -327,7 +335,7 @@ impl LocalPlacer {
                         .step_sampling_policy
                         .sample_with_seed(queue, self.config.sampling_seed(1, step))
                 } else {
-                    self.sample_by_cost(step, queue, count, random_count)
+                    self.sample_by_ranked(step, queue, count, random_count)
                 }
             }
         }
@@ -364,6 +372,70 @@ impl LocalPlacer {
         best
     }
 
+    fn sample_by_ranked(
+        &self,
+        step: usize,
+        queue: PlacerQueue,
+        count: usize,
+        random_count: usize,
+    ) -> PlacerQueue {
+        if queue.len() <= count + random_count {
+            return queue;
+        }
+
+        let mut scored = queue
+            .into_iter()
+            .enumerate()
+            .map(|(index, item)| ScoredPlacement {
+                cost: self.placement_cost(step, &item.0, &item.1),
+                signature: placement_diversity_signature(&item.1),
+                index,
+                item,
+            })
+            .collect_vec();
+        scored.sort_unstable_by_key(|item| (item.cost, item.index));
+
+        let ranked_count = count.min(scored.len());
+        let diversity_count = if ranked_count > 1 {
+            (ranked_count / 4).max(1)
+        } else {
+            0
+        };
+        let best_count = ranked_count.saturating_sub(diversity_count);
+
+        let rest = scored.split_off(best_count);
+        let mut selected = scored;
+        let mut selected_signatures = selected
+            .iter()
+            .map(|item| item.signature)
+            .collect::<HashSet<_>>();
+        let mut overflow = Vec::new();
+
+        for item in rest {
+            if selected.len() < ranked_count && selected_signatures.insert(item.signature) {
+                selected.push(item);
+            } else {
+                overflow.push(item);
+            }
+        }
+
+        let mut overflow = overflow.into_iter();
+        while selected.len() < ranked_count {
+            let Some(item) = overflow.next() else {
+                break;
+            };
+            selected.push(item);
+        }
+
+        let mut best = selected.into_iter().map(|item| item.item).collect_vec();
+        let random_pool = overflow.map(|item| item.item).collect_vec();
+        best.extend(
+            SamplingPolicy::Random(random_count)
+                .sample_with_seed(random_pool, self.config.sampling_seed(2, step)),
+        );
+        best
+    }
+
     fn placement_cost(&self, step: usize, world: &World3D, state: &PlacementState) -> usize {
         let current_node_id = self.visit_orders[step];
         let mut cost = world_compact_cost(world);
@@ -381,6 +453,42 @@ impl LocalPlacer {
         }
 
         cost
+    }
+}
+
+struct ScoredPlacement {
+    cost: usize,
+    signature: PlacementDiversitySignature,
+    index: usize,
+    item: (World3D, PlacementState),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct PlacementDiversitySignature {
+    span_bucket: usize,
+}
+
+fn placement_diversity_signature(state: &PlacementState) -> PlacementDiversitySignature {
+    let mut positions = state.node_positions();
+    let Some(first) = positions.next() else {
+        return PlacementDiversitySignature { span_bucket: 0 };
+    };
+
+    let (mut min_x, mut max_x) = (first.0, first.0);
+    let (mut min_y, mut max_y) = (first.1, first.1);
+    let (mut min_z, mut max_z) = (first.2, first.2);
+    for position in positions {
+        min_x = min_x.min(position.0);
+        max_x = max_x.max(position.0);
+        min_y = min_y.min(position.1);
+        max_y = max_y.max(position.1);
+        min_z = min_z.min(position.2);
+        max_z = max_z.max(position.2);
+    }
+
+    let span = (max_x - min_x) + (max_y - min_y) + (max_z - min_z);
+    PlacementDiversitySignature {
+        span_bucket: span / 4,
     }
 }
 
