@@ -745,8 +745,15 @@ impl Simulator {
         propagate_targets.extend(event.target_position.cardinal_redstone(*state));
 
         let up_pos = event.target_position.up();
-        if !self.world[up_pos].kind.is_cobble() {
-            propagate_targets.extend(up_pos.cardinal_redstone(*state));
+        if self.world.size.bound_on(up_pos) && !self.world[up_pos].kind.is_cobble() {
+            propagate_targets.extend(
+                up_pos
+                    .cardinal_redstone(*state)
+                    .into_iter()
+                    .filter(|&pos| {
+                        self.world.size.bound_on(pos) && self.world[pos].kind.is_redstone()
+                    }),
+            );
         }
 
         if let Some(down_pos) = event.target_position.down() {
@@ -761,9 +768,12 @@ impl Simulator {
                     .target_position
                     .cardinal_redstone(*state)
                     .into_iter()
+                    .filter(|&pos| self.world.size.bound_on(pos))
                     .filter(|&pos| !self.world[pos].kind.is_cobble())
                     .filter_map(|pos| pos.walk(Direction::Bottom))
-                    .filter(|&pos| !self.world[pos].kind.is_cobble()),
+                    .filter(|&pos| {
+                        self.world.size.bound_on(pos) && self.world[pos].kind.is_redstone()
+                    }),
             );
         }
 
@@ -1555,6 +1565,61 @@ mod test {
                 on_base_count: 0
             }
         ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn unittest_simulator_xor_generated_truth_table() -> eyre::Result<()> {
+        let nbt = NBTRoot::from_nbt_bytes(&std::fs::read("test/xor-generated.nbt")?)?;
+        let world = nbt.to_world();
+        let switches = [Position(0, 6, 0), Position(0, 6, 3)];
+        let output = Position(4, 7, 2);
+
+        for mask in 0..4 {
+            let mut sim = Simulator::from_with_limits_and_trace(&world, 256, 50_000, 0)
+                .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
+            sim.change_state_with_limits(
+                switches
+                    .iter()
+                    .enumerate()
+                    .map(|(index, pos)| (*pos, (mask & (1 << index)) != 0))
+                    .collect(),
+                256,
+                50_000,
+            )?;
+
+            let BlockKind::Redstone { strength, .. } = sim.world[output].kind else {
+                panic!("xor output should be redstone");
+            };
+            assert_eq!(
+                strength > 0,
+                mask == 1 || mask == 2,
+                "xor-generated output mismatch for mask {mask:02b}"
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn unittest_simulator_full_adder_toggle_does_not_burn_out_output_torch() -> eyre::Result<()> {
+        let nbt = NBTRoot::from_nbt_bytes(&std::fs::read("test/full-adder.nbt")?)?;
+        let world = nbt.to_world();
+        let mut sim = Simulator::from_with_limits_and_trace(&world, 256, 50_000, 50_000)
+            .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
+
+        sim.change_state_with_limits(vec![(Position(0, 5, 1), true)], 256, 50_000)?;
+        sim.change_state_with_limits(vec![(Position(0, 7, 2), true)], 256, 50_000)?;
+        sim.change_state_with_limits(vec![(Position(2, 0, 3), true)], 256, 50_000)?;
+        sim.clear_trace();
+        sim.change_state_with_limits(vec![(Position(0, 7, 2), false)], 256, 50_000)?;
+
+        assert!(
+            sim.trace().len() < 1_000,
+            "full-adder final toggle should settle without long torch flicker, got {} events",
+            sim.trace().len()
+        );
 
         Ok(())
     }
