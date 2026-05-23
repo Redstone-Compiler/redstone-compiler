@@ -483,7 +483,7 @@ impl Simulator {
                     return None;
                 };
                 let support_is_powered =
-                    on_count > 0 || self.redstone_currently_powers(support);
+                    on_count > 0 || self.redstone_currently_powers(support, Some(pos));
                 Some(Event {
                     id: None,
                     from_id: None,
@@ -504,21 +504,118 @@ impl Simulator {
         self.queue.push_back(events.into());
     }
 
-    fn redstone_currently_powers(&self, target: Position) -> bool {
+    fn redstone_currently_powers(&self, target: Position, ignored_torch: Option<Position>) -> bool {
         self.world
             .iter_block()
             .into_iter()
             .any(|(pos, block)| match block.kind {
                 BlockKind::Redstone {
-                    state,
-                    strength,
-                    ..
-                } if strength > 0 => self
-                    .redstone_propagate_targets(pos, state)
-                    .into_iter()
-                    .any(|redstone_target| redstone_target == target),
+                    state, strength, ..
+                } if strength > 0 => {
+                    self.redstone_is_powered_independently_of(pos, ignored_torch)
+                        && self
+                            .redstone_propagate_targets(pos, state)
+                            .into_iter()
+                            .any(|redstone_target| redstone_target == target)
+                }
                 _ => false,
             })
+    }
+
+    fn redstone_is_powered_independently_of(
+        &self,
+        pos: Position,
+        ignored_torch: Option<Position>,
+    ) -> bool {
+        self.redstone_is_powered_independently_of_inner(pos, ignored_torch, &mut HashSet::new())
+    }
+
+    fn redstone_is_powered_independently_of_inner(
+        &self,
+        pos: Position,
+        ignored_torch: Option<Position>,
+        visited: &mut HashSet<Position>,
+    ) -> bool {
+        if !visited.insert(pos) {
+            return false;
+        }
+
+        let BlockKind::Redstone {
+            on_count, strength, ..
+        } = self.world[pos].kind
+        else {
+            return false;
+        };
+
+        if strength == 0 {
+            return false;
+        }
+
+        if on_count > 0 && !self.is_torch_direct_redstone_output(ignored_torch, pos) {
+            return true;
+        }
+
+        self.world
+            .iter_block()
+            .into_iter()
+            .any(|(source_pos, source_block)| match source_block.kind {
+                BlockKind::Redstone {
+                    state,
+                    strength: source_strength,
+                    ..
+                } if source_strength > strength
+                    && self
+                        .redstone_propagate_targets(source_pos, state)
+                        .contains(&pos) =>
+                {
+                    let mut branch_visited = visited.clone();
+                    self.redstone_is_powered_independently_of_inner(
+                        source_pos,
+                        ignored_torch,
+                        &mut branch_visited,
+                    )
+                }
+                _ => false,
+            })
+    }
+
+    fn is_torch_direct_redstone_output(
+        &self,
+        ignored_torch: Option<Position>,
+        redstone_pos: Position,
+    ) -> bool {
+        let Some(torch_pos) = ignored_torch else {
+            return false;
+        };
+        if !self.world.size.bound_on(torch_pos) {
+            return false;
+        }
+        let torch = self.world[torch_pos];
+        if !torch.kind.is_torch() {
+            return false;
+        }
+
+        self.torch_output_targets(torch_pos, torch.direction)
+            .into_iter()
+            .any(|target| target == redstone_pos)
+    }
+
+    fn torch_output_targets(&self, pos: Position, direction: Direction) -> Vec<Position> {
+        let mut targets = match direction {
+            Direction::Bottom => pos.cardinal(),
+            Direction::East | Direction::West | Direction::South | Direction::North => {
+                let mut positions = pos.cardinal_except(direction);
+                positions.extend(pos.down());
+                positions
+            }
+            _ => Vec::new(),
+        };
+        targets.push(pos.up());
+        targets
+            .into_iter()
+            .filter(|&target| self.world.size.bound_on(target))
+            .filter(|&target| self.world[target].kind.is_redstone())
+            .collect()
     }
 
     fn redstone_propagate_targets(&self, pos: Position, state: usize) -> Vec<Position> {
@@ -1716,6 +1813,23 @@ mod test {
             panic!("full-adder output should be redstone");
         };
         assert_eq!(strength, 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn unittest_simulator_full_adder_middle_input_keeps_output_powered() -> eyre::Result<()> {
+        let nbt = NBTRoot::from_nbt_bytes(&std::fs::read("test/full-adder.nbt")?)?;
+        let world = nbt.to_world();
+        let mut sim = Simulator::from_with_limits_and_trace(&world, 256, 50_000, 0)
+            .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
+
+        sim.change_state_with_limits(vec![(Position(0, 7, 2), true)], 256, 50_000)?;
+
+        let BlockKind::Redstone { strength, .. } = sim.world[Position(8, 2, 2)].kind else {
+            panic!("full-adder output should be redstone");
+        };
+        assert!(strength > 0, "full-adder output should stay powered");
 
         Ok(())
     }
