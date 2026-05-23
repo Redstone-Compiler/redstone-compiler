@@ -14,7 +14,7 @@ use crate::graph::{GraphNode, GraphNodeId, GraphNodeKind};
 use crate::logic::LogicType;
 use crate::sequential::layout::SequentialMacro;
 use crate::sequential::{SequentialPrimitive, SequentialType};
-use crate::transform::place_and_route::estimate::world_compact_cost;
+use crate::transform::place_and_route::estimate::{bounding_box_of_positions, world_compact_cost};
 use crate::transform::place_and_route::place_bound::PropagateType;
 use crate::world::block::{Block, BlockKind, Direction};
 use crate::world::position::{DimSize, Position};
@@ -469,26 +469,12 @@ struct PlacementDiversitySignature {
 }
 
 fn placement_diversity_signature(state: &PlacementState) -> PlacementDiversitySignature {
-    let mut positions = state.node_positions();
-    let Some(first) = positions.next() else {
+    let Some(bounds) = bounding_box_of_positions(state.node_positions()) else {
         return PlacementDiversitySignature { span_bucket: 0 };
     };
 
-    let (mut min_x, mut max_x) = (first.0, first.0);
-    let (mut min_y, mut max_y) = (first.1, first.1);
-    let (mut min_z, mut max_z) = (first.2, first.2);
-    for position in positions {
-        min_x = min_x.min(position.0);
-        max_x = max_x.max(position.0);
-        min_y = min_y.min(position.1);
-        max_y = max_y.max(position.1);
-        min_z = min_z.min(position.2);
-        max_z = max_z.max(position.2);
-    }
-
-    let span = (max_x - min_x) + (max_y - min_y) + (max_z - min_z);
     PlacementDiversitySignature {
-        span_bucket: span / 4,
+        span_bucket: bounds.manhattan_span() / 4,
     }
 }
 
