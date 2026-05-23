@@ -133,9 +133,16 @@ export class NbtSimulation {
     const current = this.getSwitch(block);
     if (!current) return undefined;
 
+    return this.setSwitch(block, !current.is_on);
+  }
+
+  setSwitch(block: StructureBlock, isOn: boolean): unknown | undefined {
+    const current = this.getSwitch(block);
+    if (!current || current.is_on === isOn) return undefined;
+
     const [x, y, z] = current.pos;
     try {
-      return this.sim.toggle_switch(x, y, z, !current.is_on);
+      return this.sim.toggle_switch(x, y, z, isOn);
     } catch (error) {
       throw new NbtSimulationError(getErrorMessage(error), this.trace(), this.snapshots());
     }
