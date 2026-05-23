@@ -899,14 +899,9 @@ impl Simulator {
 
         let up_pos = event.target_position.up();
         if self.world.size.bound_on(up_pos) && !self.world[up_pos].kind.is_cobble() {
-            propagate_targets.extend(
-                up_pos
-                    .cardinal_redstone(*state)
-                    .into_iter()
-                    .filter(|&pos| {
-                        self.world.size.bound_on(pos) && self.world[pos].kind.is_redstone()
-                    }),
-            );
+            propagate_targets.extend(up_pos.cardinal_redstone(*state).into_iter().filter(|&pos| {
+                self.world.size.bound_on(pos) && self.world[pos].kind.is_redstone()
+            }));
         }
 
         if let Some(down_pos) = event.target_position.down() {
@@ -929,6 +924,8 @@ impl Simulator {
                     }),
             );
         }
+
+        propagate_targets.retain(|&pos| self.world.size.bound_on(pos));
 
         match event.event_type {
             EventType::SoftOn
@@ -1163,14 +1160,11 @@ impl Simulator {
         let Some(support_position) = event.target_position.walk(event.direction) else {
             return Ok(());
         };
-        if !self.world[support_position]
-            .kind
-            .is_cobble()
-        {
+        if !self.world[support_position].kind.is_cobble() {
             return Ok(());
         }
 
-        // Cobble??遺숈뼱?덉? ?딆? 寃쎌슦
+        // Cobble에 붙어있지 않은 경우
         if event.direction != block.direction {
             return Ok(());
         }
@@ -1651,7 +1645,10 @@ mod test {
             sim.propgate_cobble_event(&mut block, &event)
         }));
 
-        assert!(result.is_ok(), "cobble event should not panic at world edge");
+        assert!(
+            result.is_ok(),
+            "cobble event should not panic at world edge"
+        );
         result.unwrap()?;
 
         Ok(())
@@ -1672,11 +1669,54 @@ mod test {
             direction: Direction::East,
         }]));
 
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sim.run_with_max_cycles(1)));
+
+        assert!(
+            result.is_ok(),
+            "simulator should not panic on out-of-bounds events"
+        );
+        result.unwrap()?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn unittest_simulator_redstone_event_ignores_out_of_bounds_neighbors() -> eyre::Result<()> {
+        let target = Position(1, 0, 0);
+        let mock_world = World {
+            size: DimSize(2, 2, 1),
+            blocks: vec![(
+                target,
+                Block {
+                    kind: BlockKind::Redstone {
+                        state: Default::default(),
+                        on_count: 0,
+                        strength: 0,
+                    },
+                    direction: Direction::None,
+                },
+            )],
+        };
+        let event = Event {
+            id: None,
+            from_id: None,
+            event_type: EventType::TorchOn,
+            target_position: target,
+            direction: Direction::East,
+        };
+        let mut sim = Simulator::new(&mock_world, DEFAULT_TRACE_LIMIT);
+        sim.queue.push_back(VecDeque::new());
+        let mut block = sim.world[target];
+
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            sim.run_with_max_cycles(1)
+            sim.propagate_redstone_event(&mut block, &event)
         }));
 
-        assert!(result.is_ok(), "simulator should not panic on out-of-bounds events");
+        assert!(
+            result.is_ok(),
+            "redstone event should not panic at world edge"
+        );
         result.unwrap()?;
 
         Ok(())
