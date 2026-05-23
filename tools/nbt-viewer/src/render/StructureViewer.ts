@@ -11,6 +11,8 @@ type SetStructureOptions = {
   preserveSelection?: boolean;
 };
 
+const ROTATION_DRAG_SCALE = 300;
+
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
@@ -168,8 +170,8 @@ export class StructureViewer {
 
     if (!this.dragPos) return;
 
-    const dx = (event.clientX - this.dragPos[0]) / 100;
-    const dy = (event.clientY - this.dragPos[1]) / 100;
+    const dx = (event.clientX - this.dragPos[0]) / ROTATION_DRAG_SCALE;
+    const dy = (event.clientY - this.dragPos[1]) / ROTATION_DRAG_SCALE;
     vec2.set(this.dragPos, event.clientX, event.clientY);
 
     if (this.dragMode === 'move') {
