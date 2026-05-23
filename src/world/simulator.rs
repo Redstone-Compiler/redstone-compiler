@@ -482,10 +482,12 @@ impl Simulator {
                 let BlockKind::Cobble { on_count, .. } = self.world[support].kind else {
                     return None;
                 };
+                let support_is_powered =
+                    on_count > 0 || self.redstone_currently_powers(support);
                 Some(Event {
                     id: None,
                     from_id: None,
-                    event_type: if on_count > 0 {
+                    event_type: if support_is_powered {
                         EventType::SoftOn
                     } else {
                         EventType::SoftOff
@@ -500,6 +502,60 @@ impl Simulator {
             return;
         }
         self.queue.push_back(events.into());
+    }
+
+    fn redstone_currently_powers(&self, target: Position) -> bool {
+        self.world
+            .iter_block()
+            .into_iter()
+            .any(|(pos, block)| match block.kind {
+                BlockKind::Redstone {
+                    state,
+                    strength,
+                    ..
+                } if strength > 0 => self
+                    .redstone_propagate_targets(pos, state)
+                    .into_iter()
+                    .any(|redstone_target| redstone_target == target),
+                _ => false,
+            })
+    }
+
+    fn redstone_propagate_targets(&self, pos: Position, state: usize) -> Vec<Position> {
+        let mut propagate_targets = Vec::new();
+
+        propagate_targets.extend(pos.cardinal_redstone(state));
+
+        let up_pos = pos.up();
+        if self.world.size.bound_on(up_pos) && !self.world[up_pos].kind.is_cobble() {
+            propagate_targets.extend(
+                up_pos
+                    .cardinal_redstone(state)
+                    .into_iter()
+                    .filter(|&pos| {
+                        self.world.size.bound_on(pos) && self.world[pos].kind.is_redstone()
+                    }),
+            );
+        }
+
+        if let Some(down_pos) = pos.down() {
+            if self.world[down_pos].kind.is_cobble() {
+                propagate_targets.push(down_pos);
+
+                propagate_targets.extend(
+                    pos.cardinal_redstone(state)
+                        .into_iter()
+                        .filter(|&pos| self.world.size.bound_on(pos))
+                        .filter(|&pos| !self.world[pos].kind.is_cobble())
+                        .filter_map(|pos| pos.walk(Direction::Bottom))
+                        .filter(|&pos| {
+                            self.world.size.bound_on(pos) && self.world[pos].kind.is_redstone()
+                        }),
+                );
+            }
+        }
+
+        propagate_targets
     }
 
     fn init_switch_event(&mut self, dir: Direction, pos: Position) {
@@ -1620,6 +1676,37 @@ mod test {
             "full-adder final toggle should settle without long torch flicker, got {} events",
             sim.trace().len()
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn unittest_simulator_full_adder_all_on_then_first_input_off_unpowers_output(
+    ) -> eyre::Result<()> {
+        let nbt = NBTRoot::from_nbt_bytes(&std::fs::read("test/full-adder.nbt")?)?;
+        let world = nbt.to_world();
+        let mut sim = Simulator::from_with_limits_and_trace(&world, 256, 50_000, 0)
+            .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
+
+        sim.change_state_with_limits(
+            vec![
+                (Position(0, 5, 1), true),
+                (Position(0, 7, 2), true),
+                (Position(2, 0, 3), true),
+            ],
+            256,
+            50_000,
+        )?;
+        sim.change_state_with_limits(vec![(Position(0, 5, 1), false)], 256, 50_000)?;
+
+        assert!(matches!(
+            sim.world[Position(8, 2, 3)].kind,
+            BlockKind::Torch { is_on: false }
+        ));
+        let BlockKind::Redstone { strength, .. } = sim.world[Position(8, 2, 2)].kind else {
+            panic!("full-adder output should be redstone");
+        };
+        assert_eq!(strength, 0);
 
         Ok(())
     }
