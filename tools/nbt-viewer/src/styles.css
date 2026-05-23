@@ -169,10 +169,41 @@ input {
 }
 
 .switches-list {
-  max-height: calc(min(38vh, 320px) - 38px);
+  max-height: calc(min(38vh, 320px) - 79px);
   overflow: auto;
   padding: 6px;
   border-top: 1px solid rgb(154 164 173 / 18%);
+}
+
+.switches-actions.hidden + .switches-list {
+  max-height: calc(min(38vh, 320px) - 38px);
+}
+
+.switches-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  padding: 6px;
+  border-top: 1px solid rgb(154 164 173 / 18%);
+}
+
+.switches-actions button {
+  min-width: 0;
+  min-height: 28px;
+  border: 1px solid rgb(154 164 173 / 24%);
+  border-radius: 4px;
+  background: rgb(255 255 255 / 7%);
+  color: #dce3e7;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.switches-actions button:hover {
+  background: rgb(255 255 255 / 12%);
+}
+
+.switches-actions.hidden {
+  display: none;
 }
 
 .files-list.empty,
@@ -609,6 +640,14 @@ input {
     transform: none;
     width: calc(100vw - 24px);
     max-height: 28vh;
+  }
+
+  .switches-list {
+    max-height: calc(28vh - 79px);
+  }
+
+  .switches-actions.hidden + .switches-list {
+    max-height: calc(28vh - 38px);
   }
 
   .inspector-panel {

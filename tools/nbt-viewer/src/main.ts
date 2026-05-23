@@ -91,6 +91,10 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
             <span>Switches</span>
             <span id="switches-count">No switches</span>
           </summary>
+          <div id="switches-actions" class="switches-actions hidden">
+            <button id="switches-all-on" type="button">All On</button>
+            <button id="switches-all-off" type="button">All Off</button>
+          </div>
           <div id="switches-list" class="switches-list empty">Open an NBT file to control switches.</div>
         </details>
         <details id="files-panel" class="floating-panel files-panel">
@@ -172,6 +176,9 @@ const traceCycleLabel = document.querySelector<HTMLElement>('#trace-cycle-label'
 const tracePrevButton = document.querySelector<HTMLButtonElement>('#trace-prev')!;
 const traceNextButton = document.querySelector<HTMLButtonElement>('#trace-next')!;
 const switchesPanel = document.querySelector<HTMLDetailsElement>('#switches-panel')!;
+const switchesActions = document.querySelector<HTMLElement>('#switches-actions')!;
+const switchesAllOnButton = document.querySelector<HTMLButtonElement>('#switches-all-on')!;
+const switchesAllOffButton = document.querySelector<HTMLButtonElement>('#switches-all-off')!;
 const switchesList = document.querySelector<HTMLElement>('#switches-list')!;
 const switchesCount = document.querySelector<HTMLElement>('#switches-count')!;
 const openGraphsButton = document.querySelector<HTMLButtonElement>('#open-graphs')!;
@@ -225,6 +232,18 @@ folderInput.addEventListener('change', () => {
 
 toggleSwitchButton.addEventListener('click', () => {
   void toggleSelectedSwitch().catch(error => {
+    renderSimulationError(error);
+  });
+});
+
+switchesAllOnButton.addEventListener('click', () => {
+  void setAllSwitches(true).catch(error => {
+    renderSimulationError(error);
+  });
+});
+
+switchesAllOffButton.addEventListener('click', () => {
+  void setAllSwitches(false).catch(error => {
     renderSimulationError(error);
   });
 });
@@ -487,16 +506,47 @@ async function toggleSwitchBlock(block: StructureBlock): Promise<void> {
   const nextRoot = simulation.toggleSwitch(block);
   if (!nextRoot) return;
 
+  await applySimulatedRoot(simulation, nextRoot, baseRoot, selectedPos);
+}
+
+async function setAllSwitches(isOn: boolean): Promise<void> {
+  if (!currentNbtBytes) return;
+
+  const structure = toStructureModel(currentRoot);
+  const switches = structure?.blocks.filter(block => block.palette.name === 'minecraft:lever') ?? [];
+  if (switches.length === 0) return;
+
+  simulation ??= await NbtSimulation.create(currentNbtBytes);
+
+  const selectedPos = selectedBlock?.pos;
+  const baseRoot = currentRoot;
+  let nextRoot: unknown | undefined;
+
+  for (const block of switches) {
+    nextRoot = simulation.setSwitch(block, isOn) ?? nextRoot;
+  }
+
+  if (!nextRoot) return;
+
+  await applySimulatedRoot(simulation, nextRoot, baseRoot, selectedPos);
+}
+
+async function applySimulatedRoot(
+  activeSimulation: NbtSimulation,
+  nextRoot: unknown,
+  baseRoot: unknown,
+  selectedPos: StructureBlock['pos'] | undefined,
+): Promise<void> {
   currentRoot = mergeSimulatedState(currentRoot, nextRoot);
   const structure = toStructureModel(currentRoot);
   if (!structure) throw new Error('Simulator returned a structure that the viewer could not render.');
 
   await viewer.setStructure(structure, { preserveSelection: true, preserveView: true });
-  const nextSelectedBlock = structure.blocks.find(block => samePos(block.pos, selectedPos));
+  const nextSelectedBlock = selectedPos ? structure.blocks.find(block => samePos(block.pos, selectedPos)) : undefined;
   viewer.setSelectedBlock(nextSelectedBlock);
   renderSelection(nextSelectedBlock);
   renderSwitches(structure);
-  renderTrace(simulation.trace(), simulation.snapshots(), baseRoot, { animateTo: 'last' });
+  renderTrace(activeSimulation.trace(), activeSimulation.snapshots(), baseRoot, { animateTo: 'last' });
 }
 
 dropZone.addEventListener('dragover', event => {
@@ -812,6 +862,7 @@ function renderSwitches(structure?: StructureModel): void {
   switchesList.replaceChildren();
   const switches = structure?.blocks.filter(block => block.palette.name === 'minecraft:lever') ?? [];
   switchesCount.textContent = switches.length === 0 ? 'No switches' : `${switches.length} switches`;
+  switchesActions.classList.toggle('hidden', switches.length === 0);
 
   if (switches.length === 0) {
     switchesPanel.open = !structure;
