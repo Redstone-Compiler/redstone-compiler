@@ -1183,7 +1183,8 @@ impl Simulator {
             unreachable!()
         };
 
-        let lock_signal = event.direction.is_othogonal_plane(block.direction);
+        let lock_signal = event.direction.is_othogonal_plane(block.direction)
+            && self.is_repeater_lock_source(event);
 
         if event.direction != block.direction && !lock_signal {
             return Ok(());
@@ -1199,40 +1200,40 @@ impl Simulator {
             | EventType::HardOn
             | EventType::TorchOn
             | EventType::RedstoneOn { .. } => {
-                if !is_on {
-                    if lock_signal {
+                if lock_signal {
+                    if !is_locked {
                         block.kind.set_repeater_lock(true)?;
 
                         tracing::info!("trigger repeater event: {event:?}, {block:?}");
-                    } else {
-                        self.push_event_to_next_tick(Event {
-                            id: None,
-                            from_id: event.id,
-                            event_type: EventType::RepeaterOn { delay },
-                            target_position: event.target_position,
-                            direction: event.direction,
-                        });
                     }
+                } else if !is_on {
+                    self.push_event_to_next_tick(Event {
+                        id: None,
+                        from_id: event.id,
+                        event_type: EventType::RepeaterOn { delay },
+                        target_position: event.target_position,
+                        direction: event.direction,
+                    });
                 }
             }
             EventType::SoftOff
             | EventType::HardOff
             | EventType::TorchOff
             | EventType::RedstoneOff => {
-                if is_on {
-                    if lock_signal {
+                if lock_signal {
+                    if is_locked {
                         block.kind.set_repeater_lock(false)?;
 
                         tracing::info!("trigger repeater event: {event:?}, {block:?}");
-                    } else {
-                        self.push_event_to_next_tick(Event {
-                            id: None,
-                            from_id: event.id,
-                            event_type: EventType::RepeaterOff { delay },
-                            target_position: event.target_position,
-                            direction: event.direction,
-                        });
                     }
+                } else if is_on {
+                    self.push_event_to_next_tick(Event {
+                        id: None,
+                        from_id: event.id,
+                        event_type: EventType::RepeaterOff { delay },
+                        target_position: event.target_position,
+                        direction: event.direction,
+                    });
                 }
             }
             EventType::RepeaterOn { delay } => {
@@ -1313,6 +1314,14 @@ impl Simulator {
         }
 
         Ok(())
+    }
+
+    fn is_repeater_lock_source(&self, event: &Event) -> bool {
+        let Some(source_pos) = event.target_position.walk(event.direction) else {
+            return false;
+        };
+
+        self.world.size.bound_on(source_pos) && self.world[source_pos].kind.is_repeater()
     }
 }
 
@@ -1761,6 +1770,140 @@ mod test {
         };
 
         assert_eq!(strength, 14)
+    }
+
+    fn test_repeater(is_on: bool, is_locked: bool, direction: Direction) -> Block {
+        Block {
+            kind: BlockKind::Repeater {
+                is_on,
+                is_locked,
+                delay: 2,
+                lock_input1: None,
+                lock_input2: None,
+            },
+            direction,
+        }
+    }
+
+    fn test_cobble(on_count: usize, on_base_count: usize) -> Block {
+        Block {
+            kind: BlockKind::Cobble {
+                on_count,
+                on_base_count,
+            },
+            direction: Direction::None,
+        }
+    }
+
+    #[test]
+    fn unittest_simulator_repeater_side_hard_power_does_not_lock() -> eyre::Result<()> {
+        let target = Position(1, 1, 0);
+        let source = Position(2, 1, 0);
+        let mock_world = World {
+            size: DimSize(3, 3, 1),
+            blocks: vec![
+                (target, test_repeater(false, false, Direction::North)),
+                (source, test_cobble(1, 1)),
+            ],
+        };
+        let mut sim = Simulator::new(&mock_world, DEFAULT_TRACE_LIMIT);
+        sim.queue.push_back(VecDeque::new());
+        let mut block = sim.world[target];
+
+        sim.propgate_repeater_event(
+            &mut block,
+            &Event {
+                id: None,
+                from_id: None,
+                event_type: EventType::HardOn,
+                target_position: target,
+                direction: target.diff(source),
+            },
+        )?;
+
+        assert!(matches!(
+            block.kind,
+            BlockKind::Repeater {
+                is_locked: false,
+                ..
+            }
+        ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn unittest_simulator_repeater_side_repeater_power_locks() -> eyre::Result<()> {
+        let target = Position(1, 1, 0);
+        let source = Position(2, 1, 0);
+        let mock_world = World {
+            size: DimSize(3, 3, 1),
+            blocks: vec![
+                (target, test_repeater(true, false, Direction::North)),
+                (source, test_repeater(true, false, Direction::West)),
+            ],
+        };
+        let mut sim = Simulator::new(&mock_world, DEFAULT_TRACE_LIMIT);
+        sim.queue.push_back(VecDeque::new());
+        let mut block = sim.world[target];
+
+        sim.propgate_repeater_event(
+            &mut block,
+            &Event {
+                id: None,
+                from_id: None,
+                event_type: EventType::HardOn,
+                target_position: target,
+                direction: target.diff(source),
+            },
+        )?;
+
+        assert!(matches!(
+            block.kind,
+            BlockKind::Repeater {
+                is_locked: true,
+                ..
+            }
+        ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn unittest_simulator_repeater_side_repeater_power_off_unlocks() -> eyre::Result<()> {
+        let target = Position(1, 1, 0);
+        let source = Position(2, 1, 0);
+        let mock_world = World {
+            size: DimSize(3, 3, 1),
+            blocks: vec![
+                (target, test_repeater(false, true, Direction::North)),
+                (source, test_repeater(false, false, Direction::West)),
+            ],
+        };
+        let mut sim = Simulator::new(&mock_world, DEFAULT_TRACE_LIMIT);
+        sim.queue.push_back(VecDeque::new());
+        let mut block = sim.world[target];
+
+        sim.propgate_repeater_event(
+            &mut block,
+            &Event {
+                id: None,
+                from_id: None,
+                event_type: EventType::HardOff,
+                target_position: target,
+                direction: target.diff(source),
+            },
+        )?;
+
+        assert!(matches!(
+            block.kind,
+            BlockKind::Repeater {
+                is_locked: false,
+                ..
+            }
+        ));
+
+        Ok(())
     }
 
     #[test]
