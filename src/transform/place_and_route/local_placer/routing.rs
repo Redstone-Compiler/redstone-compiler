@@ -97,7 +97,7 @@ pub(super) fn generate_torch_place_and_routes(
 
     let place_strategy = iproduct!(0..world.size.0, 0..world.size.1, 0..world.size.2)
         .map(|(x, y, z)| Position(x, y, z))
-        // start?먯꽌 理쒖냼 ??移??⑥뼱吏?怨녹뿉 ?꾩튂?쒗궓??
+        // start에서 최소 한 칸 떨어진 곳에 배치한다.
         .filter(|pos| source.manhattan_distance(pos) > 1)
         .filter(|pos| {
             !config.route_torch_directly
@@ -163,9 +163,9 @@ pub(super) fn generate_routes_to_cobble(
             let directly_connected = start.position() == cobble_pos
                 && matches!(
                     start.propagation_type(),
-                    // TODO: 議곌굔 ??젣 媛?ν븳吏 ?뺤씤
-                    // Hard: Switch -> Torch ?곌껐
-                    // Soft: Redstone -> Torch ?곌껐
+                    // TODO: 조건 해제가 가능한지 확인.
+                    // Hard: Switch -> Torch 연결
+                    // Soft: Redstone -> Torch 연결
                     PropagateType::Hard | PropagateType::Soft
                 );
 
@@ -204,7 +204,7 @@ pub(super) fn generate_routes_to_cobble(
         .collect()
 }
 
-// ??torch瑜??곌껐?섎뒗 redstone routes瑜??앹꽦?쒕떎.
+// torch를 연결하는 redstone routes를 생성한다.
 pub(super) fn generate_routes_to_cobble_with_paths(
     config: &LocalPlacerConfig,
     world: &World3D,
@@ -536,7 +536,7 @@ pub(super) fn generate_routes_to_cobble_init_states(
                 .up()
                 .cardinal()
                 .into_iter()
-                // Cobble ?꾩そ??redstone??諛곗튂?섎뒗 耳?댁뒪
+                // Cobble 위쪽에 redstone을 배치하는 케이스
                 .chain(Some(source.up().up()))
                 .map(|pos| PlaceBound(PropagateType::Soft, pos, pos.diff(source)))
                 .collect_vec()
@@ -667,7 +667,7 @@ pub(super) fn generate_or_routes_init_states(
                 from.up()
                     .cardinal()
                     .into_iter()
-                    // Cobble ?꾩そ??redstone??諛곗튂?섎뒗 耳?댁뒪
+                    // Cobble 위쪽에 redstone을 배치하는 케이스
                     .chain(Some(from.up().up()))
                     .map(|pos| PlaceBound(PropagateType::Soft, pos, pos.diff(from)))
                     .collect_vec()
@@ -723,7 +723,7 @@ pub(super) fn place_redstone_with_cobble(
     let Some(cobble_pos) = bound.position().walk(Direction::Bottom) else {
         return PlaceRedstoneResult::Rejected(RouteRejectReason::NoBottomForCobble);
     };
-    // 泥?踰덉㎏ step?먯꽌 torch ?꾩そ??cobble + redstone???볦씤 寃쎌슦 ?덉쇅泥섎━
+    // 첫 번째 step에서 torch 위쪽에 cobble + redstone을 놓는 경우 예외 처리
     let cobble_except = (world[prev].kind.is_torch())
         .then_some(vec![cobble_pos, prev])
         .unwrap_or_default();

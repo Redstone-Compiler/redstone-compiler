@@ -1011,7 +1011,7 @@ impl Simulator {
             return Ok(());
         }
 
-        // Cobble??遺숈뼱?덉? ?딆? 寃쎌슦
+        // Cobble에 붙어있지 않은 경우
         if event.direction != block.direction {
             return Ok(());
         }

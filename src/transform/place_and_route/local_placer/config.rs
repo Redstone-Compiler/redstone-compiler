@@ -7,15 +7,15 @@ pub struct LocalPlacerConfig {
     pub input_placement_strategy: InputPlacementStrategy,
     pub step_sampling_policy: SamplingPolicy,
     pub placement_sampling_policy: PlacementSamplingPolicy,
+    // dealloc 시간을 줄이기 위해 generation을 leak 시킨다.
     pub leak_sampling: bool,
-    // dealloc ?쒓컙??以꾩씠湲??꾪빐 generation?ㅼ쓣 leak ?쒗궓??    pub leak_sampling: bool,
-    // torch place??input怨?direct濡??곌껐?섎룄濡?媛뺤젣?쒕떎.
+    // torch placement를 input과 direct로 연결하도록 강제한다.
     pub route_torch_directly: bool,
     pub torch_placement_strategy: TorchPlacementStrategy,
     pub not_route_strategy: NotRouteStrategy,
     pub max_not_route_step: usize,
     pub not_route_step_sampling_policy: SamplingPolicy,
-    // 理쒕? routing 嫄곕━瑜?吏?뺥븳??
+    // 최대 routing 거리를 지정한다.
     pub max_route_step: usize,
     pub route_step_sampling_policy: SamplingPolicy,
 }
