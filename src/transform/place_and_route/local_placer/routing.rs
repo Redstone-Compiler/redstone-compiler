@@ -149,59 +149,16 @@ pub(super) fn generate_routes_to_cobble(
     _torch_pos: Position,
     cobble_pos: Position,
 ) -> Vec<(World3D, Position)> {
-    let source_node = PlacedNode::new(source, world[source]);
-    assert!(source_node.is_propagation_target() && world[cobble_pos].kind.is_cobble());
-    let forbidden_cobble = torch_source_support(world, source);
-
-    // (world, pos, cost)
-    let mut route_candidates = Vec::new();
-    if matches!(
-        config.not_route_strategy,
-        NotRouteStrategy::DirectOnly | NotRouteStrategy::DirectAndRedstone
-    ) {
-        for start in source_node.propagation_bound(Some(world)) {
-            let directly_connected = start.position() == cobble_pos
-                && matches!(
-                    start.propagation_type(),
-                    // TODO: 조건 해제가 가능한지 확인.
-                    // Hard: Switch -> Torch 연결
-                    // Soft: Redstone -> Torch 연결
-                    PropagateType::Hard | PropagateType::Soft
-                );
-
-            if directly_connected
-                && !route_powers_forbidden_cobble(world, &[source], forbidden_cobble)
-            {
-                route_candidates.push((world.clone(), start.position(), 0usize));
-                continue;
-            }
-        }
-    }
-
-    if matches!(
-        config.not_route_strategy,
-        NotRouteStrategy::RedstoneOnly | NotRouteStrategy::DirectAndRedstone
-    ) && (source_node.is_diode() || source_node.block.kind.is_redstone())
-    {
-        let route_config = LocalPlacerConfig {
-            max_route_step: config.max_not_route_step,
-            route_step_sampling_policy: config.not_route_step_sampling_policy,
-            ..*config
-        };
-        route_candidates.extend(
-            generate_redstone_routes_to_cobble(&route_config, world, source, cobble_pos)
-                .into_iter()
-                .map(|(world, positions)| {
-                    (world, positions.last().copied().unwrap(), positions.len())
-                }),
-        );
-    }
-
-    route_candidates
-        .into_iter()
-        .sorted_by_key(|(_, _, cost)| *cost)
-        .map(|(world, pos, _)| (world, pos))
-        .collect()
+    generate_routes_for_goal(
+        config,
+        world,
+        source,
+        RouteGoal::PowerCobble { cobble: cobble_pos },
+    )
+    .into_iter()
+    .sorted_by_key(|candidate| candidate.cost)
+    .map(|candidate| (candidate.world, candidate.terminal))
+    .collect()
 }
 
 // torch를 연결하는 redstone routes를 생성한다.
@@ -212,49 +169,15 @@ pub(super) fn generate_routes_to_cobble_with_paths(
     _torch_pos: Position,
     cobble_pos: Position,
 ) -> Vec<(World3D, Vec<Position>)> {
-    let source_node = PlacedNode::new(source, world[source]);
-    assert!(source_node.is_propagation_target() && world[cobble_pos].kind.is_cobble());
-    let forbidden_cobble = torch_source_support(world, source);
-
-    let mut route_candidates = Vec::new();
-    if matches!(
-        config.not_route_strategy,
-        NotRouteStrategy::DirectOnly | NotRouteStrategy::DirectAndRedstone
-    ) {
-        for start in source_node.propagation_bound(Some(world)) {
-            let directly_connected = start.position() == cobble_pos
-                && matches!(
-                    start.propagation_type(),
-                    PropagateType::Hard | PropagateType::Soft
-                );
-
-            if directly_connected
-                && !route_powers_forbidden_cobble(world, &[source], forbidden_cobble)
-            {
-                route_candidates.push((world.clone(), vec![source]));
-            }
-        }
-    }
-
-    if matches!(
-        config.not_route_strategy,
-        NotRouteStrategy::RedstoneOnly | NotRouteStrategy::DirectAndRedstone
-    ) && (source_node.is_diode() || source_node.block.kind.is_redstone())
-    {
-        let route_config = LocalPlacerConfig {
-            max_route_step: config.max_not_route_step,
-            route_step_sampling_policy: config.not_route_step_sampling_policy,
-            ..*config
-        };
-        route_candidates.extend(generate_redstone_routes_to_cobble(
-            &route_config,
-            world,
-            source,
-            cobble_pos,
-        ));
-    }
-
-    route_candidates
+    generate_routes_for_goal(
+        config,
+        world,
+        source,
+        RouteGoal::PowerCobble { cobble: cobble_pos },
+    )
+    .into_iter()
+    .map(|candidate| (candidate.world, candidate.path))
+    .collect()
 }
 
 pub(super) fn generate_routes_to_cobble_or_network(
@@ -265,8 +188,115 @@ pub(super) fn generate_routes_to_cobble_or_network(
     cobble_pos: Position,
     network: &HashSet<Position>,
 ) -> Vec<(World3D, Vec<Position>)> {
+    generate_routes_for_goal(
+        config,
+        world,
+        source,
+        RouteGoal::PowerCobbleOrNetwork {
+            cobble: cobble_pos,
+            network,
+        },
+    )
+    .into_iter()
+    .map(|candidate| (candidate.world, candidate.path))
+    .collect()
+}
+
+#[derive(Clone)]
+struct RouteCandidate {
+    world: World3D,
+    path: Vec<Position>,
+    terminal: Position,
+    cost: usize,
+}
+
+#[derive(Clone, Copy)]
+enum RouteGoal<'a> {
+    // 특정 cobble 블록을 전원 공급 상태로 만든다.
+    PowerCobble {
+        cobble: Position,
+    },
+    // 특정 cobble을 직접 켜거나, 그 cobble을 켤 수 있는 기존 network에 합류한다.
+    PowerCobbleOrNetwork {
+        cobble: Position,
+        network: &'a HashSet<Position>,
+    },
+    // 특정 위치까지 redstone path를 물리적으로 연결한다.
+    ConnectPosition {
+        target: Position,
+    },
+}
+
+impl<'a> RouteGoal<'a> {
+    fn powered_cobble(self) -> Option<Position> {
+        match self {
+            RouteGoal::PowerCobble { cobble } | RouteGoal::PowerCobbleOrNetwork { cobble, .. } => {
+                Some(cobble)
+            }
+            RouteGoal::ConnectPosition { .. } => None,
+        }
+    }
+
+    fn placement_target(self) -> Position {
+        match self {
+            RouteGoal::PowerCobble { cobble } | RouteGoal::PowerCobbleOrNetwork { cobble, .. } => {
+                cobble
+            }
+            RouteGoal::ConnectPosition { target } => target,
+        }
+    }
+
+    fn accepts_direct_bound(self, bound: PlaceBound) -> bool {
+        let is_direct_signal = matches!(
+            bound.propagation_type(),
+            PropagateType::Hard | PropagateType::Soft
+        );
+        if !is_direct_signal {
+            return false;
+        }
+
+        match self {
+            RouteGoal::PowerCobble { cobble } => bound.position() == cobble,
+            RouteGoal::PowerCobbleOrNetwork { cobble, network } => {
+                bound.position() == cobble || network.contains(&bound.position())
+            }
+            RouteGoal::ConnectPosition { target } => bound.position() == target,
+        }
+    }
+
+    fn accepts_redstone(self, world: &World3D, route: &[Position], redstone: Position) -> bool {
+        match self {
+            RouteGoal::PowerCobble { cobble } => redstone_powers_cobble(world, redstone, cobble),
+            RouteGoal::PowerCobbleOrNetwork { cobble, network } => {
+                redstone_powers_cobble(world, redstone, cobble)
+                    || (redstone_connects_to_network(world, redstone, network)
+                        && route_network_powers_cobble(world, route, network, cobble))
+            }
+            RouteGoal::ConnectPosition { target } => {
+                PlacedNode::new(redstone, world[redstone]).has_connection_with(world, target)
+            }
+        }
+    }
+
+    fn allowed_short_positions(self) -> Option<&'a HashSet<Position>> {
+        match self {
+            RouteGoal::PowerCobbleOrNetwork { network, .. } => Some(network),
+            RouteGoal::PowerCobble { .. } | RouteGoal::ConnectPosition { .. } => None,
+        }
+    }
+}
+
+fn generate_routes_for_goal(
+    config: &LocalPlacerConfig,
+    world: &World3D,
+    source: Position,
+    goal: RouteGoal,
+) -> Vec<RouteCandidate> {
     let source_node = PlacedNode::new(source, world[source]);
-    assert!(source_node.is_propagation_target() && world[cobble_pos].kind.is_cobble());
+    assert!(source_node.is_propagation_target());
+    if let Some(cobble) = goal.powered_cobble() {
+        assert!(world[cobble].kind.is_cobble());
+    }
     let forbidden_cobble = torch_source_support(world, source);
 
     let mut route_candidates = Vec::new();
@@ -275,16 +305,15 @@ pub(super) fn generate_routes_to_cobble_or_network(
         NotRouteStrategy::DirectOnly | NotRouteStrategy::DirectAndRedstone
     ) {
         for start in source_node.propagation_bound(Some(world)) {
-            let directly_connected = start.position() == cobble_pos
-                && matches!(
-                    start.propagation_type(),
-                    PropagateType::Hard | PropagateType::Soft
-                );
-
-            if (directly_connected || network.contains(&start.position()))
+            if goal.accepts_direct_bound(start)
                 && !route_powers_forbidden_cobble(world, &[source], forbidden_cobble)
             {
-                route_candidates.push((world.clone(), vec![source]));
+                route_candidates.push(RouteCandidate {
+                    world: world.clone(),
+                    path: vec![source],
+                    terminal: start.position(),
+                    cost: 0,
+                });
             }
         }
     }
@@ -299,24 +328,18 @@ pub(super) fn generate_routes_to_cobble_or_network(
             route_step_sampling_policy: config.not_route_step_sampling_policy,
             ..*config
         };
-        route_candidates.extend(generate_redstone_routes_to_cobble_or_network(
-            &route_config,
-            world,
-            source,
-            cobble_pos,
-            network,
-        ));
+        route_candidates.extend(generate_redstone_routes(&route_config, world, source, goal));
     }
 
     route_candidates
 }
 
-pub(super) fn generate_redstone_routes_to_cobble(
+fn generate_redstone_routes(
     config: &LocalPlacerConfig,
     world: &World3D,
     source: Position,
-    cobble_pos: Position,
-) -> Vec<(World3D, Vec<Position>)> {
+    goal: RouteGoal,
+) -> Vec<RouteCandidate> {
     let source_node = PlacedNode::new(source, world[source]);
     let forbidden_cobble = torch_source_support(world, source);
     let mut queue = if source_node.is_diode() {
@@ -344,7 +367,7 @@ pub(super) fn generate_redstone_routes_to_cobble(
                 }
 
                 let (new_world, redstone_node) =
-                    match place_redstone_with_cobble(&world, bound, prev_pos, cobble_pos) {
+                    match place_redstone_for_goal(&world, bound, prev_pos, goal) {
                         PlaceRedstoneResult::Placed(new_world, redstone_node) => {
                             (new_world, redstone_node)
                         }
@@ -360,82 +383,14 @@ pub(super) fn generate_redstone_routes_to_cobble(
                     continue;
                 }
 
-                if redstone_powers_cobble(&new_world, redstone_node.position, cobble_pos) {
-                    candidates.push((new_world, new_prevs));
-                } else {
-                    let nexts = redstone_node.propagation_bound(Some(&new_world));
-                    next_queue.push((new_world, new_prevs, nexts));
-                }
-            }
-        }
-
-        queue = config
-            .route_step_sampling_policy
-            .sample_with_seed(next_queue, config.sampling_seed(5, step));
-        step += 1;
-    }
-
-    candidates
-}
-
-pub(super) fn generate_redstone_routes_to_cobble_or_network(
-    config: &LocalPlacerConfig,
-    world: &World3D,
-    source: Position,
-    cobble_pos: Position,
-    network: &HashSet<Position>,
-) -> Vec<(World3D, Vec<Position>)> {
-    let source_node = PlacedNode::new(source, world[source]);
-    let forbidden_cobble = torch_source_support(world, source);
-    let mut queue = if source_node.is_diode() {
-        generate_routes_to_cobble_init_states(world, source)
-    } else if source_node.block.kind.is_redstone() {
-        vec![(
-            world.clone(),
-            vec![source],
-            source_node.propagation_bound(Some(world)),
-        )]
-    } else {
-        Vec::new()
-    };
-    let mut candidates = Vec::new();
-    let mut step = 0;
-
-    while step < config.max_route_step && !queue.is_empty() {
-        let mut next_queue = Vec::new();
-
-        for (world, prevs, bounds) in queue {
-            let prev_pos = prevs.last().copied().unwrap();
-            for bound in bounds {
-                if !world.size.bound_on(bound.position()) {
-                    continue;
-                }
-
-                let (new_world, redstone_node) = match place_redstone_with_cobble_allowing_shorts(
-                    &world, bound, prev_pos, cobble_pos, network,
-                ) {
-                    PlaceRedstoneResult::Placed(new_world, redstone_node) => {
-                        (new_world, redstone_node)
-                    }
-                    PlaceRedstoneResult::Rejected(_) => continue,
-                };
-
-                let new_prevs = prevs
-                    .iter()
-                    .copied()
-                    .chain([redstone_node.position])
-                    .collect_vec();
-                if route_powers_forbidden_cobble(&new_world, &new_prevs, forbidden_cobble) {
-                    continue;
-                }
-
-                let powers_cobble =
-                    redstone_powers_cobble(&new_world, redstone_node.position, cobble_pos);
-                let connects_to_network =
-                    redstone_connects_to_network(&new_world, redstone_node.position, network)
-                        && route_network_powers_cobble(&new_world, &new_prevs, network, cobble_pos);
-                if powers_cobble || connects_to_network {
-                    candidates.push((new_world, new_prevs));
+                if goal.accepts_redstone(&new_world, &new_prevs, redstone_node.position) {
+                    let terminal = redstone_node.position;
+                    candidates.push(RouteCandidate {
+                        world: new_world,
+                        path: new_prevs,
+                        terminal,
+                        cost: prevs.len() + 1,
+                    });
                 } else {
                     let nexts = redstone_node.propagation_bound(Some(&new_world));
                     next_queue.push((new_world, new_prevs, nexts));
@@ -557,6 +512,7 @@ pub(super) fn generate_or_routes(
     to: Position,
 ) -> RouteResult {
     let (mut queue, mut debug) = generate_or_routes_init_states(world, from, to);
+    let goal = RouteGoal::ConnectPosition { target: to };
     debug.route_calls = 1;
     debug.route_samples.push((from, to));
     debug.initial_states = queue.len();
@@ -583,7 +539,7 @@ pub(super) fn generate_or_routes(
                 }
 
                 let (new_world, redstone_node) =
-                    match place_redstone_with_cobble(&world, bound, prev_pos, to) {
+                    match place_redstone_for_goal(&world, bound, prev_pos, goal) {
                         PlaceRedstoneResult::Placed(new_world, redstone_node) => {
                             (new_world, redstone_node)
                         }
@@ -597,9 +553,9 @@ pub(super) fn generate_or_routes(
                     .iter()
                     .copied()
                     .chain([redstone_node.position])
-                    .collect();
+                    .collect_vec();
 
-                if redstone_node.has_connection_with(&new_world, to) {
+                if goal.accepts_redstone(&new_world, &new_prevs, redstone_node.position) {
                     depth_debug.accepted_routes += 1;
                     candidates.push((new_world, new_prevs));
                 } else {
@@ -714,11 +670,37 @@ pub(super) fn cobble_would_stack_above_side_torch_support(
         })
 }
 
+fn place_redstone_for_goal(
+    world: &World3D,
+    bound: PlaceBound,
+    prev: Position,
+    goal: RouteGoal,
+) -> PlaceRedstoneResult {
+    place_redstone_with_cobble_and_allowed_shorts(
+        world,
+        bound,
+        prev,
+        goal.placement_target(),
+        goal.allowed_short_positions(),
+    )
+}
+
+#[cfg(test)]
 pub(super) fn place_redstone_with_cobble(
     world: &World3D,
     bound: PlaceBound,
     prev: Position,
     to: Position,
+) -> PlaceRedstoneResult {
+    place_redstone_with_cobble_and_allowed_shorts(world, bound, prev, to, None)
+}
+
+fn place_redstone_with_cobble_and_allowed_shorts(
+    world: &World3D,
+    bound: PlaceBound,
+    prev: Position,
+    to: Position,
+    allowed_shorts: Option<&HashSet<Position>>,
 ) -> PlaceRedstoneResult {
     let Some(cobble_pos) = bound.position().walk(Direction::Bottom) else {
         return PlaceRedstoneResult::Rejected(RouteRejectReason::NoBottomForCobble);
@@ -738,56 +720,12 @@ pub(super) fn place_redstone_with_cobble(
         return PlaceRedstoneResult::Rejected(RouteRejectReason::RedstoneConflict);
     };
     let redstone_node = PlacedNode::new_redstone(bound_pos);
-    let except = [prev, bound_back_pos, bound_pos, to, to.up()]
-        .into_iter()
-        .collect();
-    if redstone_node.has_conflict(&new_world, &except) {
-        return PlaceRedstoneResult::Rejected(RouteRejectReason::RedstoneConflict);
-    }
-    if redstone_node.has_short(world, &except) {
-        return PlaceRedstoneResult::Rejected(RouteRejectReason::ShortCircuit);
-    }
-    place_node(&mut new_world, redstone_node);
-    if let BlockKind::Torch { .. } = world[prev].kind {
-        if let Some(source_cobble) = prev.walk(world[prev].direction) {
-            if redstone_powers_cobble(&new_world, redstone_node.position, source_cobble) {
-                return PlaceRedstoneResult::Rejected(RouteRejectReason::ShortCircuit);
-            }
-        }
-    }
-    new_world.update_redstone_states(prev);
-
-    PlaceRedstoneResult::Placed(new_world, redstone_node)
-}
-
-pub(super) fn place_redstone_with_cobble_allowing_shorts(
-    world: &World3D,
-    bound: PlaceBound,
-    prev: Position,
-    to: Position,
-    allowed_shorts: &HashSet<Position>,
-) -> PlaceRedstoneResult {
-    let Some(cobble_pos) = bound.position().walk(Direction::Bottom) else {
-        return PlaceRedstoneResult::Rejected(RouteRejectReason::NoBottomForCobble);
-    };
-    let cobble_except = (world[prev].kind.is_torch())
-        .then_some(vec![cobble_pos, prev])
-        .unwrap_or_default();
-    let Some(cobble_node) = try_generate_cobble_node(world, cobble_pos, &cobble_except) else {
-        return PlaceRedstoneResult::Rejected(RouteRejectReason::CobbleConflict);
-    };
-    let mut new_world = world.clone();
-    place_node(&mut new_world, cobble_node);
-
-    let bound_pos = bound.position();
-    let Some(bound_back_pos) = bound_pos.walk(bound.direction()) else {
-        return PlaceRedstoneResult::Rejected(RouteRejectReason::RedstoneConflict);
-    };
-    let redstone_node = PlacedNode::new_redstone(bound_pos);
     let mut except = [prev, bound_back_pos, bound_pos, to, to.up()]
         .into_iter()
         .collect::<HashSet<_>>();
-    except.extend(allowed_shorts.iter().copied());
+    if let Some(allowed_shorts) = allowed_shorts {
+        except.extend(allowed_shorts.iter().copied());
+    }
     if redstone_node.has_conflict(&new_world, &except) {
         return PlaceRedstoneResult::Rejected(RouteRejectReason::RedstoneConflict);
     }
