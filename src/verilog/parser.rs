@@ -31,6 +31,10 @@ impl Parser {
                     declarations.push(self.parse_declaration()?);
                 }
                 Some(Token::Assign) => assignments.push(self.parse_assignment()?),
+                Some(Token::Always) => eyre::bail!("unsupported Verilog construct: always block"),
+                Some(Token::LBracket) => {
+                    eyre::bail!("unsupported Verilog construct: vector declaration")
+                }
                 Some(token) => eyre::bail!("unsupported Verilog token in module body: {token:?}"),
                 None => eyre::bail!("expected endmodule"),
             }
@@ -52,6 +56,9 @@ impl Parser {
             Some(token) => eyre::bail!("expected declaration direction, got {token:?}"),
             None => eyre::bail!("expected declaration direction"),
         };
+        if matches!(self.peek(), Some(Token::LBracket)) {
+            eyre::bail!("unsupported Verilog construct: vector declaration");
+        }
         let names = self.parse_ident_list()?;
         self.expect(Token::Semi)?;
 
@@ -242,5 +249,37 @@ mod tests {
         assert_eq!(module.assignments[0].expr.to_logic_stmt(), "(a^(b&c))");
 
         Ok(())
+    }
+
+    #[test]
+    fn rejects_always_blocks_with_clear_message() {
+        let error = parse_module(
+            r#"
+            module bad(clk, q);
+              input clk;
+              output q;
+              always @(posedge clk) q = ~q;
+            endmodule
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("always block"));
+    }
+
+    #[test]
+    fn rejects_vector_declarations_with_clear_message() {
+        let error = parse_module(
+            r#"
+            module bad(a, y);
+              input [3:0] a;
+              output y;
+              assign y = a;
+            endmodule
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("vector declaration"));
     }
 }

@@ -6,12 +6,18 @@ pub enum Token {
     Output,
     Wire,
     Assign,
+    Always,
     Ident(String),
+    Number(usize),
     LParen,
     RParen,
+    LBracket,
+    RBracket,
     Comma,
     Semi,
+    Colon,
     Eq,
+    At,
     Not,
     And,
     Xor,
@@ -34,13 +40,27 @@ pub fn lex(source: &str) -> eyre::Result<Vec<Token>> {
         match ch {
             '(' => tokens.push(Token::LParen),
             ')' => tokens.push(Token::RParen),
+            '[' => tokens.push(Token::LBracket),
+            ']' => tokens.push(Token::RBracket),
             ',' => tokens.push(Token::Comma),
             ';' => tokens.push(Token::Semi),
+            ':' => tokens.push(Token::Colon),
             '=' => tokens.push(Token::Eq),
+            '@' => tokens.push(Token::At),
             '~' => tokens.push(Token::Not),
             '&' => tokens.push(Token::And),
             '^' => tokens.push(Token::Xor),
             '|' => tokens.push(Token::Or),
+            ch if ch.is_ascii_digit() => {
+                let start = index;
+                index += 1;
+                while index < chars.len() && chars[index].is_ascii_digit() {
+                    index += 1;
+                }
+                let text = chars[start..index].iter().collect::<String>();
+                tokens.push(Token::Number(text.parse()?));
+                continue;
+            }
             ch if is_ident_start(ch) => {
                 let start = index;
                 index += 1;
@@ -55,6 +75,7 @@ pub fn lex(source: &str) -> eyre::Result<Vec<Token>> {
                     "output" => Token::Output,
                     "wire" => Token::Wire,
                     "assign" => Token::Assign,
+                    "always" => Token::Always,
                     _ => Token::Ident(text),
                 });
                 continue;
