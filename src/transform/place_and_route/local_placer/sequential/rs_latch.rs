@@ -5,6 +5,18 @@ use itertools::{iproduct, Itertools};
 use super::macro_routes::generate_sequential_macro_routes;
 use super::*;
 
+const RS_LATCH_PAIR_SELECTION_SAMPLE_SCOPE: u64 = 4;
+const RS_LATCH_BRANCH_ROUTE_SAMPLE_SCOPE: u64 = 8;
+const RS_LATCH_INPUT_BLOCK_PENALTY: usize = 1_000;
+const RS_LATCH_INPUT_DISTANCE_BALANCE_WEIGHT: usize = 10;
+const RS_LATCH_CLOSE_INPUT_DISTANCE: usize = 2;
+const RS_LATCH_CLOSE_INPUT_PENALTY: usize = 100;
+const RS_LATCH_MIN_SUPPORT_DISTANCE: usize = 2;
+const RS_LATCH_MAX_SUPPORT_DISTANCE: usize = 3;
+const RS_LATCH_MIN_TORCH_DISTANCE: usize = 3;
+const RS_LATCH_MAX_TORCH_DISTANCE: usize = 5;
+const RS_LATCH_MIN_SUPPORT_Z: usize = 1;
+
 #[derive(Debug, Clone)]
 pub(in super::super) struct RsLatchGatePlacement {
     pub(in super::super) world: World3D,
@@ -66,9 +78,10 @@ pub(in super::super) fn select_rs_latch_not_pairs(
     mut pairs: Vec<RsLatchGatePlacement>,
 ) -> Vec<RsLatchGatePlacement> {
     let Some(set_source) = rs_latch_input_source(node, sequential, state, "s") else {
-        return config
-            .step_sampling_policy
-            .sample_with_seed(pairs, config.sampling_seed(4, 0));
+        return config.step_sampling_policy.sample_with_seed(
+            pairs,
+            config.sampling_seed(RS_LATCH_PAIR_SELECTION_SAMPLE_SCOPE, 0),
+        );
     };
     let Some(reset_source) = rs_latch_input_source(node, sequential, state, "r") else {
         return Vec::new();
@@ -78,18 +91,21 @@ pub(in super::super) fn select_rs_latch_not_pairs(
         let reset_distance = reset_source.manhattan_distance(&placed.q_cobble);
         let set_distance = set_source.manhattan_distance(&placed.nq_cobble);
         let input_block_penalty = if lies_between(reset_source, placed.q_cobble, placed.q_torch) {
-            1_000
+            RS_LATCH_INPUT_BLOCK_PENALTY
         } else {
             0
         } + if lies_between(set_source, placed.nq_cobble, placed.nq_torch)
         {
-            1_000
+            RS_LATCH_INPUT_BLOCK_PENALTY
         } else {
             0
         };
-        let input_space_penalty = (reset_distance.abs_diff(set_distance) * 10)
-            + usize::from(reset_distance < 2) * 100
-            + usize::from(set_distance < 2) * 100;
+        let input_space_penalty = reset_distance.abs_diff(set_distance)
+            * RS_LATCH_INPUT_DISTANCE_BALANCE_WEIGHT
+            + usize::from(reset_distance < RS_LATCH_CLOSE_INPUT_DISTANCE)
+                * RS_LATCH_CLOSE_INPUT_PENALTY
+            + usize::from(set_distance < RS_LATCH_CLOSE_INPUT_DISTANCE)
+                * RS_LATCH_CLOSE_INPUT_PENALTY;
         reset_distance
             + set_distance
             + placed.q_torch.manhattan_distance(&placed.nq_torch)
@@ -160,7 +176,10 @@ fn route_rs_latch_signals_to_cobble(
         .route_step_sampling_policy
         .sample_with_seed(
             worlds,
-            config.sampling_seed(8, target_cobble.0 + target_cobble.1),
+            config.sampling_seed(
+                RS_LATCH_BRANCH_ROUTE_SAMPLE_SCOPE,
+                target_cobble.0 + target_cobble.1,
+            ),
         )
         .into_iter()
         .map(|world| RsLatchGatePlacement { world, ..placed })
@@ -255,18 +274,20 @@ fn rs_latch_input_source(
         })
 }
 
-pub(in super::super) fn generate_rs_latch_not_pairs(
-    world: &World3D,
-) -> Vec<RsLatchGatePlacement> {
+pub(in super::super) fn generate_rs_latch_not_pairs(world: &World3D) -> Vec<RsLatchGatePlacement> {
     let cardinal = [
         Direction::East,
         Direction::West,
         Direction::South,
         Direction::North,
     ];
-    let support_positions = iproduct!(0..world.size.0, 0..world.size.1, 1..world.size.2)
-        .map(|(x, y, z)| Position(x, y, z))
-        .collect_vec();
+    let support_positions = iproduct!(
+        0..world.size.0,
+        0..world.size.1,
+        RS_LATCH_MIN_SUPPORT_Z..world.size.2
+    )
+    .map(|(x, y, z)| Position(x, y, z))
+    .collect_vec();
     let mut candidates = Vec::new();
 
     for &q_direction in &cardinal {
@@ -293,7 +314,9 @@ pub(in super::super) fn generate_rs_latch_not_pairs(
                         continue;
                     }
                     let support_distance = q_cobble.manhattan_distance(nq_cobble);
-                    if !(2..=3).contains(&support_distance) || q_direction.inverse() != nq_direction
+                    if !(RS_LATCH_MIN_SUPPORT_DISTANCE..=RS_LATCH_MAX_SUPPORT_DISTANCE)
+                        .contains(&support_distance)
+                        || q_direction.inverse() != nq_direction
                     {
                         continue;
                     }
@@ -302,7 +325,8 @@ pub(in super::super) fn generate_rs_latch_not_pairs(
                     };
                     if !q_world.size.bound_on(nq_torch)
                         || q_torch == nq_torch
-                        || !(3..=5).contains(&q_torch.manhattan_distance(&nq_torch))
+                        || !(RS_LATCH_MIN_TORCH_DISTANCE..=RS_LATCH_MAX_TORCH_DISTANCE)
+                            .contains(&q_torch.manhattan_distance(&nq_torch))
                     {
                         continue;
                     }

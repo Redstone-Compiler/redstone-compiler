@@ -6,6 +6,16 @@ use super::*;
 use crate::world::simulator::Simulator;
 use crate::world::World;
 
+const D_LATCH_SAMPLE_SCOPE: u64 = 7;
+const D_LATCH_OUTPUT_SAMPLE_STEP: usize = 6;
+const D_LATCH_PREFIX_SAMPLE_COUNT: usize = 64;
+const RS_CORE_SEARCH_SAMPLE_COUNT: usize = 32;
+const RS_CORE_SEARCH_MAX_ROUTE_STEP: usize = 8;
+const D_LATCH_SIM_EXTRA_Z: usize = 2;
+const D_LATCH_SIM_MAX_CYCLES: usize = 64;
+const D_LATCH_SIM_MAX_EVENTS: usize = 20_000;
+const D_LATCH_SIM_TRACE_LIMIT: usize = 0;
+
 pub(in super::super) fn generate_d_latch_gate_routes(
     config: &LocalPlacerConfig,
     node: &GraphNode,
@@ -46,9 +56,10 @@ pub(in super::super) fn generate_d_latch_gate_routes(
         queue,
     );
 
-    config
-        .step_sampling_policy
-        .sample_with_seed(routed, config.sampling_seed(7, 6))
+    config.step_sampling_policy.sample_with_seed(
+        routed,
+        config.sampling_seed(D_LATCH_SAMPLE_SCOPE, D_LATCH_OUTPUT_SAMPLE_STEP),
+    )
 }
 
 fn route_d_latch_core(
@@ -65,11 +76,11 @@ fn route_d_latch_core(
     let mut routed = Vec::new();
     let limit = take_sampling_limit(config.step_sampling_policy);
     let rs_config = LocalPlacerConfig {
-        step_sampling_policy: SamplingPolicy::Random(32),
-        route_step_sampling_policy: SamplingPolicy::Random(32),
-        not_route_step_sampling_policy: SamplingPolicy::Random(32),
-        max_not_route_step: 8,
-        max_route_step: 8,
+        step_sampling_policy: SamplingPolicy::Random(RS_CORE_SEARCH_SAMPLE_COUNT),
+        route_step_sampling_policy: SamplingPolicy::Random(RS_CORE_SEARCH_SAMPLE_COUNT),
+        not_route_step_sampling_policy: SamplingPolicy::Random(RS_CORE_SEARCH_SAMPLE_COUNT),
+        max_not_route_step: RS_CORE_SEARCH_MAX_ROUTE_STEP,
+        max_route_step: RS_CORE_SEARCH_MAX_ROUTE_STEP,
         ..*config
     };
 
@@ -134,7 +145,10 @@ fn retain_valid_d_latch_prefix(
             )
         })
         .collect_vec();
-    SamplingPolicy::Random(64).sample_with_seed(queue, config.sampling_seed(7, 6))
+    SamplingPolicy::Random(D_LATCH_PREFIX_SAMPLE_COUNT).sample_with_seed(
+        queue,
+        config.sampling_seed(D_LATCH_SAMPLE_SCOPE, D_LATCH_OUTPUT_SAMPLE_STEP),
+    )
 }
 
 fn d_latch_prefix_behaves(
@@ -172,14 +186,14 @@ fn d_latch_input_gate_values(
     data_value: bool,
     enable_value: bool,
 ) -> Option<(bool, bool)> {
-    let mut world = pad_world_top_for_simulation(world, 2);
+    let mut world = pad_world_top_for_simulation(world, D_LATCH_SIM_EXTRA_Z);
     world[data].kind = BlockKind::Switch { is_on: data_value };
     world[enable].kind = BlockKind::Switch {
         is_on: enable_value,
     };
     world.initialize_redstone_states();
     let world = World::from(&world);
-    let sim = Simulator::from_with_limits_and_trace(&world, 64, 20_000, 0).ok()?;
+    let sim = run_d_latch_simulation(&world)?;
     let set_value = match sim.world()[set].kind {
         BlockKind::Torch { is_on } => is_on,
         _ => return None,
@@ -206,65 +220,66 @@ fn d_latch_candidate_behaves(
         return false;
     };
 
-    let mut reset_world = pad_world_top_for_simulation(world, 2);
+    let mut reset_world = pad_world_top_for_simulation(world, D_LATCH_SIM_EXTRA_Z);
     reset_world[enable].kind = BlockKind::Switch { is_on: true };
     reset_world[data].kind = BlockKind::Switch { is_on: false };
     reset_world.initialize_redstone_states();
     let world = World::from(&reset_world);
-    let Ok(mut sim) = Simulator::from_with_limits_and_trace(&world, 64, 20_000, 0) else {
+    let Some(mut sim) = run_d_latch_simulation(&world) else {
         return false;
     };
 
     if torch_is_on_in_world3d(sim.world(), q) || !torch_is_on_in_world3d(sim.world(), nq) {
         return false;
     }
-    if sim
-        .change_state_with_limits(vec![(enable, false)], 64, 20_000)
-        .is_err()
-    {
+    if !change_d_latch_switch(&mut sim, enable, false) {
         return false;
     }
-    if sim
-        .change_state_with_limits(vec![(data, true)], 64, 20_000)
-        .is_err()
-    {
+    if !change_d_latch_switch(&mut sim, data, true) {
         return false;
     }
     if torch_is_on_in_world3d(sim.world(), q) || !torch_is_on_in_world3d(sim.world(), nq) {
         return false;
     }
-    if sim
-        .change_state_with_limits(vec![(enable, true)], 64, 20_000)
-        .is_err()
-    {
+    if !change_d_latch_switch(&mut sim, enable, true) {
         return false;
     }
     if !torch_is_on_in_world3d(sim.world(), q) || torch_is_on_in_world3d(sim.world(), nq) {
         return false;
     }
-    if sim
-        .change_state_with_limits(vec![(enable, false)], 64, 20_000)
-        .is_err()
-    {
+    if !change_d_latch_switch(&mut sim, enable, false) {
         return false;
     }
-    if sim
-        .change_state_with_limits(vec![(data, false)], 64, 20_000)
-        .is_err()
-    {
+    if !change_d_latch_switch(&mut sim, data, false) {
         return false;
     }
     if !torch_is_on_in_world3d(sim.world(), q) || torch_is_on_in_world3d(sim.world(), nq) {
         return false;
     }
-    if sim
-        .change_state_with_limits(vec![(enable, true)], 64, 20_000)
-        .is_err()
-    {
+    if !change_d_latch_switch(&mut sim, enable, true) {
         return false;
     }
 
     !torch_is_on_in_world3d(sim.world(), q) && torch_is_on_in_world3d(sim.world(), nq)
+}
+
+fn run_d_latch_simulation(world: &World) -> Option<Simulator> {
+    Simulator::from_with_limits_and_trace(
+        world,
+        D_LATCH_SIM_MAX_CYCLES,
+        D_LATCH_SIM_MAX_EVENTS,
+        D_LATCH_SIM_TRACE_LIMIT,
+    )
+    .ok()
+}
+
+fn change_d_latch_switch(sim: &mut Simulator, position: Position, value: bool) -> bool {
+    sim.change_state_with_limits(
+        vec![(position, value)],
+        D_LATCH_SIM_MAX_CYCLES,
+        D_LATCH_SIM_MAX_EVENTS,
+    )
+    .is_ok()
 }
 
 fn torch_is_on_in_world3d(world: &World3D, position: Position) -> bool {
