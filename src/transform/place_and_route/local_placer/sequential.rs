@@ -37,6 +37,87 @@ pub(super) fn rs_latch_input_node_ids(node_id: GraphNodeId) -> RsLatchInputNodeI
     }
 }
 
+struct RsLatchPrefixPlan {
+    graph: LogicGraph,
+    input_mappings: Vec<(GraphNodeId, GraphNodeId)>,
+    input_node_ids_by_port: HashMap<String, GraphNodeId>,
+    input_positions_by_port: HashMap<String, Position>,
+    set_source: GraphNodeId,
+    reset_source: GraphNodeId,
+    rs_input_nodes: RsLatchInputNodeIds,
+}
+
+impl RsLatchPrefixPlan {
+    fn build(
+        node: &GraphNode,
+        sequential: &SequentialPrimitive,
+        state: &PlacementState,
+    ) -> Option<Self> {
+        let core = sequential.rs_latch_core()?;
+        let graph = rs_latch_prefix_graph(&sequential.inner_graph, &core)
+            .and_then(|graph| graph.prepare_place().ok())?;
+        let set_source = output_source_node_id(&graph, "s")?;
+        let reset_source = output_source_node_id(&graph, "r")?;
+
+        let mut input_mappings = Vec::new();
+        let mut input_node_ids_by_port = HashMap::new();
+        let mut input_positions_by_port = HashMap::new();
+        for prefix_input in graph.nodes.iter().filter_map(|node| match &node.kind {
+            GraphNodeKind::Input(name) => Some((node.id, name.as_str())),
+            _ => None,
+        }) {
+            let outer_input = outer_input_node_id(node, sequential, prefix_input.1)?;
+            let position = state.node_position(outer_input)?;
+            input_mappings.push((prefix_input.0, outer_input));
+            input_node_ids_by_port.insert(prefix_input.1.to_owned(), outer_input);
+            input_positions_by_port.insert(prefix_input.1.to_owned(), position);
+        }
+
+        Some(Self {
+            graph,
+            input_mappings,
+            input_node_ids_by_port,
+            input_positions_by_port,
+            set_source,
+            reset_source,
+            rs_input_nodes: rs_latch_input_node_ids(node.id),
+        })
+    }
+
+    fn rs_node_inputs(&self) -> Vec<GraphNodeId> {
+        vec![self.rs_input_nodes.set, self.rs_input_nodes.reset]
+    }
+
+    fn input_node_id(&self, port: &str) -> Option<GraphNodeId> {
+        self.input_node_ids_by_port.get(port).copied()
+    }
+
+    fn input_position(&self, port: &str) -> Option<Position> {
+        self.input_positions_by_port.get(port).copied()
+    }
+
+    fn d_latch_input_node_ids(&self) -> Option<(GraphNodeId, GraphNodeId)> {
+        Some((self.input_node_id("d")?, self.input_node_id("en")?))
+    }
+
+    fn source_positions(&self, state: &PlacementState) -> Option<(Position, Position)> {
+        Some((
+            state.node_position(self.set_source)?,
+            state.node_position(self.reset_source)?,
+        ))
+    }
+
+    fn publish_rs_inputs(
+        &self,
+        state: &mut PlacementState,
+        set_position: Position,
+        reset_position: Position,
+    ) {
+        state.set_node_position(self.rs_input_nodes.set, set_position);
+        state.set_node_position(self.rs_input_nodes.reset, reset_position);
+    }
+}
+
 pub(super) fn generate_d_latch_gate_routes(
     config: &LocalPlacerConfig,
     node: &GraphNode,
@@ -44,41 +125,12 @@ pub(super) fn generate_d_latch_gate_routes(
     world: &World3D,
     state: &PlacementState,
 ) -> PlacerQueue {
-    let Some(data_input) = sequential_input(node, sequential, state, "d") else {
+    let Some(prefix_plan) = RsLatchPrefixPlan::build(node, sequential, state) else {
         return Vec::new();
     };
-    let Some(enable_input) = sequential_input(node, sequential, state, "en") else {
+    let Some((data_input, enable_input)) = prefix_plan.d_latch_input_node_ids() else {
         return Vec::new();
     };
-    let Some(data_position) = state.node_position(data_input.node_id) else {
-        return Vec::new();
-    };
-    let Some(enable_position) = state.node_position(enable_input.node_id) else {
-        return Vec::new();
-    };
-    let Some(core) = sequential.rs_latch_core() else {
-        return Vec::new();
-    };
-    let Some(prefix_graph) = rs_latch_prefix_graph(&sequential.inner_graph, &core) else {
-        return Vec::new();
-    };
-    let Ok(prefix_graph) = prefix_graph.prepare_place() else {
-        return Vec::new();
-    };
-    let Some(prefix_data_input) = input_node_id_by_name(&prefix_graph, "d") else {
-        return Vec::new();
-    };
-    let Some(prefix_enable_input) = input_node_id_by_name(&prefix_graph, "en") else {
-        return Vec::new();
-    };
-    let Some(prefix_set_source) = output_source_node_id(&prefix_graph, "s") else {
-        return Vec::new();
-    };
-    let Some(prefix_reset_source) = output_source_node_id(&prefix_graph, "r") else {
-        return Vec::new();
-    };
-
-    let rs_input_nodes = rs_latch_input_node_ids(node.id);
     let rs_sequential = SequentialPrimitive::new(
         SequentialType::RsLatch,
         vec!["s".to_owned(), "r".to_owned()],
@@ -87,28 +139,12 @@ pub(super) fn generate_d_latch_gate_routes(
     let rs_node = GraphNode {
         id: node.id,
         kind: GraphNodeKind::Sequential(rs_sequential.clone()),
-        inputs: vec![rs_input_nodes.set, rs_input_nodes.reset],
+        inputs: prefix_plan.rs_node_inputs(),
         ..Default::default()
     };
 
-    let queue = place_rs_latch_prefix(
-        config,
-        world,
-        prefix_graph,
-        &[
-            (prefix_data_input, data_input.node_id),
-            (prefix_enable_input, enable_input.node_id),
-        ],
-        state,
-    );
-    let queue = retain_valid_d_latch_prefix(
-        config,
-        queue,
-        data_position,
-        enable_position,
-        prefix_set_source,
-        prefix_reset_source,
-    );
+    let queue = place_rs_latch_prefix(config, world, &prefix_plan, state);
+    let queue = retain_valid_d_latch_prefix(config, queue, &prefix_plan);
 
     let mut routed = Vec::new();
     let limit = take_sampling_limit(config.step_sampling_policy);
@@ -121,15 +157,12 @@ pub(super) fn generate_d_latch_gate_routes(
         ..*config
     };
     for (world, prefix_state) in queue {
-        let Some(set_position) = prefix_state.node_position(prefix_set_source) else {
-            continue;
-        };
-        let Some(reset_position) = prefix_state.node_position(prefix_reset_source) else {
+        let Some((set_position, reset_position)) = prefix_plan.source_positions(&prefix_state)
+        else {
             continue;
         };
         let mut state = state.clone();
-        state.set_node_position(rs_input_nodes.set, set_position);
-        state.set_node_position(rs_input_nodes.reset, reset_position);
+        prefix_plan.publish_rs_inputs(&mut state, set_position, reset_position);
         for (world, state) in
             generate_rs_latch_gate_routes(&rs_config, &rs_node, &rs_sequential, &world, &state)
         {
@@ -140,14 +173,7 @@ pub(super) fn generate_d_latch_gate_routes(
                 continue;
             };
             if std::panic::catch_unwind(|| {
-                d_latch_candidate_behaves(
-                    &world,
-                    data_input.node_id,
-                    enable_input.node_id,
-                    &state,
-                    q,
-                    nq,
-                )
+                d_latch_candidate_behaves(&world, data_input, enable_input, &state, q, nq)
             })
             .unwrap_or(false)
             {
@@ -168,19 +194,18 @@ pub(super) fn generate_d_latch_gate_routes(
 fn place_rs_latch_prefix(
     config: &LocalPlacerConfig,
     world: &World3D,
-    prefix_graph: LogicGraph,
-    input_mappings: &[(GraphNodeId, GraphNodeId)],
+    prefix_plan: &RsLatchPrefixPlan,
     outer_state: &PlacementState,
 ) -> PlacerQueue {
     let mut prefix_state = PlacementState::default();
-    for &(prefix_input, outer_input) in input_mappings {
+    for &(prefix_input, outer_input) in &prefix_plan.input_mappings {
         let Some(position) = outer_state.node_position(outer_input) else {
             return Vec::new();
         };
         prefix_state.set_node_position(prefix_input, position);
     }
 
-    let Ok(prefix_placer) = LocalPlacer::new(prefix_graph, *config) else {
+    let Ok(prefix_placer) = LocalPlacer::new(prefix_plan.graph.clone(), *config) else {
         return Vec::new();
     };
     prefix_placer.generate_queue_from(vec![(world.clone(), prefix_state)], None, None)
@@ -189,15 +214,25 @@ fn place_rs_latch_prefix(
 fn retain_valid_d_latch_prefix(
     config: &LocalPlacerConfig,
     queue: PlacerQueue,
-    data: Position,
-    enable: Position,
-    set_node_id: GraphNodeId,
-    reset_node_id: GraphNodeId,
+    prefix_plan: &RsLatchPrefixPlan,
 ) -> PlacerQueue {
+    let Some(data) = prefix_plan.input_position("d") else {
+        return Vec::new();
+    };
+    let Some(enable) = prefix_plan.input_position("en") else {
+        return Vec::new();
+    };
     let queue = queue
         .into_iter()
         .filter(|(world, state)| {
-            d_latch_prefix_behaves(world, data, enable, set_node_id, reset_node_id, state)
+            d_latch_prefix_behaves(
+                world,
+                data,
+                enable,
+                prefix_plan.set_source,
+                prefix_plan.reset_source,
+                state,
+            )
         })
         .collect_vec();
     SamplingPolicy::Random(64).sample_with_seed(queue, config.sampling_seed(7, 6))
@@ -351,33 +386,15 @@ fn pad_world_top_for_simulation(world: &World3D, extra_z: usize) -> World3D {
     padded
 }
 
-#[derive(Clone, Copy)]
-struct SequentialInput {
-    node_id: GraphNodeId,
-}
-
-fn sequential_input(
+fn outer_input_node_id(
     node: &GraphNode,
     sequential: &SequentialPrimitive,
-    state: &PlacementState,
     port: &str,
-) -> Option<SequentialInput> {
+) -> Option<GraphNodeId> {
     node.inputs
         .iter()
         .zip(&sequential.input_ports)
-        .find_map(|(input_node, input_port)| {
-            (input_port == port && state.node_position(*input_node).is_some()).then_some(
-                SequentialInput {
-                    node_id: *input_node,
-                },
-            )
-        })
-}
-
-fn input_node_id_by_name(graph: &LogicGraph, input_name: &str) -> Option<GraphNodeId> {
-    graph.nodes.iter().find_map(|node| {
-        matches!(&node.kind, GraphNodeKind::Input(name) if name == input_name).then_some(node.id)
-    })
+        .find_map(|(input_node, input_port)| (input_port == port).then_some(*input_node))
 }
 
 fn output_source_node_id(graph: &LogicGraph, output_name: &str) -> Option<GraphNodeId> {
