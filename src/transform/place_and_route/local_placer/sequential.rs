@@ -1,4 +1,5 @@
 use super::*;
+use crate::world::World;
 
 pub(super) fn supports_sequential_primitive(sequential: &SequentialPrimitive) -> bool {
     matches!(

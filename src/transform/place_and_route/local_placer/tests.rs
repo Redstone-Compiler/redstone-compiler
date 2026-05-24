@@ -1,5 +1,5 @@
 use super::*;
-use crate::graph::logic::LogicGraph;
+use crate::graph::logic::{predefined_logics, LogicGraph};
 use crate::graph::{Graph, GraphNode, GraphNodeKind};
 use crate::logic::LogicType;
 use crate::sequential::layout::SequentialMacro;
@@ -78,6 +78,26 @@ fn generate_inputs_limits_candidates_per_world() {
     let generated = generate_inputs(&config, &world, BlockKind::Switch { is_on: false });
 
     assert_eq!(generated.len(), 4);
+}
+
+#[test]
+fn local_placer_accepts_chained_or_after_buffer_insertion() -> eyre::Result<()> {
+    let mut graph = LogicGraph::from_stmt("a|b", "x")?;
+    graph.graph.merge(LogicGraph::from_stmt("x|c", "y")?.graph);
+    let graph = graph.prepare_place()?;
+
+    let _ = LocalPlacer::new(graph, config(4))?;
+
+    Ok(())
+}
+
+#[test]
+fn local_placer_accepts_unbuffered_full_adder_after_buffer_insertion() -> eyre::Result<()> {
+    let graph = predefined_logics::full_adder_graph()?;
+
+    let _ = LocalPlacer::new(graph, config(4))?;
+
+    Ok(())
 }
 
 #[test]

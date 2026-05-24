@@ -279,7 +279,7 @@ impl<'a> RouteGoal<'a> {
                         && route_network_powers_cobble(world, route, network, cobble))
             }
             RouteGoal::ConnectPosition { target } => {
-                PlacedNode::new(redstone, world[redstone]).has_connection_with(world, target)
+                target_powers_redstone(world, target, redstone)
             }
         }
     }
@@ -459,6 +459,25 @@ pub(super) fn redstone_connects_to_network(
         .propagation_bound(Some(world))
         .into_iter()
         .any(|bound| network.contains(&bound.position()))
+}
+
+pub(super) fn target_powers_redstone(
+    world: &World3D,
+    target: Position,
+    redstone: Position,
+) -> bool {
+    let target_node = PlacedNode::new(target, world[target]);
+    target_node
+        .propagation_bound(Some(world))
+        .into_iter()
+        .filter(|bound| bound.is_bound_on(world))
+        .any(|bound| {
+            bound.position() == redstone
+                || bound
+                    .propagate_to(world)
+                    .into_iter()
+                    .any(|(_, position)| position == redstone)
+        })
 }
 
 pub(super) fn route_network_powers_cobble(
@@ -732,13 +751,26 @@ fn place_redstone_with_cobble_and_allowed_shorts(
     if let Some(allowed_shorts) = allowed_shorts {
         except.extend(allowed_shorts.iter().copied());
     }
+    let mut short_except = [prev, bound_pos, to, to.up()]
+        .into_iter()
+        .collect::<HashSet<_>>();
+    if let Some(allowed_shorts) = allowed_shorts {
+        short_except.extend(allowed_shorts.iter().copied());
+    }
     if redstone_node.has_conflict(&new_world, &except) {
         return PlaceRedstoneResult::Rejected(RouteRejectReason::RedstoneConflict);
     }
-    if redstone_node.has_short(world, &except) {
+    if redstone_node.has_short(world, &short_except) {
         return PlaceRedstoneResult::Rejected(RouteRejectReason::ShortCircuit);
     }
     place_node(&mut new_world, redstone_node);
+    new_world.update_redstone_states(prev);
+    if !target_powers_redstone(&new_world, prev, redstone_node.position) {
+        return PlaceRedstoneResult::Rejected(RouteRejectReason::DisconnectedRoute);
+    }
+    if redstone_node.has_short(&new_world, &short_except) {
+        return PlaceRedstoneResult::Rejected(RouteRejectReason::ShortCircuit);
+    }
     if let BlockKind::Torch { .. } = world[prev].kind {
         if let Some(source_cobble) = prev.walk(world[prev].direction) {
             if redstone_powers_cobble(&new_world, redstone_node.position, source_cobble) {
@@ -746,7 +778,6 @@ fn place_redstone_with_cobble_and_allowed_shorts(
             }
         }
     }
-    new_world.update_redstone_states(prev);
 
     PlaceRedstoneResult::Placed(new_world, redstone_node)
 }

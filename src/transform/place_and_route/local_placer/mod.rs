@@ -19,10 +19,11 @@ use crate::transform::place_and_route::place_bound::PropagateType;
 use crate::world::block::{Block, BlockKind, Direction};
 use crate::world::position::{DimSize, Position};
 use crate::world::simulator::Simulator;
-use crate::world::{World, World3D};
+use crate::world::World3D;
 
 mod config;
 mod debug;
+mod isolation;
 mod state;
 
 pub use config::{
@@ -30,6 +31,7 @@ pub use config::{
     TorchPlacementStrategy, K_MAX_LOCAL_PLACE_NODE_COUNT,
 };
 pub use debug::{LocalPlacerDebug, RouteDebug, RouteDepthDebug, RouteRejectReason, StepDebug};
+use isolation::RouteIsolation;
 use state::PlacementState;
 
 mod routing;
@@ -93,6 +95,32 @@ impl LocalPlacer {
                 ensure!(
                     sequential.output_ports.len() == 1,
                     "local placer currently supports only one exposed sequential output"
+                );
+            }
+        }
+        self.verify_no_unsupported_direct_or_to_or()?;
+
+        Ok(())
+    }
+
+    fn verify_no_unsupported_direct_or_to_or(&self) -> eyre::Result<()> {
+        for node in &self.graph.nodes {
+            if !matches!(&node.kind, GraphNodeKind::Logic(logic) if logic.logic_type == LogicType::Or)
+            {
+                continue;
+            }
+
+            for output_id in &node.outputs {
+                let Some(output) = self.graph.find_node_by_id(*output_id) else {
+                    continue;
+                };
+                // OR outputs are represented as redstone endpoints. Prepared logic graphs
+                // should insert a buffer before another OR consumes that endpoint.
+                ensure!(
+                    !matches!(&output.kind, GraphNodeKind::Logic(logic) if logic.logic_type == LogicType::Or),
+                    "OR-to-OR local placement requires a buffer/repeater between node {} and node {}; run logic preparation before local placement",
+                    node.id,
+                    output.id
                 );
             }
         }
@@ -232,12 +260,11 @@ impl LocalPlacer {
                 .map(|(world, position)| {
                     let mut state = state.clone();
                     state.set_node_position(node.id, position);
+                    state.set_signal_footprint(node.id, [position]);
                     (world, state)
                 })
                 .collect(),
-            GraphNodeKind::Output(_) => {
-                vec![(world.clone(), state.clone())]
-            }
+            GraphNodeKind::Output(_) => vec![(world.clone(), state.clone())],
             GraphNodeKind::Logic(logic) => match logic.logic_type {
                 LogicType::Not => not_node_kind()
                     .into_iter()
@@ -252,28 +279,62 @@ impl LocalPlacer {
                     .map(|(world, position)| {
                         let mut state = state.clone();
                         state.set_node_position(node.id, position);
+                        state.set_signal_footprint(
+                            node.id,
+                            [Some(position), position.walk(world[position].direction)]
+                                .into_iter()
+                                .flatten(),
+                        );
                         (world, state)
                     })
                     .collect(),
                 LogicType::Or => {
                     assert_eq!(node.inputs.len(), 2);
-                    let result = generate_or_routes(
-                        &self.config,
-                        &world,
-                        state[&node.inputs[0]],
-                        state[&node.inputs[1]],
-                    );
+                    let input_a = state[&node.inputs[0]];
+                    let input_b = state[&node.inputs[1]];
+                    let sealed_output_source_ids =
+                        self.graph.externally_observable_output_source_ids();
+                    let mut protected_positions =
+                        state.signal_positions_for_nodes(&sealed_output_source_ids);
+                    protected_positions.extend(state.endpoint_positions().into_iter().filter_map(
+                        |(endpoint, position)| match endpoint {
+                            state::PlacementEndpoint::Node(node_id)
+                                if sealed_output_source_ids.contains(&node_id) =>
+                            {
+                                Some(position)
+                            }
+                            _ => None,
+                        },
+                    ));
+                    let isolation =
+                        RouteIsolation::new(&world, [input_a, input_b], protected_positions);
+                    let result = generate_or_routes(&self.config, &world, input_a, input_b);
                     route_debug = Some(result.debug);
                     result
                         .routes
                         .into_iter()
-                        .flat_map(|(world, positions)| {
+                        .flat_map(|(candidate_world, route_path)| {
+                            // Keep the OR tap on the terminal redstone where both inputs
+                            // have joined. Source or mid-route taps can see only one input.
+                            let positions = route_path
+                                .last()
+                                .copied()
+                                .filter(|position| {
+                                    candidate_world[*position].kind.is_redstone()
+                                        && isolation.accepts_or_route(&candidate_world, &route_path)
+                                })
+                                .into_iter()
+                                .collect_vec();
                             positions
                                 .into_iter()
                                 .map(|position| {
                                     let mut state = state.clone();
                                     state.set_node_position(node.id, position);
-                                    (world.clone(), state)
+                                    state.set_signal_footprint(
+                                        node.id,
+                                        [Some(position), position.down()].into_iter().flatten(),
+                                    );
+                                    (candidate_world.clone(), state)
                                 })
                                 .collect_vec()
                         })
@@ -354,6 +415,7 @@ impl LocalPlacer {
             .filter_map(|node_id| self.graph.find_node_by_id(*node_id))
             .filter(|node| !matches!(node.kind, GraphNodeKind::Output(_)))
             .flat_map(|node| node.inputs.iter().copied())
+            .chain(self.graph.externally_observable_output_source_ids())
             .collect::<HashSet<_>>();
 
         for (_, state) in &mut queue {
@@ -362,7 +424,13 @@ impl LocalPlacer {
 
         queue
             .into_iter()
-            .unique_by(|(world, state)| (world.iter_block(), state.endpoint_positions()))
+            .unique_by(|(world, state)| {
+                (
+                    world.iter_block(),
+                    state.endpoint_positions(),
+                    state.signal_footprints(),
+                )
+            })
             .collect()
     }
 

@@ -75,6 +75,7 @@ pub enum RouteRejectReason {
     NoBottomForCobble,
     CobbleConflict,
     RedstoneConflict,
+    DisconnectedRoute,
     ShortCircuit,
 }
 

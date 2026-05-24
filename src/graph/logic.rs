@@ -1,4 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+use itertools::Itertools;
 
 use super::Graph;
 use crate::graph::{GraphNode, GraphNodeId, GraphNodeKind};
@@ -22,11 +24,51 @@ impl LogicGraph {
         transform.decompose_and()?;
         transform.remove_double_neg_expression();
         transform.optimize_cse()?;
+        transform.insert_buffers_for_direct_or_to_or()?;
         Ok(transform.finish())
     }
 
     pub fn truth_table(&self) -> eyre::Result<LogicTruthTable> {
         LogicTruthTable::from_graph(self)
+    }
+
+    pub fn externally_observable_output_source_ids(&self) -> HashSet<GraphNodeId> {
+        self.nodes
+            .iter()
+            .filter_map(|node| match &node.kind {
+                GraphNodeKind::Output(_) => {
+                    let producer = self.find_node_by_id(node.inputs[0])?;
+                    let has_internal_consumers = producer.outputs.iter().any(|output| {
+                        self.find_node_by_id(*output)
+                            .is_some_and(|node| !matches!(node.kind, GraphNodeKind::Output(_)))
+                    });
+                    (!has_internal_consumers).then_some(producer.id)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub fn externally_observable_truth_table(&self) -> eyre::Result<LogicTruthTable> {
+        let table = self.truth_table()?;
+        let output_source_ids = self.externally_observable_output_source_ids();
+        let mut output_names = self
+            .nodes
+            .iter()
+            .filter_map(|node| match &node.kind {
+                GraphNodeKind::Output(name) => output_source_ids
+                    .contains(&node.inputs[0])
+                    .then_some(name.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        if output_names.is_empty() {
+            return Ok(table);
+        }
+
+        output_names.sort();
+        table.select_outputs(&output_names)
     }
 }
 
@@ -56,6 +98,13 @@ impl LogicTruthTable {
                 _ => None,
             })
             .collect::<Vec<_>>();
+        if outputs.is_empty() {
+            outputs = graph
+                .outputs()
+                .into_iter()
+                .map(|node_id| (node_id, format!("#{node_id}")))
+                .collect();
+        }
         outputs.sort_by(|(_, a), (_, b)| a.cmp(b));
 
         let mut output_tables = outputs
@@ -109,12 +158,71 @@ impl LogicTruthTable {
         self.output_tables.values().cloned().collect()
     }
 
+    pub fn select_outputs(&self, output_names: &[&str]) -> eyre::Result<Self> {
+        let mut output_tables = HashMap::new();
+        for output_name in output_names {
+            let Some(output_table) = self.output_tables.get(*output_name) else {
+                eyre::bail!("missing output truth table: {output_name}");
+            };
+            output_tables.insert((*output_name).to_owned(), output_table.clone());
+        }
+
+        Ok(Self {
+            input_names: self.input_names.clone(),
+            output_tables,
+        })
+    }
+
     pub fn contains_output_tables(&self, expected: &LogicTruthTable) -> bool {
         self.input_names.len() == expected.input_names.len()
             && self
                 .output_table_set()
                 .is_superset(&expected.output_table_set())
     }
+
+    pub fn contains_output_tables_under_input_permutation(
+        &self,
+        expected: &LogicTruthTable,
+    ) -> bool {
+        if self.input_names.len() != expected.input_names.len() {
+            return false;
+        }
+
+        let input_count = self.input_names.len();
+        let actual = self.output_table_set();
+        (0..input_count)
+            .permutations(input_count)
+            .any(|permutation| {
+                actual.is_superset(&permuted_output_table_set(expected, &permutation))
+            })
+    }
+}
+
+fn permuted_output_table_set(
+    table: &LogicTruthTable,
+    generated_to_expected_input: &[usize],
+) -> HashSet<Vec<bool>> {
+    table
+        .output_tables
+        .values()
+        .map(|output_table| {
+            (0..output_table.len())
+                .map(|generated_mask| {
+                    let expected_mask = generated_to_expected_input.iter().enumerate().fold(
+                        0usize,
+                        |mask, (generated_index, expected_index)| {
+                            if generated_mask & (1 << generated_index) != 0 {
+                                mask | (1 << expected_index)
+                            } else {
+                                mask
+                            }
+                        },
+                    );
+                    output_table[expected_mask]
+                })
+                .collect()
+        })
+        .collect()
 }
 
 #[derive(Default)]
@@ -383,7 +491,7 @@ pub mod predefined_logics {
 
     pub fn full_adder_graph() -> eyre::Result<LogicGraph> {
         let out_s = LogicGraph::from_stmt("(a^b)^cin", "s")?;
-        let out_cout = LogicGraph::from_stmt("(a&b)|(s&cin)", "cout")?;
+        let out_cout = LogicGraph::from_stmt("(a&b)|((a^b)&cin)", "cout")?;
 
         let mut fa = out_s.clone();
         fa.graph.merge(out_cout.graph);
@@ -413,7 +521,8 @@ mod tests {
 
     use crate::graph::graphviz::ToGraphvizGraph;
     use crate::graph::logic::LogicGraph;
-    use crate::graph::Graph;
+    use crate::graph::{Graph, GraphNodeKind};
+    use crate::logic::LogicType;
     use crate::transform::logic::LogicGraphTransformer;
 
     #[test]
@@ -440,6 +549,49 @@ mod tests {
 
         assert!(table.output_table_set().contains(&sum));
         assert!(table.output_table_set().contains(&carry));
+
+        Ok(())
+    }
+
+    #[test]
+    fn truth_table_can_compare_unbuffered_full_adder_outputs_by_function() -> eyre::Result<()> {
+        let graph = super::predefined_logics::full_adder_graph()?;
+        let table = graph.truth_table()?;
+        let sum = (0..8)
+            .map(|mask: usize| mask.count_ones() % 2 == 1)
+            .collect::<Vec<_>>();
+        let carry = (0..8)
+            .map(|mask: usize| mask.count_ones() >= 2)
+            .collect::<Vec<_>>();
+
+        assert!(table.output_table_set().contains(&sum));
+        assert!(table.output_table_set().contains(&carry));
+
+        Ok(())
+    }
+
+    #[test]
+    fn prepare_place_inserts_buffers_between_direct_or_nodes() -> eyre::Result<()> {
+        let mut graph = LogicGraph::from_stmt("a|b", "x")?;
+        graph.graph.merge(LogicGraph::from_stmt("x|c", "y")?.graph);
+        let graph = graph.prepare_place()?;
+
+        let has_direct_or_to_or = graph.nodes.iter().any(|node| {
+            matches!(&node.kind, GraphNodeKind::Logic(logic) if logic.logic_type == LogicType::Or)
+                && node.outputs.iter().any(|output_id| {
+                    graph.find_node_by_id(*output_id).is_some_and(|output| {
+                        matches!(&output.kind, GraphNodeKind::Logic(logic) if logic.logic_type == LogicType::Or)
+                    })
+                })
+        });
+        let auto_buffer_count = graph
+            .nodes
+            .iter()
+            .filter(|node| node.tag == "auto-buffer")
+            .count();
+
+        assert!(!has_direct_or_to_or);
+        assert_eq!(auto_buffer_count, 2);
 
         Ok(())
     }
