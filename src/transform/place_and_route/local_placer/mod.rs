@@ -44,7 +44,7 @@ use sequential::{
 #[cfg(test)]
 use sequential::{
     generate_rs_latch_not_pairs, place_sequential_macro, route_rs_latch_branches,
-    route_sequential_inputs, select_rs_latch_not_pairs, D_LATCH_INPUT_GATING_NODES,
+    route_sequential_inputs, rs_latch_input_node_ids, select_rs_latch_not_pairs,
 };
 
 pub struct LocalPlacer {
@@ -156,12 +156,20 @@ impl LocalPlacer {
         &self,
         dim: DimSize,
         finish_step: Option<usize>,
+        debug: Option<&mut LocalPlacerDebug>,
+    ) -> PlacerQueue {
+        let mut queue = PlacerQueue::new();
+        queue.push((World3D::new(dim), Default::default()));
+        self.generate_queue_from(queue, finish_step, debug)
+    }
+
+    fn generate_queue_from(
+        &self,
+        mut queue: PlacerQueue,
+        finish_step: Option<usize>,
         mut debug: Option<&mut LocalPlacerDebug>,
     ) -> PlacerQueue {
         tracing::info!("generate starts");
-
-        let mut queue = PlacerQueue::new();
-        queue.push((World3D::new(dim), Default::default()));
 
         let mut step = 0;
         while step < self.visit_orders.len() && Some(step) != finish_step {
@@ -252,16 +260,24 @@ impl LocalPlacer {
     ) -> PlacementGeneration {
         let mut route_debug = None;
         let items = match node.kind {
-            GraphNodeKind::Input(_) => input_node_kind()
-                .into_iter()
-                .flat_map(|kind| generate_inputs(&self.config, &world, kind))
-                .map(|(world, position)| {
+            GraphNodeKind::Input(_) => {
+                if let Some(position) = state.node_position(node.id) {
                     let mut state = state.clone();
-                    state.set_node_position(node.id, position);
                     state.set_signal_footprint(node.id, [position]);
-                    (world, state)
-                })
-                .collect(),
+                    vec![(world, state)]
+                } else {
+                    input_node_kind()
+                        .into_iter()
+                        .flat_map(|kind| generate_inputs(&self.config, &world, kind))
+                        .map(|(world, position)| {
+                            let mut state = state.clone();
+                            state.set_node_position(node.id, position);
+                            state.set_signal_footprint(node.id, [position]);
+                            (world, state)
+                        })
+                        .collect()
+                }
+            }
             GraphNodeKind::Output(_) => vec![(world.clone(), state.clone())],
             GraphNodeKind::Logic(logic) => match logic.logic_type {
                 LogicType::Not => not_node_kind()

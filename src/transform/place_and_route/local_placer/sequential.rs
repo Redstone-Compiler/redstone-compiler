@@ -1,4 +1,5 @@
 use super::*;
+use crate::sequential::core::rs_latch_prefix_graph;
 use crate::world::World;
 
 pub(super) fn supports_sequential_primitive(sequential: &SequentialPrimitive) -> bool {
@@ -19,26 +20,22 @@ pub(super) struct RsLatchGatePlacement {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(super) struct DLatchInputGatingNodes {
-    pub(super) not_d: GraphNodeId,
-    pub(super) not_en: GraphNodeId,
-    pub(super) set_or: GraphNodeId,
-    pub(super) reset_or: GraphNodeId,
+pub(super) struct RsLatchInputNodeIds {
     pub(super) set: GraphNodeId,
     pub(super) reset: GraphNodeId,
 }
 
-// D latch is placed as an acyclic input-gating prefix feeding the cyclic RS latch core.
-// These synthetic IDs let the prefix store intermediate endpoints in PlacementState without
-// colliding with graph node IDs owned by the caller.
-pub(super) const D_LATCH_INPUT_GATING_NODES: DLatchInputGatingNodes = DLatchInputGatingNodes {
-    not_d: usize::MAX - 2,
-    not_en: usize::MAX - 3,
-    set_or: usize::MAX - 4,
-    reset_or: usize::MAX - 5,
-    set: usize::MAX - 1,
-    reset: usize::MAX,
-};
+const SEQUENTIAL_SYNTHETIC_NODE_ID_STRIDE: usize = 4;
+
+// Prefix placement runs in its own graph, then publishes only the set/reset
+// endpoints back into the outer placement state for the RS latch core router.
+pub(super) fn rs_latch_input_node_ids(node_id: GraphNodeId) -> RsLatchInputNodeIds {
+    let base = usize::MAX - node_id * SEQUENTIAL_SYNTHETIC_NODE_ID_STRIDE;
+    RsLatchInputNodeIds {
+        set: base - 1,
+        reset: base - 2,
+    }
+}
 
 pub(super) fn generate_d_latch_gate_routes(
     config: &LocalPlacerConfig,
@@ -53,6 +50,35 @@ pub(super) fn generate_d_latch_gate_routes(
     let Some(enable_input) = sequential_input(node, sequential, state, "en") else {
         return Vec::new();
     };
+    let Some(data_position) = state.node_position(data_input.node_id) else {
+        return Vec::new();
+    };
+    let Some(enable_position) = state.node_position(enable_input.node_id) else {
+        return Vec::new();
+    };
+    let Some(core) = sequential.rs_latch_core() else {
+        return Vec::new();
+    };
+    let Some(prefix_graph) = rs_latch_prefix_graph(&sequential.inner_graph, &core) else {
+        return Vec::new();
+    };
+    let Ok(prefix_graph) = prefix_graph.prepare_place() else {
+        return Vec::new();
+    };
+    let Some(prefix_data_input) = input_node_id_by_name(&prefix_graph, "d") else {
+        return Vec::new();
+    };
+    let Some(prefix_enable_input) = input_node_id_by_name(&prefix_graph, "en") else {
+        return Vec::new();
+    };
+    let Some(prefix_set_source) = output_source_node_id(&prefix_graph, "s") else {
+        return Vec::new();
+    };
+    let Some(prefix_reset_source) = output_source_node_id(&prefix_graph, "r") else {
+        return Vec::new();
+    };
+
+    let rs_input_nodes = rs_latch_input_node_ids(node.id);
     let rs_sequential = SequentialPrimitive::new(
         SequentialType::RsLatch,
         vec!["s".to_owned(), "r".to_owned()],
@@ -61,15 +87,28 @@ pub(super) fn generate_d_latch_gate_routes(
     let rs_node = GraphNode {
         id: node.id,
         kind: GraphNodeKind::Sequential(rs_sequential.clone()),
-        inputs: vec![
-            D_LATCH_INPUT_GATING_NODES.set,
-            D_LATCH_INPUT_GATING_NODES.reset,
-        ],
+        inputs: vec![rs_input_nodes.set, rs_input_nodes.reset],
         ..Default::default()
     };
 
-    let queue = place_d_latch_input_gating(config, world, state, data_input, enable_input);
-    let queue = retain_valid_d_latch_input_gating(config, queue, data_input, enable_input);
+    let queue = place_rs_latch_prefix(
+        config,
+        world,
+        prefix_graph,
+        &[
+            (prefix_data_input, data_input.node_id),
+            (prefix_enable_input, enable_input.node_id),
+        ],
+        state,
+    );
+    let queue = retain_valid_d_latch_prefix(
+        config,
+        queue,
+        data_position,
+        enable_position,
+        prefix_set_source,
+        prefix_reset_source,
+    );
 
     let mut routed = Vec::new();
     let limit = take_sampling_limit(config.step_sampling_policy);
@@ -81,7 +120,16 @@ pub(super) fn generate_d_latch_gate_routes(
         max_route_step: 8,
         ..*config
     };
-    for (world, state) in queue {
+    for (world, prefix_state) in queue {
+        let Some(set_position) = prefix_state.node_position(prefix_set_source) else {
+            continue;
+        };
+        let Some(reset_position) = prefix_state.node_position(prefix_reset_source) else {
+            continue;
+        };
+        let mut state = state.clone();
+        state.set_node_position(rs_input_nodes.set, set_position);
+        state.set_node_position(rs_input_nodes.reset, reset_position);
         for (world, state) in
             generate_rs_latch_gate_routes(&rs_config, &rs_node, &rs_sequential, &world, &state)
         {
@@ -117,62 +165,56 @@ pub(super) fn generate_d_latch_gate_routes(
     sample_d_latch_step(config, 6, routed)
 }
 
-fn place_d_latch_input_gating(
+fn place_rs_latch_prefix(
     config: &LocalPlacerConfig,
     world: &World3D,
-    state: &PlacementState,
-    data_input: SequentialInput,
-    enable_input: SequentialInput,
+    prefix_graph: LogicGraph,
+    input_mappings: &[(GraphNodeId, GraphNodeId)],
+    outer_state: &PlacementState,
 ) -> PlacerQueue {
-    let nodes = D_LATCH_INPUT_GATING_NODES;
-    let queue = vec![(world.clone(), state.clone())];
-    let queue = generate_not_step(config, 0, queue, data_input.node_id, nodes.not_d);
-    let queue = generate_not_step(config, 1, queue, enable_input.node_id, nodes.not_en);
+    let mut prefix_state = PlacementState::default();
+    for &(prefix_input, outer_input) in input_mappings {
+        let Some(position) = outer_state.node_position(outer_input) else {
+            return Vec::new();
+        };
+        prefix_state.set_node_position(prefix_input, position);
+    }
 
-    // set   = !(!d | !en) = d & en
-    // reset = !( d | !en) = !d & en
-    let queue = generate_two_or_step(
-        config,
-        2,
-        queue,
-        (nodes.not_d, nodes.not_en, nodes.set_or),
-        (data_input.node_id, nodes.not_en, nodes.reset_or),
-    );
-    let queue = generate_not_step(config, 3, queue, nodes.set_or, nodes.set);
-    generate_not_step(config, 4, queue, nodes.reset_or, nodes.reset)
+    let Ok(prefix_placer) = LocalPlacer::new(prefix_graph, *config) else {
+        return Vec::new();
+    };
+    prefix_placer.generate_queue_from(vec![(world.clone(), prefix_state)], None, None)
 }
 
-fn retain_valid_d_latch_input_gating(
+fn retain_valid_d_latch_prefix(
     config: &LocalPlacerConfig,
     queue: PlacerQueue,
-    data_input: SequentialInput,
-    enable_input: SequentialInput,
+    data: Position,
+    enable: Position,
+    set_node_id: GraphNodeId,
+    reset_node_id: GraphNodeId,
 ) -> PlacerQueue {
     let queue = queue
         .into_iter()
         .filter(|(world, state)| {
-            d_latch_input_gating_behaves(world, data_input.node_id, enable_input.node_id, state)
+            d_latch_prefix_behaves(world, data, enable, set_node_id, reset_node_id, state)
         })
         .collect_vec();
     SamplingPolicy::Random(64).sample_with_seed(queue, config.sampling_seed(7, 6))
 }
 
-fn d_latch_input_gating_behaves(
+fn d_latch_prefix_behaves(
     world: &World3D,
-    data_node_id: GraphNodeId,
-    enable_node_id: GraphNodeId,
+    data: Position,
+    enable: Position,
+    set_node_id: GraphNodeId,
+    reset_node_id: GraphNodeId,
     state: &PlacementState,
 ) -> bool {
-    let Some(data) = state.node_position(data_node_id) else {
+    let Some(set) = state.node_position(set_node_id) else {
         return false;
     };
-    let Some(enable) = state.node_position(enable_node_id) else {
-        return false;
-    };
-    let Some(set) = state.node_position(D_LATCH_INPUT_GATING_NODES.set) else {
-        return false;
-    };
-    let Some(reset) = state.node_position(D_LATCH_INPUT_GATING_NODES.reset) else {
+    let Some(reset) = state.node_position(reset_node_id) else {
         return false;
     };
 
@@ -332,128 +374,17 @@ fn sequential_input(
         })
 }
 
-fn generate_not_step(
-    config: &LocalPlacerConfig,
-    step: usize,
-    queue: PlacerQueue,
-    input_node_id: GraphNodeId,
-    output_node_id: GraphNodeId,
-) -> PlacerQueue {
-    let candidates: PlacerQueue = queue
-        .into_iter()
-        .flat_map(|(world, state)| {
-            let source = state[&input_node_id];
-            let route_config = if world[source].kind.is_switch() {
-                Cow::Owned(LocalPlacerConfig {
-                    not_route_strategy: NotRouteStrategy::DirectOnly,
-                    ..*config
-                })
-            } else {
-                Cow::Borrowed(config)
-            };
-            not_node_kind()
-                .into_iter()
-                .flat_map(move |kind| {
-                    let state = state.clone();
-                    generate_place_and_routes(&route_config, &world, source, kind)
-                        .into_iter()
-                        .map(move |(world, position)| {
-                            let mut state = state.clone();
-                            state.set_node_position(output_node_id, position);
-                            (world, state)
-                        })
-                })
-                .collect_vec()
-        })
-        .collect();
-    sample_d_latch_step(config, step, candidates)
+fn input_node_id_by_name(graph: &LogicGraph, input_name: &str) -> Option<GraphNodeId> {
+    graph.nodes.iter().find_map(|node| {
+        matches!(&node.kind, GraphNodeKind::Input(name) if name == input_name).then_some(node.id)
+    })
 }
 
-fn generate_two_or_step(
-    config: &LocalPlacerConfig,
-    step: usize,
-    queue: PlacerQueue,
-    first: (GraphNodeId, GraphNodeId, GraphNodeId),
-    second: (GraphNodeId, GraphNodeId, GraphNodeId),
-) -> PlacerQueue {
-    let candidates = queue
-        .into_iter()
-        .flat_map(|(base_world, state)| {
-            let first_routes =
-                generate_or_routes(config, &base_world, state[&first.0], state[&first.1]).routes;
-            let second_routes =
-                generate_or_routes(config, &base_world, state[&second.0], state[&second.1]).routes;
-            first_routes
-                .into_iter()
-                .cartesian_product(second_routes)
-                .filter_map(
-                    |((first_world, first_positions), (second_world, second_positions))| {
-                        let world =
-                            merge_independent_route_worlds(&base_world, first_world, second_world)?;
-                        let first_position = first_positions.last().copied()?;
-                        let second_position = second_positions.last().copied()?;
-                        Some({
-                            let mut state = state.clone();
-                            state.set_node_position(first.2, first_position);
-                            state.set_node_position(second.2, second_position);
-                            (world, state)
-                        })
-                    },
-                )
-                .collect_vec()
-        })
-        .collect();
-    sample_d_latch_step(config, step, candidates)
-}
-
-fn merge_independent_route_worlds(
-    base: &World3D,
-    first: World3D,
-    second: World3D,
-) -> Option<World3D> {
-    let mut merged = first.clone();
-    let mut first_redstone = HashSet::new();
-    let mut second_redstone = HashSet::new();
-    for (x, y, z) in iproduct!(0..base.size.0, 0..base.size.1, 0..base.size.2) {
-        let position = Position(x, y, z);
-        if first[position] != base[position] && first[position].kind.is_redstone() {
-            first_redstone.insert(position);
-        }
-        if second[position] != base[position] && second[position].kind.is_redstone() {
-            second_redstone.insert(position);
-        }
-        if second[position] == base[position] {
-            continue;
-        }
-        if first[position] != base[position] {
-            return None;
-        }
-        merged[position] = second[position];
-        if merged[position].kind.is_redstone() {
-            merged.update_redstone_states(position);
-        }
-    }
-    if redstone_networks_touch(&merged, &first_redstone, &second_redstone) {
-        return None;
-    }
-    Some(merged)
-}
-
-fn redstone_networks_touch(
-    world: &World3D,
-    first: &HashSet<Position>,
-    second: &HashSet<Position>,
-) -> bool {
-    first.iter().any(|&position| {
-        PlacedNode::new(position, world[position])
-            .propagation_bound(Some(world))
-            .into_iter()
-            .any(|bound| second.contains(&bound.position()))
-    }) || second.iter().any(|&position| {
-        PlacedNode::new(position, world[position])
-            .propagation_bound(Some(world))
-            .into_iter()
-            .any(|bound| first.contains(&bound.position()))
+fn output_source_node_id(graph: &LogicGraph, output_name: &str) -> Option<GraphNodeId> {
+    graph.nodes.iter().find_map(|node| {
+        (matches!(&node.kind, GraphNodeKind::Output(name) if name == output_name)
+            && node.inputs.len() == 1)
+            .then(|| node.inputs[0])
     })
 }
 
@@ -550,15 +481,11 @@ pub(super) fn select_rs_latch_not_pairs(
         let input_space_penalty = (reset_distance.abs_diff(set_distance) * 10)
             + usize::from(reset_distance < 2) * 100
             + usize::from(set_distance < 2) * 100;
-        let internal_interference_penalty =
-            d_latch_internal_interference_penalty(state, placed) * 2_000;
-
         reset_distance
             + set_distance
             + placed.q_torch.manhattan_distance(&placed.nq_torch)
             + input_block_penalty
             + input_space_penalty
-            + internal_interference_penalty
     });
 
     match config.step_sampling_policy {
@@ -567,30 +494,6 @@ pub(super) fn select_rs_latch_not_pairs(
             pairs.into_iter().take(count).collect()
         }
     }
-}
-
-fn d_latch_internal_interference_penalty(
-    state: &PlacementState,
-    placed: &RsLatchGatePlacement,
-) -> usize {
-    let nodes = D_LATCH_INPUT_GATING_NODES;
-    let protected_nodes = [nodes.not_d, nodes.not_en, nodes.set_or, nodes.reset_or];
-    let latch_positions = [
-        placed.q_torch,
-        placed.q_cobble,
-        placed.nq_torch,
-        placed.nq_cobble,
-    ];
-
-    protected_nodes
-        .into_iter()
-        .filter_map(|node_id| state.node_position(node_id))
-        .flat_map(|protected| {
-            latch_positions
-                .into_iter()
-                .map(move |latch| 4usize.saturating_sub(protected.manhattan_distance(&latch)))
-        })
-        .sum()
 }
 
 fn lies_between(start: Position, end: Position, position: Position) -> bool {

@@ -101,6 +101,29 @@ fn local_placer_accepts_unbuffered_full_adder_after_buffer_insertion() -> eyre::
 }
 
 #[test]
+fn local_placer_seeded_queue_reuses_preplaced_input_nodes() -> eyre::Result<()> {
+    let graph = LogicGraph::from_stmt("a", "out")?;
+    let placer = LocalPlacer::new(graph.clone(), config(1))?;
+    let input_id = graph
+        .nodes
+        .iter()
+        .find(|node| matches!(&node.kind, GraphNodeKind::Input(name) if name == "a"))
+        .unwrap()
+        .id;
+    let input_position = Position(2, 2, 1);
+    let mut world = empty_world();
+    world[input_position] = switch(Direction::East);
+    let state = [(input_id, input_position)].into_iter().collect();
+
+    let generated = placer.generate_queue_from(vec![(world, state)], None, None);
+
+    assert_eq!(generated.len(), 1);
+    assert_eq!(generated[0].1.node_position(input_id), Some(input_position));
+    assert!(generated[0].0[input_position].kind.is_switch());
+    Ok(())
+}
+
+#[test]
 fn placement_cost_penalizes_spread_future_join_inputs() -> eyre::Result<()> {
     let graph = LogicGraph::from_stmt("a|b", "c")?.prepare_place()?;
     let placer = LocalPlacer::new(graph.clone(), config(1))?;
