@@ -267,6 +267,14 @@ enum LogicStringTokenType {
     Eof,
 }
 
+fn is_ident_start(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphabetic()
+}
+
+fn is_ident_continue(ch: char) -> bool {
+    ch == '_' || ch == '$' || ch.is_ascii_alphanumeric()
+}
+
 impl LogicGraphBuilder {
     pub fn new(stmt: String) -> Self {
         LogicGraphBuilder {
@@ -352,11 +360,11 @@ impl LogicGraphBuilder {
             '(' => LogicStringTokenType::ParStart,
             ')' => LogicStringTokenType::ParEnd,
             '~' => LogicStringTokenType::Not,
-            'a'..='z' => {
+            ch if is_ident_start(ch) => {
                 let mut result = String::new();
 
                 while self.stmt.len() != next_ptr
-                    && matches!(self.stmt.chars().nth(next_ptr).unwrap(), 'a'..='z' | '0'..='9')
+                    && is_ident_continue(self.stmt.chars().nth(next_ptr).unwrap())
                 {
                     result.push(self.stmt.chars().nth(next_ptr).unwrap());
                     next_ptr = self.next_ptr();
@@ -640,6 +648,17 @@ mod tests {
         assert_eq!(table.input_names, vec!["a", "b"]);
         assert_eq!(table.output_tables["s"], vec![false, true, true, false]);
         assert_eq!(table.output_tables["c"], vec![false, false, false, true]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn logic_parser_accepts_verilog_style_identifiers() -> eyre::Result<()> {
+        let graph = LogicGraph::from_stmt("A_0&carry_in", "SUM_0")?;
+        let table = graph.truth_table()?;
+
+        assert_eq!(table.input_names, vec!["A_0", "carry_in"]);
+        assert_eq!(table.output_tables["SUM_0"], vec![false, false, false, true]);
 
         Ok(())
     }
