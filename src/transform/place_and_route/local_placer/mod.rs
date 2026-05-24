@@ -287,15 +287,13 @@ impl LocalPlacer {
                     result
                         .routes
                         .into_iter()
-                        .flat_map(|(candidate_world, route_path)| {
+                        .flat_map(|route| {
                             // Keep the OR tap on the terminal redstone where both inputs
                             // have joined. Source or mid-route taps can see only one input.
-                            let positions = route_path
-                                .last()
-                                .copied()
+                            let positions = Some(route.footprint.terminal)
                                 .filter(|position| {
-                                    candidate_world[*position].kind.is_redstone()
-                                        && isolation.accepts_or_route(&candidate_world, &route_path)
+                                    route.world[*position].kind.is_redstone()
+                                        && isolation.accepts_or_route(&route.world, &route.path)
                                 })
                                 .into_iter()
                                 .collect_vec();
@@ -308,7 +306,7 @@ impl LocalPlacer {
                                         node.id,
                                         [Some(position), position.down()].into_iter().flatten(),
                                     );
-                                    (candidate_world.clone(), state)
+                                    (route.world.clone(), state)
                                 })
                                 .collect_vec()
                         })
