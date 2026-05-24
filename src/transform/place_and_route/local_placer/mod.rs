@@ -23,7 +23,6 @@ use crate::world::World3D;
 
 mod config;
 mod debug;
-mod isolation;
 mod state;
 
 pub use config::{
@@ -31,8 +30,7 @@ pub use config::{
     TorchPlacementStrategy, K_MAX_LOCAL_PLACE_NODE_COUNT,
 };
 pub use debug::{LocalPlacerDebug, RouteDebug, RouteDepthDebug, RouteRejectReason, StepDebug};
-use isolation::RouteIsolation;
-use state::PlacementState;
+use state::{PlacementState, SignalExpr};
 
 mod routing;
 use routing::*;
@@ -254,11 +252,12 @@ impl LocalPlacer {
                         let mut state = state.clone();
                         state.set_node_position(node.id, position);
                         let input_node_ids = [node.inputs[0]].into_iter().collect();
-                        let sources = state.signal_sources_for_nodes(&input_node_ids);
+                        let expression =
+                            state.signal_expression_for_nodes(&input_node_ids).invert();
                         let footprint = [Some(position), position.walk(world[position].direction)]
                             .into_iter()
                             .flatten();
-                        state.set_signal_net(node.id, footprint, sources);
+                        state.set_signal_net_with_expression(node.id, footprint, expression);
                         (world, state)
                     })
                     .collect(),
@@ -267,44 +266,89 @@ impl LocalPlacer {
                     let input_a = state[&node.inputs[0]];
                     let input_b = state[&node.inputs[1]];
                     let input_node_ids = node.inputs.iter().copied().collect::<HashSet<_>>();
+                    let input_a_node_ids = [node.inputs[0]].into_iter().collect::<HashSet<_>>();
+                    let input_b_node_ids = [node.inputs[1]].into_iter().collect::<HashSet<_>>();
+                    let input_a_sources = state.signal_sources_for_nodes(&input_a_node_ids);
+                    let input_b_sources = state.signal_sources_for_nodes(&input_b_node_ids);
                     let input_sources = state.signal_sources_for_nodes(&input_node_ids);
+                    let input_expression = state.signal_expression_for_nodes(&input_node_ids);
                     let sealed_output_source_ids =
                         self.graph.externally_observable_output_source_ids();
-                    let mut protected_positions =
-                        state.signal_positions_for_nodes(&sealed_output_source_ids);
-                    protected_positions.extend(state.endpoint_positions().into_iter().filter_map(
-                        |(endpoint, position)| match endpoint {
-                            state::PlacementEndpoint::Node(node_id)
-                                if sealed_output_source_ids.contains(&node_id) =>
-                            {
-                                Some(position)
-                            }
-                            _ => None,
-                        },
-                    ));
-                    let isolation =
-                        RouteIsolation::new(&world, [input_a, input_b], protected_positions);
-                    let signal_nets = state.signal_nets();
-                    let result = generate_or_routes_with_signal_nets(
+                    let all_signal_nets = state.signal_nets();
+                    let input_signal_nets = all_signal_nets
+                        .iter()
+                        .filter(|(node_id, _)| input_node_ids.contains(node_id))
+                        .cloned()
+                        .collect_vec();
+                    let signal_nets = all_signal_nets
+                        .iter()
+                        .filter(|(node_id, net)| {
+                            input_node_ids.contains(node_id)
+                                || sealed_output_source_ids.contains(node_id)
+                                    && !net.sources.is_subset(&input_sources)
+                        })
+                        .cloned()
+                        .collect_vec();
+                    let mut result = generate_or_routes_with_boundaries(
                         &self.config,
                         &world,
                         input_a,
                         input_b,
                         &signal_nets,
+                        &[],
+                        &all_signal_nets,
                     );
+                    if result.routes.is_empty() {
+                        let mut retry_config = self.config;
+                        retry_config.max_route_step = retry_config.max_route_step.saturating_add(8);
+                        result = generate_or_routes_with_boundaries(
+                            &retry_config,
+                            &world,
+                            input_a,
+                            input_b,
+                            &signal_nets,
+                            &[],
+                            &all_signal_nets,
+                        );
+                    }
+                    if result.routes.is_empty() && signal_nets.len() > input_signal_nets.len() {
+                        let mut retry_config = self.config;
+                        retry_config.max_route_step = retry_config.max_route_step.saturating_add(8);
+                        result = generate_or_routes_with_boundaries(
+                            &retry_config,
+                            &world,
+                            input_a,
+                            input_b,
+                            &input_signal_nets,
+                            &[],
+                            &all_signal_nets,
+                        );
+                    }
                     route_debug = Some(result.debug);
                     result
                         .routes
                         .into_iter()
                         .flat_map(|route| {
-                            let _shadow_accepts_sources =
-                                route.impact.accepts_sources(&input_sources);
                             // Keep the OR tap on the terminal redstone where both inputs
                             // have joined. Source or mid-route taps can see only one input.
                             let positions = Some(route.footprint.terminal)
                                 .filter(|position| {
                                     route.world[*position].kind.is_redstone()
-                                        && isolation.accepts_or_route(&route.world, &route.path)
+                                        && route_terminal_matches_expression(
+                                            &route.world,
+                                            *position,
+                                            &input_expression,
+                                        )
+                                        && sealed_outputs_preserved(
+                                            &route.world,
+                                            state,
+                                            &sealed_output_source_ids,
+                                        )
+                                        && route.impact.accepts_declared_inputs(
+                                            &input_node_ids,
+                                            &input_sources,
+                                            &sealed_output_source_ids,
+                                        )
                                 })
                                 .into_iter()
                                 .collect_vec();
@@ -313,9 +357,42 @@ impl LocalPlacer {
                                 .map(|position| {
                                     let mut state = state.clone();
                                     state.set_node_position(node.id, position);
-                                    let footprint =
-                                        [Some(position), position.down()].into_iter().flatten();
-                                    state.set_signal_net(node.id, footprint, input_sources.clone());
+                                    let source_side_supports = route
+                                        .footprint
+                                        .source_side
+                                        .iter()
+                                        .filter_map(|position| position.down());
+                                    let source_side_segments = route
+                                        .footprint
+                                        .source_side
+                                        .iter()
+                                        .copied()
+                                        .chain(source_side_supports)
+                                        .map(|position| (position, input_a_sources.clone()));
+                                    let terminal_segments = [
+                                        Some(route.footprint.terminal),
+                                        route.footprint.terminal_support,
+                                    ]
+                                    .into_iter()
+                                    .flatten()
+                                    .map(|position| (position, input_sources.clone()));
+                                    let input_boundary_segments =
+                                        input_contact_positions(&world, input_a)
+                                            .into_iter()
+                                            .map(|position| (position, input_a_sources.clone()))
+                                            .chain(
+                                                input_contact_positions(&world, input_b)
+                                                    .into_iter()
+                                                    .map(|position| {
+                                                        (position, input_b_sources.clone())
+                                                    }),
+                                            );
+                                    state.set_signal_net_with_position_sources_and_contacts(
+                                        node.id,
+                                        input_expression.clone(),
+                                        source_side_segments.chain(terminal_segments),
+                                        input_boundary_segments,
+                                    );
                                     (route.world.clone(), state)
                                 })
                                 .collect_vec()
@@ -644,6 +721,68 @@ fn local_density(world: &World3D, position: Position) -> usize {
         .filter(|&pos| world.size.bound_on(pos))
         .filter(|&pos| !world[pos].kind.is_air())
         .count()
+}
+
+fn input_contact_positions(world: &World3D, position: Position) -> HashSet<Position> {
+    [position]
+        .into_iter()
+        .chain(position.cardinal())
+        .chain([position.up()])
+        .chain(position.down())
+        .filter(|position| world.size.bound_on(*position))
+        .collect()
+}
+
+fn route_terminal_matches_expression(
+    world: &World3D,
+    terminal: Position,
+    expression: &SignalExpr,
+) -> bool {
+    let sources = expression.sources().into_iter().sorted().collect_vec();
+    if sources.len() > 8 {
+        return true;
+    }
+
+    for mask in 0..(1usize << sources.len()) {
+        let states = sources
+            .iter()
+            .enumerate()
+            .map(|(index, source)| (*source, (mask & (1 << index)) != 0))
+            .collect_vec();
+        let source_states = states.iter().copied().collect::<HashMap<_, _>>();
+        let expected = expression.eval(&source_states);
+
+        let world = crate::world::World::from(world);
+        let Ok(mut simulator) = Simulator::from(&world) else {
+            return false;
+        };
+        if simulator.change_state_with_max_cycles(states, 64).is_err() {
+            return false;
+        }
+        let actual = match simulator.world()[terminal].kind {
+            BlockKind::Redstone { strength, .. } => strength > 0,
+            _ => return false,
+        };
+        if actual != expected {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn sealed_outputs_preserved(
+    world: &World3D,
+    state: &PlacementState,
+    sealed_output_source_ids: &HashSet<GraphNodeId>,
+) -> bool {
+    sealed_output_source_ids.iter().all(|node_id| {
+        let Some(position) = state.node_position(*node_id) else {
+            return true;
+        };
+        let expression = state.signal_expression_for_nodes(&[*node_id].into_iter().collect());
+        route_terminal_matches_expression(world, position, &expression)
+    })
 }
 
 struct StepResult {

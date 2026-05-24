@@ -1,8 +1,66 @@
-use std::collections::{HashMap, HashSet};
+﻿use std::collections::{HashMap, HashSet};
 use std::ops::Index;
 
 use crate::graph::GraphNodeId;
 use crate::world::position::Position;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(super) enum SignalExpr {
+    Source(Position),
+    Not(Box<SignalExpr>),
+    Or(Vec<SignalExpr>),
+}
+
+impl SignalExpr {
+    pub(super) fn source(source: Position) -> Self {
+        Self::Source(source)
+    }
+
+    pub(super) fn invert(self) -> Self {
+        Self::Not(Box::new(self))
+    }
+
+    pub(super) fn or(expressions: impl IntoIterator<Item = SignalExpr>) -> Self {
+        let mut expressions = expressions.into_iter().collect::<Vec<_>>();
+        expressions.sort();
+        expressions.dedup();
+        match expressions.as_slice() {
+            [] => Self::Or(Vec::new()),
+            [expression] => expression.clone(),
+            _ => Self::Or(expressions),
+        }
+    }
+
+    pub(super) fn sources(&self) -> HashSet<Position> {
+        let mut sources = HashSet::new();
+        self.collect_sources(&mut sources);
+        sources
+    }
+
+    fn collect_sources(&self, sources: &mut HashSet<Position>) {
+        match self {
+            Self::Source(source) => {
+                sources.insert(*source);
+            }
+            Self::Not(expression) => expression.collect_sources(sources),
+            Self::Or(expressions) => {
+                for expression in expressions {
+                    expression.collect_sources(sources);
+                }
+            }
+        }
+    }
+
+    pub(super) fn eval(&self, source_states: &HashMap<Position, bool>) -> bool {
+        match self {
+            Self::Source(source) => source_states.get(source).copied().unwrap_or(false),
+            Self::Not(expression) => !expression.eval(source_states),
+            Self::Or(expressions) => expressions
+                .iter()
+                .any(|expression| expression.eval(source_states)),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(super) enum PlacementEndpoint {
@@ -16,10 +74,25 @@ pub(super) struct PlacementState {
     signal_nets: HashMap<GraphNodeId, SignalNet>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub(super) struct SignalNet {
     pub(super) footprint: HashSet<Position>,
     pub(super) sources: HashSet<Position>,
+    pub(super) expression: SignalExpr,
+    pub(super) position_sources: HashMap<Position, HashSet<Position>>,
+    pub(super) position_drivers: HashMap<Position, HashSet<GraphNodeId>>,
+}
+
+impl Default for SignalNet {
+    fn default() -> Self {
+        Self {
+            footprint: HashSet::new(),
+            sources: HashSet::new(),
+            expression: SignalExpr::Or(Vec::new()),
+            position_sources: HashMap::new(),
+            position_drivers: HashMap::new(),
+        }
+    }
 }
 
 impl PlacementState {
@@ -69,6 +142,7 @@ impl PlacementState {
         footprints
     }
 
+    #[cfg(test)]
     pub(super) fn signal_positions_for_nodes(
         &self,
         node_ids: &HashSet<GraphNodeId>,
@@ -101,6 +175,18 @@ impl PlacementState {
             .collect()
     }
 
+    pub(super) fn signal_expression_for_nodes(
+        &self,
+        node_ids: &HashSet<GraphNodeId>,
+    ) -> SignalExpr {
+        SignalExpr::or(
+            self.signal_nets
+                .iter()
+                .filter(|(node_id, _)| node_ids.contains(node_id))
+                .map(|(_, net)| net.expression.clone()),
+        )
+    }
+
     #[allow(dead_code)]
     pub(super) fn port_position(&self, node_id: GraphNodeId, port: &str) -> Option<Position> {
         self.positions
@@ -129,13 +215,90 @@ impl PlacementState {
         footprint: impl IntoIterator<Item = Position>,
         sources: impl IntoIterator<Item = Position>,
     ) {
+        let footprint = footprint.into_iter().collect::<HashSet<_>>();
+        let sources = sources.into_iter().collect::<HashSet<_>>();
+        let expression = SignalExpr::or(sources.iter().copied().map(SignalExpr::source));
+        let position_sources = footprint
+            .iter()
+            .copied()
+            .map(|position| (position, sources.clone()))
+            .collect();
+        let position_drivers = footprint
+            .iter()
+            .copied()
+            .map(|position| (position, [node_id].into_iter().collect()))
+            .collect();
         self.signal_nets.insert(
             node_id,
             SignalNet {
-                footprint: footprint.into_iter().collect(),
-                sources: sources.into_iter().collect(),
+                footprint,
+                sources,
+                expression,
+                position_sources,
+                position_drivers,
             },
         );
+    }
+
+    pub(super) fn set_signal_net_with_expression(
+        &mut self,
+        node_id: GraphNodeId,
+        footprint: impl IntoIterator<Item = Position>,
+        expression: SignalExpr,
+    ) {
+        let footprint = footprint.into_iter().collect::<HashSet<_>>();
+        let sources = expression.sources();
+        let position_sources = footprint
+            .iter()
+            .copied()
+            .map(|position| (position, sources.clone()))
+            .collect();
+        let position_drivers = footprint
+            .iter()
+            .copied()
+            .map(|position| (position, [node_id].into_iter().collect()))
+            .collect();
+        self.signal_nets.insert(
+            node_id,
+            SignalNet {
+                footprint,
+                sources,
+                expression,
+                position_sources,
+                position_drivers,
+            },
+        );
+    }
+
+    pub(super) fn set_signal_net_with_position_sources_and_contacts(
+        &mut self,
+        node_id: GraphNodeId,
+        expression: SignalExpr,
+        footprint_segments: impl IntoIterator<Item = (Position, HashSet<Position>)>,
+        contact_segments: impl IntoIterator<Item = (Position, HashSet<Position>)>,
+    ) {
+        let mut net = SignalNet {
+            expression,
+            ..Default::default()
+        };
+        for (position, sources) in footprint_segments {
+            net.footprint.insert(position);
+            net.sources.extend(sources.iter().copied());
+            net.position_sources.insert(position, sources);
+            net.position_drivers
+                .entry(position)
+                .or_default()
+                .insert(node_id);
+        }
+        for (position, sources) in contact_segments {
+            net.sources.extend(sources.iter().copied());
+            net.position_sources.insert(position, sources);
+            net.position_drivers
+                .entry(position)
+                .or_default()
+                .insert(node_id);
+        }
+        self.signal_nets.insert(node_id, net);
     }
 }
 

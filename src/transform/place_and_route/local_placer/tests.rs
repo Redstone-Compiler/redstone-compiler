@@ -738,11 +738,10 @@ fn generate_or_routes_footprint_records_redstone_supports() {
 }
 
 #[test]
-fn generate_or_routes_reports_touched_signal_net_sources() {
+fn generate_or_routes_reports_touched_signal_net_ids() {
     let mut world = empty_world();
     let from = Position(1, 1, 1);
     let to = Position(4, 1, 1);
-    let external_source = Position(0, 0, 1);
     place_node(&mut world, PlacedNode::new(from, torch(Direction::Bottom)));
     place_node(&mut world, PlacedNode::new(to, torch(Direction::Bottom)));
 
@@ -751,7 +750,10 @@ fn generate_or_routes_reports_touched_signal_net_sources() {
         .into_iter()
         .find(|route| !route.footprint.placed_redstone.is_empty())
         .expect("expected route with redstone");
-    let route_positions = first.footprint.positions().collect::<std::collections::HashSet<_>>();
+    let route_positions = first
+        .footprint
+        .positions()
+        .collect::<std::collections::HashSet<_>>();
     let touched_position = first.footprint.placed_redstone[0]
         .cardinal()
         .into_iter()
@@ -761,7 +763,6 @@ fn generate_or_routes_reports_touched_signal_net_sources() {
         .expect("expected adjacent signal contact position");
     let mut net = SignalNet::default();
     net.footprint.insert(touched_position);
-    net.sources.insert(external_source);
 
     let result = generate_or_routes_with_signal_nets(&config(2), &world, from, to, &[(99, net)]);
     let impacted = result
@@ -777,8 +778,6 @@ fn generate_or_routes_reports_touched_signal_net_sources() {
         .expect("expected matching route");
 
     assert!(impacted.impact.touched_net_ids.contains(&99));
-    assert!(impacted.impact.touched_sources.contains(&external_source));
-    assert!(impacted.impact.has_sources_outside(&HashSet::new()));
 }
 
 #[test]
@@ -786,18 +785,28 @@ fn route_impact_accepts_only_declared_sources() {
     let declared_a = Position(1, 1, 1);
     let declared_b = Position(4, 1, 1);
     let external = Position(0, 0, 1);
-    let mut allowed = [declared_a, declared_b].into_iter().collect::<HashSet<_>>();
+    let allowed_net_ids = [10, 11].into_iter().collect::<HashSet<_>>();
+    let allowed_sources = [declared_a, declared_b].into_iter().collect::<HashSet<_>>();
+    let sealed_net_ids = [12].into_iter().collect::<HashSet<_>>();
     let mut impact = RouteImpact::default();
 
+    impact.touched_net_ids.insert(10);
     impact.touched_sources.insert(declared_a);
+    assert!(impact.accepts_declared_inputs(&allowed_net_ids, &allowed_sources, &sealed_net_ids));
+
+    impact.touched_net_ids.insert(11);
     impact.touched_sources.insert(declared_b);
-    assert!(impact.accepts_sources(&allowed));
+    assert!(impact.accepts_declared_inputs(&allowed_net_ids, &allowed_sources, &sealed_net_ids));
 
     impact.touched_sources.insert(external);
-    assert!(!impact.accepts_sources(&allowed));
+    assert!(!impact.accepts_declared_inputs(&allowed_net_ids, &allowed_sources, &sealed_net_ids));
 
-    allowed.insert(external);
-    assert!(impact.accepts_sources(&allowed));
+    impact.touched_sources.remove(&external);
+    impact.touched_net_ids.insert(12);
+    assert!(impact.accepts_declared_inputs(&allowed_net_ids, &allowed_sources, &sealed_net_ids));
+
+    impact.touched_sources.clear();
+    assert!(!impact.accepts_declared_inputs(&allowed_net_ids, &allowed_sources, &sealed_net_ids));
 }
 
 #[test]
