@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use mimalloc::MiMalloc;
+use redstone_compiler::verilog;
 use structopt::StructOpt;
 
 #[global_allocator]
@@ -18,10 +19,19 @@ pub struct CompilerOption {
 
 fn main() -> eyre::Result<()> {
     tracing_subscriber::fmt::init();
-    let _opt = CompilerOption::from_args();
-    // let syntax = verilog::load(&opt.input)?;
+    let opt = CompilerOption::from_args();
 
-    // println!("{syntax:?}");
+    if opt.input.extension().and_then(|ext| ext.to_str()) == Some("v") {
+        let graph = verilog::load_logic_graph(&opt.input)?;
+        let prepared = graph.prepare_place()?;
+        println!(
+            "loaded Verilog graph: nodes={} inputs={} outputs={}",
+            prepared.nodes.len(),
+            prepared.inputs().len(),
+            prepared.outputs().len()
+        );
+        return Ok(());
+    }
 
-    Ok(())
+    eyre::bail!("unsupported input file extension: {:?}", opt.input)
 }
