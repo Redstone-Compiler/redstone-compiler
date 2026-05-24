@@ -53,6 +53,7 @@ fn main() -> eyre::Result<()> {
         placement_sampling_policy: PlacementSamplingPolicy::StepPolicy,
         leak_sampling: false,
         route_torch_directly: true,
+        materialize_outputs: true,
         torch_placement_strategy: TorchPlacementStrategy::DirectOnly,
         not_route_strategy: NotRouteStrategy::DirectOnly,
         max_not_route_step: 3,

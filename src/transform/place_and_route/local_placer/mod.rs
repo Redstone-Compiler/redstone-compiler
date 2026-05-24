@@ -286,6 +286,20 @@ impl LocalPlacer {
                         .collect()
                 }
             }
+            GraphNodeKind::Output(_) if self.config.materialize_outputs => {
+                generate_output_routes(&world, state[&node.inputs[0]])
+                    .into_iter()
+                    .map(|(world, position)| {
+                        let mut state = state.clone();
+                        state.set_node_position(node.id, position);
+                        state.set_signal_footprint(
+                            node.id,
+                            [Some(position), position.down()].into_iter().flatten(),
+                        );
+                        (world, state)
+                    })
+                    .collect()
+            }
             GraphNodeKind::Output(_) => vec![(world.clone(), state.clone())],
             GraphNodeKind::Logic(logic) => match logic.logic_type {
                 LogicType::Not => not_node_kind()

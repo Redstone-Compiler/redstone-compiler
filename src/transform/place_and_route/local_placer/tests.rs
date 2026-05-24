@@ -36,6 +36,7 @@ fn config(max_route_step: usize) -> LocalPlacerConfig {
         placement_sampling_policy: PlacementSamplingPolicy::StepPolicy,
         leak_sampling: false,
         route_torch_directly: true,
+        materialize_outputs: false,
         torch_placement_strategy: TorchPlacementStrategy::DirectOnly,
         not_route_strategy: NotRouteStrategy::DirectOnly,
         max_not_route_step: max_route_step,
@@ -204,7 +205,7 @@ fn compact_queue_keeps_positions_needed_by_future_logic() -> eyre::Result<()> {
 }
 
 #[test]
-fn compact_queue_drops_positions_used_only_by_outputs() -> eyre::Result<()> {
+fn compact_queue_keeps_positions_needed_by_external_outputs() -> eyre::Result<()> {
     let graph = LogicGraph::from_stmt("a|b", "c")?.prepare_place()?;
     let placer = LocalPlacer::new(graph.clone(), config(1))?;
     let or_id = graph
@@ -231,14 +232,16 @@ fn compact_queue_drops_positions_used_only_by_outputs() -> eyre::Result<()> {
 
     let compacted = placer.compact_queue_after_step(or_step, queue);
 
-    assert_eq!(compacted.len(), 1);
+    assert_eq!(compacted.len(), 2);
     Ok(())
 }
 
 #[test]
-fn output_step_does_not_extend_placement_state() -> eyre::Result<()> {
+fn output_step_routes_visible_redstone_endpoint_from_or_source() -> eyre::Result<()> {
     let graph = LogicGraph::from_stmt("a|b", "c")?.prepare_place()?;
-    let placer = LocalPlacer::new(graph.clone(), config(1))?;
+    let mut config = config(1);
+    config.materialize_outputs = true;
+    let placer = LocalPlacer::new(graph.clone(), config)?;
     let or_id = graph
         .nodes
         .iter()
@@ -258,11 +261,65 @@ fn output_step_does_not_extend_placement_state() -> eyre::Result<()> {
         .iter()
         .position(|id| *id == output_id)
         .unwrap();
-    let state = [(or_id, Position(1, 1, 1))].into_iter().collect();
+    let source = Position(2, 2, 1);
+    let mut world = empty_world();
+    place_node(&mut world, PlacedNode::new_cobble(Position(2, 2, 0)));
+    place_node(&mut world, PlacedNode::new_redstone(source));
+    let state = [(or_id, source)].into_iter().collect();
 
-    let result = placer.do_step(output_step, vec![(empty_world(), state)]);
+    let result = placer.do_step(output_step, vec![(world, state)]);
 
-    assert_eq!(result.queue[0].1.endpoint_positions().len(), 1);
+    assert!(!result.queue.is_empty());
+    assert!(result.queue.iter().any(|(world, state)| {
+        state
+            .node_position(output_id)
+            .is_some_and(|position| world[position].kind.is_redstone())
+    }));
+    Ok(())
+}
+
+#[test]
+fn output_step_routes_visible_redstone_endpoint_from_torch_source() -> eyre::Result<()> {
+    let graph = LogicGraph::from_stmt("~a", "out")?.prepare_place()?;
+    let mut config = config(1);
+    config.materialize_outputs = true;
+    let placer = LocalPlacer::new(graph.clone(), config)?;
+    let not_id = graph
+        .nodes
+        .iter()
+        .find(|node| {
+            matches!(&node.kind, GraphNodeKind::Logic(logic) if logic.logic_type == LogicType::Not)
+        })
+        .unwrap()
+        .id;
+    let output_id = graph
+        .nodes
+        .iter()
+        .find(|node| matches!(&node.kind, GraphNodeKind::Output(name) if name == "out"))
+        .unwrap()
+        .id;
+    let output_step = placer
+        .visit_orders
+        .iter()
+        .position(|id| *id == output_id)
+        .unwrap();
+    let source = Position(2, 2, 1);
+    let mut world = empty_world();
+    place_node(&mut world, PlacedNode::new_cobble(Position(2, 2, 0)));
+    place_node(
+        &mut world,
+        PlacedNode::new(source, torch(Direction::Bottom)),
+    );
+    let state = [(not_id, source)].into_iter().collect();
+
+    let result = placer.do_step(output_step, vec![(world, state)]);
+
+    assert!(!result.queue.is_empty());
+    assert!(result.queue.iter().any(|(world, state)| {
+        state
+            .node_position(output_id)
+            .is_some_and(|position| world[position].kind.is_redstone())
+    }));
     Ok(())
 }
 
