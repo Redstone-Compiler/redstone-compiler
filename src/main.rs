@@ -28,50 +28,46 @@ fn main() -> eyre::Result<()> {
     tracing_subscriber::fmt::init();
     let opt = CompilerOption::from_args();
 
-    if opt.input.extension().and_then(|ext| ext.to_str()) == Some("v") {
-        let graph = verilog::load_logic_graph(&opt.input)?;
-        let prepared = graph.prepare_place()?;
-        if let Some(output) = opt.output {
-            let output_display = output.display().to_string();
-            let config = LocalPlacerConfig {
-                random_seed: 42,
-                greedy_input_generation: true,
-                input_placement_strategy: InputPlacementStrategy::Boundary,
-                input_candidate_limit: None,
-                step_sampling_policy: SamplingPolicy::Random(10000),
-                placement_sampling_policy: PlacementSamplingPolicy::StepPolicy,
-                leak_sampling: false,
-                route_torch_directly: true,
-                torch_placement_strategy: TorchPlacementStrategy::DirectOnly,
-                not_route_strategy: NotRouteStrategy::DirectOnly,
-                max_not_route_step: 3,
-                not_route_step_sampling_policy: SamplingPolicy::Random(100),
-                max_route_step: 3,
-                route_step_sampling_policy: SamplingPolicy::Random(100),
-            };
-            let placer = LocalPlacer::new(prepared.clone(), config)?;
-            let worlds = placer.generate(DimSize(10, 10, 5), None);
-            let Some(world) = worlds.into_iter().next() else {
-                eyre::bail!("placement produced no worlds");
-            };
-            world.to_nbt().save(output);
-            println!(
-                "exported Verilog graph: nodes={} inputs={} outputs={} path={}",
-                prepared.nodes.len(),
-                prepared.inputs().len(),
-                prepared.outputs().len(),
-                output_display
-            );
-            return Ok(());
-        }
-        println!(
-            "loaded Verilog graph: nodes={} inputs={} outputs={}",
-            prepared.nodes.len(),
-            prepared.inputs().len(),
-            prepared.outputs().len()
-        );
-        return Ok(());
+    if opt.input.extension().and_then(|ext| ext.to_str()) != Some("v") {
+        eyre::bail!("unsupported input file extension: {:?}", opt.input);
     }
 
-    eyre::bail!("unsupported input file extension: {:?}", opt.input)
+    let graph = verilog::load_logic_graph(&opt.input)?.prepare_place()?;
+
+    let Some(output) = opt.output else {
+        println!(
+            "loaded Verilog graph: nodes={} inputs={} outputs={}",
+            graph.nodes.len(),
+            graph.inputs().len(),
+            graph.outputs().len()
+        );
+        return Ok(());
+    };
+
+    let config = LocalPlacerConfig {
+        random_seed: 42,
+        greedy_input_generation: true,
+        input_placement_strategy: InputPlacementStrategy::Boundary,
+        input_candidate_limit: None,
+        step_sampling_policy: SamplingPolicy::Random(10000),
+        placement_sampling_policy: PlacementSamplingPolicy::StepPolicy,
+        leak_sampling: false,
+        route_torch_directly: true,
+        torch_placement_strategy: TorchPlacementStrategy::DirectOnly,
+        not_route_strategy: NotRouteStrategy::DirectOnly,
+        max_not_route_step: 3,
+        not_route_step_sampling_policy: SamplingPolicy::Random(100),
+        max_route_step: 3,
+        route_step_sampling_policy: SamplingPolicy::Random(100),
+    };
+    let placer = LocalPlacer::new(graph, config)?;
+    let worlds = placer.generate(DimSize(10, 10, 5), None);
+    let Some(world) = worlds.into_iter().next() else {
+        eyre::bail!("placement produced no worlds");
+    };
+    world.to_nbt().save(&output);
+
+    println!("exported Verilog graph: path={}", output.display());
+
+    Ok(())
 }
