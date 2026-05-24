@@ -18,6 +18,27 @@ impl LogicGraph {
         LogicGraphBuilder::new(stmt.to_string()).build(output.to_string())
     }
 
+    pub fn from_assignments<I>(assignments: I) -> eyre::Result<LogicGraph>
+    where
+        I: IntoIterator<Item = (String, String)>,
+    {
+        let mut graphs = assignments
+            .into_iter()
+            .map(|(output, expr)| LogicGraph::from_stmt(&expr, &output))
+            .collect::<eyre::Result<Vec<_>>>()?
+            .into_iter();
+
+        let Some(mut graph) = graphs.next() else {
+            eyre::bail!("expected at least one logic assignment");
+        };
+
+        for next in graphs {
+            graph.graph.merge(next.graph);
+        }
+
+        Ok(graph)
+    }
+
     pub fn prepare_place(self) -> eyre::Result<Self> {
         let mut transform = LogicGraphTransformer::new(self);
         transform.decompose_xor()?;
@@ -604,6 +625,21 @@ mod tests {
         assert!(graph
             .truth_table()?
             .contains_output_tables(&required.truth_table()?));
+
+        Ok(())
+    }
+
+    #[test]
+    fn from_assignments_builds_half_adder() -> eyre::Result<()> {
+        let graph = LogicGraph::from_assignments([
+            ("s".to_owned(), "a^b".to_owned()),
+            ("c".to_owned(), "a&b".to_owned()),
+        ])?;
+        let table = graph.truth_table()?;
+
+        assert_eq!(table.input_names, vec!["a", "b"]);
+        assert_eq!(table.output_tables["s"], vec![false, true, true, false]);
+        assert_eq!(table.output_tables["c"], vec![false, false, false, true]);
 
         Ok(())
     }
