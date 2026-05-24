@@ -582,7 +582,7 @@ pub(super) fn generate_or_routes(
 
                 if goal.accepts_redstone(&new_world, &new_prevs, redstone_node.position) {
                     depth_debug.accepted_routes += 1;
-                    candidates.push(OrRoute::new(new_world, new_prevs));
+                    candidates.push((new_world, new_prevs));
                 } else {
                     let nexts = redstone_node.propagation_bound(Some(&new_world));
                     next_queue.push((new_world, new_prevs, nexts));
@@ -607,68 +607,8 @@ pub(super) fn generate_or_routes(
 }
 
 pub(super) struct RouteResult {
-    pub(super) routes: Vec<OrRoute>,
+    pub(super) routes: Vec<(World3D, Vec<Position>)>,
     pub(super) debug: RouteDebug,
-}
-
-#[derive(Clone)]
-pub(super) struct OrRoute {
-    pub(super) world: World3D,
-    pub(super) path: Vec<Position>,
-    pub(super) footprint: RouteFootprint,
-}
-
-impl OrRoute {
-    fn new(world: World3D, path: Vec<Position>) -> Self {
-        let footprint = RouteFootprint::from_path(&world, &path);
-        Self {
-            world,
-            path,
-            footprint,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct RouteFootprint {
-    // route path 중 terminal 이전 구간이다. 이후 source-side / join-side 분리의 기준점으로 쓴다.
-    pub(super) source_side: Vec<Position>,
-    // OR 결과로 PlacementState에 남길 최종 redstone tap 위치다.
-    pub(super) terminal: Position,
-    // terminal redstone을 받치는 cobble 위치다. support도 물리 신호망 형태에 영향을 준다.
-    pub(super) terminal_support: Option<Position>,
-    // 이 route path에서 실제 redstone으로 배치된 위치들이다.
-    pub(super) placed_redstone: Vec<Position>,
-    // path redstone 아래 support cobble 위치들이다.
-    pub(super) placed_supports: Vec<Position>,
-}
-
-impl RouteFootprint {
-    fn from_path(world: &World3D, path: &[Position]) -> Self {
-        let terminal = path.last().copied().unwrap();
-        let source_side = path[..path.len().saturating_sub(1)].to_vec();
-        let placed_redstone = path
-            .iter()
-            .copied()
-            .filter(|position| world[*position].kind.is_redstone())
-            .collect_vec();
-        let placed_supports = placed_redstone
-            .iter()
-            .filter_map(|position| position.down())
-            .filter(|position| world[*position].kind.is_cobble())
-            .collect_vec();
-        let terminal_support = terminal
-            .down()
-            .filter(|position| world[*position].kind.is_cobble());
-
-        Self {
-            source_side,
-            terminal,
-            terminal_support,
-            placed_redstone,
-            placed_supports,
-        }
-    }
 }
 
 pub(super) fn generate_or_routes_init_states(

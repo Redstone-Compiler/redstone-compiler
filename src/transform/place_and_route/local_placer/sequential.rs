@@ -367,19 +367,20 @@ fn generate_two_or_step(
             first_routes
                 .into_iter()
                 .cartesian_product(second_routes)
-                .filter_map(|(first_route, second_route)| {
-                    let world = merge_independent_route_worlds(
-                        &base_world,
-                        first_route.world,
-                        second_route.world,
-                    )?;
-                    Some({
-                        let mut state = state.clone();
-                        state.set_node_position(first.2, first_route.footprint.terminal);
-                        state.set_node_position(second.2, second_route.footprint.terminal);
-                        (world, state)
-                    })
-                })
+                .filter_map(
+                    |((first_world, first_positions), (second_world, second_positions))| {
+                        let world =
+                            merge_independent_route_worlds(&base_world, first_world, second_world)?;
+                        let first_position = first_positions.last().copied()?;
+                        let second_position = second_positions.last().copied()?;
+                        Some({
+                            let mut state = state.clone();
+                            state.set_node_position(first.2, first_position);
+                            state.set_node_position(second.2, second_position);
+                            (world, state)
+                        })
+                    },
+                )
                 .collect_vec()
         })
         .collect();
@@ -922,7 +923,7 @@ pub(super) fn route_sequential_inputs(
                 generate_or_routes(config, &world, source, target)
                     .routes
                     .into_iter()
-                    .map(|route| route.world)
+                    .map(|(world, _)| world)
                     .collect_vec()
             })
             .collect_vec();

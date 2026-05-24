@@ -640,24 +640,6 @@ fn has_connection_with_requires_world_after_cobble_placement() {
 }
 
 #[test]
-fn target_powers_redstone_uses_world_after_support_cobble_placement() {
-    let mut world = empty_world();
-    let target = Position(2, 2, 1);
-    let redstone = Position(3, 2, 2);
-    place_node(
-        &mut world,
-        PlacedNode::new(target, torch(Direction::Bottom)),
-    );
-
-    let mut routed_world = world.clone();
-    place_node(&mut routed_world, PlacedNode::new_cobble(target.up()));
-    place_node(&mut routed_world, PlacedNode::new_redstone(redstone));
-
-    assert!(!target_powers_redstone(&world, target, redstone));
-    assert!(target_powers_redstone(&routed_world, target, redstone));
-}
-
-#[test]
 fn generate_or_routes_finds_adjacent_torch_route() {
     let mut world = empty_world();
     let from = Position(1, 1, 1);
@@ -670,50 +652,6 @@ fn generate_or_routes_finds_adjacent_torch_route() {
     assert!(!result.routes.is_empty());
     assert!(result.debug.candidates_found > 0);
     assert_eq!(result.debug.route_calls, 1);
-}
-
-#[test]
-fn generate_or_routes_reports_terminal_join_footprint() {
-    let mut world = empty_world();
-    let from = Position(1, 1, 1);
-    let to = Position(4, 1, 1);
-    place_node(&mut world, PlacedNode::new(from, torch(Direction::Bottom)));
-    place_node(&mut world, PlacedNode::new(to, torch(Direction::Bottom)));
-
-    let result = generate_or_routes(&config(2), &world, from, to);
-
-    let route = result
-        .routes
-        .iter()
-        .find(|route| route.path.len() > 1)
-        .expect("expected at least one redstone route");
-    let terminal = *route.path.last().unwrap();
-    assert_eq!(route.footprint.terminal, terminal);
-    assert_eq!(route.footprint.terminal_support, terminal.down());
-    assert!(route.footprint.placed_redstone.contains(&terminal));
-    assert!(!route.footprint.source_side.contains(&terminal));
-}
-
-#[test]
-fn generate_or_routes_footprint_records_redstone_supports() {
-    let mut world = empty_world();
-    let from = Position(1, 1, 1);
-    let to = Position(4, 1, 1);
-    place_node(&mut world, PlacedNode::new(from, torch(Direction::Bottom)));
-    place_node(&mut world, PlacedNode::new(to, torch(Direction::Bottom)));
-
-    let result = generate_or_routes(&config(2), &world, from, to);
-    let route = result
-        .routes
-        .iter()
-        .find(|route| !route.footprint.placed_redstone.is_empty())
-        .expect("expected at least one redstone route");
-
-    for redstone in &route.footprint.placed_redstone {
-        let support = redstone.down().expect("redstone route should have support");
-        assert!(route.footprint.placed_supports.contains(&support));
-        assert!(route.world[support].kind.is_cobble());
-    }
 }
 
 #[test]
