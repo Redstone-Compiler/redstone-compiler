@@ -18,12 +18,27 @@ pub(super) struct RsLatchGatePlacement {
     pub(super) nq_cobble: Position,
 }
 
-pub(super) const D_LATCH_SET_NODE_ID: GraphNodeId = usize::MAX - 1;
-pub(super) const D_LATCH_RESET_NODE_ID: GraphNodeId = usize::MAX;
-pub(super) const D_LATCH_NOT_D_NODE_ID: GraphNodeId = usize::MAX - 2;
-pub(super) const D_LATCH_SET_NOT_EN_NODE_ID: GraphNodeId = usize::MAX - 3;
-pub(super) const D_LATCH_SET_OR_NODE_ID: GraphNodeId = usize::MAX - 4;
-pub(super) const D_LATCH_RESET_OR_NODE_ID: GraphNodeId = usize::MAX - 5;
+#[derive(Debug, Clone, Copy)]
+pub(super) struct DLatchInputGatingNodes {
+    pub(super) not_d: GraphNodeId,
+    pub(super) not_en: GraphNodeId,
+    pub(super) set_or: GraphNodeId,
+    pub(super) reset_or: GraphNodeId,
+    pub(super) set: GraphNodeId,
+    pub(super) reset: GraphNodeId,
+}
+
+// D latch is placed as an acyclic input-gating prefix feeding the cyclic RS latch core.
+// These synthetic IDs let the prefix store intermediate endpoints in PlacementState without
+// colliding with graph node IDs owned by the caller.
+pub(super) const D_LATCH_INPUT_GATING_NODES: DLatchInputGatingNodes = DLatchInputGatingNodes {
+    not_d: usize::MAX - 2,
+    not_en: usize::MAX - 3,
+    set_or: usize::MAX - 4,
+    reset_or: usize::MAX - 5,
+    set: usize::MAX - 1,
+    reset: usize::MAX,
+};
 
 pub(super) fn generate_d_latch_gate_routes(
     config: &LocalPlacerConfig,
@@ -46,55 +61,15 @@ pub(super) fn generate_d_latch_gate_routes(
     let rs_node = GraphNode {
         id: node.id,
         kind: GraphNodeKind::Sequential(rs_sequential.clone()),
-        inputs: vec![D_LATCH_SET_NODE_ID, D_LATCH_RESET_NODE_ID],
+        inputs: vec![
+            D_LATCH_INPUT_GATING_NODES.set,
+            D_LATCH_INPUT_GATING_NODES.reset,
+        ],
         ..Default::default()
     };
 
-    let queue = vec![(world.clone(), state.clone())];
-    let queue = generate_not_step(config, 0, queue, data_input.node_id, D_LATCH_NOT_D_NODE_ID);
-    let queue = generate_not_step(
-        config,
-        1,
-        queue,
-        enable_input.node_id,
-        D_LATCH_SET_NOT_EN_NODE_ID,
-    );
-    let queue = generate_two_or_step(
-        config,
-        2,
-        queue,
-        (
-            D_LATCH_NOT_D_NODE_ID,
-            D_LATCH_SET_NOT_EN_NODE_ID,
-            D_LATCH_SET_OR_NODE_ID,
-        ),
-        (
-            data_input.node_id,
-            D_LATCH_SET_NOT_EN_NODE_ID,
-            D_LATCH_RESET_OR_NODE_ID,
-        ),
-    );
-    let queue = generate_not_step(
-        config,
-        3,
-        queue,
-        D_LATCH_SET_OR_NODE_ID,
-        D_LATCH_SET_NODE_ID,
-    );
-    let queue = generate_not_step(
-        config,
-        4,
-        queue,
-        D_LATCH_RESET_OR_NODE_ID,
-        D_LATCH_RESET_NODE_ID,
-    );
-    let queue = queue
-        .into_iter()
-        .filter(|(world, state)| {
-            d_latch_input_gates_behave(world, data_input.node_id, enable_input.node_id, state)
-        })
-        .collect_vec();
-    let queue = SamplingPolicy::Random(64).sample_with_seed(queue, config.sampling_seed(7, 6));
+    let queue = place_d_latch_input_gating(config, world, state, data_input, enable_input);
+    let queue = retain_valid_d_latch_input_gating(config, queue, data_input, enable_input);
 
     let mut routed = Vec::new();
     let limit = take_sampling_limit(config.step_sampling_policy);
@@ -142,7 +117,47 @@ pub(super) fn generate_d_latch_gate_routes(
     sample_d_latch_step(config, 6, routed)
 }
 
-fn d_latch_input_gates_behave(
+fn place_d_latch_input_gating(
+    config: &LocalPlacerConfig,
+    world: &World3D,
+    state: &PlacementState,
+    data_input: SequentialInput,
+    enable_input: SequentialInput,
+) -> PlacerQueue {
+    let nodes = D_LATCH_INPUT_GATING_NODES;
+    let queue = vec![(world.clone(), state.clone())];
+    let queue = generate_not_step(config, 0, queue, data_input.node_id, nodes.not_d);
+    let queue = generate_not_step(config, 1, queue, enable_input.node_id, nodes.not_en);
+
+    // set   = !(!d | !en) = d & en
+    // reset = !( d | !en) = !d & en
+    let queue = generate_two_or_step(
+        config,
+        2,
+        queue,
+        (nodes.not_d, nodes.not_en, nodes.set_or),
+        (data_input.node_id, nodes.not_en, nodes.reset_or),
+    );
+    let queue = generate_not_step(config, 3, queue, nodes.set_or, nodes.set);
+    generate_not_step(config, 4, queue, nodes.reset_or, nodes.reset)
+}
+
+fn retain_valid_d_latch_input_gating(
+    config: &LocalPlacerConfig,
+    queue: PlacerQueue,
+    data_input: SequentialInput,
+    enable_input: SequentialInput,
+) -> PlacerQueue {
+    let queue = queue
+        .into_iter()
+        .filter(|(world, state)| {
+            d_latch_input_gating_behaves(world, data_input.node_id, enable_input.node_id, state)
+        })
+        .collect_vec();
+    SamplingPolicy::Random(64).sample_with_seed(queue, config.sampling_seed(7, 6))
+}
+
+fn d_latch_input_gating_behaves(
     world: &World3D,
     data_node_id: GraphNodeId,
     enable_node_id: GraphNodeId,
@@ -154,10 +169,10 @@ fn d_latch_input_gates_behave(
     let Some(enable) = state.node_position(enable_node_id) else {
         return false;
     };
-    let Some(set) = state.node_position(D_LATCH_SET_NODE_ID) else {
+    let Some(set) = state.node_position(D_LATCH_INPUT_GATING_NODES.set) else {
         return false;
     };
-    let Some(reset) = state.node_position(D_LATCH_RESET_NODE_ID) else {
+    let Some(reset) = state.node_position(D_LATCH_INPUT_GATING_NODES.reset) else {
         return false;
     };
 
@@ -558,12 +573,8 @@ fn d_latch_internal_interference_penalty(
     state: &PlacementState,
     placed: &RsLatchGatePlacement,
 ) -> usize {
-    let protected_nodes = [
-        D_LATCH_NOT_D_NODE_ID,
-        D_LATCH_SET_NOT_EN_NODE_ID,
-        D_LATCH_SET_OR_NODE_ID,
-        D_LATCH_RESET_OR_NODE_ID,
-    ];
+    let nodes = D_LATCH_INPUT_GATING_NODES;
+    let protected_nodes = [nodes.not_d, nodes.not_en, nodes.set_or, nodes.reset_or];
     let latch_positions = [
         placed.q_torch,
         placed.q_cobble,

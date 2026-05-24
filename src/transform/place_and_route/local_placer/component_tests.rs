@@ -9,8 +9,7 @@ use crate::transform::place_and_route::local_placer::{
     generate_d_latch_gate_routes, generate_rs_latch_not_pairs, route_rs_latch_branches,
     select_rs_latch_not_pairs, InputPlacementStrategy, LocalPlacer, LocalPlacerConfig,
     LocalPlacerDebug, NotRouteStrategy, PlacementSamplingPolicy, SamplingPolicy,
-    TorchPlacementStrategy, D_LATCH_NOT_D_NODE_ID, D_LATCH_RESET_NODE_ID, D_LATCH_RESET_OR_NODE_ID,
-    D_LATCH_SET_NODE_ID, D_LATCH_SET_NOT_EN_NODE_ID, D_LATCH_SET_OR_NODE_ID,
+    TorchPlacementStrategy, D_LATCH_INPUT_GATING_NODES,
 };
 use crate::transform::place_and_route::utils::{
     contains_truth_table_with_world3ds, equivalent_logic_with_world3d,
@@ -392,6 +391,7 @@ fn test_generate_component_d_latch() -> eyre::Result<()> {
                     eprintln!("candidate {checked} failed: {error}; q={q:?} nq={nq:?}");
                     let q_support = q.walk(world[q].direction).unwrap();
                     let nq_support = nq.walk(world[nq].direction).unwrap();
+                    let nodes = D_LATCH_INPUT_GATING_NODES;
                     let _ = trace_d_latch_behavior(
                         world,
                         d,
@@ -399,12 +399,12 @@ fn test_generate_component_d_latch() -> eyre::Result<()> {
                         &[
                             ("d", d),
                             ("en", en),
-                            ("not_d", state[&D_LATCH_NOT_D_NODE_ID]),
-                            ("set_not_en", state[&D_LATCH_SET_NOT_EN_NODE_ID]),
-                            ("set_or", state[&D_LATCH_SET_OR_NODE_ID]),
-                            ("reset_or", state[&D_LATCH_RESET_OR_NODE_ID]),
-                            ("set", state[&D_LATCH_SET_NODE_ID]),
-                            ("reset", state[&D_LATCH_RESET_NODE_ID]),
+                            ("not_d", state[&nodes.not_d]),
+                            ("not_en", state[&nodes.not_en]),
+                            ("set_or", state[&nodes.set_or]),
+                            ("reset_or", state[&nodes.reset_or]),
+                            ("set", state[&nodes.set]),
+                            ("reset", state[&nodes.reset]),
                             ("q_support", q_support),
                             ("nq_support", nq_support),
                             ("q", q),

@@ -44,9 +44,7 @@ use sequential::{
 #[cfg(test)]
 use sequential::{
     generate_rs_latch_not_pairs, place_sequential_macro, route_rs_latch_branches,
-    route_sequential_inputs, select_rs_latch_not_pairs, D_LATCH_NOT_D_NODE_ID,
-    D_LATCH_RESET_NODE_ID, D_LATCH_RESET_OR_NODE_ID, D_LATCH_SET_NODE_ID,
-    D_LATCH_SET_NOT_EN_NODE_ID, D_LATCH_SET_OR_NODE_ID,
+    route_sequential_inputs, select_rs_latch_not_pairs, D_LATCH_INPUT_GATING_NODES,
 };
 
 pub struct LocalPlacer {
