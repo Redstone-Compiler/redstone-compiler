@@ -13,7 +13,8 @@ use crate::transform::place_and_route::local_placer::{
     D_LATCH_SET_NODE_ID, D_LATCH_SET_NOT_EN_NODE_ID, D_LATCH_SET_OR_NODE_ID,
 };
 use crate::transform::place_and_route::utils::{
-    equivalent_logic_with_world3d, equivalent_logic_with_world3ds, world3d_to_logic,
+    contains_truth_table_with_world3ds, equivalent_logic_with_world3d,
+    equivalent_logic_with_world3ds, world3d_to_logic,
 };
 use crate::world::block::{Block, BlockKind, Direction};
 use crate::world::position::{DimSize, Position};
@@ -598,15 +599,35 @@ fn test_generate_component_full_adder() -> eyre::Result<()> {
     };
 
     let fa_graph = predefined_logics::buffered_full_adder_graph()?;
+    let expected_graph = predefined_logics::full_adder_graph()?;
     println!("{}", fa_graph.to_graphviz());
-    let placer = LocalPlacer::new(fa_graph, config)?;
+    let placer = LocalPlacer::new(fa_graph.clone(), config)?;
     let worlds = placer.generate(DimSize(10, 10, 5), None);
 
-    let sampled_worlds = SamplingPolicy::Random(1).sample(worlds);
-    let sample_logic = world3d_to_logic(&sampled_worlds[0])?.prepare_place()?;
+    let generated_count = worlds.len();
+    let mut valid_worlds = Vec::new();
+    for world in worlds {
+        if contains_truth_table_with_world3ds(&expected_graph, std::slice::from_ref(&world))? {
+            valid_worlds.push(world);
+        }
+    }
+    println!(
+        "full adder candidates: generated={generated_count}, valid={}",
+        valid_worlds.len()
+    );
+    eyre::ensure!(
+        !valid_worlds.is_empty(),
+        "expected at least one generated full adder candidate to match the truth table"
+    );
+
+    let world = valid_worlds
+        .into_iter()
+        .min_by_key(world_compact_cost)
+        .unwrap();
+    let sample_logic = world3d_to_logic(&world)?.prepare_place()?;
     println!("{}", sample_logic.to_graphviz());
 
-    save_worlds_to_nbt(sampled_worlds, "test/full-adder.nbt")?;
+    save_worlds_to_nbt(vec![world], "test/full-adder.nbt")?;
 
     Ok(())
 }

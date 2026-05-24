@@ -18,10 +18,16 @@
     "size": 292
   },
   {
+    "name": "d-latch.nbt",
+    "file": "d-latch.nbt",
+    "path": "examples/d-latch.nbt",
+    "size": 562
+  },
+  {
     "name": "full-adder.nbt",
     "file": "full-adder.nbt",
     "path": "examples/full-adder.nbt",
-    "size": 636
+    "size": 508
   },
   {
     "name": "half-adder-generated.nbt",

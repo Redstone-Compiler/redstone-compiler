@@ -660,6 +660,21 @@ fn has_connection_with_requires_world_after_cobble_placement() {
 }
 
 #[test]
+fn redstone_below_switch_powered_cobble_is_short() {
+    let mut world = empty_world();
+    let switch_pos = Position(0, 2, 2);
+    let cobble_pos = Position(1, 2, 2);
+    let redstone_pos = Position(1, 2, 1);
+
+    place_node(&mut world, PlacedNode::new(switch_pos, switch(Direction::East)));
+    place_node(&mut world, PlacedNode::new_cobble(cobble_pos));
+
+    let redstone_node = PlacedNode::new_redstone(redstone_pos);
+
+    assert!(redstone_node.has_short(&world, &Default::default()));
+}
+
+#[test]
 fn generate_or_routes_finds_adjacent_torch_route() {
     let mut world = empty_world();
     let from = Position(1, 1, 1);

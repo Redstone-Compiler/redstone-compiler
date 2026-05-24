@@ -276,7 +276,7 @@ impl PlaceBound {
                         }
                     }
                     BlockKind::Switch { .. } => {
-                        if dir.is_cardinal() && world[pos].direction == dir {
+                        if dir.is_cardinal() && world[pos].direction == dir.inverse() {
                             result.push(Self(PropagateType::Hard, pos, dir.inverse()));
                         }
                     }
