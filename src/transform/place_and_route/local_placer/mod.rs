@@ -18,7 +18,6 @@ use crate::transform::place_and_route::estimate::{bounding_box_of_positions, wor
 use crate::transform::place_and_route::place_bound::PropagateType;
 use crate::world::block::{Block, BlockKind, Direction};
 use crate::world::position::{DimSize, Position};
-use crate::world::simulator::Simulator;
 use crate::world::World3D;
 
 mod config;
