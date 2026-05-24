@@ -55,21 +55,12 @@ pub fn equivalent_logic_with_world3ds(
     Ok(checks.into_iter().all(|x| x))
 }
 
-pub fn contains_truth_table_with_world3d(
-    expected: &LogicGraph,
-    generated: &World3D,
-) -> eyre::Result<bool> {
-    let expected = expected.truth_table()?;
-    let generated = world3d_to_logic(generated)?.truth_table()?;
-    Ok(generated.contains_output_tables(&expected))
-}
-
 pub fn contains_truth_table_with_world3ds(
     expected: &LogicGraph,
-    generates: &Vec<World3D>,
+    generated: &[World3D],
 ) -> eyre::Result<bool> {
     let expected = expected.truth_table()?;
-    let checks = generates
+    let checks = generated
         .par_iter()
         .map(|generated| {
             let generated = world3d_to_logic(generated)?.truth_table()?;
