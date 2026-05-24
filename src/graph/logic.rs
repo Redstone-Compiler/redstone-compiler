@@ -1,6 +1,4 @@
-use std::collections::{HashMap, HashSet};
-
-use itertools::Itertools;
+use std::collections::HashMap;
 
 use super::Graph;
 use crate::graph::{GraphNode, GraphNodeId, GraphNodeKind};
@@ -30,45 +28,6 @@ impl LogicGraph {
     pub fn truth_table(&self) -> eyre::Result<LogicTruthTable> {
         LogicTruthTable::from_graph(self)
     }
-
-    pub fn externally_observable_output_source_ids(&self) -> HashSet<GraphNodeId> {
-        self.nodes
-            .iter()
-            .filter_map(|node| match &node.kind {
-                GraphNodeKind::Output(_) => {
-                    let producer = self.find_node_by_id(node.inputs[0])?;
-                    let has_internal_consumers = producer.outputs.iter().any(|output| {
-                        self.find_node_by_id(*output)
-                            .is_some_and(|node| !matches!(node.kind, GraphNodeKind::Output(_)))
-                    });
-                    (!has_internal_consumers).then_some(producer.id)
-                }
-                _ => None,
-            })
-            .collect()
-    }
-
-    pub fn externally_observable_truth_table(&self) -> eyre::Result<LogicTruthTable> {
-        let table = self.truth_table()?;
-        let output_source_ids = self.externally_observable_output_source_ids();
-        let mut output_names = self
-            .nodes
-            .iter()
-            .filter_map(|node| match &node.kind {
-                GraphNodeKind::Output(name) => output_source_ids
-                    .contains(&node.inputs[0])
-                    .then_some(name.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-
-        if output_names.is_empty() {
-            return Ok(table);
-        }
-
-        output_names.sort();
-        table.select_outputs(&output_names)
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,14 +56,6 @@ impl LogicTruthTable {
                 _ => None,
             })
             .collect::<Vec<_>>();
-
-        if outputs.is_empty() {
-            outputs = graph
-                .outputs()
-                .into_iter()
-                .map(|node_id| (node_id, format!("#{node_id}")))
-                .collect();
-        }
         outputs.sort_by(|(_, a), (_, b)| a.cmp(b));
 
         let mut output_tables = outputs
@@ -158,71 +109,12 @@ impl LogicTruthTable {
         self.output_tables.values().cloned().collect()
     }
 
-    pub fn select_outputs(&self, output_names: &[&str]) -> eyre::Result<Self> {
-        let mut output_tables = HashMap::new();
-        for output_name in output_names {
-            let Some(output_table) = self.output_tables.get(*output_name) else {
-                eyre::bail!("missing output truth table: {output_name}");
-            };
-            output_tables.insert((*output_name).to_owned(), output_table.clone());
-        }
-
-        Ok(Self {
-            input_names: self.input_names.clone(),
-            output_tables,
-        })
-    }
-
     pub fn contains_output_tables(&self, expected: &LogicTruthTable) -> bool {
         self.input_names.len() == expected.input_names.len()
             && self
                 .output_table_set()
                 .is_superset(&expected.output_table_set())
     }
-
-    pub fn contains_output_tables_under_input_permutation(
-        &self,
-        expected: &LogicTruthTable,
-    ) -> bool {
-        if self.input_names.len() != expected.input_names.len() {
-            return false;
-        }
-
-        let input_count = self.input_names.len();
-        let actual = self.output_table_set();
-        (0..input_count)
-            .permutations(input_count)
-            .any(|permutation| {
-                actual.is_superset(&permuted_output_table_set(expected, &permutation))
-            })
-    }
-}
-
-fn permuted_output_table_set(
-    table: &LogicTruthTable,
-    generated_to_expected_input: &[usize],
-) -> HashSet<Vec<bool>> {
-    table
-        .output_tables
-        .values()
-        .map(|output_table| {
-            (0..output_table.len())
-                .map(|generated_mask| {
-                    let expected_mask = generated_to_expected_input.iter().enumerate().fold(
-                        0usize,
-                        |mask, (generated_index, expected_index)| {
-                            if generated_mask & (1 << generated_index) != 0 {
-                                mask | (1 << expected_index)
-                            } else {
-                                mask
-                            }
-                        },
-                    );
-                    output_table[expected_mask]
-                })
-                .collect()
-        })
-        .collect()
 }
 
 #[derive(Default)]
@@ -553,55 +445,6 @@ mod tests {
     }
 
     #[test]
-    fn truth_table_can_select_named_outputs() -> eyre::Result<()> {
-        let table = super::predefined_logics::buffered_full_adder_graph()?.truth_table()?;
-        let selected = table.select_outputs(&["s", "cout"])?;
-
-        assert_eq!(
-            selected
-                .output_tables
-                .keys()
-                .map(String::as_str)
-                .sorted()
-                .collect::<Vec<_>>(),
-            vec!["cout", "s"]
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn externally_observable_truth_table_ignores_internal_named_outputs() -> eyre::Result<()> {
-        let table = super::predefined_logics::buffered_full_adder_graph()?
-            .externally_observable_truth_table()?;
-
-        assert_eq!(
-            table
-                .output_tables
-                .keys()
-                .map(String::as_str)
-                .sorted()
-                .collect::<Vec<_>>(),
-            vec!["cout", "s"]
-        );
-
-        let table = super::predefined_logics::buffered_half_adder_graph()?
-            .externally_observable_truth_table()?;
-
-        assert_eq!(
-            table
-                .output_tables
-                .keys()
-                .map(String::as_str)
-                .sorted()
-                .collect::<Vec<_>>(),
-            vec!["s"]
-        );
-
-        Ok(())
-    }
-
-    #[test]
     fn truth_table_can_check_required_output_tables() -> eyre::Result<()> {
         let graph = super::predefined_logics::buffered_xor_graph()?;
         let required = LogicGraph::from_stmt("a^b", "s")?;
@@ -609,49 +452,6 @@ mod tests {
         assert!(graph
             .truth_table()?
             .contains_output_tables(&required.truth_table()?));
-
-        Ok(())
-    }
-
-    #[test]
-    fn truth_table_can_compare_outputs_under_input_permutation() -> eyre::Result<()> {
-        let mut expected = LogicGraph::from_stmt("a|cin", "y")?;
-        expected
-            .graph
-            .merge(LogicGraph::from_stmt("a|b", "x")?.graph);
-        let generated = {
-            let mut graph = LogicGraph::from_stmt("b|cin", "y")?;
-            graph.graph.merge(LogicGraph::from_stmt("b|a", "x")?.graph);
-            graph
-        };
-
-        assert!(generated
-            .truth_table()?
-            .contains_output_tables_under_input_permutation(&expected.truth_table()?));
-
-        Ok(())
-    }
-
-    #[test]
-    fn truth_table_uses_sink_nodes_when_graph_has_no_explicit_outputs() -> eyre::Result<()> {
-        let mut graph = LogicGraph::from_stmt("a^b", "s")?;
-        let output = graph
-            .nodes
-            .iter()
-            .find(|node| matches!(node.kind, crate::graph::GraphNodeKind::Output(_)))
-            .unwrap()
-            .id;
-        graph.graph.remove_and_reconnect_by_node_id_lazy(output);
-        graph.graph.build_outputs();
-        graph.graph.build_producers();
-        graph.graph.build_consumers();
-
-        let table = graph.truth_table()?;
-
-        assert_eq!(
-            table.output_table_set().into_iter().collect_vec(),
-            vec![vec![false, true, true, false],]
-        );
 
         Ok(())
     }

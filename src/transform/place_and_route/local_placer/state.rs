@@ -13,7 +13,6 @@ pub(super) enum PlacementEndpoint {
 #[derive(Debug, Clone, Default)]
 pub(super) struct PlacementState {
     positions: HashMap<PlacementEndpoint, Position>,
-    signal_footprints: HashMap<GraphNodeId, HashSet<Position>>,
 }
 
 impl PlacementState {
@@ -35,8 +34,6 @@ impl PlacementState {
                 node_ids.contains(node_id)
             }
         });
-        self.signal_footprints
-            .retain(|node_id, _| node_ids.contains(node_id));
     }
 
     pub(super) fn endpoint_positions(&self) -> Vec<(PlacementEndpoint, Position)> {
@@ -47,31 +44,6 @@ impl PlacementState {
             .collect::<Vec<_>>();
         positions.sort();
         positions
-    }
-
-    pub(super) fn signal_footprints(&self) -> Vec<(GraphNodeId, Vec<Position>)> {
-        let mut footprints = self
-            .signal_footprints
-            .iter()
-            .map(|(node_id, positions)| {
-                let mut positions = positions.iter().copied().collect::<Vec<_>>();
-                positions.sort();
-                (*node_id, positions)
-            })
-            .collect::<Vec<_>>();
-        footprints.sort();
-        footprints
-    }
-
-    pub(super) fn signal_positions_for_nodes(
-        &self,
-        node_ids: &HashSet<GraphNodeId>,
-    ) -> HashSet<Position> {
-        self.signal_footprints
-            .iter()
-            .filter(|(node_id, _)| node_ids.contains(node_id))
-            .flat_map(|(_, positions)| positions.iter().copied())
-            .collect()
     }
 
     #[allow(dead_code)]
@@ -94,15 +66,6 @@ impl PlacementState {
     ) {
         self.positions
             .insert(PlacementEndpoint::Port(node_id, port), position);
-    }
-
-    pub(super) fn set_signal_footprint(
-        &mut self,
-        node_id: GraphNodeId,
-        positions: impl IntoIterator<Item = Position>,
-    ) {
-        self.signal_footprints
-            .insert(node_id, positions.into_iter().collect());
     }
 }
 

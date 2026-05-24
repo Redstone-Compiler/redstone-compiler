@@ -161,7 +161,7 @@ fn compact_queue_keeps_positions_needed_by_future_logic() -> eyre::Result<()> {
 }
 
 #[test]
-fn compact_queue_keeps_externally_observable_output_sources() -> eyre::Result<()> {
+fn compact_queue_drops_positions_used_only_by_outputs() -> eyre::Result<()> {
     let graph = LogicGraph::from_stmt("a|b", "c")?.prepare_place()?;
     let placer = LocalPlacer::new(graph.clone(), config(1))?;
     let or_id = graph
@@ -188,7 +188,7 @@ fn compact_queue_keeps_externally_observable_output_sources() -> eyre::Result<()
 
     let compacted = placer.compact_queue_after_step(or_step, queue);
 
-    assert_eq!(compacted.len(), 2);
+    assert_eq!(compacted.len(), 1);
     Ok(())
 }
 
