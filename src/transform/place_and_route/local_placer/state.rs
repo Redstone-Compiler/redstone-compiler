@@ -13,7 +13,13 @@ pub(super) enum PlacementEndpoint {
 #[derive(Debug, Clone, Default)]
 pub(super) struct PlacementState {
     positions: HashMap<PlacementEndpoint, Position>,
-    signal_footprints: HashMap<GraphNodeId, HashSet<Position>>,
+    signal_nets: HashMap<GraphNodeId, SignalNet>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(super) struct SignalNet {
+    pub(super) footprint: HashSet<Position>,
+    pub(super) sources: HashSet<Position>,
 }
 
 impl PlacementState {
@@ -35,7 +41,7 @@ impl PlacementState {
                 node_ids.contains(node_id)
             }
         });
-        self.signal_footprints
+        self.signal_nets
             .retain(|node_id, _| node_ids.contains(node_id));
     }
 
@@ -51,10 +57,10 @@ impl PlacementState {
 
     pub(super) fn signal_footprints(&self) -> Vec<(GraphNodeId, Vec<Position>)> {
         let mut footprints = self
-            .signal_footprints
+            .signal_nets
             .iter()
-            .map(|(node_id, positions)| {
-                let mut positions = positions.iter().copied().collect::<Vec<_>>();
+            .map(|(node_id, net)| {
+                let mut positions = net.footprint.iter().copied().collect::<Vec<_>>();
                 positions.sort();
                 (*node_id, positions)
             })
@@ -67,10 +73,31 @@ impl PlacementState {
         &self,
         node_ids: &HashSet<GraphNodeId>,
     ) -> HashSet<Position> {
-        self.signal_footprints
+        self.signal_nets
             .iter()
             .filter(|(node_id, _)| node_ids.contains(node_id))
-            .flat_map(|(_, positions)| positions.iter().copied())
+            .flat_map(|(_, net)| net.footprint.iter().copied())
+            .collect()
+    }
+
+    pub(super) fn signal_nets(&self) -> Vec<(GraphNodeId, SignalNet)> {
+        let mut nets = self
+            .signal_nets
+            .iter()
+            .map(|(node_id, net)| (*node_id, net.clone()))
+            .collect::<Vec<_>>();
+        nets.sort_by_key(|(node_id, _)| *node_id);
+        nets
+    }
+
+    pub(super) fn signal_sources_for_nodes(
+        &self,
+        node_ids: &HashSet<GraphNodeId>,
+    ) -> HashSet<Position> {
+        self.signal_nets
+            .iter()
+            .filter(|(node_id, _)| node_ids.contains(node_id))
+            .flat_map(|(_, net)| net.sources.iter().copied())
             .collect()
     }
 
@@ -96,13 +123,19 @@ impl PlacementState {
             .insert(PlacementEndpoint::Port(node_id, port), position);
     }
 
-    pub(super) fn set_signal_footprint(
+    pub(super) fn set_signal_net(
         &mut self,
         node_id: GraphNodeId,
-        positions: impl IntoIterator<Item = Position>,
+        footprint: impl IntoIterator<Item = Position>,
+        sources: impl IntoIterator<Item = Position>,
     ) {
-        self.signal_footprints
-            .insert(node_id, positions.into_iter().collect());
+        self.signal_nets.insert(
+            node_id,
+            SignalNet {
+                footprint: footprint.into_iter().collect(),
+                sources: sources.into_iter().collect(),
+            },
+        );
     }
 }
 
@@ -111,6 +144,7 @@ impl FromIterator<(GraphNodeId, Position)> for PlacementState {
         let mut state = PlacementState::default();
         for (node_id, position) in iter {
             state.set_node_position(node_id, position);
+            state.set_signal_net(node_id, [position], [position]);
         }
         state
     }

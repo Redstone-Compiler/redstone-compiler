@@ -1,3 +1,4 @@
+use super::state::SignalNet;
 use super::*;
 
 pub(super) fn input_node_kind() -> Vec<BlockKind> {
@@ -536,6 +537,16 @@ pub(super) fn generate_or_routes(
     from: Position,
     to: Position,
 ) -> RouteResult {
+    generate_or_routes_with_signal_nets(config, world, from, to, &[])
+}
+
+pub(super) fn generate_or_routes_with_signal_nets(
+    config: &LocalPlacerConfig,
+    world: &World3D,
+    from: Position,
+    to: Position,
+    signal_nets: &[(GraphNodeId, SignalNet)],
+) -> RouteResult {
     let (mut queue, mut debug) = generate_or_routes_init_states(world, from, to);
     let goal = RouteGoal::ConnectPosition { target: to };
     debug.route_calls = 1;
@@ -582,7 +593,7 @@ pub(super) fn generate_or_routes(
 
                 if goal.accepts_redstone(&new_world, &new_prevs, redstone_node.position) {
                     depth_debug.accepted_routes += 1;
-                    candidates.push(OrRoute::new(new_world, new_prevs));
+                    candidates.push(OrRoute::new(new_world, new_prevs, signal_nets));
                 } else {
                     let nexts = redstone_node.propagation_bound(Some(&new_world));
                     next_queue.push((new_world, new_prevs, nexts));
@@ -616,16 +627,49 @@ pub(super) struct OrRoute {
     pub(super) world: World3D,
     pub(super) path: Vec<Position>,
     pub(super) footprint: RouteFootprint,
+    pub(super) impact: RouteImpact,
 }
 
 impl OrRoute {
-    fn new(world: World3D, path: Vec<Position>) -> Self {
+    fn new(world: World3D, path: Vec<Position>, signal_nets: &[(GraphNodeId, SignalNet)]) -> Self {
         let footprint = RouteFootprint::from_path(&world, &path);
+        let impact = RouteImpact::from_footprint(&world, &footprint, signal_nets);
         Self {
             world,
             path,
             footprint,
+            impact,
         }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct RouteImpact {
+    pub(super) touched_net_ids: HashSet<GraphNodeId>,
+    pub(super) touched_sources: HashSet<Position>,
+}
+
+impl RouteImpact {
+    pub(super) fn has_sources_outside(&self, allowed_sources: &HashSet<Position>) -> bool {
+        self.touched_sources
+            .iter()
+            .any(|source| !allowed_sources.contains(source))
+    }
+
+    fn from_footprint(
+        world: &World3D,
+        footprint: &RouteFootprint,
+        signal_nets: &[(GraphNodeId, SignalNet)],
+    ) -> Self {
+        let route_positions = footprint.contact_positions(world).collect::<HashSet<_>>();
+        let mut impact = Self::default();
+        for (node_id, net) in signal_nets {
+            if !route_positions.is_disjoint(&net.footprint) {
+                impact.touched_net_ids.insert(*node_id);
+                impact.touched_sources.extend(net.sources.iter().copied());
+            }
+        }
+        impact
     }
 }
 
@@ -644,6 +688,45 @@ pub(super) struct RouteFootprint {
 }
 
 impl RouteFootprint {
+    pub(super) fn positions(&self) -> impl Iterator<Item = Position> + '_ {
+        self.source_side
+            .iter()
+            .copied()
+            .chain([self.terminal])
+            .chain(self.terminal_support)
+            .chain(self.placed_redstone.iter().copied())
+            .chain(self.placed_supports.iter().copied())
+    }
+
+    fn contact_positions<'a>(&'a self, world: &'a World3D) -> impl Iterator<Item = Position> + 'a {
+        let redstone_contacts = self
+            .placed_redstone
+            .iter()
+            .flat_map(|position| {
+                position
+                    .cardinal()
+                    .into_iter()
+                    .chain([position.up()])
+                    .chain(position.down())
+            })
+            .filter(|position| world.size.bound_on(*position));
+        let support_contacts = self
+            .placed_supports
+            .iter()
+            .flat_map(|position| {
+                position
+                    .cardinal()
+                    .into_iter()
+                    .chain([position.up()])
+                    .chain(position.down())
+            })
+            .filter(|position| world.size.bound_on(*position));
+
+        self.positions()
+            .chain(redstone_contacts)
+            .chain(support_contacts)
+    }
+
     fn from_path(world: &World3D, path: &[Position]) -> Self {
         let terminal = path.last().copied().unwrap();
         let source_side = path[..path.len().saturating_sub(1)].to_vec();
