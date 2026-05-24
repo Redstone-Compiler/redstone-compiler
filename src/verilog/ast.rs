@@ -4,6 +4,7 @@ pub struct VerilogModule {
     pub ports: Vec<String>,
     pub declarations: Vec<Declaration>,
     pub assignments: Vec<Assignment>,
+    pub instances: Vec<Instance>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +31,13 @@ pub enum PortDirection {
 pub struct Assignment {
     pub output: String,
     pub expr: Expr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Instance {
+    pub module_name: String,
+    pub instance_name: String,
+    pub connections: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

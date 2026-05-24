@@ -1,10 +1,18 @@
 use crate::verilog::ast::{
-    Assignment, BinaryOp, Declaration, Expr, PortDirection, Range, VerilogModule,
+    Assignment, BinaryOp, Declaration, Expr, Instance, PortDirection, Range, VerilogModule,
 };
 use crate::verilog::lexer::{lex, Token};
 
 pub fn parse_module(source: &str) -> eyre::Result<VerilogModule> {
-    Parser::new(lex(source)?).parse_module()
+    let mut modules = parse_modules(source)?;
+    if modules.len() != 1 {
+        eyre::bail!("expected exactly one module, got {}", modules.len());
+    }
+    Ok(modules.remove(0))
+}
+
+pub fn parse_modules(source: &str) -> eyre::Result<Vec<VerilogModule>> {
+    Parser::new(lex(source)?).parse_modules()
 }
 
 struct Parser {
@@ -17,7 +25,15 @@ impl Parser {
         Self { tokens, index: 0 }
     }
 
-    fn parse_module(&mut self) -> eyre::Result<VerilogModule> {
+    fn parse_modules(&mut self) -> eyre::Result<Vec<VerilogModule>> {
+        let mut modules = Vec::new();
+        while self.peek().is_some() {
+            modules.push(self.parse_one_module()?);
+        }
+        Ok(modules)
+    }
+
+    fn parse_one_module(&mut self) -> eyre::Result<VerilogModule> {
         self.expect(Token::Module)?;
         let name = self.expect_ident()?;
         self.expect(Token::LParen)?;
@@ -27,12 +43,14 @@ impl Parser {
 
         let mut declarations = Vec::new();
         let mut assignments = Vec::new();
+        let mut instances = Vec::new();
         while !self.consume(&Token::EndModule) {
             match self.peek() {
                 Some(Token::Input) | Some(Token::Output) | Some(Token::Wire) => {
                     declarations.push(self.parse_declaration()?);
                 }
                 Some(Token::Assign) => assignments.push(self.parse_assignment()?),
+                Some(Token::Ident(_)) => instances.push(self.parse_instance()?),
                 Some(Token::Always) => eyre::bail!("unsupported Verilog construct: always block"),
                 Some(token) => eyre::bail!("unsupported Verilog token in module body: {token:?}"),
                 None => eyre::bail!("expected endmodule"),
@@ -44,6 +62,7 @@ impl Parser {
             ports,
             declarations,
             assignments,
+            instances,
         })
     }
 
@@ -74,6 +93,41 @@ impl Parser {
         self.expect(Token::Semi)?;
 
         Ok(Assignment { output, expr })
+    }
+
+    fn parse_instance(&mut self) -> eyre::Result<Instance> {
+        let module_name = self.expect_ident()?;
+        let instance_name = self.expect_ident()?;
+        self.expect(Token::LParen)?;
+        let connections = self.parse_named_connections()?;
+        self.expect(Token::RParen)?;
+        self.expect(Token::Semi)?;
+
+        Ok(Instance {
+            module_name,
+            instance_name,
+            connections,
+        })
+    }
+
+    fn parse_named_connections(&mut self) -> eyre::Result<Vec<(String, String)>> {
+        let mut connections = vec![self.parse_named_connection()?];
+        while self.consume(&Token::Comma) {
+            connections.push(self.parse_named_connection()?);
+        }
+        Ok(connections)
+    }
+
+    fn parse_named_connection(&mut self) -> eyre::Result<(String, String)> {
+        if !self.consume(&Token::Dot) {
+            eyre::bail!("unsupported Verilog construct: positional instance ports");
+        }
+        let port = self.expect_ident()?;
+        self.expect(Token::LParen)?;
+        let signal = self.parse_signal_name()?;
+        self.expect(Token::RParen)?;
+
+        Ok((port, signal))
     }
 
     fn parse_expr(&mut self) -> eyre::Result<Expr> {
@@ -130,12 +184,7 @@ impl Parser {
     fn parse_primary(&mut self) -> eyre::Result<Expr> {
         match self.next() {
             Some(Token::Ident(name)) => {
-                if self.consume(&Token::LBracket) {
-                    let index = self.expect_number()?;
-                    self.expect(Token::RBracket)?;
-                    return Ok(Expr::Ident(format!("{name}_{index}")));
-                }
-
+                let name = self.finish_signal_name(name)?;
                 Ok(Expr::Ident(name))
             }
             Some(Token::LParen) => {
@@ -154,6 +203,21 @@ impl Parser {
             names.push(self.expect_ident()?);
         }
         Ok(names)
+    }
+
+    fn parse_signal_name(&mut self) -> eyre::Result<String> {
+        let name = self.expect_ident()?;
+        self.finish_signal_name(name)
+    }
+
+    fn finish_signal_name(&mut self, name: String) -> eyre::Result<String> {
+        if self.consume(&Token::LBracket) {
+            let index = self.expect_number()?;
+            self.expect(Token::RBracket)?;
+            return Ok(format!("{name}_{index}"));
+        }
+
+        Ok(name)
     }
 
     fn parse_optional_range(&mut self) -> eyre::Result<Option<Range>> {

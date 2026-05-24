@@ -10,8 +10,8 @@ use crate::graph::logic::LogicGraph;
 
 pub fn load_logic_graph(path: impl AsRef<Path>) -> eyre::Result<LogicGraph> {
     let source = fs::read_to_string(path)?;
-    let module = parser::parse_module(&source)?;
-    lower::lower_module(&module)
+    let modules = parser::parse_modules(&source)?;
+    lower::lower_modules(&modules)
 }
 
 #[cfg(test)]
