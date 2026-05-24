@@ -1,6 +1,6 @@
 use crate::graph::analysis::equivalent_expression_groups;
 use crate::graph::graphviz::ToGraphvizGraph;
-use crate::graph::logic::predefined_logics;
+use crate::graph::logic::{predefined_logics, LogicGraph, LogicTruthTable};
 use crate::graph::{GraphNode, GraphNodeKind};
 use crate::nbt::{NBTRoot, ToNBT};
 use crate::sequential::{SequentialPrimitive, SequentialType};
@@ -42,6 +42,7 @@ fn test_generate_component_and_shortest() -> eyre::Result<()> {
     let placer = LocalPlacer::new(logic_graph.clone(), config)?;
     let worlds = placer.generate(DimSize(10, 10, 5), None);
     assert!(!worlds.is_empty());
+    assert_worlds_contain_truth_table("and", &logic_graph, &worlds)?;
     assert!(equivalent_logic_with_world3ds(&logic_graph, &worlds)?);
     Ok(())
 }
@@ -51,6 +52,72 @@ fn save_worlds_to_nbt(worlds: Vec<World3D>, path: &str) -> eyre::Result<()> {
     let nbt: NBTRoot = concated_world.to_nbt();
     nbt.save(path);
     Ok(())
+}
+
+fn assert_worlds_contain_truth_table(
+    label: &str,
+    expected: &LogicGraph,
+    worlds: &[World3D],
+) -> eyre::Result<()> {
+    let expected = expected.externally_observable_truth_table()?;
+    assert_worlds_contain_expected_truth_table(label, &expected, worlds)
+}
+
+fn assert_worlds_contain_expected_truth_table(
+    label: &str,
+    expected: &LogicTruthTable,
+    worlds: &[World3D],
+) -> eyre::Result<()> {
+    eyre::ensure!(!worlds.is_empty(), "{label}: no candidates generated");
+
+    let mut failed = Vec::new();
+
+    for (index, world) in worlds.iter().enumerate() {
+        let logic = world3d_to_logic(world)?;
+        let generated = logic.truth_table()?;
+        if !generated.contains_output_tables_under_input_permutation(expected) {
+            if failed.is_empty() {
+                eprintln!("first truth-table failure logic graph:");
+                eprintln!("{}", logic.to_graphviz());
+                for node in &logic.nodes {
+                    eprintln!("{node}");
+                }
+            }
+            failed.push(format!(
+                "#{index}: inputs={:?}, nodes={}, expected=[{}], generated=[{}]",
+                generated.input_names,
+                logic.nodes.len(),
+                truth_table_summary(&expected),
+                truth_table_summary(&generated)
+            ));
+        }
+    }
+
+    eyre::ensure!(
+        failed.is_empty(),
+        "{label}: {} of {} candidates failed truth-table check\n{}",
+        failed.len(),
+        worlds.len(),
+        failed.into_iter().take(5).collect::<Vec<_>>().join("\n")
+    );
+
+    Ok(())
+}
+
+fn truth_table_summary(table: &LogicTruthTable) -> String {
+    let mut outputs = table.output_tables.iter().collect::<Vec<_>>();
+    outputs.sort_by(|(left, _), (right, _)| left.cmp(right));
+    outputs
+        .into_iter()
+        .map(|(name, values)| {
+            let values = values
+                .iter()
+                .map(|value| if *value { '1' } else { '0' })
+                .collect::<String>();
+            format!("{name}:{values}")
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn torch_is_on(world: &World3D, position: Position) -> bool {
@@ -524,6 +591,7 @@ fn test_generate_component_xor_shortest() -> eyre::Result<()> {
     let worlds = placer.generate(DimSize(10, 10, 5), None);
 
     let sampled_worlds = SamplingPolicy::Random(100).sample(worlds);
+    assert_worlds_contain_truth_table("xor shortest", &xor_graph, &sampled_worlds)?;
     let sample_logic = world3d_to_logic(&sampled_worlds[0])?.prepare_place()?;
     println!("{}", sample_logic.to_graphviz());
 
@@ -568,10 +636,47 @@ fn test_generate_component_half_adder() -> eyre::Result<()> {
     let worlds = placer.generate(DimSize(10, 10, 5), None);
 
     let sampled_worlds = SamplingPolicy::Random(100).sample(worlds);
+    assert_worlds_contain_truth_table(
+        "half adder",
+        &predefined_logics::buffered_half_adder_graph()?,
+        &sampled_worlds,
+    )?;
     let sample_logic = world3d_to_logic(&sampled_worlds[0])?.prepare_place()?;
     println!("{}", sample_logic.to_graphviz());
 
     save_worlds_to_nbt(sampled_worlds, "test/half-adder.nbt")?;
+
+    Ok(())
+}
+
+#[test]
+fn test_generate_component_two_output_or_truth_table() -> eyre::Result<()> {
+    let config = LocalPlacerConfig {
+        random_seed: 42,
+        greedy_input_generation: true,
+        input_placement_strategy: InputPlacementStrategy::Boundary,
+        input_candidate_limit: Some(25),
+        step_sampling_policy: SamplingPolicy::None,
+        placement_sampling_policy: LocalPlacerConfig::ranked_sampling(2000, 500, 0),
+        leak_sampling: false,
+        route_torch_directly: true,
+        torch_placement_strategy: TorchPlacementStrategy::DirectOnly,
+        not_route_strategy: NotRouteStrategy::DirectOnly,
+        max_not_route_step: 0,
+        not_route_step_sampling_policy: SamplingPolicy::Random(10),
+        max_route_step: 4,
+        route_step_sampling_policy: SamplingPolicy::Random(10),
+    };
+
+    let mut graph = LogicGraph::from_stmt("a|b", "x")?;
+    graph
+        .graph
+        .merge(LogicGraph::from_stmt("a|cin", "y")?.graph);
+    let graph = graph.prepare_place()?;
+    let placer = LocalPlacer::new(graph.clone(), config)?;
+    let worlds = placer.generate(DimSize(10, 10, 5), None);
+
+    assert_worlds_contain_truth_table("two output or", &graph, &worlds)?;
 
     Ok(())
 }
@@ -599,8 +704,24 @@ fn test_generate_component_full_adder() -> eyre::Result<()> {
 
     let fa_graph = predefined_logics::buffered_full_adder_graph()?;
     println!("{}", fa_graph.to_graphviz());
-    let placer = LocalPlacer::new(fa_graph, config)?;
-    let worlds = placer.generate(DimSize(10, 10, 5), None);
+    let placer = LocalPlacer::new(fa_graph.clone(), config)?;
+    let mut debug = LocalPlacerDebug::default();
+    let worlds = placer.generate_with_debug(DimSize(10, 10, 5), None, &mut debug);
+    if worlds.is_empty() {
+        debug.print_summary();
+        if let Some(step) = debug.first_empty_step() {
+            println!(
+                "first empty step: step={} node={} kind={} inputs={:?} input_positions={:?}",
+                step.step + 1,
+                step.node_id,
+                step.node_kind,
+                step.input_node_ids,
+                step.input_positions,
+            );
+        }
+    }
+    let expected = fa_graph.externally_observable_truth_table()?;
+    assert_worlds_contain_expected_truth_table("full adder", &expected, &worlds)?;
 
     let sampled_worlds = SamplingPolicy::Random(1).sample(worlds);
     let sample_logic = world3d_to_logic(&sampled_worlds[0])?.prepare_place()?;
