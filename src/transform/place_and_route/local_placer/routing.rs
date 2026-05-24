@@ -1,4 +1,4 @@
-﻿use super::state::SignalNet;
+use super::state::SignalNet;
 use super::*;
 
 pub(super) fn input_node_kind() -> Vec<BlockKind> {
@@ -547,21 +547,8 @@ pub(super) fn generate_or_routes_with_signal_nets(
     to: Position,
     signal_nets: &[(GraphNodeId, SignalNet)],
 ) -> RouteResult {
-    generate_or_routes_with_boundaries(config, world, from, to, signal_nets, &[], signal_nets)
-}
-
-pub(super) fn generate_or_routes_with_boundaries(
-    config: &LocalPlacerConfig,
-    world: &World3D,
-    from: Position,
-    to: Position,
-    route_signal_nets: &[(GraphNodeId, SignalNet)],
-    protected_signal_nets: &[(GraphNodeId, SignalNet)],
-    source_signal_nets: &[(GraphNodeId, SignalNet)],
-) -> RouteResult {
     let (mut queue, mut debug) = generate_or_routes_init_states(world, from, to);
     let goal = RouteGoal::ConnectPosition { target: to };
-    let protected_boundaries = protected_signal_boundaries(world, protected_signal_nets);
     debug.route_calls = 1;
     debug.route_samples.push((from, to));
     debug.initial_states = queue.len();
@@ -606,13 +593,7 @@ pub(super) fn generate_or_routes_with_boundaries(
 
                 if goal.accepts_redstone(&new_world, &new_prevs, redstone_node.position) {
                     depth_debug.accepted_routes += 1;
-                    candidates.push(OrRoute::new(
-                        new_world,
-                        new_prevs,
-                        route_signal_nets,
-                        &protected_boundaries,
-                        source_signal_nets,
-                    ));
+                    candidates.push(OrRoute::new(new_world, new_prevs, signal_nets));
                 } else {
                     let nexts = redstone_node.propagation_bound(Some(&new_world));
                     next_queue.push((new_world, new_prevs, nexts));
@@ -644,28 +625,15 @@ pub(super) struct RouteResult {
 #[derive(Clone)]
 pub(super) struct OrRoute {
     pub(super) world: World3D,
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) path: Vec<Position>,
     pub(super) footprint: RouteFootprint,
     pub(super) impact: RouteImpact,
 }
 
 impl OrRoute {
-    fn new(
-        world: World3D,
-        path: Vec<Position>,
-        signal_nets: &[(GraphNodeId, SignalNet)],
-        protected_boundaries: &[SignalBoundary],
-        source_signal_nets: &[(GraphNodeId, SignalNet)],
-    ) -> Self {
+    fn new(world: World3D, path: Vec<Position>, signal_nets: &[(GraphNodeId, SignalNet)]) -> Self {
         let footprint = RouteFootprint::from_path(&world, &path);
-        let impact = RouteImpact::from_footprint(
-            &world,
-            &footprint,
-            signal_nets,
-            protected_boundaries,
-            source_signal_nets,
-        );
+        let impact = RouteImpact::from_footprint(&world, &footprint, signal_nets);
         Self {
             world,
             path,
@@ -677,220 +645,45 @@ impl OrRoute {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct RouteImpact {
-    // 이번 route가 물리적으로 접촉한 기존 signal net id.
     pub(super) touched_net_ids: HashSet<GraphNodeId>,
-    // 이번 route가 접촉한 기존 signal net들의 원천 입력 위치.
     pub(super) touched_sources: HashSet<Position>,
-    violates_protected_boundary: bool,
 }
 
 impl RouteImpact {
-    pub(super) fn accepts_declared_inputs(
-        &self,
-        allowed_net_ids: &HashSet<GraphNodeId>,
-        allowed_sources: &HashSet<Position>,
-        sealed_net_ids: &HashSet<GraphNodeId>,
-    ) -> bool {
-        // OR route는 이번에 선언된 입력망만 새 route와 이어 붙일 수 있다.
-        // 또한 state metadata 기준으로 declared input 밖의 source와 접촉하면 short로 본다.
-        !self.violates_protected_boundary
-            && (!self.touched_sources.is_empty()
-                || self.touched_net_ids.iter().all(|node_id| {
-                    allowed_net_ids.contains(node_id) || !sealed_net_ids.contains(node_id)
-                }))
-            && self
-                .touched_sources
-                .iter()
-                .all(|source| allowed_sources.contains(source))
+    pub(super) fn accepts_sources(&self, allowed_sources: &HashSet<Position>) -> bool {
+        !self.has_sources_outside(allowed_sources)
+    }
+
+    pub(super) fn has_sources_outside(&self, allowed_sources: &HashSet<Position>) -> bool {
+        self.touched_sources
+            .iter()
+            .any(|source| !allowed_sources.contains(source))
     }
 
     fn from_footprint(
         world: &World3D,
         footprint: &RouteFootprint,
         signal_nets: &[(GraphNodeId, SignalNet)],
-        protected_boundaries: &[SignalBoundary],
-        source_signal_nets: &[(GraphNodeId, SignalNet)],
     ) -> Self {
-        let source_route_positions = footprint.contact_positions(world).collect::<HashSet<_>>();
+        let route_positions = footprint.contact_positions(world).collect::<HashSet<_>>();
         let mut impact = Self::default();
         for (node_id, net) in signal_nets {
-            for position in source_route_positions.intersection(&net.footprint) {
-                impact.touched_sources.extend(
-                    net.position_sources
-                        .get(position)
-                        .unwrap_or(&net.sources)
-                        .iter()
-                        .copied(),
-                );
-
-                if net
-                    .position_drivers
-                    .get(position)
-                    .map(|drivers| drivers.contains(node_id))
-                    .unwrap_or(true)
-                {
-                    impact.touched_net_ids.insert(*node_id);
-                }
+            if !route_positions.is_disjoint(&net.footprint) {
+                impact.touched_net_ids.insert(*node_id);
+                impact.touched_sources.extend(net.sources.iter().copied());
             }
-
-            for (position, sources) in &net.position_sources {
-                if source_route_positions.is_disjoint(&signal_contact_positions(world, *position)) {
-                    continue;
-                }
-                impact.touched_sources.extend(sources.iter().copied());
-                if net
-                    .position_drivers
-                    .get(position)
-                    .map(|drivers| drivers.contains(node_id))
-                    .unwrap_or(true)
-                {
-                    impact.touched_net_ids.insert(*node_id);
-                }
-            }
-        }
-        for before in protected_boundaries {
-            let after = signal_boundary(world, &before.seeds, before.sources.clone());
-            if !after.expands_from(before) {
-                continue;
-            }
-            let _ = source_signal_nets;
-            impact.violates_protected_boundary = true;
         }
         impact
     }
 }
 
-#[derive(Clone)]
-struct SignalBoundary {
-    seeds: HashSet<Position>,
-    sources: HashSet<Position>,
-    connected: HashSet<Position>,
-}
-
-impl SignalBoundary {
-    fn expands_from(&self, before: &Self) -> bool {
-        self.connected
-            .difference(&before.connected)
-            .next()
-            .is_some()
-    }
-}
-
-fn protected_signal_boundaries(
-    world: &World3D,
-    signal_nets: &[(GraphNodeId, SignalNet)],
-) -> Vec<SignalBoundary> {
-    signal_nets
-        .iter()
-        .map(|(_, net)| signal_boundary(world, &net.footprint, net.sources.clone()))
-        .collect()
-}
-
-fn signal_boundary(
-    world: &World3D,
-    seeds: &HashSet<Position>,
-    sources: HashSet<Position>,
-) -> SignalBoundary {
-    SignalBoundary {
-        seeds: seeds.clone(),
-        sources,
-        connected: connected_signal_positions(world, seeds),
-    }
-}
-
-fn connected_signal_positions(world: &World3D, seeds: &HashSet<Position>) -> HashSet<Position> {
-    let mut visited = HashSet::new();
-    let mut stack = seeds.iter().copied().collect_vec();
-
-    while let Some(position) = stack.pop() {
-        if !world.size.bound_on(position) || !visited.insert(position) {
-            continue;
-        }
-        if !(world[position].kind.is_redstone() || world[position].kind.is_cobble()) {
-            continue;
-        }
-
-        let incoming = PlaceBound::propagated_from(position, &world[position].kind, world)
-            .into_iter()
-            .map(|bound| bound.position());
-        let neighbors = if world[position].kind.is_redstone() {
-            PlacedNode::new(position, world[position])
-                .propagation_bound(Some(world))
-                .into_iter()
-                .filter(|bound| bound.is_bound_on(world))
-                .flat_map(|bound| {
-                    std::iter::once(bound.position()).chain(
-                        bound
-                            .propagate_to(world)
-                            .into_iter()
-                            .map(|(_, position)| position),
-                    )
-                })
-                .chain(incoming)
-                .collect_vec()
-        } else {
-            incoming.collect_vec()
-        };
-
-        for neighbor in neighbors {
-            if !visited.contains(&neighbor) {
-                stack.push(neighbor);
-            }
-        }
-    }
-
-    visited
-}
-
-fn signal_contact_positions(world: &World3D, position: Position) -> HashSet<Position> {
-    if !world.size.bound_on(position) {
-        return HashSet::new();
-    }
-
-    let mut contacts = position
-        .cardinal()
-        .into_iter()
-        .chain([position.up()])
-        .chain(position.down())
-        .filter(|position| world.size.bound_on(*position))
-        .collect::<HashSet<_>>();
-    contacts.insert(position);
-
-    if world[position].kind.is_redstone() {
-        let redstone_node = PlacedNode::new(position, world[position]);
-        contacts.extend(
-            redstone_node
-                .propagation_bound(Some(world))
-                .into_iter()
-                .filter(|bound| bound.is_bound_on(world))
-                .flat_map(|bound| {
-                    std::iter::once(bound.position()).chain(
-                        bound
-                            .propagate_to(world)
-                            .into_iter()
-                            .map(|(_, position)| position),
-                    )
-                }),
-        );
-    }
-
-    if world[position].kind.is_redstone() || world[position].kind.is_cobble() {
-        contacts.extend(
-            PlaceBound::propagated_from(position, &world[position].kind, world)
-                .into_iter()
-                .map(|bound| bound.position()),
-        );
-    }
-    contacts
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct RouteFootprint {
-    // route path 중 terminal 이전 구간이다. 이후 source-side / join-side 분리의 기준으로 쓴다.
+    // route path 중 terminal 이전 구간이다. 이후 source-side / join-side 분리의 기준점으로 쓴다.
     pub(super) source_side: Vec<Position>,
-    // OR 결과로 PlacementState에 남길 최종 redstone tap 위치.
+    // OR 결과로 PlacementState에 남길 최종 redstone tap 위치다.
     pub(super) terminal: Position,
-    // terminal redstone을 받치는 cobble 위치. support도 물리 신호망 형태에 영향을 준다.
+    // terminal redstone을 받치는 cobble 위치다. support도 물리 신호망 형태에 영향을 준다.
     pub(super) terminal_support: Option<Position>,
     // 이 route path에서 실제 redstone으로 배치된 위치들이다.
     pub(super) placed_redstone: Vec<Position>,
@@ -914,30 +707,11 @@ impl RouteFootprint {
             .placed_redstone
             .iter()
             .flat_map(|position| {
-                let redstone_node = PlacedNode::new(*position, world[*position]);
-                let outgoing = redstone_node
-                    .propagation_bound(Some(world))
-                    .into_iter()
-                    .filter(|bound| bound.is_bound_on(world))
-                    .flat_map(|bound| {
-                        std::iter::once(bound.position()).chain(
-                            bound
-                                .propagate_to(world)
-                                .into_iter()
-                                .map(|(_, position)| position),
-                        )
-                    });
-                let incoming =
-                    PlaceBound::propagated_from(*position, &world[*position].kind, world)
-                        .into_iter()
-                        .map(|bound| bound.position());
                 position
                     .cardinal()
                     .into_iter()
                     .chain([position.up()])
                     .chain(position.down())
-                    .chain(outgoing)
-                    .chain(incoming)
             })
             .filter(|position| world.size.bound_on(*position));
         let support_contacts = self
