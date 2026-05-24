@@ -102,7 +102,7 @@ pub(super) fn generate_d_latch_gate_routes(
         step_sampling_policy: SamplingPolicy::Random(32),
         route_step_sampling_policy: SamplingPolicy::Random(32),
         not_route_step_sampling_policy: SamplingPolicy::Random(32),
-        not_route_strategy: NotRouteStrategy::DirectOnly,
+        max_not_route_step: 8,
         max_route_step: 8,
         ..*config
     };
@@ -129,9 +129,13 @@ pub(super) fn generate_d_latch_gate_routes(
             .unwrap_or(false)
             {
                 routed.push((world, state));
+                break;
             }
         }
         if limit.is_some_and(|limit| routed.len() >= limit) {
+            break;
+        }
+        if !routed.is_empty() {
             break;
         }
     }
