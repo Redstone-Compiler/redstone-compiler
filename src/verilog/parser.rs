@@ -1,4 +1,6 @@
-use crate::verilog::ast::{Assignment, BinaryOp, Declaration, Expr, PortDirection, VerilogModule};
+use crate::verilog::ast::{
+    Assignment, BinaryOp, Declaration, Expr, PortDirection, Range, VerilogModule,
+};
 use crate::verilog::lexer::{lex, Token};
 
 pub fn parse_module(source: &str) -> eyre::Result<VerilogModule> {
@@ -32,9 +34,6 @@ impl Parser {
                 }
                 Some(Token::Assign) => assignments.push(self.parse_assignment()?),
                 Some(Token::Always) => eyre::bail!("unsupported Verilog construct: always block"),
-                Some(Token::LBracket) => {
-                    eyre::bail!("unsupported Verilog construct: vector declaration")
-                }
                 Some(token) => eyre::bail!("unsupported Verilog token in module body: {token:?}"),
                 None => eyre::bail!("expected endmodule"),
             }
@@ -56,14 +55,13 @@ impl Parser {
             Some(token) => eyre::bail!("expected declaration direction, got {token:?}"),
             None => eyre::bail!("expected declaration direction"),
         };
-        if matches!(self.peek(), Some(Token::LBracket)) {
-            eyre::bail!("unsupported Verilog construct: vector declaration");
-        }
+        let range = self.parse_optional_range()?;
         let names = self.parse_ident_list()?;
         self.expect(Token::Semi)?;
 
         Ok(Declaration {
             direction: Some(direction),
+            range,
             names,
         })
     }
@@ -131,7 +129,15 @@ impl Parser {
 
     fn parse_primary(&mut self) -> eyre::Result<Expr> {
         match self.next() {
-            Some(Token::Ident(name)) => Ok(Expr::Ident(name)),
+            Some(Token::Ident(name)) => {
+                if self.consume(&Token::LBracket) {
+                    let index = self.expect_number()?;
+                    self.expect(Token::RBracket)?;
+                    return Ok(Expr::Ident(format!("{name}_{index}")));
+                }
+
+                Ok(Expr::Ident(name))
+            }
             Some(Token::LParen) => {
                 let expr = self.parse_expr()?;
                 self.expect(Token::RParen)?;
@@ -150,11 +156,32 @@ impl Parser {
         Ok(names)
     }
 
+    fn parse_optional_range(&mut self) -> eyre::Result<Option<Range>> {
+        if !self.consume(&Token::LBracket) {
+            return Ok(None);
+        }
+
+        let msb = self.expect_number()?;
+        self.expect(Token::Colon)?;
+        let lsb = self.expect_number()?;
+        self.expect(Token::RBracket)?;
+
+        Ok(Some(Range { msb, lsb }))
+    }
+
     fn expect_ident(&mut self) -> eyre::Result<String> {
         match self.next() {
             Some(Token::Ident(name)) => Ok(name),
             Some(token) => eyre::bail!("expected identifier, got {token:?}"),
             None => eyre::bail!("expected identifier"),
+        }
+    }
+
+    fn expect_number(&mut self) -> eyre::Result<usize> {
+        match self.next() {
+            Some(Token::Number(value)) => Ok(value),
+            Some(token) => eyre::bail!("expected number, got {token:?}"),
+            None => eyre::bail!("expected number"),
         }
     }
 
@@ -268,18 +295,25 @@ mod tests {
     }
 
     #[test]
-    fn rejects_vector_declarations_with_clear_message() {
-        let error = parse_module(
+    fn parses_vector_declarations() -> eyre::Result<()> {
+        let module = parse_module(
             r#"
-            module bad(a, y);
+            module vectors(a, y);
               input [3:0] a;
               output y;
-              assign y = a;
+              assign y = a[0];
             endmodule
             "#,
-        )
-        .unwrap_err();
+        )?;
 
-        assert!(error.to_string().contains("vector declaration"));
+        let range = module.declarations[0]
+            .range
+            .as_ref()
+            .expect("expected parsed vector range");
+        assert_eq!(range.msb, 3);
+        assert_eq!(range.lsb, 0);
+        assert_eq!(module.assignments[0].expr.to_logic_stmt(), "a_0");
+
+        Ok(())
     }
 }

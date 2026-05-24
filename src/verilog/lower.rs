@@ -71,4 +71,25 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn lowers_vector_bit_selects_by_flattening_names() -> eyre::Result<()> {
+        let module = parse_module(
+            r#"
+            module bit_xor(a, y);
+              input [1:0] a;
+              output y;
+              assign y = a[0] ^ a[1];
+            endmodule
+            "#,
+        )?;
+
+        let graph = lower_module(&module)?;
+        let table = graph.truth_table()?;
+
+        assert_eq!(table.input_names, vec!["a_0", "a_1"]);
+        assert_eq!(table.output_tables["y"], vec![false, true, true, false]);
+
+        Ok(())
+    }
 }

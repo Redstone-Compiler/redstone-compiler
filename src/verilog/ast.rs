@@ -9,7 +9,14 @@ pub struct VerilogModule {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Declaration {
     pub direction: Option<PortDirection>,
+    pub range: Option<Range>,
     pub names: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Range {
+    pub msb: usize,
+    pub lsb: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
