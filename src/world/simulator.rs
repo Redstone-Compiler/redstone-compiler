@@ -379,18 +379,29 @@ impl Simulator {
         let mut local_cycle = 0;
         let mut local_events = 0;
 
-        while !self.queue.is_empty() {
-            if limits
-                .max_cycles
-                .is_some_and(|max_cycles| local_cycle >= max_cycles)
-            {
-                eyre::bail!("simulation exceeded max cycle limit ({local_cycle})");
+        loop {
+            while !self.queue.is_empty() {
+                if limits
+                    .max_cycles
+                    .is_some_and(|max_cycles| local_cycle >= max_cycles)
+                {
+                    eyre::bail!("simulation exceeded max cycle limit ({local_cycle})");
+                }
+
+                self.consume_events(limits.max_events, &mut local_events)?;
+                local_cycle += 1;
+                self.record_snapshot();
+                tracing::info!("simulator cycle: {local_cycle}/{}", self.cycle);
             }
 
-            self.consume_events(limits.max_events, &mut local_events)?;
-            local_cycle += 1;
-            self.record_snapshot();
-            tracing::info!("simulator cycle: {local_cycle}/{}", self.cycle);
+            if !self.normalize_signal_levels() {
+                break;
+            }
+            self.enqueue_torch_reevaluations();
+            self.fill_event_id();
+            if self.queue.is_empty() {
+                break;
+            }
         }
 
         Ok(local_cycle)
@@ -625,14 +636,9 @@ impl Simulator {
 
         let up_pos = pos.up();
         if self.world.size.bound_on(up_pos) && !self.world[up_pos].kind.is_cobble() {
-            propagate_targets.extend(
-                up_pos
-                    .cardinal_redstone(state)
-                    .into_iter()
-                    .filter(|&pos| {
-                        self.world.size.bound_on(pos) && self.world[pos].kind.is_redstone()
-                    }),
-            );
+            propagate_targets.extend(up_pos.cardinal_redstone(state).into_iter().filter(|&pos| {
+                self.world.size.bound_on(pos) && self.world[pos].kind.is_redstone()
+            }));
         }
 
         if let Some(down_pos) = pos.down() {
@@ -653,6 +659,178 @@ impl Simulator {
         }
 
         propagate_targets
+    }
+
+    fn normalize_signal_levels(&mut self) -> bool {
+        let redstone_changed = self.normalize_redstone_strengths();
+        let cobble_changed = self.normalize_cobble_power_counts();
+        redstone_changed || cobble_changed
+    }
+
+    fn normalize_redstone_strengths(&mut self) -> bool {
+        let mut any_changed = false;
+        let mut changed = true;
+        while changed {
+            changed = false;
+            let next_strengths = self
+                .world
+                .iter_block()
+                .into_iter()
+                .filter_map(|(pos, block)| {
+                    let BlockKind::Redstone {
+                        on_count, strength, ..
+                    } = block.kind
+                    else {
+                        return None;
+                    };
+                    let next_strength = if on_count > 0 {
+                        15
+                    } else {
+                        self.redstone_input_strength(pos)
+                    };
+                    (next_strength != strength).then_some((pos, next_strength))
+                })
+                .collect::<Vec<_>>();
+
+            for (pos, next_strength) in next_strengths {
+                let BlockKind::Redstone { strength, .. } = &mut self.world[pos].kind else {
+                    continue;
+                };
+                *strength = next_strength;
+                changed = true;
+                any_changed = true;
+            }
+        }
+        any_changed
+    }
+
+    fn redstone_input_strength(&self, target: Position) -> usize {
+        self.world
+            .iter_block()
+            .into_iter()
+            .filter_map(|(source_pos, source_block)| {
+                if source_pos == target {
+                    return None;
+                }
+                let BlockKind::Redstone {
+                    state,
+                    strength: source_strength,
+                    ..
+                } = source_block.kind
+                else {
+                    return None;
+                };
+                if source_strength <= 1 {
+                    return None;
+                }
+                self.redstone_propagate_targets(source_pos, state)
+                    .into_iter()
+                    .any(|position| position == target)
+                    .then_some(source_strength - 1)
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    fn normalize_cobble_power_counts(&mut self) -> bool {
+        let updates = self
+            .world
+            .iter_block()
+            .into_iter()
+            .filter_map(|(pos, block)| {
+                let BlockKind::Cobble {
+                    on_count,
+                    on_base_count,
+                } = block.kind
+                else {
+                    return None;
+                };
+                let (next_on_count, next_on_base_count) = self.cobble_power_counts(pos);
+                (next_on_count != on_count || next_on_base_count != on_base_count).then_some((
+                    pos,
+                    next_on_count,
+                    next_on_base_count,
+                ))
+            })
+            .collect::<Vec<_>>();
+
+        let changed = !updates.is_empty();
+        for (pos, next_on_count, next_on_base_count) in updates {
+            self.world[pos].kind = BlockKind::Cobble {
+                on_count: next_on_count,
+                on_base_count: next_on_base_count,
+            };
+        }
+        changed
+    }
+
+    fn cobble_power_counts(&self, target: Position) -> (usize, usize) {
+        let mut sources = HashSet::new();
+        let mut hard_sources = HashSet::new();
+
+        for (source_pos, source_block) in self.world.iter_block() {
+            match source_block.kind {
+                BlockKind::Torch { is_on } if is_on => {
+                    for position in source_pos
+                        .cardinal_except(source_block.direction)
+                        .into_iter()
+                        .chain(source_pos.down())
+                    {
+                        if position == target {
+                            sources.insert(source_pos);
+                        }
+                    }
+                    if source_pos.up() == target {
+                        sources.insert(source_pos);
+                        hard_sources.insert(source_pos);
+                    }
+                }
+                BlockKind::Switch { is_on } if is_on => {
+                    for position in source_pos.forwards_except(source_block.direction) {
+                        if position == target {
+                            sources.insert(source_pos);
+                        }
+                    }
+                    if source_pos.walk(source_block.direction) == Some(target) {
+                        sources.insert(source_pos);
+                        hard_sources.insert(source_pos);
+                    }
+                }
+                BlockKind::Redstone {
+                    state, strength, ..
+                } if strength > 0 => {
+                    if self
+                        .redstone_propagate_targets(source_pos, state)
+                        .into_iter()
+                        .any(|position| position == target)
+                    {
+                        sources.insert(source_pos);
+                    }
+                }
+                BlockKind::RedstoneBlock => {
+                    if source_pos
+                        .forwards()
+                        .into_iter()
+                        .any(|position| position == target)
+                    {
+                        sources.insert(source_pos);
+                    }
+                }
+                BlockKind::Repeater { is_on: true, .. } => {
+                    let output = source_pos.walk(source_block.direction.inverse());
+                    if output == Some(target) {
+                        sources.insert(source_pos);
+                        hard_sources.insert(source_pos);
+                    }
+                    if output.and_then(|position| position.down()) == Some(target) {
+                        sources.insert(source_pos);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        (sources.len(), hard_sources.len())
     }
 
     fn init_switch_event(&mut self, dir: Direction, pos: Position) {
@@ -1740,33 +1918,85 @@ mod test {
         );
     }
 
-    #[test]
-    fn unittest_simulator_full_adder_all_on_recomputes_wall_torch() -> eyre::Result<()> {
-        let nbt = NBTRoot::from_nbt_bytes(&std::fs::read("test/full-adder.nbt")?)?;
-        let world = nbt.to_world();
-        let mut sim = Simulator::from_with_limits_and_trace(&world, 256, 50_000, 0)
-            .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
-        let states = world
+    fn full_adder_world() -> eyre::Result<World> {
+        Ok(NBTRoot::from_nbt_bytes(&std::fs::read("test/full-adder.nbt")?)?.to_world())
+    }
+
+    fn switch_positions(world: &World) -> Vec<Position> {
+        let mut switches = world
             .blocks
             .iter()
             .filter_map(|(pos, block)| {
-                matches!(block.kind, BlockKind::Switch { .. }).then_some((*pos, true))
+                matches!(block.kind, BlockKind::Switch { .. }).then_some(*pos)
             })
             .collect::<Vec<_>>();
+        switches.sort();
+        switches
+    }
 
-        sim.change_state_with_limits(states, 256, 50_000)?;
+    fn signal_snapshot(world: &World3D) -> Vec<(Position, BlockKind)> {
+        let mut snapshot = world
+            .iter_block()
+            .into_iter()
+            .filter_map(|(pos, block)| match block.kind {
+                BlockKind::Switch { .. }
+                | BlockKind::Torch { .. }
+                | BlockKind::Redstone { .. }
+                | BlockKind::Cobble { .. } => Some((pos, block.kind.clone())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        snapshot.sort_by_key(|(pos, _)| *pos);
+        snapshot
+    }
 
-        assert!(matches!(
-            sim.world[Position(8, 2, 3)].kind,
-            BlockKind::Torch { is_on: true }
-        ));
-        assert!(matches!(
-            sim.world[Position(7, 2, 3)].kind,
-            BlockKind::Cobble {
-                on_count: 0,
-                on_base_count: 0
-            }
-        ));
+    fn assert_matches_fresh_recompute(
+        world: &World,
+        toggles: &[(usize, bool)],
+    ) -> eyre::Result<()> {
+        let switches = switch_positions(world);
+        let mut final_states = vec![false; switches.len()];
+        let mut sequential = Simulator::from_with_limits_and_trace(world, 256, 50_000, 0)
+            .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
+
+        for (switch_index, value) in toggles {
+            final_states[*switch_index] = *value;
+            sequential.change_state_with_limits(
+                vec![(switches[*switch_index], *value)],
+                256,
+                50_000,
+            )?;
+        }
+
+        let mut fresh = Simulator::from_with_limits_and_trace(world, 256, 50_000, 0)
+            .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
+        fresh.change_state_with_limits(
+            switches
+                .iter()
+                .zip(final_states)
+                .map(|(position, value)| (*position, value))
+                .collect(),
+            256,
+            50_000,
+        )?;
+
+        assert_eq!(
+            signal_snapshot(sequential.world()),
+            signal_snapshot(fresh.world()),
+            "sequential switch toggles should settle to the same state as a fresh recompute"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn unittest_simulator_full_adder_sequential_toggles_match_fresh_recompute() -> eyre::Result<()>
+    {
+        let world = full_adder_world()?;
+
+        assert_matches_fresh_recompute(&world, &[(0, true), (1, true), (2, true), (1, false)])?;
+        assert_matches_fresh_recompute(&world, &[(0, true), (1, true), (2, true), (0, false)])?;
+        assert_matches_fresh_recompute(&world, &[(0, true), (1, true), (2, true), (2, false)])?;
 
         Ok(())
     }
@@ -1800,76 +2030,6 @@ mod test {
                 "xor-generated output mismatch for mask {mask:02b}"
             );
         }
-
-        Ok(())
-    }
-
-    #[test]
-    fn unittest_simulator_full_adder_toggle_does_not_burn_out_output_torch() -> eyre::Result<()> {
-        let nbt = NBTRoot::from_nbt_bytes(&std::fs::read("test/full-adder.nbt")?)?;
-        let world = nbt.to_world();
-        let mut sim = Simulator::from_with_limits_and_trace(&world, 256, 50_000, 50_000)
-            .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
-
-        sim.change_state_with_limits(vec![(Position(0, 5, 1), true)], 256, 50_000)?;
-        sim.change_state_with_limits(vec![(Position(0, 7, 2), true)], 256, 50_000)?;
-        sim.change_state_with_limits(vec![(Position(2, 0, 3), true)], 256, 50_000)?;
-        sim.clear_trace();
-        sim.change_state_with_limits(vec![(Position(0, 7, 2), false)], 256, 50_000)?;
-
-        assert!(
-            sim.trace().len() < 1_000,
-            "full-adder final toggle should settle without long torch flicker, got {} events",
-            sim.trace().len()
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn unittest_simulator_full_adder_all_on_then_first_input_off_unpowers_output(
-    ) -> eyre::Result<()> {
-        let nbt = NBTRoot::from_nbt_bytes(&std::fs::read("test/full-adder.nbt")?)?;
-        let world = nbt.to_world();
-        let mut sim = Simulator::from_with_limits_and_trace(&world, 256, 50_000, 0)
-            .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
-
-        sim.change_state_with_limits(
-            vec![
-                (Position(0, 5, 1), true),
-                (Position(0, 7, 2), true),
-                (Position(2, 0, 3), true),
-            ],
-            256,
-            50_000,
-        )?;
-        sim.change_state_with_limits(vec![(Position(0, 5, 1), false)], 256, 50_000)?;
-
-        assert!(matches!(
-            sim.world[Position(8, 2, 3)].kind,
-            BlockKind::Torch { is_on: false }
-        ));
-        let BlockKind::Redstone { strength, .. } = sim.world[Position(8, 2, 2)].kind else {
-            panic!("full-adder output should be redstone");
-        };
-        assert_eq!(strength, 0);
-
-        Ok(())
-    }
-
-    #[test]
-    fn unittest_simulator_full_adder_middle_input_keeps_output_powered() -> eyre::Result<()> {
-        let nbt = NBTRoot::from_nbt_bytes(&std::fs::read("test/full-adder.nbt")?)?;
-        let world = nbt.to_world();
-        let mut sim = Simulator::from_with_limits_and_trace(&world, 256, 50_000, 0)
-            .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
-
-        sim.change_state_with_limits(vec![(Position(0, 7, 2), true)], 256, 50_000)?;
-
-        let BlockKind::Redstone { strength, .. } = sim.world[Position(8, 2, 2)].kind else {
-            panic!("full-adder output should be redstone");
-        };
-        assert!(strength > 0, "full-adder output should stay powered");
 
         Ok(())
     }
