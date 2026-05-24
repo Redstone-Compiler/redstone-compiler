@@ -207,6 +207,13 @@ impl PlaceBound {
                         cardinal_propagation.push((Direction::None, up_pos));
                     }
                 }
+                if let Some(down_pos) = pos.down() {
+                    if !matches!(propagate_type, PropagateType::Soft)
+                        && matches!(world[down_pos].kind, BlockKind::Redstone { .. })
+                    {
+                        cardinal_propagation.push((Direction::None, down_pos));
+                    }
+                }
 
                 cardinal_propagation
             }
