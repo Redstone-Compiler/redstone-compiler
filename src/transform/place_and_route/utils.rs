@@ -55,6 +55,21 @@ pub fn equivalent_logic_with_world3ds(
     Ok(checks.into_iter().all(|x| x))
 }
 
+pub fn contains_truth_table_with_world3ds(
+    expected: &LogicGraph,
+    generated: &[World3D],
+) -> eyre::Result<bool> {
+    let expected = expected.truth_table()?;
+    let checks = generated
+        .par_iter()
+        .map(|generated| {
+            let generated = world3d_to_logic(generated)?.truth_table()?;
+            Ok(generated.contains_output_tables(&expected))
+        })
+        .collect::<eyre::Result<Vec<_>>>()?;
+    Ok(checks.into_iter().all(|x| x))
+}
+
 pub fn equivalent_logic_with_world(expected: &LogicGraph, generated: &World) -> eyre::Result<bool> {
     let expected = outputs_removed(expected);
     let generated = world_to_logic(generated)?;

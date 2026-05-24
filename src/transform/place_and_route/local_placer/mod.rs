@@ -14,7 +14,7 @@ use crate::graph::{GraphNode, GraphNodeId, GraphNodeKind};
 use crate::logic::LogicType;
 use crate::sequential::layout::SequentialMacro;
 use crate::sequential::{SequentialPrimitive, SequentialType};
-use crate::transform::place_and_route::estimate::world_compact_cost;
+use crate::transform::place_and_route::estimate::{bounding_box_of_positions, world_compact_cost};
 use crate::transform::place_and_route::place_bound::PropagateType;
 use crate::world::block::{Block, BlockKind, Direction};
 use crate::world::position::{DimSize, Position};
@@ -51,7 +51,7 @@ pub struct LocalPlacer {
     graph: LogicGraph,
     config: LocalPlacerConfig,
     visit_orders: Vec<GraphNodeId>,
-    cost_join_pairs_by_step: Vec<Vec<(GraphNodeId, GraphNodeId)>>,
+    cost_join_pairs_by_step: Vec<Vec<FutureJoinPair>>,
 }
 
 type PlacerQueue = Vec<(World3D, PlacementState)>;
@@ -143,7 +143,9 @@ impl LocalPlacer {
             let result = self.do_step(step, queue);
             let next_len = result.queue.len();
 
-            queue = self.sample(step, result.queue);
+            let compacted = self.compact_queue_after_step(step, result.queue);
+            let compacted_len = compacted.len();
+            queue = self.sample(step, compacted);
             let sampled_len = queue.len();
             if let Some(debug) = debug.as_deref_mut() {
                 let mut step_debug = result.debug;
@@ -152,7 +154,9 @@ impl LocalPlacer {
             }
 
             step += 1;
-            tracing::info!("from {prev_len} -> generated {next_len} -> sampled {sampled_len}");
+            tracing::info!(
+                "from {prev_len} -> generated {next_len} -> compacted {compacted_len} -> sampled {sampled_len}"
+            );
         }
 
         tracing::info!("generate complete");
@@ -232,10 +236,7 @@ impl LocalPlacer {
                 })
                 .collect(),
             GraphNodeKind::Output(_) => {
-                let position = state[&node.inputs[0]];
-                let mut state = state.clone();
-                state.set_node_position(node.id, position);
-                vec![(world.clone(), state)]
+                vec![(world.clone(), state.clone())]
             }
             GraphNodeKind::Logic(logic) => match logic.logic_type {
                 LogicType::Not => not_node_kind()
@@ -325,7 +326,44 @@ impl LocalPlacer {
                     self.sample_by_cost(step, queue, count, random_count)
                 }
             }
+            PlacementSamplingPolicy::Ranked {
+                count,
+                random_count,
+                start_step,
+            } => {
+                if step < start_step {
+                    self.config
+                        .step_sampling_policy
+                        .sample_with_seed(queue, self.config.sampling_seed(1, step))
+                } else {
+                    self.sample_by_ranked(step, queue, count, random_count)
+                }
+            }
         }
+    }
+
+    // OR 라우트는 같은 블록 배치에서도 route 위의 여러 tap 위치를
+    // PlacementState에 남길 수 있다. 이후 실제 배치될 노드가 그 위치에서
+    // 다시 라우팅해야 할 때만 tap 차이를 보존하고, 아니면 같은 후보로 본다.
+    fn compact_queue_after_step(&self, step: usize, queue: PlacerQueue) -> PlacerQueue {
+        let mut queue = queue;
+        let live_node_ids = self
+            .visit_orders
+            .iter()
+            .skip(step + 1)
+            .filter_map(|node_id| self.graph.find_node_by_id(*node_id))
+            .filter(|node| !matches!(node.kind, GraphNodeKind::Output(_)))
+            .flat_map(|node| node.inputs.iter().copied())
+            .collect::<HashSet<_>>();
+
+        for (_, state) in &mut queue {
+            state.retain_nodes(&live_node_ids);
+        }
+
+        queue
+            .into_iter()
+            .unique_by(|(world, state)| (world.iter_block(), state.endpoint_positions()))
+            .collect()
     }
 
     fn sample_by_cost(
@@ -359,6 +397,90 @@ impl LocalPlacer {
         best
     }
 
+    // 확장된 placement 후보들을 beam search처럼 줄인다. cost sampling과 같은
+    // heuristic cost를 쓰되, beam 일부는 기하적으로 다른 후보를 위해 남긴다.
+    // 이렇게 해야 compact하지만 거의 같은 후보들만 살아남아 후반 join/fanout
+    // route를 막는 상황을 줄일 수 있다.
+    fn sample_by_ranked(
+        &self,
+        step: usize,
+        queue: PlacerQueue,
+        count: usize,
+        random_count: usize,
+    ) -> PlacerQueue {
+        if queue.len() <= count + random_count {
+            return queue;
+        }
+
+        // 확장된 모든 후보에 점수를 매긴다. `index`는 deterministic tie-breaker라서,
+        // cost가 같은 후보들은 기존 queue 순서를 유지한다.
+        let mut scored = queue
+            .into_iter()
+            .enumerate()
+            .map(|(index, item)| ScoredPlacement {
+                cost: self.placement_cost(step, &item.0, &item.1),
+                // diversity 보존용 coarse geometry bucket이다. 완전한 placement
+                // identity가 아니므로 semantic deduplication 용도로 쓰면 안 된다.
+                signature: bounding_box_of_positions(item.1.node_positions())
+                    .map(|bounds| bounds.manhattan_span() / 4)
+                    .unwrap_or_default(),
+                index,
+                item,
+            })
+            .collect_vec();
+        scored.sort_unstable_by_key(|item| (item.cost, item.index));
+
+        // beam 대부분은 cost가 낮은 후보로 채우고, 25%는 diversity bucket용으로
+        // 남긴다. 25% 비율은 heuristic이므로, 컴포넌트별 튜닝이 필요해지면
+        // config knob으로 드러내는 것이 좋다.
+        let ranked_count = count.min(scored.len());
+        let diversity_count = if ranked_count > 1 {
+            (ranked_count / 4).max(1)
+        } else {
+            0
+        };
+        let best_count = ranked_count.saturating_sub(diversity_count);
+
+        let rest = scored.split_off(best_count);
+        let mut selected = scored;
+        let mut selected_signatures = selected
+            .iter()
+            .map(|item| item.signature)
+            .collect::<HashSet<_>>();
+        let mut overflow = Vec::new();
+
+        // 남겨둔 beam slot에는 아직 선택되지 않은 geometry signature별 최저 cost
+        // 후보를 먼저 넣고, 부족하면 일반 cost 순서 후보로 채운다.
+        for item in rest {
+            if selected.len() < ranked_count && selected_signatures.insert(item.signature) {
+                selected.push(item);
+            } else {
+                overflow.push(item);
+            }
+        }
+
+        // distinct signature 개수가 남겨둔 slot보다 적으면, 남은 beam은 overflow에서
+        // cost 순서대로 채운다.
+        let mut overflow = overflow.into_iter();
+        while selected.len() < ranked_count {
+            let Some(item) = overflow.next() else {
+                break;
+            };
+            selected.push(item);
+        }
+
+        // deterministic beam 선택 뒤에 작은 stochastic tail을 붙인다. diversity
+        // 보존과는 별개로, deterministic ranking이 나쁜 방향으로 굳었을 때 빠져나갈
+        // 기회를 남기는 용도다.
+        let mut best = selected.into_iter().map(|item| item.item).collect_vec();
+        let random_pool = overflow.map(|item| item.item).collect_vec();
+        best.extend(
+            SamplingPolicy::Random(random_count)
+                .sample_with_seed(random_pool, self.config.sampling_seed(2, step)),
+        );
+        best
+    }
+
     fn placement_cost(&self, step: usize, world: &World3D, state: &PlacementState) -> usize {
         let current_node_id = self.visit_orders[step];
         let mut cost = world_compact_cost(world);
@@ -367,21 +489,36 @@ impl LocalPlacer {
             cost += local_density(world, position) * 3;
         }
 
-        for (a, b) in &self.cost_join_pairs_by_step[step] {
-            let (Some(a), Some(b)) = (state.node_position(*a), state.node_position(*b)) else {
+        for pair in &self.cost_join_pairs_by_step[step] {
+            let (Some(a), Some(b)) = (state.node_position(pair.a), state.node_position(pair.b))
+            else {
                 continue;
             };
-            cost += a.manhattan_distance(&b) * 8;
+            cost += a.manhattan_distance(&b) * pair.weight * 8;
         }
 
         cost
     }
 }
 
+struct ScoredPlacement {
+    cost: usize,
+    signature: usize,
+    index: usize,
+    item: (World3D, PlacementState),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FutureJoinPair {
+    a: GraphNodeId,
+    b: GraphNodeId,
+    weight: usize,
+}
+
 fn build_cost_join_pairs_by_step(
     graph: &LogicGraph,
     visit_orders: &[GraphNodeId],
-) -> Vec<Vec<(GraphNodeId, GraphNodeId)>> {
+) -> Vec<Vec<FutureJoinPair>> {
     let mut order_index = HashMap::new();
     for (index, node_id) in visit_orders.iter().copied().enumerate() {
         order_index.insert(node_id, index);
@@ -391,21 +528,63 @@ fn build_cost_join_pairs_by_step(
         .iter()
         .enumerate()
         .map(|(step, _)| {
-            graph
+            let remaining_fanouts = remaining_fanout_counts_by_node(graph, &order_index, step);
+            let mut pair_weights = HashMap::<(GraphNodeId, GraphNodeId), usize>::new();
+
+            for node in graph
                 .nodes
                 .iter()
                 .filter(|node| order_index[&node.id] > step)
-                .flat_map(|node| {
-                    node.inputs
-                        .iter()
-                        .copied()
-                        .filter(|input| order_index.get(input).is_some_and(|index| *index <= step))
-                        .tuple_combinations()
-                        .collect_vec()
-                })
+            {
+                for (a, b) in node
+                    .inputs
+                    .iter()
+                    .copied()
+                    .filter(|input| order_index.get(input).is_some_and(|index| *index <= step))
+                    .tuple_combinations()
+                {
+                    let weight = 1
+                        + remaining_fanouts
+                            .get(&a)
+                            .copied()
+                            .unwrap_or_default()
+                            .saturating_sub(1)
+                        + remaining_fanouts
+                            .get(&b)
+                            .copied()
+                            .unwrap_or_default()
+                            .saturating_sub(1);
+                    *pair_weights.entry((a, b)).or_default() += weight;
+                }
+            }
+
+            pair_weights
+                .into_iter()
+                .map(|((a, b), weight)| FutureJoinPair { a, b, weight })
+                .sorted_by_key(|pair| (pair.a, pair.b))
                 .collect_vec()
         })
         .collect_vec()
+}
+
+fn remaining_fanout_counts_by_node(
+    graph: &LogicGraph,
+    order_index: &HashMap<GraphNodeId, usize>,
+    step: usize,
+) -> HashMap<GraphNodeId, usize> {
+    let mut counts = HashMap::new();
+    for node in graph
+        .nodes
+        .iter()
+        .filter(|node| order_index[&node.id] > step)
+    {
+        for input in &node.inputs {
+            if order_index.get(input).is_some_and(|index| *index <= step) {
+                *counts.entry(*input).or_default() += 1;
+            }
+        }
+    }
+    counts
 }
 
 fn local_density(world: &World3D, position: Position) -> usize {

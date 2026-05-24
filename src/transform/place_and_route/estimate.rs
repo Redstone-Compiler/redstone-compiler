@@ -27,15 +27,26 @@ impl BoundingBox {
     pub fn extent_sum(self) -> usize {
         self.width() + self.depth() + self.height()
     }
+
+    pub fn manhattan_span(self) -> usize {
+        (self.max.0 - self.min.0) + (self.max.1 - self.min.1) + (self.max.2 - self.min.2)
+    }
 }
 
 pub fn bounding_box(world: &World3D) -> Option<BoundingBox> {
-    let mut blocks = world.iter_block().into_iter().map(|(position, _)| position);
-    let first = blocks.next()?;
+    bounding_box_of_positions(world.iter_block().into_iter().map(|(position, _)| position))
+}
+
+pub fn bounding_box_of_positions<I>(positions: I) -> Option<BoundingBox>
+where
+    I: IntoIterator<Item = Position>,
+{
+    let mut positions = positions.into_iter();
+    let first = positions.next()?;
     let mut min = first;
     let mut max = first;
 
-    for position in blocks {
+    for position in positions {
         min.0 = min.0.min(position.0);
         min.1 = min.1.min(position.1);
         min.2 = min.2.min(position.2);
@@ -86,6 +97,23 @@ mod tests {
         assert_eq!(bounds.depth(), 2);
         assert_eq!(bounds.height(), 3);
         assert_eq!(bounds.volume(), 24);
+    }
+
+    #[test]
+    fn bounding_box_of_positions_tracks_position_extents() {
+        let bounds = bounding_box_of_positions([Position(1, 2, 0), Position(4, 3, 2)]).unwrap();
+
+        assert_eq!(bounds.min, Position(1, 2, 0));
+        assert_eq!(bounds.max, Position(4, 3, 2));
+        assert_eq!(bounds.width(), 4);
+        assert_eq!(bounds.depth(), 2);
+        assert_eq!(bounds.height(), 3);
+        assert_eq!(bounds.manhattan_span(), 6);
+    }
+
+    #[test]
+    fn bounding_box_of_positions_returns_none_for_empty_iterators() {
+        assert_eq!(bounding_box_of_positions([]), None);
     }
 
     #[test]

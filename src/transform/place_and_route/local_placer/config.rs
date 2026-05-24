@@ -5,6 +5,7 @@ pub struct LocalPlacerConfig {
     pub random_seed: u64,
     pub greedy_input_generation: bool,
     pub input_placement_strategy: InputPlacementStrategy,
+    pub input_candidate_limit: Option<usize>,
     pub step_sampling_policy: SamplingPolicy,
     pub placement_sampling_policy: PlacementSamplingPolicy,
     // dealloc 시간을 줄이기 위해 generation을 leak 시킨다.
@@ -26,6 +27,7 @@ impl Default for LocalPlacerConfig {
             random_seed: 42,
             greedy_input_generation: false,
             input_placement_strategy: InputPlacementStrategy::default(),
+            input_candidate_limit: None,
             step_sampling_policy: SamplingPolicy::default(),
             placement_sampling_policy: PlacementSamplingPolicy::default(),
             leak_sampling: false,
@@ -42,31 +44,46 @@ impl Default for LocalPlacerConfig {
 
 #[derive(Default, Debug, Copy, Clone, PartialEq, Eq)]
 pub enum InputPlacementStrategy {
+    /// 입력을 search 영역의 boundary에만 배치한다.
     #[default]
     Boundary,
+    /// 입력을 search 영역 내부 어디에나 배치할 수 있다.
     Anywhere,
 }
 
 #[derive(Default, Debug, Copy, Clone, PartialEq, Eq)]
 pub enum TorchPlacementStrategy {
+    /// Torch를 입력과 직접 연결되는 위치에만 배치한다.
     #[default]
     DirectOnly,
+    /// Torch를 입력과 인접하지 않은 위치까지 확장해서 배치한다.
     AnywhereNonAdjacent,
 }
 
 #[derive(Default, Debug, Copy, Clone, PartialEq, Eq)]
 pub enum NotRouteStrategy {
+    /// NOT gate 입력을 torch에 직접 연결되는 형태로만 route한다.
     #[default]
     DirectOnly,
+    /// NOT gate 입력을 redstone route로만 연결한다.
     RedstoneOnly,
+    /// 직접 연결과 redstone route를 모두 후보로 탐색한다.
     DirectAndRedstone,
 }
 
 #[derive(Default, Debug, Copy, Clone, PartialEq, Eq)]
 pub enum PlacementSamplingPolicy {
+    /// 각 step에서 `step_sampling_policy`만 적용한다.
     #[default]
     StepPolicy,
+    /// Heuristic cost 상위 후보와 random tail을 남긴다.
     Cost {
+        count: usize,
+        random_count: usize,
+        start_step: usize,
+    },
+    /// Cost 상위 후보에 더해 geometry diversity가 다른 beam 후보를 보존한다.
+    Ranked {
         count: usize,
         random_count: usize,
         start_step: usize,
@@ -79,6 +96,7 @@ impl LocalPlacerConfig {
             random_seed: 42,
             greedy_input_generation: false,
             input_placement_strategy: InputPlacementStrategy::Anywhere,
+            input_candidate_limit: None,
             step_sampling_policy: SamplingPolicy::None,
             placement_sampling_policy: PlacementSamplingPolicy::StepPolicy,
             leak_sampling: false,
@@ -98,6 +116,18 @@ impl LocalPlacerConfig {
         start_step: usize,
     ) -> PlacementSamplingPolicy {
         PlacementSamplingPolicy::Cost {
+            count,
+            random_count,
+            start_step,
+        }
+    }
+
+    pub fn ranked_sampling(
+        count: usize,
+        random_count: usize,
+        start_step: usize,
+    ) -> PlacementSamplingPolicy {
+        PlacementSamplingPolicy::Ranked {
             count,
             random_count,
             start_step,
