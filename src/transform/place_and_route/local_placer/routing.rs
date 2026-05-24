@@ -650,6 +650,10 @@ pub(super) struct RouteImpact {
 }
 
 impl RouteImpact {
+    pub(super) fn accepts_sources(&self, allowed_sources: &HashSet<Position>) -> bool {
+        !self.has_sources_outside(allowed_sources)
+    }
+
     pub(super) fn has_sources_outside(&self, allowed_sources: &HashSet<Position>) -> bool {
         self.touched_sources
             .iter()

@@ -782,6 +782,25 @@ fn generate_or_routes_reports_touched_signal_net_sources() {
 }
 
 #[test]
+fn route_impact_accepts_only_declared_sources() {
+    let declared_a = Position(1, 1, 1);
+    let declared_b = Position(4, 1, 1);
+    let external = Position(0, 0, 1);
+    let mut allowed = [declared_a, declared_b].into_iter().collect::<HashSet<_>>();
+    let mut impact = RouteImpact::default();
+
+    impact.touched_sources.insert(declared_a);
+    impact.touched_sources.insert(declared_b);
+    assert!(impact.accepts_sources(&allowed));
+
+    impact.touched_sources.insert(external);
+    assert!(!impact.accepts_sources(&allowed));
+
+    allowed.insert(external);
+    assert!(impact.accepts_sources(&allowed));
+}
+
+#[test]
 fn local_placer_accepts_q_only_sequential_primitives_with_macro_candidates() {
     let mut graph = Graph {
         nodes: vec![

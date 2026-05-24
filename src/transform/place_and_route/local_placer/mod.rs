@@ -297,8 +297,8 @@ impl LocalPlacer {
                         .routes
                         .into_iter()
                         .flat_map(|route| {
-                            let _shadow_has_external_sources =
-                                route.impact.has_sources_outside(&input_sources);
+                            let _shadow_accepts_sources =
+                                route.impact.accepts_sources(&input_sources);
                             // Keep the OR tap on the terminal redstone where both inputs
                             // have joined. Source or mid-route taps can see only one input.
                             let positions = Some(route.footprint.terminal)
