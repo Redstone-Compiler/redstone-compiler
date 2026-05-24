@@ -9,11 +9,11 @@ use crate::transform::place_and_route::local_placer::{
     generate_d_latch_gate_routes, generate_rs_latch_not_pairs, route_rs_latch_branches,
     select_rs_latch_not_pairs, InputPlacementStrategy, LocalPlacer, LocalPlacerConfig,
     LocalPlacerDebug, NotRouteStrategy, PlacementSamplingPolicy, SamplingPolicy,
-    TorchPlacementStrategy, D_LATCH_NOT_D_NODE_ID, D_LATCH_RESET_NODE_ID, D_LATCH_RESET_OR_NODE_ID,
-    D_LATCH_SET_NODE_ID, D_LATCH_SET_NOT_EN_NODE_ID, D_LATCH_SET_OR_NODE_ID,
+    TorchPlacementStrategy, D_LATCH_INPUT_GATING_NODES,
 };
 use crate::transform::place_and_route::utils::{
-    equivalent_logic_with_world3d, equivalent_logic_with_world3ds, world3d_to_logic,
+    contains_truth_table_with_world3ds, equivalent_logic_with_world3d,
+    equivalent_logic_with_world3ds, world3d_to_logic,
 };
 use crate::world::block::{Block, BlockKind, Direction};
 use crate::world::position::{DimSize, Position};
@@ -391,6 +391,7 @@ fn test_generate_component_d_latch() -> eyre::Result<()> {
                     eprintln!("candidate {checked} failed: {error}; q={q:?} nq={nq:?}");
                     let q_support = q.walk(world[q].direction).unwrap();
                     let nq_support = nq.walk(world[nq].direction).unwrap();
+                    let nodes = D_LATCH_INPUT_GATING_NODES;
                     let _ = trace_d_latch_behavior(
                         world,
                         d,
@@ -398,12 +399,12 @@ fn test_generate_component_d_latch() -> eyre::Result<()> {
                         &[
                             ("d", d),
                             ("en", en),
-                            ("not_d", state[&D_LATCH_NOT_D_NODE_ID]),
-                            ("set_not_en", state[&D_LATCH_SET_NOT_EN_NODE_ID]),
-                            ("set_or", state[&D_LATCH_SET_OR_NODE_ID]),
-                            ("reset_or", state[&D_LATCH_RESET_OR_NODE_ID]),
-                            ("set", state[&D_LATCH_SET_NODE_ID]),
-                            ("reset", state[&D_LATCH_RESET_NODE_ID]),
+                            ("not_d", state[&nodes.not_d]),
+                            ("not_en", state[&nodes.not_en]),
+                            ("set_or", state[&nodes.set_or]),
+                            ("reset_or", state[&nodes.reset_or]),
+                            ("set", state[&nodes.set]),
+                            ("reset", state[&nodes.reset]),
                             ("q_support", q_support),
                             ("nq_support", nq_support),
                             ("q", q),
@@ -598,15 +599,35 @@ fn test_generate_component_full_adder() -> eyre::Result<()> {
     };
 
     let fa_graph = predefined_logics::buffered_full_adder_graph()?;
+    let expected_graph = predefined_logics::full_adder_graph()?;
     println!("{}", fa_graph.to_graphviz());
-    let placer = LocalPlacer::new(fa_graph, config)?;
+    let placer = LocalPlacer::new(fa_graph.clone(), config)?;
     let worlds = placer.generate(DimSize(10, 10, 5), None);
 
-    let sampled_worlds = SamplingPolicy::Random(1).sample(worlds);
-    let sample_logic = world3d_to_logic(&sampled_worlds[0])?.prepare_place()?;
+    let generated_count = worlds.len();
+    let mut valid_worlds = Vec::new();
+    for world in worlds {
+        if contains_truth_table_with_world3ds(&expected_graph, std::slice::from_ref(&world))? {
+            valid_worlds.push(world);
+        }
+    }
+    println!(
+        "full adder candidates: generated={generated_count}, valid={}",
+        valid_worlds.len()
+    );
+    eyre::ensure!(
+        !valid_worlds.is_empty(),
+        "expected at least one generated full adder candidate to match the truth table"
+    );
+
+    let world = valid_worlds
+        .into_iter()
+        .min_by_key(world_compact_cost)
+        .unwrap();
+    let sample_logic = world3d_to_logic(&world)?.prepare_place()?;
     println!("{}", sample_logic.to_graphviz());
 
-    save_worlds_to_nbt(sampled_worlds, "test/full-adder.nbt")?;
+    save_worlds_to_nbt(vec![world], "test/full-adder.nbt")?;
 
     Ok(())
 }

@@ -170,6 +170,9 @@ mod tests {
     use crate::transform::logic::LogicGraphTransformer;
     use crate::transform::place_and_route::utils::equivalent_logic_with_world;
     use crate::transform::world_to_logic::WorldToLogicTransformer;
+    use crate::world::block::{Block, BlockKind, Direction};
+    use crate::world::position::{DimSize, Position};
+    use crate::world::World;
 
     #[test]
     fn unittest_world_to_logic_graph() -> eyre::Result<()> {
@@ -214,6 +217,63 @@ mod tests {
         let world = &nbt.to_world();
         let expected = predefined_logics::buffered_half_adder_graph()?;
         assert!(equivalent_logic_with_world(&expected, world)?);
+
+        Ok(())
+    }
+
+    #[test]
+    fn world_to_logic_preserves_switch_and_inverted_output_short() -> eyre::Result<()> {
+        let redstone = Block {
+            kind: BlockKind::Redstone {
+                on_count: 0,
+                state: 0,
+                strength: 0,
+            },
+            direction: Direction::None,
+        };
+        let world = World {
+            size: DimSize(4, 3, 2),
+            blocks: vec![
+                (
+                    Position(0, 1, 1),
+                    Block {
+                        kind: BlockKind::Switch { is_on: false },
+                        direction: Direction::East,
+                    },
+                ),
+                (
+                    Position(1, 1, 1),
+                    Block {
+                        kind: BlockKind::Cobble {
+                            on_count: 0,
+                            on_base_count: 0,
+                        },
+                        direction: Direction::None,
+                    },
+                ),
+                (
+                    Position(2, 1, 1),
+                    Block {
+                        kind: BlockKind::Torch { is_on: true },
+                        direction: Direction::West,
+                    },
+                ),
+                (Position(1, 1, 0), redstone),
+                (Position(2, 1, 0), redstone),
+            ],
+        };
+
+        let graph = WorldGraphBuilder::new(&world).build();
+        let logic = WorldToLogicTransformer::new(graph, true)?.transform()?;
+        let table = logic.truth_table()?;
+
+        assert!(
+            table
+                .output_table_set()
+                .contains(&vec![true, true]),
+            "shorted switch and inverted output should extract as a constant-high output, got {:?}",
+            table
+        );
 
         Ok(())
     }

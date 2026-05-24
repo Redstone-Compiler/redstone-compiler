@@ -1,5 +1,5 @@
 use super::*;
-use crate::graph::logic::LogicGraph;
+use crate::graph::logic::{predefined_logics, LogicGraph};
 use crate::graph::{Graph, GraphNode, GraphNodeKind};
 use crate::logic::LogicType;
 use crate::sequential::layout::SequentialMacro;
@@ -78,6 +78,26 @@ fn generate_inputs_limits_candidates_per_world() {
     let generated = generate_inputs(&config, &world, BlockKind::Switch { is_on: false });
 
     assert_eq!(generated.len(), 4);
+}
+
+#[test]
+fn local_placer_accepts_chained_or_after_buffer_insertion() -> eyre::Result<()> {
+    let mut graph = LogicGraph::from_stmt("a|b", "x")?;
+    graph.graph.merge(LogicGraph::from_stmt("x|c", "y")?.graph);
+    let graph = graph.prepare_place()?;
+
+    let _ = LocalPlacer::new(graph, config(4))?;
+
+    Ok(())
+}
+
+#[test]
+fn local_placer_accepts_unbuffered_full_adder_after_buffer_insertion() -> eyre::Result<()> {
+    let graph = predefined_logics::full_adder_graph()?;
+
+    let _ = LocalPlacer::new(graph, config(4))?;
+
+    Ok(())
 }
 
 #[test]
@@ -637,6 +657,21 @@ fn has_connection_with_requires_world_after_cobble_placement() {
 
     assert!(!redstone_node.has_connection_with(&world, to));
     assert!(redstone_node.has_connection_with(&new_world, to));
+}
+
+#[test]
+fn redstone_below_switch_powered_cobble_is_short() {
+    let mut world = empty_world();
+    let switch_pos = Position(0, 2, 2);
+    let cobble_pos = Position(1, 2, 2);
+    let redstone_pos = Position(1, 2, 1);
+
+    place_node(&mut world, PlacedNode::new(switch_pos, switch(Direction::East)));
+    place_node(&mut world, PlacedNode::new_cobble(cobble_pos));
+
+    let redstone_node = PlacedNode::new_redstone(redstone_pos);
+
+    assert!(redstone_node.has_short(&world, &Default::default()));
 }
 
 #[test]

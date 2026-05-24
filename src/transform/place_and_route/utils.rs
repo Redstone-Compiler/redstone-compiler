@@ -64,7 +64,7 @@ pub fn contains_truth_table_with_world3ds(
         .par_iter()
         .map(|generated| {
             let generated = world3d_to_logic(generated)?.truth_table()?;
-            Ok(generated.contains_output_tables(&expected))
+            Ok(generated.contains_output_tables_under_input_permutation(&expected))
         })
         .collect::<eyre::Result<Vec<_>>>()?;
     Ok(checks.into_iter().all(|x| x))

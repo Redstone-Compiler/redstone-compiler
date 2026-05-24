@@ -448,6 +448,66 @@ impl LogicGraphTransformer {
         Ok(())
     }
 
+    pub fn insert_buffers_for_direct_or_to_or(&mut self) -> eyre::Result<()> {
+        let direct_edges = self
+            .graph
+            .graph
+            .nodes
+            .iter()
+            .filter(|node| {
+                matches!(&node.kind, GraphNodeKind::Logic(logic) if logic.logic_type == LogicType::Or)
+            })
+            .flat_map(|node| {
+                node.outputs.iter().filter_map(|&output_id| {
+                    let output = self.graph.graph.find_node_by_id(output_id)?;
+                    matches!(&output.kind, GraphNodeKind::Logic(logic) if logic.logic_type == LogicType::Or)
+                        .then_some((node.id, output.id))
+                })
+            })
+            .collect_vec();
+
+        let mut next_id = self.graph.graph.max_node_id().unwrap_or_default() + 1;
+        for (from, to) in direct_edges {
+            let first_not = next_id;
+            let second_not = next_id + 1;
+            next_id += 2;
+
+            self.graph
+                .graph
+                .replace_target_output_node_ids(from, to, vec![first_not]);
+            self.graph
+                .graph
+                .replace_target_input_node_ids(to, from, vec![second_not]);
+
+            self.graph.graph.nodes.push(GraphNode {
+                id: first_not,
+                kind: GraphNodeKind::Logic(Logic {
+                    logic_type: LogicType::Not,
+                }),
+                inputs: vec![from],
+                outputs: vec![second_not],
+                tag: "auto-buffer".to_owned(),
+            });
+            self.graph.graph.nodes.push(GraphNode {
+                id: second_not,
+                kind: GraphNodeKind::Logic(Logic {
+                    logic_type: LogicType::Not,
+                }),
+                inputs: vec![first_not],
+                outputs: vec![to],
+                tag: "auto-buffer".to_owned(),
+            });
+        }
+
+        self.graph.graph.build_inputs();
+        self.graph.graph.build_outputs();
+        self.graph.graph.build_producers();
+        self.graph.graph.build_consumers();
+        self.graph.graph.verify()?;
+
+        Ok(())
+    }
+
     pub fn cluster(&self, include_ouput_node: bool) -> Vec<SubGraphWithGraph> {
         let mut tags: HashMap<GraphNodeId, HashSet<GraphNodeId>> = HashMap::new();
         let mut queue = VecDeque::from(self.graph.graph.inputs());

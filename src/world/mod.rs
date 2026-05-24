@@ -44,7 +44,7 @@ impl World3D {
 
     pub fn iter_pos(&self) -> Vec<Position> {
         let mut result = Vec::new();
-        let (z, y, x) = (self.map.len(), self.map[0].len(), self.map[0][1].len());
+        let (z, y, x) = (self.map.len(), self.map[0].len(), self.map[0][0].len());
 
         for z in 0..z {
             for y in 0..y {
