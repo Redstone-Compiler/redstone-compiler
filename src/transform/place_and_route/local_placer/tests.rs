@@ -1,4 +1,3 @@
-use super::state::SignalNet;
 use super::*;
 use crate::graph::logic::LogicGraph;
 use crate::graph::{Graph, GraphNode, GraphNodeKind};
@@ -574,26 +573,6 @@ fn random_sampling_uses_explicit_seed() {
 }
 
 #[test]
-fn placement_state_tracks_signal_sources_with_footprints() {
-    let mut state = PlacementState::default();
-    let source_a = Position(0, 1, 1);
-    let source_b = Position(1, 1, 1);
-    let route = [Position(2, 1, 1), Position(2, 1, 0)];
-
-    state.set_signal_net(7, route, [source_a, source_b]);
-
-    let node_ids = [7].into_iter().collect();
-    assert_eq!(
-        state.signal_positions_for_nodes(&node_ids),
-        route.into_iter().collect()
-    );
-    assert_eq!(
-        state.signal_sources_for_nodes(&node_ids),
-        [source_a, source_b].into_iter().collect()
-    );
-}
-
-#[test]
 fn generate_or_routes_init_states_includes_top_cobble_variants() {
     let mut world = empty_world();
     let from = Position(1, 1, 1);
@@ -735,50 +714,6 @@ fn generate_or_routes_footprint_records_redstone_supports() {
         assert!(route.footprint.placed_supports.contains(&support));
         assert!(route.world[support].kind.is_cobble());
     }
-}
-
-#[test]
-fn generate_or_routes_reports_touched_signal_net_sources() {
-    let mut world = empty_world();
-    let from = Position(1, 1, 1);
-    let to = Position(4, 1, 1);
-    let external_source = Position(0, 0, 1);
-    place_node(&mut world, PlacedNode::new(from, torch(Direction::Bottom)));
-    place_node(&mut world, PlacedNode::new(to, torch(Direction::Bottom)));
-
-    let first = generate_or_routes(&config(2), &world, from, to)
-        .routes
-        .into_iter()
-        .find(|route| !route.footprint.placed_redstone.is_empty())
-        .expect("expected route with redstone");
-    let route_positions = first.footprint.positions().collect::<std::collections::HashSet<_>>();
-    let touched_position = first.footprint.placed_redstone[0]
-        .cardinal()
-        .into_iter()
-        .find(|position| {
-            first.world.size.bound_on(*position) && !route_positions.contains(position)
-        })
-        .expect("expected adjacent signal contact position");
-    let mut net = SignalNet::default();
-    net.footprint.insert(touched_position);
-    net.sources.insert(external_source);
-
-    let result = generate_or_routes_with_signal_nets(&config(2), &world, from, to, &[(99, net)]);
-    let impacted = result
-        .routes
-        .iter()
-        .find(|route| {
-            route
-                .footprint
-                .placed_redstone
-                .iter()
-                .any(|redstone| redstone.cardinal().contains(&touched_position))
-        })
-        .expect("expected matching route");
-
-    assert!(impacted.impact.touched_net_ids.contains(&99));
-    assert!(impacted.impact.touched_sources.contains(&external_source));
-    assert!(impacted.impact.has_sources_outside(&HashSet::new()));
 }
 
 #[test]

@@ -234,7 +234,7 @@ impl LocalPlacer {
                 .map(|(world, position)| {
                     let mut state = state.clone();
                     state.set_node_position(node.id, position);
-                    state.set_signal_net(node.id, [position], [position]);
+                    state.set_signal_footprint(node.id, [position]);
                     (world, state)
                 })
                 .collect(),
@@ -253,12 +253,12 @@ impl LocalPlacer {
                     .map(|(world, position)| {
                         let mut state = state.clone();
                         state.set_node_position(node.id, position);
-                        let input_node_ids = [node.inputs[0]].into_iter().collect();
-                        let sources = state.signal_sources_for_nodes(&input_node_ids);
-                        let footprint = [Some(position), position.walk(world[position].direction)]
-                            .into_iter()
-                            .flatten();
-                        state.set_signal_net(node.id, footprint, sources);
+                        state.set_signal_footprint(
+                            node.id,
+                            [Some(position), position.walk(world[position].direction)]
+                                .into_iter()
+                                .flatten(),
+                        );
                         (world, state)
                     })
                     .collect(),
@@ -266,8 +266,6 @@ impl LocalPlacer {
                     assert_eq!(node.inputs.len(), 2);
                     let input_a = state[&node.inputs[0]];
                     let input_b = state[&node.inputs[1]];
-                    let input_node_ids = node.inputs.iter().copied().collect::<HashSet<_>>();
-                    let input_sources = state.signal_sources_for_nodes(&input_node_ids);
                     let sealed_output_source_ids =
                         self.graph.externally_observable_output_source_ids();
                     let mut protected_positions =
@@ -284,21 +282,12 @@ impl LocalPlacer {
                     ));
                     let isolation =
                         RouteIsolation::new(&world, [input_a, input_b], protected_positions);
-                    let signal_nets = state.signal_nets();
-                    let result = generate_or_routes_with_signal_nets(
-                        &self.config,
-                        &world,
-                        input_a,
-                        input_b,
-                        &signal_nets,
-                    );
+                    let result = generate_or_routes(&self.config, &world, input_a, input_b);
                     route_debug = Some(result.debug);
                     result
                         .routes
                         .into_iter()
                         .flat_map(|route| {
-                            let _shadow_has_external_sources =
-                                route.impact.has_sources_outside(&input_sources);
                             // Keep the OR tap on the terminal redstone where both inputs
                             // have joined. Source or mid-route taps can see only one input.
                             let positions = Some(route.footprint.terminal)
@@ -313,9 +302,10 @@ impl LocalPlacer {
                                 .map(|position| {
                                     let mut state = state.clone();
                                     state.set_node_position(node.id, position);
-                                    let footprint =
-                                        [Some(position), position.down()].into_iter().flatten();
-                                    state.set_signal_net(node.id, footprint, input_sources.clone());
+                                    state.set_signal_footprint(
+                                        node.id,
+                                        [Some(position), position.down()].into_iter().flatten(),
+                                    );
                                     (route.world.clone(), state)
                                 })
                                 .collect_vec()
