@@ -3,9 +3,10 @@ use std::collections::HashMap;
 use super::world::WorldGraphTransformer;
 use crate::graph::logic::LogicGraph;
 use crate::graph::world::WorldGraph;
-use crate::graph::{Graph, GraphNode, GraphNodeKind};
+use crate::graph::{Graph, GraphNode, GraphNodeId, GraphNodeKind};
 use crate::logic::{Logic, LogicType};
 use crate::world::block::BlockKind;
+use crate::world::position::Position;
 
 // for testing Layout vs. Schematic
 #[derive(Default)]
@@ -63,6 +64,22 @@ impl WorldToLogicTransformer {
     }
 
     pub fn transform(mut self) -> eyre::Result<LogicGraph> {
+        self.transform_inner(true)
+    }
+
+    pub fn positions(&self) -> &HashMap<GraphNodeId, Position> {
+        &self.graph.positions
+    }
+
+    pub fn world_graph(&self) -> &WorldGraph {
+        &self.graph
+    }
+
+    pub fn transform_preserving_node_ids(mut self) -> eyre::Result<LogicGraph> {
+        self.transform_inner(false)
+    }
+
+    fn transform_inner(&mut self, rebuild_node_ids: bool) -> eyre::Result<LogicGraph> {
         let mut new_in_id = HashMap::new();
         let mut nodes = Vec::new();
 
@@ -147,11 +164,19 @@ impl WorldToLogicTransformer {
             nodes.extend(new_nodes);
         }
 
-        let graph = Graph {
+        let mut graph = Graph {
             nodes,
             ..Default::default()
+        };
+
+        if rebuild_node_ids {
+            graph = graph.rebuild_node_ids();
+        } else {
+            graph.nodes.sort_by_key(|node| node.id);
+            graph.build_outputs();
+            graph.build_producers();
+            graph.build_consumers();
         }
-        .rebuild_node_ids();
 
         Ok(LogicGraph { graph })
     }
@@ -268,9 +293,7 @@ mod tests {
         let table = logic.truth_table()?;
 
         assert!(
-            table
-                .output_table_set()
-                .contains(&vec![true, true]),
+            table.output_table_set().contains(&vec![true, true]),
             "shorted switch and inverted output should extract as a constant-high output, got {:?}",
             table
         );

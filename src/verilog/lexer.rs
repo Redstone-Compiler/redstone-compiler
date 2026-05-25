@@ -124,16 +124,14 @@ mod tests {
 
     #[test]
     fn lexes_combinational_module_subset() -> eyre::Result<()> {
-        let tokens = lex(
-            r#"
+        let tokens = lex(r#"
             module half_adder(a, b, s, c);
               input a, b;
               output s, c;
               assign s = a ^ b;
               assign c = a & b;
             endmodule
-            "#,
-        )?;
+            "#)?;
 
         assert_eq!(
             tokens,

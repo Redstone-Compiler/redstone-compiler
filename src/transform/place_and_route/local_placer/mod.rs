@@ -12,6 +12,7 @@ use super::sampling::SamplingPolicy;
 use crate::graph::logic::LogicGraph;
 use crate::graph::{GraphNode, GraphNodeId, GraphNodeKind};
 use crate::logic::LogicType;
+use crate::output::{OutputEndpoint, PlacedWorld};
 use crate::sequential::layout::SequentialMacro;
 use crate::sequential::{SequentialPrimitive, SequentialType};
 use crate::transform::place_and_route::estimate::{bounding_box_of_positions, world_compact_cost};
@@ -139,6 +140,20 @@ impl LocalPlacer {
         self.generate_inner(dim, finish_step, None)
     }
 
+    pub fn generate_with_outputs(
+        &self,
+        dim: DimSize,
+        finish_step: Option<usize>,
+    ) -> Vec<PlacedWorld> {
+        self.generate_queue(dim, finish_step, None)
+            .into_iter()
+            .map(|(world, state)| PlacedWorld {
+                world,
+                outputs: self.output_endpoints(&state),
+            })
+            .collect()
+    }
+
     pub fn generate_with_debug(
         &self,
         dim: DimSize,
@@ -157,6 +172,20 @@ impl LocalPlacer {
         self.generate_queue(dim, finish_step, debug)
             .into_iter()
             .map(|(world, _)| world)
+            .collect()
+    }
+
+    fn output_endpoints(&self, state: &PlacementState) -> Vec<OutputEndpoint> {
+        self.graph
+            .nodes
+            .iter()
+            .filter_map(|node| match &node.kind {
+                GraphNodeKind::Output(name) => state
+                    .node_position(node.id)
+                    .map(|position| OutputEndpoint::new(name.clone(), position)),
+                _ => None,
+            })
+            .sorted_by(|a, b| a.name.cmp(&b.name))
             .collect()
     }
 
@@ -450,9 +479,22 @@ impl LocalPlacer {
             .iter()
             .skip(step + 1)
             .filter_map(|node_id| self.graph.find_node_by_id(*node_id))
-            .filter(|node| !matches!(node.kind, GraphNodeKind::Output(_)))
+            .filter(|node| {
+                self.config.materialize_outputs || !matches!(node.kind, GraphNodeKind::Output(_))
+            })
             .flat_map(|node| node.inputs.iter().copied())
             .chain(self.graph.externally_observable_output_source_ids())
+            .chain(
+                self.config
+                    .materialize_outputs
+                    .then(|| {
+                        self.graph.nodes.iter().filter_map(|node| {
+                            matches!(node.kind, GraphNodeKind::Output(_)).then_some(node.id)
+                        })
+                    })
+                    .into_iter()
+                    .flatten(),
+            )
             .collect::<HashSet<_>>();
 
         for (_, state) in &mut queue {

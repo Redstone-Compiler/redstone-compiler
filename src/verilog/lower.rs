@@ -84,11 +84,7 @@ fn rewrite_expr(
 ) -> Expr {
     match expr {
         Expr::Ident(name) => Expr::Ident(rewrite_signal(name, instance_prefix, substitutions)),
-        Expr::Not(expr) => Expr::Not(Box::new(rewrite_expr(
-            expr,
-            instance_prefix,
-            substitutions,
-        ))),
+        Expr::Not(expr) => Expr::Not(Box::new(rewrite_expr(expr, instance_prefix, substitutions))),
         Expr::Binary { op, left, right } => Expr::Binary {
             op: *op,
             left: Box::new(rewrite_expr(left, instance_prefix, substitutions)),

@@ -22,7 +22,8 @@ mod tests {
     use crate::graph::GraphNodeKind;
     use crate::logic::LogicType;
     use crate::nbt::NBTRoot;
-    use crate::transform::place_and_route::utils::world_to_logic;
+    use crate::output::OutputMetadata;
+    use crate::transform::place_and_route::utils::{world_to_logic, world_to_logic_with_outputs};
 
     #[test]
     fn load_logic_graph_reads_verilog_file() -> eyre::Result<()> {
@@ -87,6 +88,23 @@ mod tests {
             .truth_table()?
             .contains_output_tables_under_input_permutation(&expected.truth_table()?));
         assert!(output_names(&generated).is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn half_adder_generated_nbt_restores_outputs_with_metadata() -> eyre::Result<()> {
+        let expected = load_logic_graph("test/half-adder.v")?;
+        let nbt = NBTRoot::load("test/half-adder-generated-from-verilog.nbt")?;
+        let metadata = OutputMetadata::load("test/half-adder-generated-from-verilog.outputs.json")?;
+        let generated = world_to_logic_with_outputs(&nbt.to_world(), &metadata)?;
+
+        assert_eq!(output_names(&generated), vec!["c", "s"]);
+        assert!(generated
+            .externally_observable_truth_table()?
+            .contains_output_tables_under_input_permutation(
+                &expected.externally_observable_truth_table()?
+            ));
 
         Ok(())
     }

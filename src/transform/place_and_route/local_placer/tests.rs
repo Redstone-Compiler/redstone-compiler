@@ -324,6 +324,24 @@ fn output_step_routes_visible_redstone_endpoint_from_torch_source() -> eyre::Res
 }
 
 #[test]
+fn generate_with_outputs_reports_materialized_output_positions() -> eyre::Result<()> {
+    let graph = LogicGraph::from_stmt("~a", "out")?.prepare_place()?;
+    let mut config = config(1);
+    config.materialize_outputs = true;
+    let placer = LocalPlacer::new(graph, config)?;
+
+    let placed = placer.generate_with_outputs(DimSize(5, 5, 3), None);
+
+    assert!(!placed.is_empty());
+    assert!(placed.iter().any(|placed| {
+        placed.outputs.iter().any(|endpoint| {
+            endpoint.name == "out" && placed.world[endpoint.position()].kind.is_redstone()
+        })
+    }));
+    Ok(())
+}
+
+#[test]
 fn future_join_cost_weights_pairs_with_remaining_fanout() {
     let mut graph = Graph {
         nodes: vec![
@@ -746,7 +764,10 @@ fn redstone_below_switch_powered_cobble_is_short() {
     let cobble_pos = Position(1, 2, 2);
     let redstone_pos = Position(1, 2, 1);
 
-    place_node(&mut world, PlacedNode::new(switch_pos, switch(Direction::East)));
+    place_node(
+        &mut world,
+        PlacedNode::new(switch_pos, switch(Direction::East)),
+    );
     place_node(&mut world, PlacedNode::new_cobble(cobble_pos));
 
     let redstone_node = PlacedNode::new_redstone(redstone_pos);

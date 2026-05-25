@@ -70,6 +70,67 @@ impl LogicGraph {
             .collect()
     }
 
+    pub fn named_outputs(&self) -> Vec<(String, GraphNodeId)> {
+        let mut outputs = self
+            .nodes
+            .iter()
+            .filter_map(|node| match &node.kind {
+                GraphNodeKind::Output(name) => Some((name.clone(), node.inputs[0])),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        outputs.sort_by(|(a, _), (b, _)| a.cmp(b));
+        outputs
+    }
+
+    pub fn terminal_sources(&self) -> Vec<GraphNodeId> {
+        self.outputs()
+            .into_iter()
+            .filter(|node_id| {
+                self.find_node_by_id(*node_id)
+                    .is_some_and(|node| !matches!(node.kind, GraphNodeKind::Output(_)))
+            })
+            .sorted()
+            .collect()
+    }
+
+    pub fn attach_outputs<I>(mut self, outputs: I) -> eyre::Result<Self>
+    where
+        I: IntoIterator<Item = (String, GraphNodeId)>,
+    {
+        let mut next_id = self.graph.max_node_id().map_or(0, |id| id + 1);
+        for (name, source_id) in outputs {
+            if self.find_node_by_id(source_id).is_none() {
+                eyre::bail!("cannot attach output {name}: missing source node {source_id}");
+            }
+
+            self.graph.nodes.push(GraphNode {
+                id: next_id,
+                kind: GraphNodeKind::Output(name),
+                inputs: vec![source_id],
+                ..Default::default()
+            });
+            next_id += 1;
+        }
+
+        self.graph.nodes.sort_by_key(|node| node.id);
+        self.graph.build_outputs();
+        self.graph.build_producers();
+        self.graph.build_consumers();
+        self.graph.verify()?;
+        Ok(self)
+    }
+
+    pub fn attach_anonymous_outputs(self) -> eyre::Result<Self> {
+        let outputs = self
+            .terminal_sources()
+            .into_iter()
+            .enumerate()
+            .map(|(index, source_id)| (format!("#{index}"), source_id))
+            .collect::<Vec<_>>();
+        self.attach_outputs(outputs)
+    }
+
     pub fn externally_observable_truth_table(&self) -> eyre::Result<LogicTruthTable> {
         let table = self.truth_table()?;
         let output_source_ids = self.externally_observable_output_source_ids();
@@ -658,7 +719,27 @@ mod tests {
         let table = graph.truth_table()?;
 
         assert_eq!(table.input_names, vec!["A_0", "carry_in"]);
-        assert_eq!(table.output_tables["SUM_0"], vec![false, false, false, true]);
+        assert_eq!(
+            table.output_tables["SUM_0"],
+            vec![false, false, false, true]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn attach_anonymous_outputs_names_terminal_sources() -> eyre::Result<()> {
+        let mut graph = LogicGraph::from_stmt("a&b", "out")?;
+        graph.graph.remove_output("out");
+        let graph = graph.attach_anonymous_outputs()?;
+
+        assert_eq!(graph.named_outputs().len(), 1);
+        assert_eq!(graph.named_outputs()[0].0, "#0");
+        assert_eq!(graph.terminal_sources().len(), 0);
+        assert_eq!(
+            graph.truth_table()?.output_tables["#0"],
+            vec![false, false, false, true]
+        );
 
         Ok(())
     }

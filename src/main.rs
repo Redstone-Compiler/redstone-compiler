@@ -62,13 +62,19 @@ fn main() -> eyre::Result<()> {
         route_step_sampling_policy: SamplingPolicy::Random(100),
     };
     let placer = LocalPlacer::new(graph, config)?;
-    let worlds = placer.generate(DimSize(10, 10, 5), None);
-    let Some(world) = worlds.into_iter().next() else {
+    let worlds = placer.generate_with_outputs(DimSize(10, 10, 5), None);
+    let Some(placed) = worlds.into_iter().next() else {
         eyre::bail!("placement produced no worlds");
     };
-    world.to_nbt().save(&output);
+    placed.world.to_nbt().save(&output);
+    let metadata_path = output.with_extension("outputs.json");
+    placed.metadata().save(&metadata_path)?;
 
-    println!("exported Verilog graph: path={}", output.display());
+    println!(
+        "exported Verilog graph: path={} outputs={}",
+        output.display(),
+        metadata_path.display()
+    );
 
     Ok(())
 }
