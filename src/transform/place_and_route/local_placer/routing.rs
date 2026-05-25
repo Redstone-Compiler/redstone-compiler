@@ -95,6 +95,27 @@ pub(super) fn generate_place_and_routes(
     }
 }
 
+pub(super) fn generate_output_routes(
+    world: &World3D,
+    source: Position,
+) -> Vec<(World3D, Position)> {
+    let source_node = PlacedNode::new(source, world[source]);
+    let forbidden_cobble = torch_source_support(world, source);
+
+    source_node
+        .propagation_bound(Some(world))
+        .into_iter()
+        .filter(|bound| world.size.bound_on(bound.position()))
+        .filter_map(|bound| place_output_redstone(world, bound, source))
+        .filter(|(world, position)| {
+            !route_powers_forbidden_cobble(world, &[source, *position], forbidden_cobble)
+        })
+        .map(|(world, position)| (source.manhattan_distance(&position), world, position))
+        .sorted_by_key(|(cost, _, _)| *cost)
+        .map(|(_, world, position)| (world, position))
+        .collect()
+}
+
 pub(super) fn generate_torch_place_and_routes(
     config: &LocalPlacerConfig,
     world: &World3D,
@@ -129,6 +150,56 @@ pub(super) fn generate_torch_place_and_routes(
                 .collect_vec()
         })
         .collect()
+}
+
+fn place_output_redstone(
+    world: &World3D,
+    bound: PlaceBound,
+    source: Position,
+) -> Option<(World3D, Position)> {
+    let redstone_pos = bound.position();
+    let cobble_pos = redstone_pos.down()?;
+    let cobble_except = if world[source].kind.is_torch() {
+        vec![cobble_pos, source]
+    } else {
+        Vec::new()
+    };
+    let cobble_node = try_generate_cobble_node(world, cobble_pos, &cobble_except)?;
+
+    let mut new_world = world.clone();
+    place_node(&mut new_world, cobble_node);
+
+    let bound_back_pos = redstone_pos.walk(bound.direction())?;
+    let redstone_node = PlacedNode::new_redstone(redstone_pos);
+    let except = [source, bound_back_pos, redstone_pos]
+        .into_iter()
+        .collect::<HashSet<_>>();
+    if redstone_node.has_conflict(&new_world, &except) {
+        return None;
+    }
+
+    let short_except = [source, redstone_pos].into_iter().collect::<HashSet<_>>();
+    if redstone_node.has_short(world, &short_except) {
+        return None;
+    }
+
+    place_node(&mut new_world, redstone_node);
+    new_world.update_redstone_states(source);
+    if !target_powers_redstone(&new_world, source, redstone_pos) {
+        return None;
+    }
+    if redstone_node.has_short(&new_world, &short_except) {
+        return None;
+    }
+    if let BlockKind::Torch { .. } = world[source].kind {
+        if let Some(source_cobble) = source.walk(world[source].direction) {
+            if redstone_powers_cobble(&new_world, redstone_pos, source_cobble) {
+                return None;
+            }
+        }
+    }
+
+    Some((new_world, redstone_pos))
 }
 
 pub(super) fn place_torch_with_cobble(

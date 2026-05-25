@@ -21,13 +21,19 @@
     "name": "d-latch.nbt",
     "file": "d-latch.nbt",
     "path": "examples/d-latch.nbt",
-    "size": 562
+    "size": 551
   },
   {
     "name": "full-adder.nbt",
     "file": "full-adder.nbt",
     "path": "examples/full-adder.nbt",
     "size": 508
+  },
+  {
+    "name": "half-adder-generated-from-verilog.nbt",
+    "file": "half-adder-generated-from-verilog.nbt",
+    "path": "examples/half-adder-generated-from-verilog.nbt",
+    "size": 403
   },
   {
     "name": "half-adder-generated.nbt",
@@ -39,7 +45,7 @@
     "name": "half-adder.nbt",
     "file": "half-adder.nbt",
     "path": "examples/half-adder.nbt",
-    "size": 21800
+    "size": 21376
   },
   {
     "name": "level.nbt",
@@ -75,19 +81,19 @@
     "name": "xor-gate-complex.nbt",
     "file": "xor-gate-complex.nbt",
     "path": "examples/xor-gate-complex.nbt",
-    "size": 12595
+    "size": 10570
   },
   {
     "name": "xor-gate-shortest.nbt",
     "file": "xor-gate-shortest.nbt",
     "path": "examples/xor-gate-shortest.nbt",
-    "size": 7269
+    "size": 6958
   },
   {
     "name": "xor-gate-simple.nbt",
     "file": "xor-gate-simple.nbt",
     "path": "examples/xor-gate-simple.nbt",
-    "size": 11128
+    "size": 11748
   },
   {
     "name": "xor-generated.nbt",

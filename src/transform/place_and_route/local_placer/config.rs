@@ -12,6 +12,7 @@ pub struct LocalPlacerConfig {
     pub leak_sampling: bool,
     // torch placement를 input과 direct로 연결하도록 강제한다.
     pub route_torch_directly: bool,
+    pub materialize_outputs: bool,
     pub torch_placement_strategy: TorchPlacementStrategy,
     pub not_route_strategy: NotRouteStrategy,
     pub max_not_route_step: usize,
@@ -32,6 +33,7 @@ impl Default for LocalPlacerConfig {
             placement_sampling_policy: PlacementSamplingPolicy::default(),
             leak_sampling: false,
             route_torch_directly: true,
+            materialize_outputs: false,
             torch_placement_strategy: TorchPlacementStrategy::default(),
             not_route_strategy: NotRouteStrategy::default(),
             max_not_route_step: 0,
@@ -101,6 +103,7 @@ impl LocalPlacerConfig {
             placement_sampling_policy: PlacementSamplingPolicy::StepPolicy,
             leak_sampling: false,
             route_torch_directly: false,
+            materialize_outputs: false,
             torch_placement_strategy: TorchPlacementStrategy::AnywhereNonAdjacent,
             not_route_strategy: NotRouteStrategy::DirectAndRedstone,
             max_not_route_step: max_route_step,

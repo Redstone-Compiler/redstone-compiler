@@ -490,11 +490,7 @@ impl Simulator {
                 if !self.world.size.bound_on(support) || !self.world[support].kind.is_cobble() {
                     return None;
                 }
-                let BlockKind::Cobble { on_count, .. } = self.world[support].kind else {
-                    return None;
-                };
-                let support_is_powered =
-                    on_count > 0 || self.redstone_currently_powers(support, Some(pos));
+                let support_is_powered = self.cobble_power_counts(support).0 > 0;
                 Some(Event {
                     id: None,
                     from_id: None,
@@ -513,120 +509,6 @@ impl Simulator {
             return;
         }
         self.queue.push_back(events.into());
-    }
-
-    fn redstone_currently_powers(&self, target: Position, ignored_torch: Option<Position>) -> bool {
-        self.world
-            .iter_block()
-            .into_iter()
-            .any(|(pos, block)| match block.kind {
-                BlockKind::Redstone {
-                    state, strength, ..
-                } if strength > 0 => {
-                    self.redstone_is_powered_independently_of(pos, ignored_torch)
-                        && self
-                            .redstone_propagate_targets(pos, state)
-                            .into_iter()
-                            .any(|redstone_target| redstone_target == target)
-                }
-                _ => false,
-            })
-    }
-
-    fn redstone_is_powered_independently_of(
-        &self,
-        pos: Position,
-        ignored_torch: Option<Position>,
-    ) -> bool {
-        self.redstone_is_powered_independently_of_inner(pos, ignored_torch, &mut HashSet::new())
-    }
-
-    fn redstone_is_powered_independently_of_inner(
-        &self,
-        pos: Position,
-        ignored_torch: Option<Position>,
-        visited: &mut HashSet<Position>,
-    ) -> bool {
-        if !visited.insert(pos) {
-            return false;
-        }
-
-        let BlockKind::Redstone {
-            on_count, strength, ..
-        } = self.world[pos].kind
-        else {
-            return false;
-        };
-
-        if strength == 0 {
-            return false;
-        }
-
-        if on_count > 0 && !self.is_torch_direct_redstone_output(ignored_torch, pos) {
-            return true;
-        }
-
-        self.world
-            .iter_block()
-            .into_iter()
-            .any(|(source_pos, source_block)| match source_block.kind {
-                BlockKind::Redstone {
-                    state,
-                    strength: source_strength,
-                    ..
-                } if source_strength > strength
-                    && self
-                        .redstone_propagate_targets(source_pos, state)
-                        .contains(&pos) =>
-                {
-                    let mut branch_visited = visited.clone();
-                    self.redstone_is_powered_independently_of_inner(
-                        source_pos,
-                        ignored_torch,
-                        &mut branch_visited,
-                    )
-                }
-                _ => false,
-            })
-    }
-
-    fn is_torch_direct_redstone_output(
-        &self,
-        ignored_torch: Option<Position>,
-        redstone_pos: Position,
-    ) -> bool {
-        let Some(torch_pos) = ignored_torch else {
-            return false;
-        };
-        if !self.world.size.bound_on(torch_pos) {
-            return false;
-        }
-        let torch = self.world[torch_pos];
-        if !torch.kind.is_torch() {
-            return false;
-        }
-
-        self.torch_output_targets(torch_pos, torch.direction)
-            .into_iter()
-            .any(|target| target == redstone_pos)
-    }
-
-    fn torch_output_targets(&self, pos: Position, direction: Direction) -> Vec<Position> {
-        let mut targets = match direction {
-            Direction::Bottom => pos.cardinal(),
-            Direction::East | Direction::West | Direction::South | Direction::North => {
-                let mut positions = pos.cardinal_except(direction);
-                positions.extend(pos.down());
-                positions
-            }
-            _ => Vec::new(),
-        };
-        targets.push(pos.up());
-        targets
-            .into_iter()
-            .filter(|&target| self.world.size.bound_on(target))
-            .filter(|&target| self.world[target].kind.is_redstone())
-            .collect()
     }
 
     fn redstone_propagate_targets(&self, pos: Position, state: usize) -> Vec<Position> {
@@ -765,17 +647,27 @@ impl Simulator {
     }
 
     fn cobble_power_counts(&self, target: Position) -> (usize, usize) {
+        let (sources, hard_sources) = self.cobble_power_sources(target);
+        (sources.len(), hard_sources.len())
+    }
+
+    fn cobble_power_sources(&self, target: Position) -> (HashSet<Position>, HashSet<Position>) {
         let mut sources = HashSet::new();
         let mut hard_sources = HashSet::new();
 
         for (source_pos, source_block) in self.world.iter_block() {
             match source_block.kind {
                 BlockKind::Torch { is_on } if is_on => {
-                    for position in source_pos
-                        .cardinal_except(source_block.direction)
-                        .into_iter()
-                        .chain(source_pos.down())
-                    {
+                    let soft_targets = match source_block.direction {
+                        Direction::Bottom => source_pos.cardinal(),
+                        Direction::East | Direction::West | Direction::South | Direction::North => {
+                            let mut positions = source_pos.cardinal_except(source_block.direction);
+                            positions.extend(source_pos.down());
+                            positions
+                        }
+                        _ => Vec::new(),
+                    };
+                    for position in soft_targets {
                         if position == target {
                             sources.insert(source_pos);
                         }
@@ -830,7 +722,7 @@ impl Simulator {
             }
         }
 
-        (sources.len(), hard_sources.len())
+        (sources, hard_sources)
     }
 
     fn init_switch_event(&mut self, dir: Direction, pos: Position) {
@@ -1934,6 +1826,15 @@ mod test {
         switches
     }
 
+    fn block_is_powered(world: &World3D, pos: Position) -> bool {
+        match world[pos].kind {
+            BlockKind::Redstone { strength, .. } => strength > 0,
+            BlockKind::Torch { is_on } | BlockKind::Switch { is_on } => is_on,
+            BlockKind::Cobble { on_count, .. } => on_count > 0,
+            _ => false,
+        }
+    }
+
     fn signal_snapshot(world: &World3D) -> Vec<(Position, BlockKind)> {
         let mut snapshot = world
             .iter_block()
@@ -2028,6 +1929,47 @@ mod test {
                 strength > 0,
                 mask == 1 || mask == 2,
                 "xor-generated output mismatch for mask {mask:02b}"
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn unittest_simulator_half_adder_generated_truth_table() -> eyre::Result<()> {
+        let nbt = NBTRoot::from_nbt_bytes(&std::fs::read(
+            "test/half-adder-generated-from-verilog.nbt",
+        )?)?;
+        let world = nbt.to_world();
+        let switches = switch_positions(&world);
+        let sum_output = Position(4, 4, 3);
+        let carry_output = Position(2, 6, 1);
+
+        assert_eq!(switches.len(), 2);
+        for mask in 0..4 {
+            let mut sim = Simulator::from_with_limits_and_trace(&world, 256, 50_000, 0)
+                .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
+            sim.change_state_with_limits(
+                switches
+                    .iter()
+                    .enumerate()
+                    .map(|(index, pos)| (*pos, (mask & (1 << index)) != 0))
+                    .collect(),
+                256,
+                50_000,
+            )?;
+
+            let a = (mask & 0b01) != 0;
+            let b = (mask & 0b10) != 0;
+            assert_eq!(
+                block_is_powered(sim.world(), sum_output),
+                a ^ b,
+                "half-adder sum mismatch for mask {mask:02b}"
+            );
+            assert_eq!(
+                block_is_powered(sim.world(), carry_output),
+                a & b,
+                "half-adder carry mismatch for mask {mask:02b}"
             );
         }
 

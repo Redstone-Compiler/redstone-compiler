@@ -18,6 +18,27 @@ impl LogicGraph {
         LogicGraphBuilder::new(stmt.to_string()).build(output.to_string())
     }
 
+    pub fn from_assignments<I>(assignments: I) -> eyre::Result<LogicGraph>
+    where
+        I: IntoIterator<Item = (String, String)>,
+    {
+        let mut graphs = assignments
+            .into_iter()
+            .map(|(output, expr)| LogicGraph::from_stmt(&expr, &output))
+            .collect::<eyre::Result<Vec<_>>>()?
+            .into_iter();
+
+        let Some(mut graph) = graphs.next() else {
+            eyre::bail!("expected at least one logic assignment");
+        };
+
+        for next in graphs {
+            graph.graph.merge(next.graph);
+        }
+
+        Ok(graph)
+    }
+
     pub fn prepare_place(self) -> eyre::Result<Self> {
         let mut transform = LogicGraphTransformer::new(self);
         transform.decompose_xor()?;
@@ -47,6 +68,67 @@ impl LogicGraph {
                 _ => None,
             })
             .collect()
+    }
+
+    pub fn named_outputs(&self) -> Vec<(String, GraphNodeId)> {
+        let mut outputs = self
+            .nodes
+            .iter()
+            .filter_map(|node| match &node.kind {
+                GraphNodeKind::Output(name) => Some((name.clone(), node.inputs[0])),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        outputs.sort_by(|(a, _), (b, _)| a.cmp(b));
+        outputs
+    }
+
+    pub fn terminal_sources(&self) -> Vec<GraphNodeId> {
+        self.outputs()
+            .into_iter()
+            .filter(|node_id| {
+                self.find_node_by_id(*node_id)
+                    .is_some_and(|node| !matches!(node.kind, GraphNodeKind::Output(_)))
+            })
+            .sorted()
+            .collect()
+    }
+
+    pub fn attach_outputs<I>(mut self, outputs: I) -> eyre::Result<Self>
+    where
+        I: IntoIterator<Item = (String, GraphNodeId)>,
+    {
+        let mut next_id = self.graph.max_node_id().map_or(0, |id| id + 1);
+        for (name, source_id) in outputs {
+            if self.find_node_by_id(source_id).is_none() {
+                eyre::bail!("cannot attach output {name}: missing source node {source_id}");
+            }
+
+            self.graph.nodes.push(GraphNode {
+                id: next_id,
+                kind: GraphNodeKind::Output(name),
+                inputs: vec![source_id],
+                ..Default::default()
+            });
+            next_id += 1;
+        }
+
+        self.graph.nodes.sort_by_key(|node| node.id);
+        self.graph.build_outputs();
+        self.graph.build_producers();
+        self.graph.build_consumers();
+        self.graph.verify()?;
+        Ok(self)
+    }
+
+    pub fn attach_anonymous_outputs(self) -> eyre::Result<Self> {
+        let outputs = self
+            .terminal_sources()
+            .into_iter()
+            .enumerate()
+            .map(|(index, source_id)| (format!("#{index}"), source_id))
+            .collect::<Vec<_>>();
+        self.attach_outputs(outputs)
     }
 
     pub fn externally_observable_truth_table(&self) -> eyre::Result<LogicTruthTable> {
@@ -246,6 +328,14 @@ enum LogicStringTokenType {
     Eof,
 }
 
+fn is_ident_start(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphabetic()
+}
+
+fn is_ident_continue(ch: char) -> bool {
+    ch == '_' || ch == '$' || ch.is_ascii_alphanumeric()
+}
+
 impl LogicGraphBuilder {
     pub fn new(stmt: String) -> Self {
         LogicGraphBuilder {
@@ -331,11 +421,11 @@ impl LogicGraphBuilder {
             '(' => LogicStringTokenType::ParStart,
             ')' => LogicStringTokenType::ParEnd,
             '~' => LogicStringTokenType::Not,
-            'a'..='z' => {
+            ch if is_ident_start(ch) => {
                 let mut result = String::new();
 
                 while self.stmt.len() != next_ptr
-                    && matches!(self.stmt.chars().nth(next_ptr).unwrap(), 'a'..='z' | '0'..='9')
+                    && is_ident_continue(self.stmt.chars().nth(next_ptr).unwrap())
                 {
                     result.push(self.stmt.chars().nth(next_ptr).unwrap());
                     next_ptr = self.next_ptr();
@@ -604,6 +694,52 @@ mod tests {
         assert!(graph
             .truth_table()?
             .contains_output_tables(&required.truth_table()?));
+
+        Ok(())
+    }
+
+    #[test]
+    fn from_assignments_builds_half_adder() -> eyre::Result<()> {
+        let graph = LogicGraph::from_assignments([
+            ("s".to_owned(), "a^b".to_owned()),
+            ("c".to_owned(), "a&b".to_owned()),
+        ])?;
+        let table = graph.truth_table()?;
+
+        assert_eq!(table.input_names, vec!["a", "b"]);
+        assert_eq!(table.output_tables["s"], vec![false, true, true, false]);
+        assert_eq!(table.output_tables["c"], vec![false, false, false, true]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn logic_parser_accepts_verilog_style_identifiers() -> eyre::Result<()> {
+        let graph = LogicGraph::from_stmt("A_0&carry_in", "SUM_0")?;
+        let table = graph.truth_table()?;
+
+        assert_eq!(table.input_names, vec!["A_0", "carry_in"]);
+        assert_eq!(
+            table.output_tables["SUM_0"],
+            vec![false, false, false, true]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn attach_anonymous_outputs_names_terminal_sources() -> eyre::Result<()> {
+        let mut graph = LogicGraph::from_stmt("a&b", "out")?;
+        graph.graph.remove_output("out");
+        let graph = graph.attach_anonymous_outputs()?;
+
+        assert_eq!(graph.named_outputs().len(), 1);
+        assert_eq!(graph.named_outputs()[0].0, "#0");
+        assert_eq!(graph.terminal_sources().len(), 0);
+        assert_eq!(
+            graph.truth_table()?.output_tables["#0"],
+            vec![false, false, false, true]
+        );
 
         Ok(())
     }
