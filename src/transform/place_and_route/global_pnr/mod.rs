@@ -14,6 +14,7 @@ use crate::transform::place_and_route::global_pnr::candidate::{
 use crate::transform::place_and_route::global_pnr::placer::{
     place_candidates_on_shelves, GlobalPlacementConfig,
 };
+use crate::transform::place_and_route::global_pnr::router::route_module_variables;
 use crate::world::World3D;
 
 #[derive(Clone, Default)]
@@ -49,7 +50,8 @@ pub fn place_and_route_module(
     }
 
     let placed = place_candidates_on_shelves(&candidates, &config.placement);
-    assemble_world(&candidates, &placed, &[]).map_err(Into::into)
+    let routed_nets = route_module_variables(module, &candidates, &placed)?;
+    assemble_world(&candidates, &placed, &routed_nets).map_err(Into::into)
 }
 
 #[cfg(test)]
@@ -115,6 +117,7 @@ mod tests {
     #[ignore = "search-heavy sequential global pnr smoke test"]
     fn d_flip_flop_module_generates_world_from_child_layout_candidates() -> eyre::Result<()> {
         let mut context = GraphModuleContext::default();
+        context.append(not_clk_module());
         context.append(d_latch_module("master"));
         context.append(d_latch_module("slave"));
         let module = d_flip_flop_module();
@@ -139,12 +142,23 @@ mod tests {
         GraphModule {
             name: "d_flip_flop".to_owned(),
             graph: None,
-            instances: vec!["master".to_owned(), "slave".to_owned()],
-            vars: vec![GraphModuleVariable {
-                var_type: GraphModulePortType::InputNet,
-                source: ("master".to_owned(), "q".to_owned()),
-                target: ("slave".to_owned(), "d".to_owned()),
-            }],
+            instances: vec![
+                "not_clk".to_owned(),
+                "master".to_owned(),
+                "slave".to_owned(),
+            ],
+            vars: vec![
+                GraphModuleVariable {
+                    var_type: GraphModulePortType::InputNet,
+                    source: ("not_clk".to_owned(), "clk_n".to_owned()),
+                    target: ("master".to_owned(), "en".to_owned()),
+                },
+                GraphModuleVariable {
+                    var_type: GraphModulePortType::InputNet,
+                    source: ("master".to_owned(), "q".to_owned()),
+                    target: ("slave".to_owned(), "d".to_owned()),
+                },
+            ],
             ports: vec![
                 GraphModulePort {
                     name: "d".to_owned(),
@@ -155,7 +169,7 @@ mod tests {
                     name: "clk".to_owned(),
                     port_type: GraphModulePortType::InputNet,
                     target: GraphModulePortTarget::Wire(vec![
-                        ("master".to_owned(), "en".to_owned()),
+                        ("not_clk".to_owned(), "clk".to_owned()),
                         ("slave".to_owned(), "en".to_owned()),
                     ]),
                 },
@@ -166,6 +180,40 @@ mod tests {
                 },
             ],
         }
+    }
+
+    fn not_clk_module() -> GraphModule {
+        let mut graph = Graph {
+            nodes: vec![
+                GraphNode {
+                    id: 0,
+                    kind: GraphNodeKind::Input("clk".to_owned()),
+                    ..Default::default()
+                },
+                GraphNode {
+                    id: 1,
+                    kind: GraphNodeKind::Logic(crate::logic::Logic {
+                        logic_type: crate::logic::LogicType::Not,
+                    }),
+                    inputs: vec![0],
+                    ..Default::default()
+                },
+                GraphNode {
+                    id: 2,
+                    kind: GraphNodeKind::Output("clk_n".to_owned()),
+                    inputs: vec![1],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        graph.build_outputs();
+        graph.build_producers();
+        graph.build_consumers();
+        graph.verify().unwrap();
+        let mut module: GraphModule = graph.into();
+        module.name = "not_clk".to_owned();
+        module
     }
 
     fn d_latch_module(name: &str) -> GraphModule {

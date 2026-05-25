@@ -98,6 +98,10 @@ impl LocalPlacerInputConstraints {
             .or_else(|| self.positions_by_input_name.get(input_name))
             .cloned()
     }
+
+    pub fn positions_for_input_name(&self, input_name: &str) -> Option<Vec<Position>> {
+        self.positions_by_input_name.get(input_name).cloned()
+    }
 }
 
 #[derive(Default, Debug, Copy, Clone, PartialEq, Eq)]

@@ -166,6 +166,21 @@ impl LocalPlacer {
             .collect()
     }
 
+    pub fn generate_with_outputs_and_input_constraints(
+        &self,
+        dim: DimSize,
+        finish_step: Option<usize>,
+        input_constraints: &LocalPlacerInputConstraints,
+    ) -> Vec<PlacedWorld> {
+        self.generate_queue(dim, finish_step, None, Some(input_constraints))
+            .into_iter()
+            .map(|(world, state)| PlacedWorld {
+                world,
+                outputs: self.output_endpoints(&state),
+            })
+            .collect()
+    }
+
     pub fn generate_with_debug(
         &self,
         dim: DimSize,
@@ -194,6 +209,11 @@ impl LocalPlacer {
             .filter_map(|node| match &node.kind {
                 GraphNodeKind::Output(name) => state
                     .node_position(node.id)
+                    .or_else(|| {
+                        node.inputs
+                            .first()
+                            .and_then(|source_id| state.node_position(*source_id))
+                    })
                     .map(|position| OutputEndpoint::new(name.clone(), position)),
                 _ => None,
             })

@@ -1,8 +1,11 @@
 use eyre::ContextCompat;
+use itertools::Itertools;
 
 use crate::graph::logic::LogicGraph;
-use crate::graph::module::GraphModule;
-use crate::transform::place_and_route::global_pnr::ir::LayoutCandidate;
+use crate::graph::module::{GraphModule, GraphModulePortTarget, GraphModulePortType};
+use crate::transform::place_and_route::global_pnr::ir::{
+    LayoutCandidate, PhysicalPort, PhysicalPortDirection,
+};
 use crate::transform::place_and_route::local_placer::{
     LocalPlacer, LocalPlacerConfig, LocalPlacerInputConstraints,
 };
@@ -39,11 +42,48 @@ pub fn generate_graph_module_candidates(
     let placer = LocalPlacer::new(graph, config.local_config)?;
 
     placer
-        .generate_with_input_constraints(config.dim, None, &config.input_constraints)
+        .generate_with_outputs_and_input_constraints(config.dim, None, &config.input_constraints)
         .into_iter()
         .take(config.max_candidates)
-        .map(|world| LayoutCandidate::from_world(module.name.clone(), world))
+        .map(|placed| {
+            let ports = candidate_ports(module, &config.input_constraints, &placed.outputs);
+            LayoutCandidate::from_world(module.name.clone(), placed.world, ports)
+        })
         .collect()
+}
+
+fn candidate_ports(
+    module: &GraphModule,
+    input_constraints: &LocalPlacerInputConstraints,
+    outputs: &[crate::output::OutputEndpoint],
+) -> Vec<PhysicalPort> {
+    let mut ports = module
+        .ports
+        .iter()
+        .filter_map(|port| match (&port.port_type, &port.target) {
+            (GraphModulePortType::InputNet, GraphModulePortTarget::Node(input_name)) => {
+                input_constraints
+                    .positions_for_input_name(input_name)
+                    .and_then(|positions| positions.into_iter().next())
+                    .map(|position| PhysicalPort {
+                        name: port.name.clone(),
+                        direction: PhysicalPortDirection::Input,
+                        position,
+                    })
+            }
+            (GraphModulePortType::OutputNet, GraphModulePortTarget::Node(output_name)) => outputs
+                .iter()
+                .find(|output| output.name == *output_name)
+                .map(|output| PhysicalPort {
+                    name: port.name.clone(),
+                    direction: PhysicalPortDirection::Output,
+                    position: output.position(),
+                }),
+            _ => None,
+        })
+        .collect_vec();
+    ports.sort_by(|a, b| a.name.cmp(&b.name));
+    ports
 }
 
 pub fn d_latch_child_candidate_config(local_config: LocalPlacerConfig) -> UnitCandidateConfig {
