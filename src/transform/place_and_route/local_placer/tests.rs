@@ -49,7 +49,7 @@ fn config(max_route_step: usize) -> LocalPlacerConfig {
 #[test]
 fn generate_inputs_uses_greedy_boundary_switch_placements() {
     let world = World3D::new(DimSize(3, 3, 2));
-    let generated = generate_inputs(&config(1), &world, BlockKind::Switch { is_on: false });
+    let generated = generate_inputs(&config(1), &world, BlockKind::Switch { is_on: false }, None);
 
     assert_eq!(generated.len(), 10);
     for (world, position) in generated {
@@ -65,7 +65,7 @@ fn generate_inputs_can_search_anywhere() {
     let mut config = config(1);
     config.input_placement_strategy = InputPlacementStrategy::Anywhere;
 
-    let generated = generate_inputs(&config, &world, BlockKind::Switch { is_on: false });
+    let generated = generate_inputs(&config, &world, BlockKind::Switch { is_on: false }, None);
 
     assert_eq!(generated.len(), 18);
 }
@@ -76,9 +76,46 @@ fn generate_inputs_limits_candidates_per_world() {
     let mut config = config(1);
     config.input_candidate_limit = Some(4);
 
-    let generated = generate_inputs(&config, &world, BlockKind::Switch { is_on: false });
+    let generated = generate_inputs(&config, &world, BlockKind::Switch { is_on: false }, None);
 
     assert_eq!(generated.len(), 4);
+}
+
+#[test]
+fn generate_inputs_uses_explicit_position_region() {
+    let world = World3D::new(DimSize(6, 6, 4));
+    let positions = [Position(3, 3, 1), Position(4, 3, 1)];
+
+    let generated = generate_inputs(
+        &config(1),
+        &world,
+        BlockKind::Switch { is_on: false },
+        Some(&positions),
+    );
+
+    assert_eq!(generated.len(), 2);
+    assert_eq!(
+        generated
+            .iter()
+            .map(|(_, position)| *position)
+            .collect_vec(),
+        positions
+    );
+}
+
+#[test]
+fn local_placer_limits_input_search_to_named_constraints() -> eyre::Result<()> {
+    let graph = LogicGraph::from_stmt("a", "out")?;
+    let placer = LocalPlacer::new(graph, config(1))?;
+    let input_position = Position(3, 3, 1);
+    let constraints =
+        LocalPlacerInputConstraints::new().with_input_positions("a", [input_position]);
+
+    let generated = placer.generate_with_input_constraints(DimSize(6, 6, 4), None, &constraints);
+
+    assert_eq!(generated.len(), 1);
+    assert!(generated[0][input_position].kind.is_switch());
+    Ok(())
 }
 
 #[test]
@@ -267,7 +304,7 @@ fn output_step_routes_visible_redstone_endpoint_from_or_source() -> eyre::Result
     place_node(&mut world, PlacedNode::new_redstone(source));
     let state = [(or_id, source)].into_iter().collect();
 
-    let result = placer.do_step(output_step, vec![(world, state)]);
+    let result = placer.do_step(output_step, vec![(world, state)], None);
 
     assert!(!result.queue.is_empty());
     assert!(result.queue.iter().any(|(world, state)| {
@@ -312,7 +349,7 @@ fn output_step_routes_visible_redstone_endpoint_from_torch_source() -> eyre::Res
     );
     let state = [(not_id, source)].into_iter().collect();
 
-    let result = placer.do_step(output_step, vec![(world, state)]);
+    let result = placer.do_step(output_step, vec![(world, state)], None);
 
     assert!(!result.queue.is_empty());
     assert!(result.queue.iter().any(|(world, state)| {

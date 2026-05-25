@@ -27,8 +27,8 @@ mod isolation;
 mod state;
 
 pub use config::{
-    InputPlacementStrategy, LocalPlacerConfig, NotRouteStrategy, PlacementSamplingPolicy,
-    TorchPlacementStrategy, K_MAX_LOCAL_PLACE_NODE_COUNT,
+    InputPlacementStrategy, LocalPlacerConfig, LocalPlacerInputConstraints, NotRouteStrategy,
+    PlacementSamplingPolicy, TorchPlacementStrategy, K_MAX_LOCAL_PLACE_NODE_COUNT,
 };
 pub use debug::{LocalPlacerDebug, RouteDebug, RouteDepthDebug, RouteRejectReason, StepDebug};
 use isolation::RouteIsolation;
@@ -140,12 +140,24 @@ impl LocalPlacer {
         self.generate_inner(dim, finish_step, None)
     }
 
+    pub fn generate_with_input_constraints(
+        &self,
+        dim: DimSize,
+        finish_step: Option<usize>,
+        input_constraints: &LocalPlacerInputConstraints,
+    ) -> Vec<World3D> {
+        self.generate_queue(dim, finish_step, None, Some(input_constraints))
+            .into_iter()
+            .map(|(world, _)| world)
+            .collect()
+    }
+
     pub fn generate_with_outputs(
         &self,
         dim: DimSize,
         finish_step: Option<usize>,
     ) -> Vec<PlacedWorld> {
-        self.generate_queue(dim, finish_step, None)
+        self.generate_queue(dim, finish_step, None, None)
             .into_iter()
             .map(|(world, state)| PlacedWorld {
                 world,
@@ -169,7 +181,7 @@ impl LocalPlacer {
         finish_step: Option<usize>,
         debug: Option<&mut LocalPlacerDebug>,
     ) -> Vec<World3D> {
-        self.generate_queue(dim, finish_step, debug)
+        self.generate_queue(dim, finish_step, debug, None)
             .into_iter()
             .map(|(world, _)| world)
             .collect()
@@ -194,24 +206,40 @@ impl LocalPlacer {
         dim: DimSize,
         finish_step: Option<usize>,
         debug: Option<&mut LocalPlacerDebug>,
+        input_constraints: Option<&LocalPlacerInputConstraints>,
     ) -> PlacerQueue {
         let mut queue = PlacerQueue::new();
         queue.push((World3D::new(dim), Default::default()));
-        self.generate_queue_from(queue, finish_step, debug)
+        self.generate_queue_from_with_input_constraints(
+            queue,
+            finish_step,
+            debug,
+            input_constraints,
+        )
     }
 
     fn generate_queue_from(
         &self,
+        queue: PlacerQueue,
+        finish_step: Option<usize>,
+        debug: Option<&mut LocalPlacerDebug>,
+    ) -> PlacerQueue {
+        self.generate_queue_from_with_input_constraints(queue, finish_step, debug, None)
+    }
+
+    fn generate_queue_from_with_input_constraints(
+        &self,
         mut queue: PlacerQueue,
         finish_step: Option<usize>,
         mut debug: Option<&mut LocalPlacerDebug>,
+        input_constraints: Option<&LocalPlacerInputConstraints>,
     ) -> PlacerQueue {
         tracing::info!("generate starts");
 
         let mut step = 0;
         while step < self.visit_orders.len() && Some(step) != finish_step {
             let prev_len = queue.len();
-            let result = self.do_step(step, queue);
+            let result = self.do_step(step, queue, input_constraints);
             let next_len = result.queue.len();
 
             let compacted = self.compact_queue_after_step(step, result.queue);
@@ -234,7 +262,12 @@ impl LocalPlacer {
         queue
     }
 
-    fn do_step(&self, step: usize, queue: PlacerQueue) -> StepResult {
+    fn do_step(
+        &self,
+        step: usize,
+        queue: PlacerQueue,
+        input_constraints: Option<&LocalPlacerInputConstraints>,
+    ) -> StepResult {
         let node = self.graph.find_node_by_id(self.visit_orders[step]).unwrap();
         tracing::info!("[{}/{}] {node}", step + 1, self.visit_orders.len());
 
@@ -254,7 +287,8 @@ impl LocalPlacer {
             .panic_fuse()
             .progress_with_style(progress_style(step + 1, self.visit_orders.len()))
             .map(|(world, state)| {
-                let generation = self.generate_place_and_route(node, world, &state);
+                let generation =
+                    self.generate_place_and_route(node, world, &state, input_constraints);
                 (generation.items, generation.route_debug)
             })
             .collect::<Vec<_>>();
@@ -294,18 +328,28 @@ impl LocalPlacer {
         node: GraphNodeRef<'_>,
         world: World3D,
         state: &PlacementState,
+        input_constraints: Option<&LocalPlacerInputConstraints>,
     ) -> PlacementGeneration {
         let mut route_debug = None;
         let items = match node.kind {
-            GraphNodeKind::Input(_) => {
+            GraphNodeKind::Input(ref input_name) => {
                 if let Some(position) = state.node_position(node.id) {
                     let mut state = state.clone();
                     state.set_signal_footprint(node.id, [position]);
                     vec![(world, state)]
                 } else {
+                    let constrained_positions = input_constraints
+                        .and_then(|constraints| constraints.positions_for(node.id, input_name));
                     input_node_kind()
                         .into_iter()
-                        .flat_map(|kind| generate_inputs(&self.config, &world, kind))
+                        .flat_map(|kind| {
+                            generate_inputs(
+                                &self.config,
+                                &world,
+                                kind,
+                                constrained_positions.as_deref(),
+                            )
+                        })
                         .map(|(world, position)| {
                             let mut state = state.clone();
                             state.set_node_position(node.id, position);

@@ -40,6 +40,7 @@ pub(super) fn generate_inputs(
     config: &LocalPlacerConfig,
     world: &World3D,
     kind: BlockKind,
+    constrained_positions: Option<&[Position]>,
 ) -> Vec<(World3D, Position)> {
     let mut input_strategy = Direction::iter_direction_without_top()
         .map(|direction| Block { kind, direction })
@@ -48,16 +49,25 @@ pub(super) fn generate_inputs(
         input_strategy = input_strategy.into_iter().take(1).collect();
     }
 
-    let place_strategy = match config.input_placement_strategy {
-        InputPlacementStrategy::Boundary => iproduct!(0..1, 0..world.size.1, 0..world.size.2)
-            .chain(iproduct!(0..world.size.0, 0..1, 0..world.size.2))
-            .map(|(x, y, z)| Position(x, y, z))
+    let place_strategy = if let Some(positions) = constrained_positions {
+        positions
+            .iter()
+            .copied()
+            .filter(|position| world.size.bound_on(*position))
             .unique()
-            .collect_vec(),
-        InputPlacementStrategy::Anywhere => {
-            iproduct!(0..world.size.0, 0..world.size.1, 0..world.size.2)
+            .collect_vec()
+    } else {
+        match config.input_placement_strategy {
+            InputPlacementStrategy::Boundary => iproduct!(0..1, 0..world.size.1, 0..world.size.2)
+                .chain(iproduct!(0..world.size.0, 0..1, 0..world.size.2))
                 .map(|(x, y, z)| Position(x, y, z))
-                .collect_vec()
+                .unique()
+                .collect_vec(),
+            InputPlacementStrategy::Anywhere => {
+                iproduct!(0..world.size.0, 0..world.size.1, 0..world.size.2)
+                    .map(|(x, y, z)| Position(x, y, z))
+                    .collect_vec()
+            }
         }
     };
 

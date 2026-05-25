@@ -1,4 +1,5 @@
 pub mod estimate;
+pub mod global_pnr;
 pub mod local_placer;
 pub mod place_bound;
 pub mod placed_node;
