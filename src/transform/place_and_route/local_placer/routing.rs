@@ -1,5 +1,8 @@
 use super::*;
 
+const OR_ROUTE_STEP_SAMPLE_SCOPE: u64 = 3;
+const NOT_ROUTE_STEP_SAMPLE_SCOPE: u64 = 5;
+
 pub(super) fn input_node_kind() -> Vec<BlockKind> {
     vec![
         BlockKind::Switch { is_on: false },
@@ -404,9 +407,10 @@ fn generate_redstone_routes(
             }
         }
 
-        queue = config
-            .route_step_sampling_policy
-            .sample_with_seed(next_queue, config.sampling_seed(5, step));
+        queue = config.route_step_sampling_policy.sample_with_seed(
+            next_queue,
+            config.sampling_seed(NOT_ROUTE_STEP_SAMPLE_SCOPE, step),
+        );
         step += 1;
     }
 
@@ -591,9 +595,10 @@ pub(super) fn generate_or_routes(
         }
 
         depth_debug.next_frontier_before_sampling = next_queue.len();
-        queue = config
-            .route_step_sampling_policy
-            .sample_with_seed(next_queue, config.sampling_seed(3, step));
+        queue = config.route_step_sampling_policy.sample_with_seed(
+            next_queue,
+            config.sampling_seed(OR_ROUTE_STEP_SAMPLE_SCOPE, step),
+        );
         depth_debug.next_frontier_after_sampling = queue.len();
         debug.depths.push(depth_debug);
         step += 1;

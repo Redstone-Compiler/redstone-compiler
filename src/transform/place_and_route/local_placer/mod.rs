@@ -18,7 +18,6 @@ use crate::transform::place_and_route::estimate::{bounding_box_of_positions, wor
 use crate::transform::place_and_route::place_bound::PropagateType;
 use crate::world::block::{Block, BlockKind, Direction};
 use crate::world::position::{DimSize, Position};
-use crate::world::simulator::Simulator;
 use crate::world::World3D;
 
 mod config;
@@ -44,7 +43,7 @@ use sequential::{
 #[cfg(test)]
 use sequential::{
     generate_rs_latch_not_pairs, place_sequential_macro, route_rs_latch_branches,
-    route_sequential_inputs, select_rs_latch_not_pairs, D_LATCH_INPUT_GATING_NODES,
+    route_sequential_inputs, rs_latch_input_node_ids, select_rs_latch_not_pairs,
 };
 
 pub struct LocalPlacer {
@@ -55,6 +54,15 @@ pub struct LocalPlacer {
 }
 
 type PlacerQueue = Vec<(World3D, PlacementState)>;
+
+const STEP_SAMPLE_SCOPE: u64 = 1;
+const RANKED_RANDOM_TAIL_SAMPLE_SCOPE: u64 = 2;
+const LEAK_SAMPLING_QUEUE_THRESHOLD: usize = 10_000;
+const PLACEMENT_DIVERSITY_SPAN_BUCKET_SIZE: usize = 4;
+const RANKED_DIVERSITY_SLOT_DIVISOR: usize = 4;
+const LOCAL_DENSITY_COST_WEIGHT: usize = 3;
+const FUTURE_JOIN_DISTANCE_COST_WEIGHT: usize = 8;
+
 impl LocalPlacer {
     pub fn new(graph: LogicGraph, config: LocalPlacerConfig) -> eyre::Result<Self> {
         let visit_orders = graph.topological_order();
@@ -156,12 +164,20 @@ impl LocalPlacer {
         &self,
         dim: DimSize,
         finish_step: Option<usize>,
+        debug: Option<&mut LocalPlacerDebug>,
+    ) -> PlacerQueue {
+        let mut queue = PlacerQueue::new();
+        queue.push((World3D::new(dim), Default::default()));
+        self.generate_queue_from(queue, finish_step, debug)
+    }
+
+    fn generate_queue_from(
+        &self,
+        mut queue: PlacerQueue,
+        finish_step: Option<usize>,
         mut debug: Option<&mut LocalPlacerDebug>,
     ) -> PlacerQueue {
         tracing::info!("generate starts");
-
-        let mut queue = PlacerQueue::new();
-        queue.push((World3D::new(dim), Default::default()));
 
         let mut step = 0;
         while step < self.visit_orders.len() && Some(step) != finish_step {
@@ -252,16 +268,24 @@ impl LocalPlacer {
     ) -> PlacementGeneration {
         let mut route_debug = None;
         let items = match node.kind {
-            GraphNodeKind::Input(_) => input_node_kind()
-                .into_iter()
-                .flat_map(|kind| generate_inputs(&self.config, &world, kind))
-                .map(|(world, position)| {
+            GraphNodeKind::Input(_) => {
+                if let Some(position) = state.node_position(node.id) {
                     let mut state = state.clone();
-                    state.set_node_position(node.id, position);
                     state.set_signal_footprint(node.id, [position]);
-                    (world, state)
-                })
-                .collect(),
+                    vec![(world, state)]
+                } else {
+                    input_node_kind()
+                        .into_iter()
+                        .flat_map(|kind| generate_inputs(&self.config, &world, kind))
+                        .map(|(world, position)| {
+                            let mut state = state.clone();
+                            state.set_node_position(node.id, position);
+                            state.set_signal_footprint(node.id, [position]);
+                            (world, state)
+                        })
+                        .collect()
+                }
+            }
             GraphNodeKind::Output(_) => vec![(world.clone(), state.clone())],
             GraphNodeKind::Logic(logic) => match logic.logic_type {
                 LogicType::Not => not_node_kind()
@@ -360,16 +384,17 @@ impl LocalPlacer {
     fn sample(&self, step: usize, queue: PlacerQueue) -> PlacerQueue {
         match self.config.placement_sampling_policy {
             PlacementSamplingPolicy::StepPolicy => {
-                if self.config.leak_sampling && queue.len() > 10_000 {
+                if self.config.leak_sampling && queue.len() > LEAK_SAMPLING_QUEUE_THRESHOLD {
                     // TODO: deallocate on other thread
                     let leak = Box::leak(Box::new(queue));
-                    self.config
-                        .step_sampling_policy
-                        .sample_with_taking_seed(leak, self.config.sampling_seed(1, step))
+                    self.config.step_sampling_policy.sample_with_taking_seed(
+                        leak,
+                        self.config.sampling_seed(STEP_SAMPLE_SCOPE, step),
+                    )
                 } else {
                     self.config
                         .step_sampling_policy
-                        .sample_with_seed(queue, self.config.sampling_seed(1, step))
+                        .sample_with_seed(queue, self.config.sampling_seed(STEP_SAMPLE_SCOPE, step))
                 }
             }
             PlacementSamplingPolicy::Cost {
@@ -380,7 +405,7 @@ impl LocalPlacer {
                 if step < start_step {
                     self.config
                         .step_sampling_policy
-                        .sample_with_seed(queue, self.config.sampling_seed(1, step))
+                        .sample_with_seed(queue, self.config.sampling_seed(STEP_SAMPLE_SCOPE, step))
                 } else {
                     self.sample_by_cost(step, queue, count, random_count)
                 }
@@ -393,7 +418,7 @@ impl LocalPlacer {
                 if step < start_step {
                     self.config
                         .step_sampling_policy
-                        .sample_with_seed(queue, self.config.sampling_seed(1, step))
+                        .sample_with_seed(queue, self.config.sampling_seed(STEP_SAMPLE_SCOPE, step))
                 } else {
                     self.sample_by_ranked(step, queue, count, random_count)
                 }
@@ -457,8 +482,11 @@ impl LocalPlacer {
         let mut best = scored.into_iter().map(|(_, item)| item).collect_vec();
         let rest = rest.into_iter().map(|(_, item)| item).collect_vec();
         best.extend(
-            SamplingPolicy::Random(random_count)
-                .sample_with_seed(rest, self.config.sampling_seed(2, step)),
+            SamplingPolicy::Random(random_count).sample_with_seed(
+                rest,
+                self.config
+                    .sampling_seed(RANKED_RANDOM_TAIL_SAMPLE_SCOPE, step),
+            ),
         );
         best
     }
@@ -488,7 +516,7 @@ impl LocalPlacer {
                 // diversity 보존용 coarse geometry bucket이다. 완전한 placement
                 // identity가 아니므로 semantic deduplication 용도로 쓰면 안 된다.
                 signature: bounding_box_of_positions(item.1.node_positions())
-                    .map(|bounds| bounds.manhattan_span() / 4)
+                    .map(|bounds| bounds.manhattan_span() / PLACEMENT_DIVERSITY_SPAN_BUCKET_SIZE)
                     .unwrap_or_default(),
                 index,
                 item,
@@ -501,7 +529,7 @@ impl LocalPlacer {
         // config knob으로 드러내는 것이 좋다.
         let ranked_count = count.min(scored.len());
         let diversity_count = if ranked_count > 1 {
-            (ranked_count / 4).max(1)
+            (ranked_count / RANKED_DIVERSITY_SLOT_DIVISOR).max(1)
         } else {
             0
         };
@@ -541,8 +569,11 @@ impl LocalPlacer {
         let mut best = selected.into_iter().map(|item| item.item).collect_vec();
         let random_pool = overflow.map(|item| item.item).collect_vec();
         best.extend(
-            SamplingPolicy::Random(random_count)
-                .sample_with_seed(random_pool, self.config.sampling_seed(2, step)),
+            SamplingPolicy::Random(random_count).sample_with_seed(
+                random_pool,
+                self.config
+                    .sampling_seed(RANKED_RANDOM_TAIL_SAMPLE_SCOPE, step),
+            ),
         );
         best
     }
@@ -552,7 +583,7 @@ impl LocalPlacer {
         let mut cost = world_compact_cost(world);
 
         if let Some(position) = state.node_position(current_node_id) {
-            cost += local_density(world, position) * 3;
+            cost += local_density(world, position) * LOCAL_DENSITY_COST_WEIGHT;
         }
 
         for pair in &self.cost_join_pairs_by_step[step] {
@@ -560,7 +591,7 @@ impl LocalPlacer {
             else {
                 continue;
             };
-            cost += a.manhattan_distance(&b) * pair.weight * 8;
+            cost += a.manhattan_distance(&b) * pair.weight * FUTURE_JOIN_DISTANCE_COST_WEIGHT;
         }
 
         cost
