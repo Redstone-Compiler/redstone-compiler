@@ -2,6 +2,7 @@ use itertools::Itertools;
 
 use super::prefix::RsLatchPrefixPlan;
 use super::rs_latch::generate_rs_latch_gate_routes;
+use super::scenario::{run_sequential_scenario, torch_output_value, SequentialScenarioStep};
 use super::*;
 use crate::world::simulator::Simulator;
 use crate::world::World;
@@ -194,14 +195,8 @@ fn d_latch_input_gate_values(
     world.initialize_redstone_states();
     let world = World::from(&world);
     let sim = run_d_latch_simulation(&world)?;
-    let set_value = match sim.world()[set].kind {
-        BlockKind::Torch { is_on } => is_on,
-        _ => return None,
-    };
-    let reset_value = match sim.world()[reset].kind {
-        BlockKind::Torch { is_on } => is_on,
-        _ => return None,
-    };
+    let set_value = torch_output_value(sim.world(), set)?;
+    let reset_value = torch_output_value(sim.world(), reset)?;
     Some((set_value, reset_value))
 }
 
@@ -229,38 +224,71 @@ fn d_latch_candidate_behaves(
         return false;
     };
 
-    if torch_is_on_in_world3d(sim.world(), q) || !torch_is_on_in_world3d(sim.world(), nq) {
-        return false;
-    }
-    if !change_d_latch_switch(&mut sim, enable, false) {
-        return false;
-    }
-    if !change_d_latch_switch(&mut sim, data, true) {
-        return false;
-    }
-    if torch_is_on_in_world3d(sim.world(), q) || !torch_is_on_in_world3d(sim.world(), nq) {
-        return false;
-    }
-    if !change_d_latch_switch(&mut sim, enable, true) {
-        return false;
-    }
-    if !torch_is_on_in_world3d(sim.world(), q) || torch_is_on_in_world3d(sim.world(), nq) {
-        return false;
-    }
-    if !change_d_latch_switch(&mut sim, enable, false) {
-        return false;
-    }
-    if !change_d_latch_switch(&mut sim, data, false) {
-        return false;
-    }
-    if !torch_is_on_in_world3d(sim.world(), q) || torch_is_on_in_world3d(sim.world(), nq) {
-        return false;
-    }
-    if !change_d_latch_switch(&mut sim, enable, true) {
-        return false;
+    #[derive(Clone, Copy)]
+    enum DLatchInput {
+        Data,
+        Enable,
     }
 
-    !torch_is_on_in_world3d(sim.world(), q) && torch_is_on_in_world3d(sim.world(), nq)
+    #[derive(Clone, Copy)]
+    enum DLatchOutput {
+        Q,
+        Nq,
+    }
+
+    let reset_outputs = [(DLatchOutput::Q, false), (DLatchOutput::Nq, true)];
+    let set_outputs = [(DLatchOutput::Q, true), (DLatchOutput::Nq, false)];
+    let scenario = [
+        // Start from en=1, d=0, so the latch must be reset.
+        SequentialScenarioStep::ExpectOutputs(&reset_outputs),
+        // While closed, changing d must not change the latched value.
+        SequentialScenarioStep::SetInput {
+            input: DLatchInput::Enable,
+            value: false,
+        },
+        SequentialScenarioStep::SetInput {
+            input: DLatchInput::Data,
+            value: true,
+        },
+        SequentialScenarioStep::ExpectOutputs(&reset_outputs),
+        // Opening the latch captures d=1.
+        SequentialScenarioStep::SetInput {
+            input: DLatchInput::Enable,
+            value: true,
+        },
+        SequentialScenarioStep::ExpectOutputs(&set_outputs),
+        // While closed again, changing d must preserve the set state.
+        SequentialScenarioStep::SetInput {
+            input: DLatchInput::Enable,
+            value: false,
+        },
+        SequentialScenarioStep::SetInput {
+            input: DLatchInput::Data,
+            value: false,
+        },
+        SequentialScenarioStep::ExpectOutputs(&set_outputs),
+        // Opening the latch captures d=0.
+        SequentialScenarioStep::SetInput {
+            input: DLatchInput::Enable,
+            value: true,
+        },
+        SequentialScenarioStep::ExpectOutputs(&reset_outputs),
+    ];
+
+    run_sequential_scenario(
+        &mut sim,
+        &scenario,
+        |input| match input {
+            DLatchInput::Data => data,
+            DLatchInput::Enable => enable,
+        },
+        |world, output| match output {
+            DLatchOutput::Q => torch_output_value(world, q),
+            DLatchOutput::Nq => torch_output_value(world, nq),
+        },
+        D_LATCH_SIM_MAX_CYCLES,
+        D_LATCH_SIM_MAX_EVENTS,
+    )
 }
 
 fn run_d_latch_simulation(world: &World) -> Option<Simulator> {
@@ -271,19 +299,6 @@ fn run_d_latch_simulation(world: &World) -> Option<Simulator> {
         D_LATCH_SIM_TRACE_LIMIT,
     )
     .ok()
-}
-
-fn change_d_latch_switch(sim: &mut Simulator, position: Position, value: bool) -> bool {
-    sim.change_state_with_limits(
-        vec![(position, value)],
-        D_LATCH_SIM_MAX_CYCLES,
-        D_LATCH_SIM_MAX_EVENTS,
-    )
-    .is_ok()
-}
-
-fn torch_is_on_in_world3d(world: &World3D, position: Position) -> bool {
-    matches!(world[position].kind, BlockKind::Torch { is_on: true })
 }
 
 fn pad_world_top_for_simulation(world: &World3D, extra_z: usize) -> World3D {

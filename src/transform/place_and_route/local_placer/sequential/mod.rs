@@ -4,6 +4,7 @@ mod d_latch;
 mod macro_routes;
 mod prefix;
 mod rs_latch;
+mod scenario;
 
 pub(super) use d_latch::generate_d_latch_gate_routes;
 pub(super) use macro_routes::generate_sequential_macro_routes;
