@@ -631,6 +631,41 @@ input {
   margin: 0;
 }
 
+.graph-output svg g.node {
+  cursor: pointer;
+}
+
+.graph-output svg .graph-node-hit-area {
+  fill: transparent;
+  pointer-events: all;
+}
+
+.graph-output svg.graph-has-selection g.node.graph-node-dimmed {
+  opacity: 0.48;
+}
+
+.graph-output svg.graph-has-selection g.edge.graph-edge-dimmed {
+  opacity: 0.32;
+}
+
+.graph-output svg g.node.graph-node-selected polygon,
+.graph-output svg g.node.graph-node-selected path,
+.graph-output svg g.node.graph-node-selected ellipse {
+  filter: drop-shadow(0 0 4px rgb(209 83 28 / 30%));
+  stroke: #d1531c;
+  stroke-width: 1.5;
+}
+
+.graph-output svg g.edge.graph-edge-connected path {
+  stroke: #d1531c;
+  stroke-width: 1.5;
+}
+
+.graph-output svg g.edge.graph-edge-connected polygon {
+  fill: #d1531c;
+  stroke: #d1531c;
+}
+
 .graph-minimap {
   position: absolute;
   right: 14px;

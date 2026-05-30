@@ -57,6 +57,11 @@ type TraceAnimation = {
 };
 type GraphTab = 'world' | 'logic';
 type GraphWorldMode = 'raw' | 'folded';
+type GraphEdgeInfo = {
+  element: SVGGElement;
+  source: string;
+  target: string;
+};
 type ExampleFile = {
   name: string;
   path: string;
@@ -235,6 +240,7 @@ let vizPromise: Promise<Viz> | undefined;
 let graphMinimapScale = 1;
 let isDraggingGraphMinimap = false;
 let graphZoom = 1;
+let selectedGraphNode: string | undefined;
 
 folderInput.setAttribute('webkitdirectory', '');
 folderInput.setAttribute('directory', '');
@@ -431,7 +437,10 @@ async function renderGraphTab(): Promise<void> {
     const dot = currentGraphDot();
     const viz = await loadViz();
     const svg = viz.renderSVGElement(dot, { engine: 'dot' });
+    selectedGraphNode = undefined;
     graphOutput.append(svg);
+    installGraphNodeHitAreas(svg);
+    bindGraphSelection(svg);
     applyGraphZoom();
     renderGraphMinimap(svg);
   } catch (error) {
@@ -451,6 +460,139 @@ function currentGraphDot(): string {
   }
 
   return graphShowTags ? graphDot.rawWorldDot : graphDot.rawWorldDotWithoutTags;
+}
+
+function installGraphNodeHitAreas(svg: SVGSVGElement): void {
+  svg.querySelectorAll<SVGGElement>('g.node').forEach(node => {
+    node.querySelector(':scope > .graph-node-hit-area')?.remove();
+    const bbox = node.getBBox();
+    if (!bbox) return;
+
+    const hitArea = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    hitArea.classList.add('graph-node-hit-area');
+    hitArea.setAttribute('x', String(bbox.x));
+    hitArea.setAttribute('y', String(bbox.y));
+    hitArea.setAttribute('width', String(bbox.width));
+    hitArea.setAttribute('height', String(bbox.height));
+    node.prepend(hitArea);
+  });
+}
+
+function bindGraphSelection(svg: SVGSVGElement): void {
+  svg.addEventListener('click', event => {
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+
+    const node = target.closest<SVGGElement>('g.node');
+    if (!node || !svg.contains(node)) {
+      selectedGraphNode = undefined;
+      applyGraphSelection(svg);
+      updateGraphSelectionStatus();
+      return;
+    }
+
+    const nodeId = graphElementTitle(node);
+    if (!nodeId) return;
+    selectedGraphNode = selectedGraphNode === nodeId ? undefined : nodeId;
+    applyGraphSelection(svg);
+    updateGraphSelectionStatus();
+  });
+}
+
+function applyGraphSelection(svg: SVGSVGElement): void {
+  const nodeElements = graphNodeElements(svg);
+  const edgeElements = graphEdgeElements(svg);
+  const selectedNodes = new Set<string>();
+  const connectedEdges = new Set<SVGGElement>();
+
+  if (selectedGraphNode) {
+    const directionalSelection = collectDirectionalGraphSelection(selectedGraphNode, edgeElements);
+    directionalSelection.nodes.forEach(nodeId => selectedNodes.add(nodeId));
+    directionalSelection.edges.forEach(edge => connectedEdges.add(edge));
+  }
+
+  svg.classList.toggle('graph-has-selection', Boolean(selectedGraphNode));
+  for (const [nodeId, node] of nodeElements) {
+    node.classList.toggle('graph-node-selected', selectedNodes.has(nodeId));
+    node.classList.toggle('graph-node-root', selectedGraphNode === nodeId);
+    node.classList.toggle('graph-node-dimmed', Boolean(selectedGraphNode) && !selectedNodes.has(nodeId));
+  }
+
+  for (const edge of edgeElements) {
+    edge.element.classList.toggle('graph-edge-connected', connectedEdges.has(edge.element));
+    edge.element.classList.toggle('graph-edge-dimmed', Boolean(selectedGraphNode) && !connectedEdges.has(edge.element));
+  }
+}
+
+function collectDirectionalGraphSelection(root: string, edges: GraphEdgeInfo[]): { nodes: Set<string>; edges: Set<SVGGElement> } {
+  const nodes = new Set<string>([root]);
+  const selectedEdges = new Set<SVGGElement>();
+
+  collectGraphCone(root, edges, 'incoming', nodes, selectedEdges);
+  collectGraphCone(root, edges, 'outgoing', nodes, selectedEdges);
+
+  return { nodes, edges: selectedEdges };
+}
+
+function collectGraphCone(
+  root: string,
+  edges: GraphEdgeInfo[],
+  direction: 'incoming' | 'outgoing',
+  nodes: Set<string>,
+  selectedEdges: Set<SVGGElement>,
+): void {
+  const visited = new Set<string>();
+  const queue = [root];
+
+  while (queue.length > 0) {
+    const nodeId = queue.pop()!;
+    if (!visited.add(nodeId)) continue;
+
+    for (const edge of edges) {
+      const next = direction === 'incoming' && edge.target === nodeId ? edge.source : direction === 'outgoing' && edge.source === nodeId ? edge.target : undefined;
+      if (!next) continue;
+
+      nodes.add(next);
+      selectedEdges.add(edge.element);
+      if (!visited.has(next)) queue.push(next);
+    }
+  }
+}
+
+function updateGraphSelectionStatus(): void {
+  const title =
+    graphTab === 'logic'
+      ? 'Logic Graph'
+      : graphWorldModeValue === 'folded'
+        ? 'World Graph - Folded'
+        : 'World Graph - Raw';
+  graphStatus.textContent = selectedGraphNode ? `${title} - ${selectedGraphNode} selected` : title;
+}
+
+function graphNodeElements(svg: SVGSVGElement): Map<string, SVGGElement> {
+  const nodes = new Map<string, SVGGElement>();
+  svg.querySelectorAll<SVGGElement>('g.node').forEach(node => {
+    const nodeId = graphElementTitle(node);
+    if (nodeId) nodes.set(nodeId, node);
+  });
+  return nodes;
+}
+
+function graphEdgeElements(svg: SVGSVGElement): GraphEdgeInfo[] {
+  return Array.from(svg.querySelectorAll<SVGGElement>('g.edge')).flatMap(edge => {
+    const parsed = parseGraphEdgeTitle(graphElementTitle(edge));
+    return parsed ? [{ element: edge, ...parsed }] : [];
+  });
+}
+
+function graphElementTitle(element: Element): string | undefined {
+  return element.querySelector(':scope > title')?.textContent?.trim() || undefined;
+}
+
+function parseGraphEdgeTitle(title: string | undefined): { source: string; target: string } | undefined {
+  const match = title?.match(/^(node\d+)(?::[^-]+)?->(node\d+)(?::.+)?$/);
+  if (!match) return undefined;
+  return { source: match[1], target: match[2] };
 }
 
 async function loadViz(): Promise<Viz> {
@@ -518,6 +660,7 @@ function readGraphBaseSize(svg: SVGSVGElement, dimension: 'width' | 'height'): n
 function renderGraphMinimap(svg: SVGSVGElement): void {
   graphMinimapContent.replaceChildren();
   const clone = svg.cloneNode(true) as SVGSVGElement;
+  clone.querySelectorAll('.graph-node-hit-area').forEach(hitArea => hitArea.remove());
   graphMinimapContent.append(clone);
   graphMinimap.classList.remove('hidden');
 
