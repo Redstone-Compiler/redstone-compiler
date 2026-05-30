@@ -628,7 +628,7 @@ input {
 .graph-output svg {
   display: block;
   max-width: none;
-  margin: 18px;
+  margin: 0;
 }
 
 .graph-minimap {
@@ -657,7 +657,7 @@ input {
 
 .graph-minimap-content {
   position: absolute;
-  inset: 8px;
+  inset: 0;
   overflow: hidden;
 }
 
@@ -669,8 +669,8 @@ input {
 
 .graph-minimap-viewport {
   position: absolute;
-  left: 8px;
-  top: 8px;
+  left: 0;
+  top: 0;
   min-width: 8px;
   min-height: 8px;
   border: 2px solid #d33232;

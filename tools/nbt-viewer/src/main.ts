@@ -64,6 +64,11 @@ type ExampleFile = {
 };
 
 const TRACE_ANIMATION_INTERVAL_MS = 50;
+const GRAPH_MINIMAP_INSET = 0;
+const GRAPH_MINIMAP_MAX_WIDTH = 360;
+const GRAPH_MINIMAP_MAX_HEIGHT = 240;
+const GRAPH_MINIMAP_MIN_WIDTH = 150;
+const GRAPH_MINIMAP_MIN_HEIGHT = 48;
 
 function resolveAssetPath(path: string): string {
   return new URL(`${import.meta.env.BASE_URL}${path}`, window.location.origin).href;
@@ -331,6 +336,17 @@ graphOutput.addEventListener('scroll', () => {
   updateGraphMinimapViewport();
 });
 
+graphOutput.addEventListener(
+  'wheel',
+  event => {
+    if (!event.ctrlKey) return;
+
+    event.preventDefault();
+    zoomGraphAt(event.clientX, event.clientY, graphZoom * (event.deltaY < 0 ? 1.12 : 1 / 1.12));
+  },
+  { passive: false },
+);
+
 graphMinimap.addEventListener('pointerdown', event => {
   if (graphMinimap.classList.contains('hidden')) return;
 
@@ -447,6 +463,22 @@ function setGraphZoom(nextZoom: number): void {
   applyGraphZoom({ refreshMinimap: true });
 }
 
+function zoomGraphAt(clientX: number, clientY: number, nextZoom: number): void {
+  const previousZoom = graphZoom;
+  const clampedZoom = Math.max(0.25, Math.min(3, nextZoom));
+  if (clampedZoom === previousZoom) return;
+
+  const outputRect = graphOutput.getBoundingClientRect();
+  const focusX = graphOutput.scrollLeft + clientX - outputRect.left;
+  const focusY = graphOutput.scrollTop + clientY - outputRect.top;
+  graphZoom = clampedZoom;
+  applyGraphZoom({ refreshMinimap: true });
+
+  const ratio = clampedZoom / previousZoom;
+  graphOutput.scrollLeft = focusX * ratio - (clientX - outputRect.left);
+  graphOutput.scrollTop = focusY * ratio - (clientY - outputRect.top);
+}
+
 function applyGraphZoom(options: { refreshMinimap?: boolean } = {}): void {
   graphZoomResetButton.textContent = `${Math.round(graphZoom * 100)}%`;
   graphZoomOutButton.disabled = graphZoom <= 0.25;
@@ -490,37 +522,60 @@ function renderGraphMinimap(svg: SVGSVGElement): void {
   graphMinimap.classList.remove('hidden');
 
   requestAnimationFrame(() => {
-    const contentWidth = Math.max(graphOutput.scrollWidth, 1);
-    const contentHeight = Math.max(graphOutput.scrollHeight, 1);
-    const minimapWidth = graphMinimapContent.clientWidth;
-    const minimapHeight = graphMinimapContent.clientHeight;
-    graphMinimapScale = Math.min(minimapWidth / contentWidth, minimapHeight / contentHeight);
+    const graphRect = currentGraphRect(svg);
+    if (!graphRect) {
+      clearGraphMinimap();
+      return;
+    }
 
-    clone.style.width = `${contentWidth * graphMinimapScale}px`;
-    clone.style.height = `${contentHeight * graphMinimapScale}px`;
+    sizeGraphMinimap(graphRect.width, graphRect.height);
+
+    const minimapWidth = Math.max(graphMinimapContent.clientWidth, 1);
+    const minimapHeight = Math.max(graphMinimapContent.clientHeight, 1);
+    graphMinimapScale = Math.min(minimapWidth / graphRect.width, minimapHeight / graphRect.height);
+
+    const fittedWidth = graphRect.width * graphMinimapScale;
+    const fittedHeight = graphRect.height * graphMinimapScale;
+    graphMinimap.style.width = `${fittedWidth + GRAPH_MINIMAP_INSET * 2 + 2}px`;
+    graphMinimap.style.height = `${fittedHeight + GRAPH_MINIMAP_INSET * 2 + 2}px`;
+    clone.style.width = `${fittedWidth}px`;
+    clone.style.height = `${fittedHeight}px`;
     updateGraphMinimapViewport();
   });
 }
 
 function updateGraphMinimapViewport(): void {
   if (graphMinimap.classList.contains('hidden')) return;
+  const svg = graphOutput.querySelector<SVGSVGElement>('svg');
+  const graphRect = svg ? currentGraphRect(svg) : undefined;
+  if (!graphRect) return;
 
-  graphMinimapViewport.style.width = `${graphOutput.clientWidth * graphMinimapScale}px`;
-  graphMinimapViewport.style.height = `${graphOutput.clientHeight * graphMinimapScale}px`;
-  graphMinimapViewport.style.transform = `translate(${graphOutput.scrollLeft * graphMinimapScale}px, ${
-    graphOutput.scrollTop * graphMinimapScale
+  const visibleLeft = Math.max(0, graphOutput.scrollLeft - graphRect.left);
+  const visibleTop = Math.max(0, graphOutput.scrollTop - graphRect.top);
+  const visibleRight = Math.min(graphRect.width, graphOutput.scrollLeft + graphOutput.clientWidth - graphRect.left);
+  const visibleBottom = Math.min(graphRect.height, graphOutput.scrollTop + graphOutput.clientHeight - graphRect.top);
+  const visibleWidth = Math.max(0, visibleRight - visibleLeft);
+  const visibleHeight = Math.max(0, visibleBottom - visibleTop);
+
+  graphMinimapViewport.style.width = `${visibleWidth * graphMinimapScale}px`;
+  graphMinimapViewport.style.height = `${visibleHeight * graphMinimapScale}px`;
+  graphMinimapViewport.style.transform = `translate(${visibleLeft * graphMinimapScale}px, ${
+    visibleTop * graphMinimapScale
   }px)`;
 }
 
 function scrollGraphFromMinimap(event: PointerEvent): void {
   event.preventDefault();
   if (graphMinimapScale <= 0) return;
+  const svg = graphOutput.querySelector<SVGSVGElement>('svg');
+  const graphRect = svg ? currentGraphRect(svg) : undefined;
+  if (!graphRect) return;
 
   const minimapContentBox = graphMinimapContent.getBoundingClientRect();
   const x = Math.max(0, Math.min(minimapContentBox.width, event.clientX - minimapContentBox.left));
   const y = Math.max(0, Math.min(minimapContentBox.height, event.clientY - minimapContentBox.top));
-  graphOutput.scrollLeft = x / graphMinimapScale - graphOutput.clientWidth / 2;
-  graphOutput.scrollTop = y / graphMinimapScale - graphOutput.clientHeight / 2;
+  graphOutput.scrollLeft = graphRect.left + x / graphMinimapScale - graphOutput.clientWidth / 2;
+  graphOutput.scrollTop = graphRect.top + y / graphMinimapScale - graphOutput.clientHeight / 2;
   updateGraphMinimapViewport();
 }
 
@@ -528,8 +583,46 @@ function clearGraphMinimap(): void {
   graphMinimap.classList.add('hidden');
   graphMinimapContent.replaceChildren();
   graphMinimapViewport.removeAttribute('style');
+  graphMinimap.removeAttribute('style');
   graphMinimapScale = 1;
   isDraggingGraphMinimap = false;
+}
+
+function currentGraphRect(svg: SVGSVGElement): { left: number; top: number; width: number; height: number } | undefined {
+  const width = readGraphBaseSize(svg, 'width') * graphZoom;
+  const height = readGraphBaseSize(svg, 'height') * graphZoom;
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    return undefined;
+  }
+
+  const outputRect = graphOutput.getBoundingClientRect();
+  const svgRect = svg.getBoundingClientRect();
+
+  return {
+    left: svgRect.left - outputRect.left + graphOutput.scrollLeft,
+    top: svgRect.top - outputRect.top + graphOutput.scrollTop,
+    width,
+    height,
+  };
+}
+
+function sizeGraphMinimap(contentWidth: number, contentHeight: number): void {
+  const aspect = Math.max(contentWidth / Math.max(contentHeight, 1), 0.1);
+  const maxContentWidth = Math.min(GRAPH_MINIMAP_MAX_WIDTH, Math.max(GRAPH_MINIMAP_MIN_WIDTH, graphOutput.clientWidth * 0.28));
+  const maxContentHeight = Math.min(
+    GRAPH_MINIMAP_MAX_HEIGHT,
+    Math.max(GRAPH_MINIMAP_MIN_HEIGHT, graphOutput.clientHeight * 0.28),
+  );
+
+  let minimapContentWidth = maxContentWidth;
+  let minimapContentHeight = minimapContentWidth / aspect;
+  if (minimapContentHeight > maxContentHeight) {
+    minimapContentHeight = maxContentHeight;
+    minimapContentWidth = minimapContentHeight * aspect;
+  }
+
+  graphMinimap.style.width = `${Math.max(GRAPH_MINIMAP_MIN_WIDTH, minimapContentWidth) + GRAPH_MINIMAP_INSET * 2}px`;
+  graphMinimap.style.height = `${Math.max(GRAPH_MINIMAP_MIN_HEIGHT, minimapContentHeight) + GRAPH_MINIMAP_INSET * 2}px`;
 }
 
 function updateGraphTabs(): void {
