@@ -56,6 +56,7 @@ impl WorldToLogicTransformer {
     fn optimize(graph: WorldGraph, remain_routings: bool) -> WorldGraph {
         let mut transform = WorldGraphTransformer::new(graph);
         transform.fold_redstone();
+        transform.fold_rs_latch_feedback_components();
         if !remain_routings {
             transform.remove_redstone();
             transform.remove_repeater();
@@ -95,69 +96,82 @@ impl WorldToLogicTransformer {
                 .map(|id| new_in_id.get(id).unwrap_or(id))
                 .copied()
                 .collect();
+            let tag = transformed_tag(id, &node.tag);
 
-            let new_nodes = match node.kind.as_block().unwrap().kind {
-                BlockKind::Switch { .. } => {
-                    input_count += 1;
-
+            let new_nodes = match node.kind {
+                GraphNodeKind::Sequential(sequential) => {
                     vec![GraphNode {
                         id: node.id,
-                        kind: GraphNodeKind::Input(format!("#{}", input_count)),
+                        kind: GraphNodeKind::Sequential(sequential),
                         inputs,
                         outputs: node.outputs,
-                        tag: format!("From #{id}"),
+                        tag,
                     }]
                 }
-                BlockKind::Redstone { .. } | BlockKind::Repeater { .. } => {
-                    vec![GraphNode {
-                        id: node.id,
-                        kind: GraphNodeKind::Logic(Logic {
-                            logic_type: LogicType::Or,
-                        }),
-                        inputs,
-                        outputs: node.outputs,
-                        tag: format!("From #{id}"),
-                    }]
-                }
-                BlockKind::Torch { .. } => {
-                    if node.inputs.len() == 1 {
+                GraphNodeKind::Block(block) => match block.kind {
+                    BlockKind::Switch { .. } => {
+                        input_count += 1;
+
                         vec![GraphNode {
                             id: node.id,
-                            kind: GraphNodeKind::Logic(Logic {
-                                logic_type: LogicType::Not,
-                            }),
+                            kind: GraphNodeKind::Input(format!("#{}", input_count)),
                             inputs,
                             outputs: node.outputs,
-                            tag: format!("From #{id}"),
+                            tag,
                         }]
-                    } else {
-                        next_new_id += 1;
-
-                        let or_node = GraphNode {
+                    }
+                    BlockKind::Redstone { .. } | BlockKind::Repeater { .. } => {
+                        vec![GraphNode {
                             id: node.id,
                             kind: GraphNodeKind::Logic(Logic {
                                 logic_type: LogicType::Or,
                             }),
                             inputs,
-                            outputs: vec![next_new_id],
-                            tag: format!("From #{id}"),
-                        };
-
-                        let not_node = GraphNode {
-                            id: next_new_id,
-                            kind: GraphNodeKind::Logic(Logic {
-                                logic_type: LogicType::Not,
-                            }),
-                            inputs: vec![or_node.id],
-                            outputs: node.outputs.clone(),
-                            tag: format!("From #{id}"),
-                        };
-
-                        new_in_id.insert(or_node.id, next_new_id);
-
-                        vec![or_node, not_node]
+                            outputs: node.outputs,
+                            tag,
+                        }]
                     }
-                }
+                    BlockKind::Torch { .. } => {
+                        if node.inputs.len() == 1 {
+                            vec![GraphNode {
+                                id: node.id,
+                                kind: GraphNodeKind::Logic(Logic {
+                                    logic_type: LogicType::Not,
+                                }),
+                                inputs,
+                                outputs: node.outputs,
+                                tag,
+                            }]
+                        } else {
+                            next_new_id += 1;
+
+                            let or_node = GraphNode {
+                                id: node.id,
+                                kind: GraphNodeKind::Logic(Logic {
+                                    logic_type: LogicType::Or,
+                                }),
+                                inputs,
+                                outputs: vec![next_new_id],
+                                tag: tag.clone(),
+                            };
+
+                            let not_node = GraphNode {
+                                id: next_new_id,
+                                kind: GraphNodeKind::Logic(Logic {
+                                    logic_type: LogicType::Not,
+                                }),
+                                inputs: vec![or_node.id],
+                                outputs: node.outputs.clone(),
+                                tag,
+                            };
+
+                            new_in_id.insert(or_node.id, next_new_id);
+
+                            vec![or_node, not_node]
+                        }
+                    }
+                    _ => todo!(),
+                },
                 _ => todo!(),
             };
 
@@ -179,6 +193,14 @@ impl WorldToLogicTransformer {
         }
 
         Ok(LogicGraph { graph })
+    }
+}
+
+fn transformed_tag(source_id: GraphNodeId, tag: &str) -> String {
+    if tag.is_empty() {
+        format!("From #{source_id}")
+    } else {
+        format!("From #{source_id}: {tag}")
     }
 }
 
@@ -242,6 +264,45 @@ mod tests {
         let world = &nbt.to_world();
         let expected = predefined_logics::buffered_half_adder_graph()?;
         assert!(equivalent_logic_with_world(&expected, world)?);
+
+        Ok(())
+    }
+
+    #[test]
+    fn world_to_logic_extracts_rs_latch_nbt_as_sequential_node() -> eyre::Result<()> {
+        let nbt = NBTRoot::load("test/rs-latch.nbt")?;
+        let logic = crate::transform::place_and_route::utils::world_to_logic(&nbt.to_world())?;
+
+        assert!(
+            logic
+                .nodes
+                .iter()
+                .any(|node| matches!(node.kind, crate::graph::GraphNodeKind::Sequential(_))),
+            "expected RS latch NBT to contain a sequential logic node"
+        );
+        assert!(
+            logic
+                .nodes
+                .iter()
+                .any(|node| node.tag.contains("Folded RS latch feedback SCC")),
+            "expected folded RS latch tag to be visible in the logic graph"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn world_to_logic_extracts_d_latch_nbt_as_sequential_node() -> eyre::Result<()> {
+        let nbt = NBTRoot::load("test/d-latch.nbt")?;
+        let logic = crate::transform::place_and_route::utils::world_to_logic(&nbt.to_world())?;
+
+        assert!(
+            logic
+                .nodes
+                .iter()
+                .any(|node| matches!(node.kind, crate::graph::GraphNodeKind::Sequential(_))),
+            "expected D latch NBT to contain a sequential logic node"
+        );
 
         Ok(())
     }

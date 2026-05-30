@@ -5,6 +5,7 @@ use itertools::Itertools;
 
 use crate::graph::world::WorldGraph;
 use crate::graph::{GraphNode, GraphNodeId, GraphNodeKind};
+use crate::sequential::SequentialPrimitive;
 use crate::world::block::{Block, BlockKind, Direction};
 
 pub struct WorldGraphTransformer {
@@ -57,6 +58,7 @@ impl WorldGraphTransformer {
         let ids: HashSet<GraphNodeId> = nodes.iter().map(|node| node.id).collect();
         let mut group_inputs: HashMap<usize, HashSet<GraphNodeId>> = HashMap::new();
         let mut group_outputs: HashMap<usize, HashSet<GraphNodeId>> = HashMap::new();
+        let mut group_members: HashMap<usize, Vec<GraphNodeId>> = HashMap::new();
 
         let mut group_ids: HashSet<usize> = HashSet::new();
 
@@ -64,6 +66,7 @@ impl WorldGraphTransformer {
             // make clustered id group
             let group_id = cluster.find(*id).unwrap();
             group_ids.insert(group_id);
+            group_members.entry(group_id).or_default().push(*id);
 
             // collect group input outputs
             group_inputs.entry(group_id).or_default().extend(
@@ -82,13 +85,16 @@ impl WorldGraphTransformer {
 
         // make clustered node
         let mut next_id = self.graph.graph.max_node_id().unwrap();
+        for members in group_members.values_mut() {
+            members.sort_unstable();
+        }
 
         // remove redstone node
         for id in &ids {
             self.graph.graph.remove_by_node_id_lazy(*id);
         }
 
-        for group_id in &group_ids {
+        for group_id in group_ids.iter().sorted() {
             next_id += 1;
 
             let node = GraphNode {
@@ -104,6 +110,10 @@ impl WorldGraphTransformer {
                 // TODO: optimize this
                 inputs: group_inputs[group_id].clone().into_iter().collect_vec(),
                 outputs: group_outputs[group_id].clone().into_iter().collect_vec(),
+                tag: format!(
+                    "Folded redstone component {:?}",
+                    group_members.get(group_id).unwrap()
+                ),
                 ..Default::default()
             };
 
@@ -132,6 +142,31 @@ impl WorldGraphTransformer {
         self.graph.graph.build_outputs();
         self.graph.graph.build_producers();
         self.graph.graph.build_consumers();
+    }
+
+    // Collapse physical RS-latch feedback loops before converting the world graph
+    // into logic. The downstream logic extraction walks nodes in topological order,
+    // so a cyclic torch/redstone latch core must become one sequential node first.
+    pub fn fold_rs_latch_feedback_components(&mut self) {
+        for component in self.graph.graph.strongly_connected_components() {
+            let component_set = component.iter().copied().collect::<HashSet<_>>();
+            if !is_rs_latch_feedback_component(&self.graph, &component, &component_set) {
+                continue;
+            }
+
+            let inputs = self.graph.graph.external_edges(&component_set, true);
+            if inputs.len() != 2 {
+                continue;
+            }
+            let outputs = self.graph.graph.external_edges(&component_set, false);
+            self.graph.replace_nodes_with(
+                &component_set,
+                GraphNodeKind::Sequential(SequentialPrimitive::rs_latch()),
+                inputs,
+                outputs,
+                format!("Folded RS latch feedback SCC {component:?}"),
+            );
+        }
     }
 
     pub fn remove_redstone(&mut self) {
@@ -173,6 +208,44 @@ impl WorldGraphTransformer {
     }
 }
 
+// Recognize the narrow post-redstone-fold shape used by the current RS latch
+// fixtures: two torches cross-coupled through two folded redstone routing nodes.
+// Input gating around that core, such as in a D latch, stays outside the SCC and
+// remains ordinary combinational logic.
+fn is_rs_latch_feedback_component(
+    graph: &WorldGraph,
+    component: &[GraphNodeId],
+    component_set: &HashSet<GraphNodeId>,
+) -> bool {
+    if component.len() != 4 {
+        return false;
+    }
+
+    let mut torch_count = 0;
+    let mut redstone_count = 0;
+    for node_id in component {
+        let Some(node) = graph.graph.find_node_by_id(*node_id) else {
+            return false;
+        };
+        match &node.kind {
+            GraphNodeKind::Block(block) if matches!(block.kind, BlockKind::Torch { .. }) => {
+                torch_count += 1;
+                if !node.inputs.iter().any(|id| component_set.contains(id))
+                    || !node.outputs.iter().any(|id| component_set.contains(id))
+                {
+                    return false;
+                }
+            }
+            GraphNodeKind::Block(block) if matches!(block.kind, BlockKind::Redstone { .. }) => {
+                redstone_count += 1;
+            }
+            _ => return false,
+        }
+    }
+
+    torch_count == 2 && redstone_count == 2
+}
+
 #[cfg(test)]
 mod tests {
     use super::WorldGraphTransformer;
@@ -186,9 +259,24 @@ mod tests {
         let g = WorldGraphBuilder::new(&nbt.to_world()).build();
 
         let mut transform = WorldGraphTransformer::new(g);
+        transform.fold_redstone();
+        let folded = transform.finish();
+
+        assert!(
+            folded
+                .graph
+                .nodes
+                .iter()
+                .any(|node| node.tag.contains("Folded redstone component")),
+            "expected folded redstone nodes to keep their source component tag"
+        );
+
+        let mut transform = WorldGraphTransformer::new(folded);
         transform.remove_redstone();
         transform.remove_repeater();
-        println!("{}", transform.finish().to_graphviz());
+        if std::env::var_os("PRINT_WORLD_GRAPHS").is_some() {
+            println!("{}", transform.finish().to_graphviz());
+        }
 
         Ok(())
     }

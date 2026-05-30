@@ -5,6 +5,8 @@ type WasmModule = {
   NbtSimulator: {
     new (nbtBytes: Uint8Array): WasmSimulator;
     graph_dot(nbtBytes: Uint8Array): RawGraphDotInfo;
+    selected_graph_dot(nbtBytes: Uint8Array, folded: boolean, nodeIds: number[]): RawGraphDotInfo;
+    selected_nbt(nbtBytes: Uint8Array, folded: boolean, nodeIds: number[]): unknown;
     trace_init(nbtBytes: Uint8Array): TraceReport;
   };
 };
@@ -46,13 +48,21 @@ export type SnapshotInfo = {
 };
 
 type RawGraphDotInfo = {
-  world_dot: string;
+  raw_world_dot: string;
+  raw_world_dot_without_tags: string;
+  folded_world_dot: string;
+  folded_world_dot_without_tags: string;
   logic_dot: string;
+  logic_dot_without_tags: string;
 };
 
 export type GraphDotInfo = {
-  worldDot: string;
+  rawWorldDot: string;
+  rawWorldDotWithoutTags: string;
+  foldedWorldDot: string;
+  foldedWorldDotWithoutTags: string;
   logicDot: string;
+  logicDotWithoutTags: string;
 };
 
 export class NbtSimulationError extends Error {
@@ -92,10 +102,22 @@ export class NbtSimulation {
     await wasm.default(resolveAssetPath(wasmBinaryPath));
     const graphDot = wasm.NbtSimulator.graph_dot(nbtBytes);
 
-    return {
-      worldDot: graphDot.world_dot,
-      logicDot: graphDot.logic_dot,
-    };
+    return mapGraphDotInfo(graphDot);
+  }
+
+  static async selectedGraphDot(nbtBytes: Uint8Array, folded: boolean, nodeIds: number[]): Promise<GraphDotInfo> {
+    const wasm = await loadWasmModule();
+    await wasm.default(resolveAssetPath(wasmBinaryPath));
+    const graphDot = wasm.NbtSimulator.selected_graph_dot(nbtBytes, folded, nodeIds);
+
+    return mapGraphDotInfo(graphDot);
+  }
+
+  static async selectedNbt(nbtBytes: Uint8Array, folded: boolean, nodeIds: number[]): Promise<unknown> {
+    const wasm = await loadWasmModule();
+    await wasm.default(resolveAssetPath(wasmBinaryPath));
+
+    return wasm.NbtSimulator.selected_nbt(nbtBytes, folded, nodeIds);
   }
 
   static async create(nbtBytes: Uint8Array): Promise<NbtSimulation> {
@@ -147,6 +169,17 @@ export class NbtSimulation {
       throw new NbtSimulationError(getErrorMessage(error), this.trace(), this.snapshots());
     }
   }
+}
+
+function mapGraphDotInfo(graphDot: RawGraphDotInfo): GraphDotInfo {
+  return {
+    rawWorldDot: graphDot.raw_world_dot,
+    rawWorldDotWithoutTags: graphDot.raw_world_dot_without_tags,
+    foldedWorldDot: graphDot.folded_world_dot,
+    foldedWorldDotWithoutTags: graphDot.folded_world_dot_without_tags,
+    logicDot: graphDot.logic_dot,
+    logicDotWithoutTags: graphDot.logic_dot_without_tags,
+  };
 }
 
 function getErrorMessage(error: unknown): string {

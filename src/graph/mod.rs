@@ -225,6 +225,27 @@ impl Graph {
         components
     }
 
+    pub fn external_edges(&self, nodes: &HashSet<GraphNodeId>, incoming: bool) -> Vec<GraphNodeId> {
+        let mut edges = nodes
+            .iter()
+            .flat_map(|node_id| {
+                let node = self.find_node_by_id(*node_id).into_iter();
+                node.flat_map(move |node| {
+                    if incoming {
+                        node.inputs.iter()
+                    } else {
+                        node.outputs.iter()
+                    }
+                })
+            })
+            .filter(|node_id| !nodes.contains(node_id))
+            .copied()
+            .collect::<Vec<_>>();
+        edges.sort();
+        edges.dedup();
+        edges
+    }
+
     pub fn dominators(
         &self,
         target_root: GraphNodeId,
@@ -562,6 +583,7 @@ impl Graph {
                 inputs: node.inputs.iter().map(|index| index_map[index]).collect(),
                 outputs: node.outputs.iter().map(|index| index_map[index]).collect(),
                 kind: node.kind,
+                tag: node.tag,
                 ..Default::default()
             })
             .collect::<Vec<_>>();
@@ -595,6 +617,7 @@ impl Graph {
                 inputs: node.inputs.iter().map(|index| indexs[index]).collect(),
                 outputs: node.outputs.iter().map(|index| indexs[index]).collect(),
                 kind: node.kind,
+                tag: node.tag,
                 ..Default::default()
             })
             .collect::<Vec<_>>();
@@ -611,6 +634,52 @@ impl Graph {
         };
 
         self.nodes.remove(index);
+    }
+
+    pub fn replace_nodes_with(
+        &mut self,
+        removed_nodes: &HashSet<GraphNodeId>,
+        kind: GraphNodeKind,
+        inputs: Vec<GraphNodeId>,
+        outputs: Vec<GraphNodeId>,
+        tag: String,
+    ) -> GraphNodeId {
+        let replacement_id = self.max_node_id().unwrap_or(0) + 1;
+
+        for input in &inputs {
+            if let Some(node) = self.find_node_by_id_mut(*input) {
+                node.outputs.retain(|id| !removed_nodes.contains(id));
+                if !node.outputs.contains(&replacement_id) {
+                    node.outputs.push(replacement_id);
+                }
+            }
+        }
+        for output in &outputs {
+            if let Some(node) = self.find_node_by_id_mut(*output) {
+                node.inputs.retain(|id| !removed_nodes.contains(id));
+                if !node.inputs.contains(&replacement_id) {
+                    node.inputs.push(replacement_id);
+                }
+            }
+        }
+        for node_id in removed_nodes {
+            self.remove_by_node_id_lazy(*node_id);
+        }
+
+        self.nodes.push(GraphNode {
+            id: replacement_id,
+            kind,
+            inputs,
+            outputs,
+            tag,
+        });
+        self.nodes.sort_by_key(|node| node.id);
+        self.build_inputs();
+        self.build_outputs();
+        self.build_producers();
+        self.build_consumers();
+
+        replacement_id
     }
 
     // 노드 삭제하고 삭제한 노드의 Input Output끼리 연결함
@@ -767,6 +836,31 @@ impl Graph {
         nodes.sort();
 
         SubGraphWithGraph::from(self, nodes)
+    }
+
+    pub fn extract_graph_by_node_ids(&self, node_ids: &HashSet<GraphNodeId>) -> Self {
+        let mut nodes = self
+            .nodes
+            .iter()
+            .filter(|node| node_ids.contains(&node.id))
+            .cloned()
+            .collect_vec();
+
+        for node in &mut nodes {
+            node.inputs.retain(|input| node_ids.contains(input));
+            node.outputs.retain(|output| node_ids.contains(output));
+        }
+        nodes.sort_by_key(|node| node.id);
+
+        let mut graph = Self {
+            nodes,
+            ..Default::default()
+        };
+        graph.build_inputs();
+        graph.build_outputs();
+        graph.build_producers();
+        graph.build_consumers();
+        graph
     }
 
     pub fn split_with_outputs(&self) -> Vec<SubGraphWithGraph> {
@@ -1128,6 +1222,56 @@ mod tests {
         assert_eq!(graph.find_node_by_id(0).unwrap().outputs, vec![3]);
         assert_eq!(graph.find_node_by_id(1).unwrap().outputs, vec![3]);
         assert_eq!(graph.find_node_by_id(2).unwrap().outputs, vec![3]);
+    }
+
+    #[test]
+    fn extract_graph_by_node_ids_keeps_only_internal_edges() {
+        let mut graph = Graph {
+            nodes: vec![
+                GraphNode {
+                    id: 0,
+                    outputs: vec![2],
+                    ..Default::default()
+                },
+                GraphNode {
+                    id: 1,
+                    outputs: vec![2],
+                    ..Default::default()
+                },
+                GraphNode {
+                    id: 2,
+                    inputs: vec![0, 1],
+                    outputs: vec![3, 4],
+                    ..Default::default()
+                },
+                GraphNode {
+                    id: 3,
+                    inputs: vec![2],
+                    ..Default::default()
+                },
+                GraphNode {
+                    id: 4,
+                    inputs: vec![2],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        graph.build_producers();
+        graph.build_consumers();
+
+        let selected = HashSet::from([1, 2, 3]);
+        let subgraph = graph.extract_graph_by_node_ids(&selected);
+
+        assert_eq!(
+            subgraph.nodes.iter().map(|node| node.id).collect_vec(),
+            vec![1, 2, 3]
+        );
+        assert_eq!(subgraph.find_node_by_id(1).unwrap().outputs, vec![2]);
+        assert_eq!(subgraph.find_node_by_id(2).unwrap().inputs, vec![1]);
+        assert_eq!(subgraph.find_node_by_id(2).unwrap().outputs, vec![3]);
+        assert_eq!(subgraph.find_node_by_id(3).unwrap().inputs, vec![2]);
+        subgraph.verify().unwrap();
     }
 
     #[test]

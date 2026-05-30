@@ -51,7 +51,7 @@ pub fn world_to_logic_with_outputs(
             } else if let Some(node) = logic_graph
                 .nodes
                 .iter()
-                .filter(|node| node.tag == format!("From #{source_id}"))
+                .filter(|node| is_source_tag(&node.tag, source_id))
                 .max_by_key(|node| node.id)
             {
                 node.id
@@ -68,6 +68,11 @@ pub fn world_to_logic_with_outputs(
         .collect::<eyre::Result<Vec<_>>>()?;
 
     normalize_logic_graph(logic_graph.attach_outputs(outputs)?)
+}
+
+fn is_source_tag(tag: &str, source_id: GraphNodeId) -> bool {
+    let source = format!("From #{source_id}");
+    tag == source || tag.starts_with(&format!("{source}: "))
 }
 
 fn resolve_folded_output_source(
@@ -156,6 +161,22 @@ fn component_external_edges(
         })
         .filter(|node_id| !component.contains(node_id))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_source_tag;
+
+    #[test]
+    fn source_tag_match_accepts_plain_and_annotated_source_tags() {
+        assert!(is_source_tag("From #12", 12));
+        assert!(is_source_tag(
+            "From #12: Folded redstone component [3, 4]",
+            12
+        ));
+        assert!(!is_source_tag("From #123", 12));
+        assert!(!is_source_tag("From #12-ish", 12));
+    }
 }
 
 pub fn equivalent_graph(src: &LogicGraph, tar: &LogicGraph) -> bool {

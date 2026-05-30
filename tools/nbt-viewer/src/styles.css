@@ -508,6 +508,61 @@ input {
   color: #fff;
 }
 
+.graph-world-mode {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-height: 28px;
+  margin-left: 8px;
+  padding: 2px;
+  border: 1px solid rgb(154 164 173 / 24%);
+  border-radius: 5px;
+  background: rgb(10 13 16 / 42%);
+}
+
+.graph-world-mode.hidden {
+  display: none;
+}
+
+.graph-mode-button {
+  min-width: 54px;
+  height: 22px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: #aeb8c0;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.graph-mode-button:hover,
+.graph-mode-button.active {
+  background: rgb(255 255 255 / 12%);
+  color: #fff;
+}
+
+.graph-tag-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  margin-left: 4px;
+  padding: 0 8px;
+  border: 1px solid rgb(154 164 173 / 24%);
+  border-radius: 5px;
+  background: rgb(10 13 16 / 30%);
+  color: #cbd4db;
+  cursor: pointer;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.graph-tag-toggle input {
+  width: 14px;
+  height: 14px;
+  accent-color: #d33232;
+}
+
 .graph-zoom-controls {
   display: flex;
   align-items: center;
@@ -573,7 +628,91 @@ input {
 .graph-output svg {
   display: block;
   max-width: none;
-  margin: 18px;
+  margin: 0;
+}
+
+.graph-selection-actions {
+  position: absolute;
+  right: 14px;
+  top: 14px;
+  z-index: 2;
+  display: flex;
+  gap: 8px;
+}
+
+.graph-selection-actions.hidden {
+  display: none;
+}
+
+.graph-selection-button {
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid rgb(17 24 32 / 28%);
+  border-radius: 5px;
+  background: rgb(247 249 251 / 92%);
+  color: #111820;
+  cursor: pointer;
+  font-size: 12px;
+  box-shadow: 0 12px 34px rgb(0 0 0 / 20%);
+}
+
+.graph-selection-button:hover {
+  background: #fff;
+}
+
+.graph-viewer.has-selection-action .graph-minimap {
+  bottom: 14px;
+}
+
+.selected-nbt-dialog-surface {
+  grid-template-rows: auto auto 1fr;
+}
+
+.selected-nbt-viewer {
+  position: relative;
+  min-height: 0;
+  background: #101317;
+}
+
+#selected-nbt-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.graph-output svg g.node {
+  cursor: pointer;
+}
+
+.graph-output svg .graph-node-hit-area {
+  fill: transparent;
+  pointer-events: all;
+}
+
+.graph-output svg.graph-has-selection g.node.graph-node-dimmed {
+  opacity: 0.48;
+}
+
+.graph-output svg.graph-has-selection g.edge.graph-edge-dimmed {
+  opacity: 0.32;
+}
+
+.graph-output svg g.node.graph-node-selected polygon,
+.graph-output svg g.node.graph-node-selected path,
+.graph-output svg g.node.graph-node-selected ellipse {
+  filter: drop-shadow(0 0 4px rgb(209 83 28 / 30%));
+  stroke: #d1531c;
+  stroke-width: 1.5;
+}
+
+.graph-output svg g.edge.graph-edge-connected path {
+  stroke: #d1531c;
+  stroke-width: 1.5;
+}
+
+.graph-output svg g.edge.graph-edge-connected polygon {
+  fill: #d1531c;
+  stroke: #d1531c;
 }
 
 .graph-minimap {
@@ -602,7 +741,7 @@ input {
 
 .graph-minimap-content {
   position: absolute;
-  inset: 8px;
+  inset: 0;
   overflow: hidden;
 }
 
@@ -614,8 +753,8 @@ input {
 
 .graph-minimap-viewport {
   position: absolute;
-  left: 8px;
-  top: 8px;
+  left: 0;
+  top: 0;
   min-width: 8px;
   min-height: 8px;
   border: 2px solid #d33232;
