@@ -58,6 +58,7 @@ impl WorldGraphTransformer {
         let ids: HashSet<GraphNodeId> = nodes.iter().map(|node| node.id).collect();
         let mut group_inputs: HashMap<usize, HashSet<GraphNodeId>> = HashMap::new();
         let mut group_outputs: HashMap<usize, HashSet<GraphNodeId>> = HashMap::new();
+        let mut group_members: HashMap<usize, Vec<GraphNodeId>> = HashMap::new();
 
         let mut group_ids: HashSet<usize> = HashSet::new();
 
@@ -65,6 +66,7 @@ impl WorldGraphTransformer {
             // make clustered id group
             let group_id = cluster.find(*id).unwrap();
             group_ids.insert(group_id);
+            group_members.entry(group_id).or_default().push(*id);
 
             // collect group input outputs
             group_inputs.entry(group_id).or_default().extend(
@@ -83,13 +85,16 @@ impl WorldGraphTransformer {
 
         // make clustered node
         let mut next_id = self.graph.graph.max_node_id().unwrap();
+        for members in group_members.values_mut() {
+            members.sort_unstable();
+        }
 
         // remove redstone node
         for id in &ids {
             self.graph.graph.remove_by_node_id_lazy(*id);
         }
 
-        for group_id in &group_ids {
+        for group_id in group_ids.iter().sorted() {
             next_id += 1;
 
             let node = GraphNode {
@@ -105,6 +110,10 @@ impl WorldGraphTransformer {
                 // TODO: optimize this
                 inputs: group_inputs[group_id].clone().into_iter().collect_vec(),
                 outputs: group_outputs[group_id].clone().into_iter().collect_vec(),
+                tag: format!(
+                    "Folded redstone component {:?}",
+                    group_members.get(group_id).unwrap()
+                ),
                 ..Default::default()
             };
 
@@ -250,9 +259,24 @@ mod tests {
         let g = WorldGraphBuilder::new(&nbt.to_world()).build();
 
         let mut transform = WorldGraphTransformer::new(g);
+        transform.fold_redstone();
+        let folded = transform.finish();
+
+        assert!(
+            folded
+                .graph
+                .nodes
+                .iter()
+                .any(|node| node.tag.contains("Folded redstone component")),
+            "expected folded redstone nodes to keep their source component tag"
+        );
+
+        let mut transform = WorldGraphTransformer::new(folded);
         transform.remove_redstone();
         transform.remove_repeater();
-        println!("{}", transform.finish().to_graphviz());
+        if std::env::var_os("PRINT_WORLD_GRAPHS").is_some() {
+            println!("{}", transform.finish().to_graphviz());
+        }
 
         Ok(())
     }

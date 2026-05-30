@@ -583,6 +583,7 @@ impl Graph {
                 inputs: node.inputs.iter().map(|index| index_map[index]).collect(),
                 outputs: node.outputs.iter().map(|index| index_map[index]).collect(),
                 kind: node.kind,
+                tag: node.tag,
                 ..Default::default()
             })
             .collect::<Vec<_>>();
@@ -616,6 +617,7 @@ impl Graph {
                 inputs: node.inputs.iter().map(|index| indexs[index]).collect(),
                 outputs: node.outputs.iter().map(|index| indexs[index]).collect(),
                 kind: node.kind,
+                tag: node.tag,
                 ..Default::default()
             })
             .collect::<Vec<_>>();

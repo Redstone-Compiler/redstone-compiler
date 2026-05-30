@@ -56,6 +56,7 @@ type TraceAnimation = {
   token: number;
 };
 type GraphTab = 'world' | 'logic';
+type GraphWorldMode = 'raw' | 'folded';
 type ExampleFile = {
   name: string;
   path: string;
@@ -139,6 +140,14 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
         <div class="graph-tabs" role="tablist" aria-label="Graph views">
           <button id="graph-world-tab" class="graph-tab active" type="button" role="tab">World Graph</button>
           <button id="graph-logic-tab" class="graph-tab" type="button" role="tab">Logic Graph</button>
+          <div id="graph-world-mode" class="graph-world-mode" aria-label="World graph mode">
+            <button id="graph-world-raw" class="graph-mode-button active" type="button">Raw</button>
+            <button id="graph-world-folded" class="graph-mode-button" type="button">Folded</button>
+          </div>
+          <label class="graph-tag-toggle">
+            <input id="graph-show-tags" type="checkbox" checked />
+            <span>Show Tag</span>
+          </label>
           <div class="graph-zoom-controls" aria-label="Graph zoom">
             <button id="graph-zoom-out" class="graph-zoom-button" type="button" aria-label="Zoom out">-</button>
             <button id="graph-zoom-reset" class="graph-zoom-value" type="button" aria-label="Reset zoom">100%</button>
@@ -186,6 +195,10 @@ const closeGraphsButton = document.querySelector<HTMLButtonElement>('#close-grap
 const graphDialog = document.querySelector<HTMLDialogElement>('#graph-dialog')!;
 const graphWorldTab = document.querySelector<HTMLButtonElement>('#graph-world-tab')!;
 const graphLogicTab = document.querySelector<HTMLButtonElement>('#graph-logic-tab')!;
+const graphWorldMode = document.querySelector<HTMLElement>('#graph-world-mode')!;
+const graphWorldRawButton = document.querySelector<HTMLButtonElement>('#graph-world-raw')!;
+const graphWorldFoldedButton = document.querySelector<HTMLButtonElement>('#graph-world-folded')!;
+const graphShowTagsInput = document.querySelector<HTMLInputElement>('#graph-show-tags')!;
 const graphZoomOutButton = document.querySelector<HTMLButtonElement>('#graph-zoom-out')!;
 const graphZoomResetButton = document.querySelector<HTMLButtonElement>('#graph-zoom-reset')!;
 const graphZoomInButton = document.querySelector<HTMLButtonElement>('#graph-zoom-in')!;
@@ -211,6 +224,8 @@ let traceAnimation: TraceAnimation | undefined;
 let traceAnimationToken = 0;
 let graphDot: GraphDotInfo | undefined;
 let graphTab: GraphTab = 'world';
+let graphWorldModeValue: GraphWorldMode = 'raw';
+let graphShowTags = true;
 let vizPromise: Promise<Viz> | undefined;
 let graphMinimapScale = 1;
 let isDraggingGraphMinimap = false;
@@ -287,6 +302,19 @@ graphLogicTab.addEventListener('click', () => {
   void setGraphTab('logic');
 });
 
+graphWorldRawButton.addEventListener('click', () => {
+  void setGraphWorldMode('raw');
+});
+
+graphWorldFoldedButton.addEventListener('click', () => {
+  void setGraphWorldMode('folded');
+});
+
+graphShowTagsInput.addEventListener('change', () => {
+  graphShowTags = graphShowTagsInput.checked;
+  void renderGraphTab();
+});
+
 graphZoomOutButton.addEventListener('click', () => {
   setGraphZoom(graphZoom - 0.25);
 });
@@ -358,6 +386,14 @@ async function setGraphTab(nextTab: GraphTab): Promise<void> {
   await renderGraphTab();
 }
 
+async function setGraphWorldMode(nextMode: GraphWorldMode): Promise<void> {
+  graphWorldModeValue = nextMode;
+  updateGraphTabs();
+  if (graphTab === 'world') {
+    await renderGraphTab();
+  }
+}
+
 async function renderGraphTab(): Promise<void> {
   updateGraphTabs();
   graphOutput.replaceChildren();
@@ -368,10 +404,15 @@ async function renderGraphTab(): Promise<void> {
     return;
   }
 
-  graphStatus.textContent = graphTab === 'logic' ? 'Logic Graph' : 'World Graph';
+  graphStatus.textContent =
+    graphTab === 'logic'
+      ? 'Logic Graph'
+      : graphWorldModeValue === 'folded'
+        ? 'World Graph - Folded'
+        : 'World Graph - Raw';
 
   try {
-    const dot = graphTab === 'logic' ? graphDot.logicDot : graphDot.worldDot;
+    const dot = currentGraphDot();
     const viz = await loadViz();
     const svg = viz.renderSVGElement(dot, { engine: 'dot' });
     graphOutput.append(svg);
@@ -380,6 +421,20 @@ async function renderGraphTab(): Promise<void> {
   } catch (error) {
     graphStatus.textContent = error instanceof Error ? error.message : String(error);
   }
+}
+
+function currentGraphDot(): string {
+  if (!graphDot) return '';
+
+  if (graphTab === 'logic') {
+    return graphShowTags ? graphDot.logicDot : graphDot.logicDotWithoutTags;
+  }
+
+  if (graphWorldModeValue === 'folded') {
+    return graphShowTags ? graphDot.foldedWorldDot : graphDot.foldedWorldDotWithoutTags;
+  }
+
+  return graphShowTags ? graphDot.rawWorldDot : graphDot.rawWorldDotWithoutTags;
 }
 
 async function loadViz(): Promise<Viz> {
@@ -488,6 +543,11 @@ function updateGraphTabs(): void {
     button.classList.toggle('active', active);
     button.setAttribute('aria-selected', String(active));
   }
+
+  graphWorldMode.classList.toggle('hidden', graphTab !== 'world');
+  graphWorldRawButton.classList.toggle('active', graphWorldModeValue === 'raw');
+  graphWorldFoldedButton.classList.toggle('active', graphWorldModeValue === 'folded');
+  graphShowTagsInput.checked = graphShowTags;
 }
 
 async function toggleSelectedSwitch(): Promise<void> {
@@ -796,6 +856,7 @@ async function openFile(file: File, selectedEntry?: Element | null): Promise<voi
     currentRoot = parsed.root;
     graphDot = undefined;
     graphTab = 'world';
+    graphWorldModeValue = 'raw';
 
     markSelectedFile(selectedEntry);
 
@@ -821,6 +882,7 @@ async function openFile(file: File, selectedEntry?: Element | null): Promise<voi
     currentRoot = undefined;
     graphDot = undefined;
     graphTab = 'world';
+    graphWorldModeValue = 'raw';
     selectedBlock = undefined;
     toggleSwitchButton.classList.add('hidden');
     viewerEmpty.classList.remove('hidden');

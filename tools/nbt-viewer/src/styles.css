@@ -508,6 +508,61 @@ input {
   color: #fff;
 }
 
+.graph-world-mode {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-height: 28px;
+  margin-left: 8px;
+  padding: 2px;
+  border: 1px solid rgb(154 164 173 / 24%);
+  border-radius: 5px;
+  background: rgb(10 13 16 / 42%);
+}
+
+.graph-world-mode.hidden {
+  display: none;
+}
+
+.graph-mode-button {
+  min-width: 54px;
+  height: 22px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: #aeb8c0;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.graph-mode-button:hover,
+.graph-mode-button.active {
+  background: rgb(255 255 255 / 12%);
+  color: #fff;
+}
+
+.graph-tag-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  margin-left: 4px;
+  padding: 0 8px;
+  border: 1px solid rgb(154 164 173 / 24%);
+  border-radius: 5px;
+  background: rgb(10 13 16 / 30%);
+  color: #cbd4db;
+  cursor: pointer;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.graph-tag-toggle input {
+  width: 14px;
+  height: 14px;
+  accent-color: #d33232;
+}
+
 .graph-zoom-controls {
   display: flex;
   align-items: center;

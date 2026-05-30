@@ -46,13 +46,21 @@ export type SnapshotInfo = {
 };
 
 type RawGraphDotInfo = {
-  world_dot: string;
+  raw_world_dot: string;
+  raw_world_dot_without_tags: string;
+  folded_world_dot: string;
+  folded_world_dot_without_tags: string;
   logic_dot: string;
+  logic_dot_without_tags: string;
 };
 
 export type GraphDotInfo = {
-  worldDot: string;
+  rawWorldDot: string;
+  rawWorldDotWithoutTags: string;
+  foldedWorldDot: string;
+  foldedWorldDotWithoutTags: string;
   logicDot: string;
+  logicDotWithoutTags: string;
 };
 
 export class NbtSimulationError extends Error {
@@ -93,8 +101,12 @@ export class NbtSimulation {
     const graphDot = wasm.NbtSimulator.graph_dot(nbtBytes);
 
     return {
-      worldDot: graphDot.world_dot,
+      rawWorldDot: graphDot.raw_world_dot,
+      rawWorldDotWithoutTags: graphDot.raw_world_dot_without_tags,
+      foldedWorldDot: graphDot.folded_world_dot,
+      foldedWorldDotWithoutTags: graphDot.folded_world_dot_without_tags,
       logicDot: graphDot.logic_dot,
+      logicDotWithoutTags: graphDot.logic_dot_without_tags,
     };
   }
 

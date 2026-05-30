@@ -1,7 +1,7 @@
 use redstone_compiler::graph::graphviz::ToGraphvizGraph;
 use redstone_compiler::graph::world::WorldGraphBuilder;
 use redstone_compiler::nbt::{NBTRoot, ToNBT};
-use redstone_compiler::transform::place_and_route::utils::world_to_logic;
+use redstone_compiler::transform::world_to_logic::WorldToLogicTransformer;
 use redstone_compiler::world::block::BlockKind;
 use redstone_compiler::world::position::Position;
 use redstone_compiler::world::simulator::{SimulationSnapshot, SimulationTraceEntry, Simulator};
@@ -34,8 +34,12 @@ struct SnapshotInfo {
 
 #[derive(Serialize)]
 struct GraphDotInfo {
-    world_dot: String,
+    raw_world_dot: String,
+    raw_world_dot_without_tags: String,
+    folded_world_dot: String,
+    folded_world_dot_without_tags: String,
     logic_dot: String,
+    logic_dot_without_tags: String,
 }
 
 #[wasm_bindgen]
@@ -97,11 +101,19 @@ impl NbtSimulator {
     pub fn graph_dot(nbt_bytes: &[u8]) -> Result<JsValue, JsValue> {
         let nbt = NBTRoot::from_nbt_bytes(nbt_bytes).map_err(to_js_error)?;
         let world = nbt.to_world();
-        let world_graph = WorldGraphBuilder::new(&world).build();
-        let logic_graph = world_to_logic(&world).map_err(to_js_error)?;
+        let raw_world_graph = WorldGraphBuilder::new(&world).build();
+        let transformer =
+            WorldToLogicTransformer::new(raw_world_graph.clone(), true).map_err(to_js_error)?;
+        let folded_world_dot = transformer.world_graph().to_graphviz();
+        let folded_world_dot_without_tags = transformer.world_graph().to_graphviz_without_tags();
+        let logic_graph = transformer.transform().map_err(to_js_error)?;
         let graph_dot = GraphDotInfo {
-            world_dot: world_graph.to_graphviz(),
+            raw_world_dot: raw_world_graph.to_graphviz(),
+            raw_world_dot_without_tags: raw_world_graph.to_graphviz_without_tags(),
+            folded_world_dot,
+            folded_world_dot_without_tags,
             logic_dot: logic_graph.to_graphviz(),
+            logic_dot_without_tags: logic_graph.to_graphviz_without_tags(),
         };
 
         serde_wasm_bindgen::to_value(&graph_dot).map_err(to_js_error)

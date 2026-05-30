@@ -96,6 +96,7 @@ impl WorldToLogicTransformer {
                 .map(|id| new_in_id.get(id).unwrap_or(id))
                 .copied()
                 .collect();
+            let tag = transformed_tag(id, &node.tag);
 
             let new_nodes = match node.kind {
                 GraphNodeKind::Sequential(sequential) => {
@@ -104,7 +105,7 @@ impl WorldToLogicTransformer {
                         kind: GraphNodeKind::Sequential(sequential),
                         inputs,
                         outputs: node.outputs,
-                        tag: format!("From #{id}"),
+                        tag,
                     }]
                 }
                 GraphNodeKind::Block(block) => match block.kind {
@@ -116,7 +117,7 @@ impl WorldToLogicTransformer {
                             kind: GraphNodeKind::Input(format!("#{}", input_count)),
                             inputs,
                             outputs: node.outputs,
-                            tag: format!("From #{id}"),
+                            tag,
                         }]
                     }
                     BlockKind::Redstone { .. } | BlockKind::Repeater { .. } => {
@@ -127,7 +128,7 @@ impl WorldToLogicTransformer {
                             }),
                             inputs,
                             outputs: node.outputs,
-                            tag: format!("From #{id}"),
+                            tag,
                         }]
                     }
                     BlockKind::Torch { .. } => {
@@ -139,7 +140,7 @@ impl WorldToLogicTransformer {
                                 }),
                                 inputs,
                                 outputs: node.outputs,
-                                tag: format!("From #{id}"),
+                                tag,
                             }]
                         } else {
                             next_new_id += 1;
@@ -151,7 +152,7 @@ impl WorldToLogicTransformer {
                                 }),
                                 inputs,
                                 outputs: vec![next_new_id],
-                                tag: format!("From #{id}"),
+                                tag: tag.clone(),
                             };
 
                             let not_node = GraphNode {
@@ -161,7 +162,7 @@ impl WorldToLogicTransformer {
                                 }),
                                 inputs: vec![or_node.id],
                                 outputs: node.outputs.clone(),
-                                tag: format!("From #{id}"),
+                                tag,
                             };
 
                             new_in_id.insert(or_node.id, next_new_id);
@@ -192,6 +193,14 @@ impl WorldToLogicTransformer {
         }
 
         Ok(LogicGraph { graph })
+    }
+}
+
+fn transformed_tag(source_id: GraphNodeId, tag: &str) -> String {
+    if tag.is_empty() {
+        format!("From #{source_id}")
+    } else {
+        format!("From #{source_id}: {tag}")
     }
 }
 
@@ -270,6 +279,13 @@ mod tests {
                 .iter()
                 .any(|node| matches!(node.kind, crate::graph::GraphNodeKind::Sequential(_))),
             "expected RS latch NBT to contain a sequential logic node"
+        );
+        assert!(
+            logic
+                .nodes
+                .iter()
+                .any(|node| node.tag.contains("Folded RS latch feedback SCC")),
+            "expected folded RS latch tag to be visible in the logic graph"
         );
 
         Ok(())

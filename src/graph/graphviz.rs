@@ -9,7 +9,6 @@ use super::world::WorldGraph;
 use super::{Graph, GraphNode, GraphNodeId, SubGraph};
 use crate::graph::module::GraphModulePortTarget;
 
-#[derive(Default)]
 pub struct GraphvizBuilder<'a> {
     graph: Option<&'a Graph>,
     module: Option<&'a GraphModule>,
@@ -17,8 +16,25 @@ pub struct GraphvizBuilder<'a> {
     clusters: Option<Vec<(String, Vec<GraphNodeId>)>>,
     show_node_id: bool,
     table_style: bool,
+    show_tags: bool,
     named_inputs: Option<HashMap<(GraphNodeId, GraphNodeId), String>>,
     subname: Option<HashMap<GraphNodeId, String>>,
+}
+
+impl<'a> Default for GraphvizBuilder<'a> {
+    fn default() -> Self {
+        Self {
+            graph: None,
+            module: None,
+            depth: None,
+            clusters: None,
+            show_node_id: false,
+            table_style: false,
+            show_tags: true,
+            named_inputs: None,
+            subname: None,
+        }
+    }
 }
 
 impl<'a> GraphvizBuilder<'a> {
@@ -62,6 +78,11 @@ impl<'a> GraphvizBuilder<'a> {
 
     pub fn with_show_node_id(&mut self) -> &mut Self {
         self.show_node_id = true;
+        self
+    }
+
+    pub fn without_tags(&mut self) -> &mut Self {
+        self.show_tags = false;
         self
     }
 
@@ -168,12 +189,23 @@ digraph {graph_name} {{
         };
 
         if !self.table_style {
-            if node.tag.is_empty() {
+            if node.tag.is_empty() || !self.show_tags {
                 format!("    node{} [label=\"{}\"]", node.id, name)
             } else {
                 format!("    node{} [label=\"{} | {}\"]", node.id, name, node.tag)
             }
         } else {
+            let colspan = node.inputs.len().max(1);
+            let tag = if node.tag.is_empty() || !self.show_tags {
+                String::new()
+            } else {
+                format!(
+                    r##"<TR><TD COLSPAN="{}" BGCOLOR="#F6F6F6">
+                <FONT POINT-SIZE="10" COLOR="#666666">{}</FONT>
+            </TD></TR>"##,
+                    colspan, node.tag
+                )
+            };
             format!(
                 r#"    node{} [label=<
         <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0">
@@ -181,12 +213,10 @@ digraph {graph_name} {{
             <TR><TD COLSPAN="{}" PORT="out">
                 {}
             </TD></TR>
+            {}
         </TABLE>
     >]"#,
-                node.id,
-                inputs,
-                node.inputs.len(),
-                name
+                node.id, inputs, colspan, name, tag
             )
         }
     }
@@ -294,6 +324,8 @@ digraph {graph_name} {{
 pub trait ToGraphvizGraph {
     fn to_graphviz(&self) -> String;
 
+    fn to_graphviz_without_tags(&self) -> String;
+
     fn to_graphviz_with_clusters(&self, clusters: &[SubGraph]) -> String;
 }
 
@@ -301,6 +333,13 @@ impl ToGraphvizGraph for Graph {
     fn to_graphviz(&self) -> String {
         GraphvizBuilder::default()
             .with_graph(self)
+            .build("DefaultGraph")
+    }
+
+    fn to_graphviz_without_tags(&self) -> String {
+        GraphvizBuilder::default()
+            .with_graph(self)
+            .without_tags()
             .build("DefaultGraph")
     }
 
@@ -322,6 +361,13 @@ impl ToGraphvizGraph for LogicGraph {
     fn to_graphviz(&self) -> String {
         GraphvizBuilder::default()
             .with_graph(&self.graph)
+            .build("LogicGraph")
+    }
+
+    fn to_graphviz_without_tags(&self) -> String {
+        GraphvizBuilder::default()
+            .with_graph(&self.graph)
+            .without_tags()
             .build("LogicGraph")
     }
 
@@ -357,6 +403,24 @@ impl ToGraphvizGraph for WorldGraph {
             .build("WorldGraph")
     }
 
+    fn to_graphviz_without_tags(&self) -> String {
+        let mut subnames = HashMap::new();
+        subnames.extend(
+            self.positions
+                .iter()
+                .map(|(id, pos)| (*id, format!("{pos:?}"))),
+        );
+        subnames.extend(self.routings.iter().map(|id| (*id, "Routings".to_string())));
+
+        GraphvizBuilder::default()
+            .with_graph(&self.graph)
+            .with_table()
+            .with_show_node_id()
+            .with_subname(subnames)
+            .without_tags()
+            .build("WorldGraph")
+    }
+
     fn to_graphviz_with_clusters(&self, clusters: &[SubGraph]) -> String {
         GraphvizBuilder::default()
             .with_graph(&self.graph)
@@ -375,6 +439,20 @@ impl ToGraphvizGraph for GraphWithSubGraphs {
     fn to_graphviz(&self) -> String {
         GraphvizBuilder::default()
             .with_graph(&self.0)
+            .with_cluster(
+                self.1
+                    .iter()
+                    .enumerate()
+                    .map(|(index, g)| (format!("Cluster {}", index), g.clone()))
+                    .collect_vec(),
+            )
+            .build("LogicGraph")
+    }
+
+    fn to_graphviz_without_tags(&self) -> String {
+        GraphvizBuilder::default()
+            .with_graph(&self.0)
+            .without_tags()
             .with_cluster(
                 self.1
                     .iter()
@@ -412,6 +490,13 @@ impl ToGraphvizGraph for ClusteredGraph {
             .build("ClusteredGraph")
     }
 
+    fn to_graphviz_without_tags(&self) -> String {
+        GraphvizBuilder::default()
+            .with_graph(&self.graph)
+            .without_tags()
+            .build("ClusteredGraph")
+    }
+
     fn to_graphviz_with_clusters(&self, _: &[SubGraph]) -> String {
         unimplemented!()
     }
@@ -426,5 +511,51 @@ impl ToGraphvizModule for GraphModule {
         GraphvizBuilder::default()
             .with_module(self)
             .build("GraphModule")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::{Graph, GraphNode, GraphNodeKind};
+
+    #[test]
+    fn table_graphviz_shows_node_tags() {
+        let graph = Graph {
+            nodes: vec![GraphNode {
+                id: 0,
+                kind: GraphNodeKind::None,
+                tag: "Folded RS latch feedback SCC [1, 2, 3, 4]".to_owned(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let dot = GraphvizBuilder::default()
+            .with_graph(&graph)
+            .with_table()
+            .build("TaggedGraph");
+
+        assert!(dot.contains("Folded RS latch feedback SCC"));
+    }
+
+    #[test]
+    fn graphviz_can_hide_node_tags() {
+        let graph = Graph {
+            nodes: vec![GraphNode {
+                id: 0,
+                kind: GraphNodeKind::None,
+                tag: "debug source tag".to_owned(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let dot = GraphvizBuilder::default()
+            .with_graph(&graph)
+            .without_tags()
+            .build("TaggedGraph");
+
+        assert!(!dot.contains("debug source tag"));
     }
 }
