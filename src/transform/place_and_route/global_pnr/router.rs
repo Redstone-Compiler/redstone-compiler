@@ -2,18 +2,21 @@ use std::collections::{HashSet, VecDeque};
 
 use eyre::ContextCompat;
 
-use crate::graph::module::GraphModule;
-use crate::transform::place_and_route::detailed_router::{self, PlaceRedstoneResult};
+use crate::graph::module::{GraphModule, GraphModulePortTarget};
+use crate::transform::place_and_route::detailed_router::{
+    self, PlaceRedstoneResult, PlaceRepeaterResult,
+};
 use crate::transform::place_and_route::global_pnr::ir::LayoutCandidate;
 use crate::transform::place_and_route::global_pnr::placer::PlacedModule;
 use crate::transform::place_and_route::place_bound::{PlaceBound, PropagateType};
 use crate::transform::place_and_route::placed_node::PlacedNode;
-use crate::world::block::Block;
+use crate::world::block::{Block, BlockKind, Direction};
 use crate::world::position::{DimSize, Position};
 use crate::world::World3D;
 
 const GLOBAL_ROUTE_PADDING: usize = 8;
-const GLOBAL_ROUTE_MAX_STEPS: usize = 64;
+const GLOBAL_ROUTE_MAX_STEPS: usize = 128;
+const MAX_REDSTONE_STRENGTH: usize = 15;
 
 #[derive(Clone, Debug)]
 pub struct RoutedNet {
@@ -34,6 +37,37 @@ pub fn route_module_variables(
 ) -> eyre::Result<Vec<RoutedNet>> {
     let mut route_world = placed_candidate_world(candidates, placed_modules)?;
     let mut routes = Vec::new();
+    let mut top_input_index = 0;
+
+    for port in module.ports.iter().filter(|port| port.port_type.is_input()) {
+        let sinks = resolve_port_target_positions(candidates, placed_modules, &port.target);
+        if sinks.is_empty() {
+            continue;
+        }
+
+        let source = external_switch_position(&route_world, top_input_index)
+            .with_context(|| format!("failed to place top-level input switch `{}`", port.name))?;
+        top_input_index += 1;
+        let switch = input_switch_block();
+        route_world[source] = switch;
+        routes.push(RoutedNet {
+            source,
+            sink: source,
+            blocks: vec![(source, switch)],
+        });
+
+        for sink in sinks {
+            let (route, next_world) =
+                route_point_to_point(&route_world, source, sink).map_err(|failure| {
+                    eyre::eyre!(
+                        "failed to route top-level input {} -> {sink:?}: {failure:?}",
+                        port.name
+                    )
+                })?;
+            route_world = next_world;
+            routes.push(route);
+        }
+    }
 
     for var in &module.vars {
         let source =
@@ -51,7 +85,6 @@ pub fn route_module_variables(
                     var.target.0, var.target.1
                 )
             })?;
-
         let (route, next_world) =
             route_point_to_point(&route_world, source, sink).map_err(|failure| {
                 eyre::eyre!(
@@ -67,6 +100,45 @@ pub fn route_module_variables(
     }
 
     Ok(routes)
+}
+
+fn resolve_port_target_positions(
+    candidates: &[LayoutCandidate],
+    placed_modules: &[PlacedModule],
+    target: &GraphModulePortTarget,
+) -> Vec<Position> {
+    match target {
+        GraphModulePortTarget::Module(module_name, port_name) => {
+            resolve_port_position(candidates, placed_modules, module_name, port_name)
+                .into_iter()
+                .collect()
+        }
+        GraphModulePortTarget::Wire(targets) => targets
+            .iter()
+            .filter_map(|(module_name, port_name)| {
+                resolve_port_position(candidates, placed_modules, module_name, port_name)
+            })
+            .collect(),
+        GraphModulePortTarget::Node(_) => Vec::new(),
+    }
+}
+
+fn external_switch_position(world: &World3D, index: usize) -> Option<Position> {
+    let max_x = world
+        .iter_block()
+        .into_iter()
+        .map(|(position, _)| position.0)
+        .max()
+        .unwrap_or(0);
+    let position = Position(max_x + 2, index * 3 + 1, 1);
+    (world.size.bound_on(position) && world[position].kind.is_air()).then_some(position)
+}
+
+fn input_switch_block() -> Block {
+    Block {
+        kind: BlockKind::Switch { is_on: false },
+        direction: Direction::West,
+    }
 }
 
 fn resolve_port_position(
@@ -166,7 +238,7 @@ pub fn route_point_to_point(
         })
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum BoundSearchMode {
     Propagation,
     Nearby,
@@ -179,70 +251,171 @@ fn route_point_to_point_with_bounds(
     goal: RouteGoal,
     mode: BoundSearchMode,
 ) -> Result<(RoutedNet, World3D), RouteFailure> {
-    let mut queue = VecDeque::from([(world.clone(), source, vec![source])]);
-    let mut visited = HashSet::from([(source, 0)]);
+    let initial_strength = initial_signal_strength(world, source);
+    let mut queue = VecDeque::from([RouteSearchState {
+        world: world.clone(),
+        terminal: source,
+        route: vec![source],
+        signal_strength: initial_strength,
+    }]);
+    let mut visited = HashSet::from([(source, 0, initial_strength)]);
 
-    while let Some((state_world, terminal, route)) = queue.pop_front() {
-        if goal.accepts(&state_world, terminal) {
-            let blocks = added_route_blocks(world, &state_world);
+    while let Some(state) = queue.pop_front() {
+        if !is_route_terminal(&state.world, state.terminal) {
+            continue;
+        }
+        if goal.accepts(&state.world, state.terminal) {
+            let blocks = added_route_blocks(world, &state.world);
             return Ok((
                 RoutedNet {
                     source,
                     sink,
                     blocks,
                 },
-                state_world,
+                state.world,
             ));
         }
 
-        if route.len() > GLOBAL_ROUTE_MAX_STEPS {
+        if state.route.len() > GLOBAL_ROUTE_MAX_STEPS {
             continue;
         }
 
-        let terminal_node = PlacedNode::new(terminal, state_world[terminal]);
+        let terminal_node = PlacedNode::new(state.terminal, state.world[state.terminal]);
         let allowed_shorts = goal.allowed_short_positions();
-        for bound in route_bounds_for_mode(mode, &state_world, &terminal_node) {
-            if !bound.is_bound_on(&state_world) || bound.position() == goal.placement_target() {
-                continue;
-            }
-            if !visited.insert((bound.position(), route.len())) {
+        for bound in route_bounds_for_mode(mode, &state.world, &terminal_node) {
+            if !bound.is_bound_on(&state.world) || goal.rejects_bound_position(bound.position()) {
                 continue;
             }
 
-            let PlaceRedstoneResult::Placed(next_world, redstone_node) =
-                detailed_router::place_redstone_with_cobble_and_allowed_shorts(
-                    &state_world,
+            if state.signal_strength > 1 {
+                match detailed_router::place_redstone_with_cobble_and_allowed_shorts(
+                    &state.world,
                     bound,
-                    terminal,
+                    state.terminal,
                     goal.placement_target(),
                     allowed_shorts.as_ref(),
-                )
-            else {
-                continue;
-            };
+                ) {
+                    PlaceRedstoneResult::Placed(next_world, redstone_node) => {
+                        let next_strength = state.signal_strength - 1;
+                        if visited.insert((
+                            redstone_node.position,
+                            state.route.len(),
+                            next_strength,
+                        )) {
+                            let mut next_route = state.route.clone();
+                            next_route.push(redstone_node.position);
+                            queue.push_back(RouteSearchState {
+                                world: next_world,
+                                terminal: redstone_node.position,
+                                route: next_route,
+                                signal_strength: next_strength,
+                            });
+                        }
+                    }
+                    PlaceRedstoneResult::Rejected(_) => {}
+                }
+            }
 
-            let mut next_route = route.clone();
-            next_route.push(redstone_node.position);
-            queue.push_back((next_world, redstone_node.position, next_route));
+            if state.signal_strength <= 2 {
+                for direction in Direction::iter_direction_without_top()
+                    .into_iter()
+                    .filter(|direction| direction.is_cardinal())
+                {
+                    match detailed_router::place_repeater_with_cobble(
+                        &state.world,
+                        bound,
+                        state.terminal,
+                        goal.placement_target(),
+                        direction,
+                        allowed_shorts.as_ref(),
+                    ) {
+                        PlaceRepeaterResult::Placed(next_world, repeater_node) => {
+                            if visited.insert((
+                                repeater_node.position,
+                                state.route.len(),
+                                MAX_REDSTONE_STRENGTH,
+                            )) {
+                                let mut next_route = state.route.clone();
+                                next_route.push(repeater_node.position);
+                                queue.push_back(RouteSearchState {
+                                    world: next_world,
+                                    terminal: repeater_node.position,
+                                    route: next_route,
+                                    signal_strength: MAX_REDSTONE_STRENGTH,
+                                });
+                            }
+                        }
+                        PlaceRepeaterResult::Rejected(_) => {}
+                    }
+                }
+            }
         }
     }
 
     Err(RouteFailure::Unreachable { source, sink })
 }
 
+#[derive(Clone)]
+struct RouteSearchState {
+    world: World3D,
+    terminal: Position,
+    route: Vec<Position>,
+    signal_strength: usize,
+}
+
+fn initial_signal_strength(world: &World3D, source: Position) -> usize {
+    match world[source].kind {
+        BlockKind::Redstone { strength, .. } if strength > 0 => strength,
+        BlockKind::Redstone { .. }
+        | BlockKind::Switch { .. }
+        | BlockKind::Torch { .. }
+        | BlockKind::Repeater { .. }
+        | BlockKind::RedstoneBlock => MAX_REDSTONE_STRENGTH,
+        _ => 0,
+    }
+}
+
+fn is_route_terminal(world: &World3D, position: Position) -> bool {
+    world[position].kind.is_redstone()
+        || world[position].kind.is_switch()
+        || world[position].kind.is_torch()
+        || world[position].kind.is_repeater()
+        || matches!(
+            world[position].kind,
+            crate::world::block::BlockKind::RedstoneBlock
+        )
+}
+
 #[derive(Clone, Copy)]
 enum RouteGoal {
     ConnectPosition { target: Position },
+    PowerCobble { cobble: Position },
+    PlaceRedstone { target: Position },
 }
 
 impl RouteGoal {
-    fn for_sink(_world: &World3D, sink: Position) -> Self {
+    fn for_sink(world: &World3D, sink: Position) -> Self {
+        if world[sink].kind.is_cobble() {
+            return Self::PowerCobble { cobble: sink };
+        }
+        if world[sink].kind.is_air() {
+            return Self::PlaceRedstone { target: sink };
+        }
         Self::ConnectPosition { target: sink }
     }
 
     fn placement_target(self) -> Position {
         match self {
             Self::ConnectPosition { target } => target,
+            Self::PowerCobble { cobble } => cobble,
+            Self::PlaceRedstone { target } => target,
+        }
+    }
+
+    fn rejects_bound_position(self, position: Position) -> bool {
+        match self {
+            Self::PlaceRedstone { .. } => false,
+            _ => position == self.placement_target(),
         }
     }
 
@@ -251,11 +424,26 @@ impl RouteGoal {
             Self::ConnectPosition { target } => {
                 detailed_router::target_powers_redstone(world, target, redstone)
             }
+            Self::PowerCobble { cobble } => {
+                detailed_router::redstone_powers_cobble(world, redstone, cobble)
+            }
+            Self::PlaceRedstone { target } => {
+                redstone == target && world[redstone].kind.is_redstone()
+            }
         }
     }
 
     fn allowed_short_positions(self) -> Option<HashSet<Position>> {
-        None
+        match self {
+            Self::PowerCobble { cobble } => Some(
+                cobble
+                    .cardinal()
+                    .into_iter()
+                    .chain([cobble, cobble.up()])
+                    .collect(),
+            ),
+            Self::ConnectPosition { .. } | Self::PlaceRedstone { .. } => None,
+        }
     }
 }
 
@@ -359,6 +547,16 @@ mod tests {
         world
     }
 
+    fn route_test_world_with_size(source: Position, sink: Position, size: DimSize) -> World3D {
+        let mut world = World3D::new(size);
+        world[source.down().unwrap()] = cobble_block();
+        world[source] = redstone_block();
+        world[sink.down().unwrap()] = cobble_block();
+        world[sink] = redstone_block();
+        world.initialize_redstone_states();
+        world
+    }
+
     fn cobble_block() -> Block {
         Block {
             kind: BlockKind::Cobble {
@@ -409,6 +607,19 @@ mod tests {
             .blocks
             .iter()
             .any(|(position, _)| *position == Position(1, 1, 1)));
+    }
+
+    #[test]
+    fn route_point_to_point_refreshes_long_redstone_with_repeater() {
+        let source = Position(0, 1, 1);
+        let sink = Position(22, 1, 1);
+        let world = route_test_world_with_size(source, sink, DimSize(26, 4, 3));
+        let (route, _) = route_point_to_point(&world, source, sink).unwrap();
+
+        assert!(route
+            .blocks
+            .iter()
+            .any(|(_, block)| block.kind.is_repeater()));
     }
 
     #[test]

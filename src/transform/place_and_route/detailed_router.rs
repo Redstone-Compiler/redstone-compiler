@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use crate::transform::place_and_route::place_bound::PlaceBound;
 use crate::transform::place_and_route::placed_node::PlacedNode;
-use crate::world::block::{BlockKind, Direction};
+use crate::world::block::{Block, BlockKind, Direction};
 use crate::world::position::Position;
 use crate::world::World3D;
 
@@ -19,6 +19,11 @@ pub enum RouteRejectReason {
 }
 
 pub enum PlaceRedstoneResult {
+    Placed(World3D, PlacedNode),
+    Rejected(RouteRejectReason),
+}
+
+pub enum PlaceRepeaterResult {
     Placed(World3D, PlacedNode),
     Rejected(RouteRejectReason),
 }
@@ -134,7 +139,57 @@ pub fn place_redstone_with_cobble_and_allowed_shorts(
     PlaceRedstoneResult::Placed(new_world, redstone_node)
 }
 
+pub fn place_repeater_with_cobble(
+    world: &World3D,
+    bound: PlaceBound,
+    prev: Position,
+    to: Position,
+    direction: Direction,
+    allowed_shorts: Option<&HashSet<Position>>,
+) -> PlaceRepeaterResult {
+    let Some(cobble_pos) = bound.position().walk(Direction::Bottom) else {
+        return PlaceRepeaterResult::Rejected(RouteRejectReason::NoBottomForCobble);
+    };
+    let Some(cobble_node) = try_generate_cobble_node(world, cobble_pos, &[]) else {
+        return PlaceRepeaterResult::Rejected(RouteRejectReason::CobbleConflict);
+    };
+    let mut new_world = world.clone();
+    place_node(&mut new_world, cobble_node);
+
+    let repeater_node = PlacedNode {
+        position: bound.position(),
+        block: Block {
+            kind: BlockKind::Repeater {
+                is_on: false,
+                is_locked: false,
+                delay: 1,
+                lock_input1: None,
+                lock_input2: None,
+            },
+            direction,
+        },
+    };
+    let mut except = [prev, bound.position(), to, to.up()]
+        .into_iter()
+        .collect::<HashSet<_>>();
+    if let Some(allowed_shorts) = allowed_shorts {
+        except.extend(allowed_shorts.iter().copied());
+    }
+    if repeater_node.has_conflict(&new_world, &except) {
+        return PlaceRepeaterResult::Rejected(RouteRejectReason::RedstoneConflict);
+    }
+    place_node(&mut new_world, repeater_node);
+    if !target_powers_position(&new_world, prev, repeater_node.position) {
+        return PlaceRepeaterResult::Rejected(RouteRejectReason::DisconnectedRoute);
+    }
+
+    PlaceRepeaterResult::Placed(new_world, repeater_node)
+}
+
 pub fn redstone_powers_cobble(world: &World3D, redstone: Position, cobble: Position) -> bool {
+    if !world[redstone].kind.is_redstone() {
+        return false;
+    }
     world[cobble].kind.is_cobble()
         && PlacedNode::new(redstone, world[redstone])
             .propagation_bound(Some(world))
@@ -143,6 +198,9 @@ pub fn redstone_powers_cobble(world: &World3D, redstone: Position, cobble: Posit
 }
 
 pub fn target_powers_redstone(world: &World3D, target: Position, redstone: Position) -> bool {
+    if world[target].kind.is_air() || world[target].kind.is_cobble() {
+        return false;
+    }
     let target_node = PlacedNode::new(target, world[target]);
     target_node
         .propagation_bound(Some(world))
@@ -154,5 +212,23 @@ pub fn target_powers_redstone(world: &World3D, target: Position, redstone: Posit
                     .propagate_to(world)
                     .into_iter()
                     .any(|(_, position)| position == redstone)
+        })
+}
+
+pub fn target_powers_position(world: &World3D, target: Position, position: Position) -> bool {
+    if world[target].kind.is_air() || world[target].kind.is_cobble() {
+        return false;
+    }
+    let target_node = PlacedNode::new(target, world[target]);
+    target_node
+        .propagation_bound(Some(world))
+        .into_iter()
+        .filter(|bound| bound.is_bound_on(world))
+        .any(|bound| {
+            bound.position() == position
+                || bound
+                    .propagate_to(world)
+                    .into_iter()
+                    .any(|(_, propagated)| propagated == position)
         })
 }
