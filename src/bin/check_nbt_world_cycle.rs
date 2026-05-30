@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 
 use petgraph::algo::kosaraju_scc;
@@ -226,9 +226,87 @@ fn main() -> eyre::Result<()> {
                 print_signal_state(sim.world());
             }
         }
+
+        if std::env::var_os("PRINT_COMPONENTS").is_some() {
+            print_physical_components(graph, &world_graph.positions, &node_kind_by_id);
+        }
     }
 
     Ok(())
+}
+
+fn print_physical_components(
+    graph: &redstone_compiler::graph::Graph,
+    positions: &HashMap<GraphNodeId, Position>,
+    node_kind_by_id: &HashMap<GraphNodeId, String>,
+) {
+    let mut neighbors = HashMap::<GraphNodeId, Vec<GraphNodeId>>::new();
+    for node in &graph.nodes {
+        for &output in &node.outputs {
+            neighbors.entry(node.id).or_default().push(output);
+            neighbors.entry(output).or_default().push(node.id);
+        }
+    }
+
+    let mut visited = HashSet::new();
+    let mut components = Vec::new();
+    for node in &graph.nodes {
+        if !visited.insert(node.id) {
+            continue;
+        }
+        let mut queue = VecDeque::from([node.id]);
+        let mut component = Vec::new();
+        while let Some(id) = queue.pop_front() {
+            component.push(id);
+            for &next in neighbors.get(&id).into_iter().flatten() {
+                if visited.insert(next) {
+                    queue.push_back(next);
+                }
+            }
+        }
+        component.sort();
+        components.push(component);
+    }
+    components.sort_by_key(|component| std::cmp::Reverse(component.len()));
+
+    println!("  physical_components: {}", components.len());
+    for (index, component) in components.iter().take(20).enumerate() {
+        let has_switch = component
+            .iter()
+            .any(|id| node_kind_by_id.get(id).is_some_and(|kind| kind == "Switch"));
+        let has_torch = component
+            .iter()
+            .any(|id| node_kind_by_id.get(id).is_some_and(|kind| kind == "Torch"));
+        let has_repeater = component
+            .iter()
+            .any(|id| node_kind_by_id.get(id).is_some_and(|kind| kind == "Repeater"));
+        let redstone_count = component
+            .iter()
+            .filter(|id| node_kind_by_id.get(id).is_some_and(|kind| kind == "Redstone"))
+            .count();
+
+        println!(
+            "    component #{index}: nodes={} redstone={} switch={} torch={} repeater={}",
+            component.len(),
+            redstone_count,
+            has_switch,
+            has_torch,
+            has_repeater
+        );
+        for id in component.iter().take(20) {
+            let Some(pos) = positions.get(id) else {
+                continue;
+            };
+            let kind = node_kind_by_id
+                .get(id)
+                .map(String::as_str)
+                .unwrap_or("unknown");
+            println!("      {id}: {kind} @ ({}, {}, {})", pos.0, pos.1, pos.2);
+        }
+        if component.len() > 20 {
+            println!("      ... {} more", component.len() - 20);
+        }
+    }
 }
 
 fn print_trace_for_positions(trace: &[SimulationTraceEntry], positions: &[Position]) {
