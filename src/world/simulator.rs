@@ -11,6 +11,10 @@ const DEFAULT_TRACE_LIMIT: usize = 0;
 // not exact game ticks or redstone ticks.
 const TORCH_BURNOUT_WINDOW_CYCLES: usize = 60;
 const TORCH_BURNOUT_TOGGLE_LIMIT: usize = 8;
+// Torch support changes are evaluated after a small simulator delay, then
+// rechecked at application time so short transient power does not force a
+// stale torch state transition.
+const TORCH_UPDATE_DELAY_CYCLES: usize = 1;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum EventType {
@@ -346,7 +350,6 @@ impl Simulator {
                 snapshots: sim.snapshots,
             });
         }
-        sim.clear_transient_torch_burnout();
 
         Ok(sim)
     }
@@ -369,7 +372,6 @@ impl Simulator {
 
         sim.fill_event_id();
         sim.run_inner(limits)?;
-        sim.clear_transient_torch_burnout();
 
         Ok(sim)
     }
@@ -492,7 +494,6 @@ impl Simulator {
             self.enqueue_torch_reevaluations();
             self.fill_event_id();
             self.run_inner(limits)?;
-            self.clear_transient_torch_burnout();
         }
 
         Ok(())
@@ -517,11 +518,6 @@ impl Simulator {
     pub fn clear_trace(&mut self) {
         self.trace.clear();
         self.snapshots.clear();
-    }
-
-    fn clear_transient_torch_burnout(&mut self) {
-        self.torch_toggle_cycles.clear();
-        self.burned_out_torches.clear();
     }
 
     pub fn run(&mut self) -> eyre::Result<usize> {
@@ -574,6 +570,13 @@ impl Simulator {
 
     fn push_event_to_next_tick(&mut self, event: Event) {
         self.queue.back_mut().unwrap().push_back(event);
+    }
+
+    fn schedule_event(&mut self, delay_cycles: usize, event: Event) {
+        while self.queue.len() <= delay_cycles {
+            self.queue.push_back(VecDeque::new());
+        }
+        self.queue[delay_cycles].push_back(event);
     }
 
     fn normalize_torches_on(&mut self) {
@@ -662,10 +665,9 @@ impl Simulator {
             })
             .collect::<Vec<_>>();
 
-        if events.is_empty() {
-            return;
+        for event in events {
+            self.schedule_event(TORCH_UPDATE_DELAY_CYCLES, event);
         }
-        self.queue.push_back(events.into());
     }
 
     fn redstone_propagate_targets(&self, pos: Position, state: usize) -> Vec<Position> {
@@ -1400,15 +1402,13 @@ impl Simulator {
             eyre::bail!("unreachable");
         };
 
-        let next_is_on = !event.event_type.is_on();
+        let support_is_powered = self.cobble_power_counts(support_position).0 > 0;
+        let next_is_on = !support_is_powered;
         if *is_on == next_is_on {
             return Ok(());
         }
         if next_is_on && self.burned_out_torches.contains(&event.target_position) {
-            if self.torch_is_still_burned_out(event.target_position) {
-                return Ok(());
-            }
-            self.burned_out_torches.remove(&event.target_position);
+            return Ok(());
         }
         let burned_out = self.record_torch_toggle(event.target_position);
         if burned_out {
@@ -1467,13 +1467,6 @@ impl Simulator {
         let history = self.torch_toggle_cycles.entry(position).or_default();
         history.push_back(self.cycle);
         history.len() >= TORCH_BURNOUT_TOGGLE_LIMIT
-    }
-
-    fn torch_is_still_burned_out(&mut self, position: Position) -> bool {
-        self.prune_torch_toggle_history(position);
-        self.torch_toggle_cycles
-            .get(&position)
-            .is_some_and(|history| history.len() >= TORCH_BURNOUT_TOGGLE_LIMIT)
     }
 
     fn prune_torch_toggle_history(&mut self, position: Position) {
@@ -1904,6 +1897,108 @@ mod test {
             "simulator should not panic on out-of-bounds events"
         );
         result.unwrap()?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn unittest_simulator_torch_reevaluation_uses_current_support_power() -> eyre::Result<()> {
+        let torch = Position(1, 1, 1);
+        let support = Position(1, 1, 0);
+        let mock_world = World {
+            size: DimSize(3, 3, 2),
+            blocks: vec![
+                (
+                    support,
+                    Block {
+                        kind: BlockKind::Cobble {
+                            on_count: 0,
+                            on_base_count: 0,
+                        },
+                        direction: Direction::None,
+                    },
+                ),
+                (
+                    torch,
+                    Block {
+                        kind: BlockKind::Torch { is_on: true },
+                        direction: Direction::Bottom,
+                    },
+                ),
+            ],
+        };
+        let mut sim = Simulator::new(&mock_world, DEFAULT_TRACE_LIMIT);
+        sim.queue.push_back(VecDeque::new());
+        let mut block = sim.world[torch];
+
+        sim.propgate_torch_event(
+            &mut block,
+            &Event {
+                id: None,
+                from_id: None,
+                event_type: EventType::SoftOn,
+                target_position: torch,
+                direction: Direction::Bottom,
+            },
+        )?;
+
+        assert!(
+            matches!(block.kind, BlockKind::Torch { is_on: true }),
+            "stale powered-support reevaluation should not turn the torch off"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn unittest_simulator_burned_out_torch_does_not_recover_during_session() -> eyre::Result<()> {
+        let torch = Position(1, 1, 1);
+        let support = Position(1, 1, 0);
+        let mock_world = World {
+            size: DimSize(3, 3, 2),
+            blocks: vec![
+                (
+                    support,
+                    Block {
+                        kind: BlockKind::Cobble {
+                            on_count: 0,
+                            on_base_count: 0,
+                        },
+                        direction: Direction::None,
+                    },
+                ),
+                (
+                    torch,
+                    Block {
+                        kind: BlockKind::Torch { is_on: false },
+                        direction: Direction::Bottom,
+                    },
+                ),
+            ],
+        };
+        let mut sim = Simulator::new(&mock_world, DEFAULT_TRACE_LIMIT);
+        sim.queue.push_back(VecDeque::new());
+        sim.cycle = TORCH_BURNOUT_WINDOW_CYCLES * 2;
+        sim.burned_out_torches.insert(torch);
+        sim.torch_toggle_cycles
+            .insert(torch, VecDeque::from([0, 1, 2, 3, 4, 5, 6, 7]));
+        let mut block = sim.world[torch];
+
+        sim.propgate_torch_event(
+            &mut block,
+            &Event {
+                id: None,
+                from_id: None,
+                event_type: EventType::SoftOff,
+                target_position: torch,
+                direction: Direction::Bottom,
+            },
+        )?;
+
+        assert!(
+            matches!(block.kind, BlockKind::Torch { is_on: false }),
+            "burnout is a simulator-session stabilization state and should not recover by age"
+        );
 
         Ok(())
     }
