@@ -62,6 +62,7 @@ pub fn assemble_world(
         }
         world[position] = block;
     }
+    world.initialize_redstone_states();
 
     Ok(world)
 }

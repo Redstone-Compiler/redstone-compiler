@@ -1,3 +1,4 @@
+pub mod detailed_router;
 pub mod estimate;
 pub mod global_pnr;
 pub mod local_placer;

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::graph::GraphNodeId;
+pub use crate::transform::place_and_route::detailed_router::RouteRejectReason;
 use crate::world::position::Position;
 
 #[derive(Debug, Default)]
@@ -65,18 +66,6 @@ pub struct StepDebug {
     pub generated_len: usize,
     pub sampled_len: usize,
     pub route_debug: Option<RouteDebug>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum RouteRejectReason {
-    InitInputTopCobbleConflict,
-    InitOutputTopCobbleConflict,
-    OutOfBounds,
-    NoBottomForCobble,
-    CobbleConflict,
-    RedstoneConflict,
-    DisconnectedRoute,
-    ShortCircuit,
 }
 
 #[derive(Debug, Default, Clone)]
