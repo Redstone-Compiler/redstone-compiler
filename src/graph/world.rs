@@ -24,6 +24,24 @@ impl Verify for WorldGraph {
 }
 
 impl WorldGraph {
+    pub fn extract_subgraph_by_node_ids(&self, node_ids: &HashSet<GraphNodeId>) -> Self {
+        Self {
+            graph: self.graph.extract_graph_by_node_ids(node_ids),
+            positions: self
+                .positions
+                .iter()
+                .filter(|(node_id, _)| node_ids.contains(node_id))
+                .map(|(node_id, position)| (*node_id, *position))
+                .collect(),
+            routings: self
+                .routings
+                .iter()
+                .filter(|node_id| node_ids.contains(node_id))
+                .copied()
+                .collect(),
+        }
+    }
+
     pub fn replace_nodes_with(
         &mut self,
         removed_nodes: &HashSet<GraphNodeId>,

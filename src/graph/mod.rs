@@ -838,6 +838,31 @@ impl Graph {
         SubGraphWithGraph::from(self, nodes)
     }
 
+    pub fn extract_graph_by_node_ids(&self, node_ids: &HashSet<GraphNodeId>) -> Self {
+        let mut nodes = self
+            .nodes
+            .iter()
+            .filter(|node| node_ids.contains(&node.id))
+            .cloned()
+            .collect_vec();
+
+        for node in &mut nodes {
+            node.inputs.retain(|input| node_ids.contains(input));
+            node.outputs.retain(|output| node_ids.contains(output));
+        }
+        nodes.sort_by_key(|node| node.id);
+
+        let mut graph = Self {
+            nodes,
+            ..Default::default()
+        };
+        graph.build_inputs();
+        graph.build_outputs();
+        graph.build_producers();
+        graph.build_consumers();
+        graph
+    }
+
     pub fn split_with_outputs(&self) -> Vec<SubGraphWithGraph> {
         self.outputs()
             .iter()
@@ -1197,6 +1222,56 @@ mod tests {
         assert_eq!(graph.find_node_by_id(0).unwrap().outputs, vec![3]);
         assert_eq!(graph.find_node_by_id(1).unwrap().outputs, vec![3]);
         assert_eq!(graph.find_node_by_id(2).unwrap().outputs, vec![3]);
+    }
+
+    #[test]
+    fn extract_graph_by_node_ids_keeps_only_internal_edges() {
+        let mut graph = Graph {
+            nodes: vec![
+                GraphNode {
+                    id: 0,
+                    outputs: vec![2],
+                    ..Default::default()
+                },
+                GraphNode {
+                    id: 1,
+                    outputs: vec![2],
+                    ..Default::default()
+                },
+                GraphNode {
+                    id: 2,
+                    inputs: vec![0, 1],
+                    outputs: vec![3, 4],
+                    ..Default::default()
+                },
+                GraphNode {
+                    id: 3,
+                    inputs: vec![2],
+                    ..Default::default()
+                },
+                GraphNode {
+                    id: 4,
+                    inputs: vec![2],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        graph.build_producers();
+        graph.build_consumers();
+
+        let selected = HashSet::from([1, 2, 3]);
+        let subgraph = graph.extract_graph_by_node_ids(&selected);
+
+        assert_eq!(
+            subgraph.nodes.iter().map(|node| node.id).collect_vec(),
+            vec![1, 2, 3]
+        );
+        assert_eq!(subgraph.find_node_by_id(1).unwrap().outputs, vec![2]);
+        assert_eq!(subgraph.find_node_by_id(2).unwrap().inputs, vec![1]);
+        assert_eq!(subgraph.find_node_by_id(2).unwrap().outputs, vec![3]);
+        assert_eq!(subgraph.find_node_by_id(3).unwrap().inputs, vec![2]);
+        subgraph.verify().unwrap();
     }
 
     #[test]

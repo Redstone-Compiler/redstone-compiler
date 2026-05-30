@@ -170,7 +170,10 @@ mod tests {
     #[test]
     fn source_tag_match_accepts_plain_and_annotated_source_tags() {
         assert!(is_source_tag("From #12", 12));
-        assert!(is_source_tag("From #12: Folded redstone component [3, 4]", 12));
+        assert!(is_source_tag(
+            "From #12: Folded redstone component [3, 4]",
+            12
+        ));
         assert!(!is_source_tag("From #123", 12));
         assert!(!is_source_tag("From #12-ish", 12));
     }

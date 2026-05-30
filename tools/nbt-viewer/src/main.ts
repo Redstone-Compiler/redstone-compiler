@@ -167,10 +167,55 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
         <div id="graph-status" class="graph-status">Open an NBT file to inspect graphs.</div>
         <div class="graph-viewer">
           <div id="graph-output" class="graph-output"></div>
+          <div id="graph-selection-actions" class="graph-selection-actions hidden">
+            <button id="open-selected-graph" class="graph-selection-button" type="button">Open Selection</button>
+            <button id="open-selected-nbt" class="graph-selection-button" type="button">Open Selection As NBT</button>
+          </div>
           <div id="graph-minimap" class="graph-minimap hidden" aria-hidden="true">
             <div id="graph-minimap-content" class="graph-minimap-content"></div>
             <div id="graph-minimap-viewport" class="graph-minimap-viewport"></div>
           </div>
+        </div>
+      </div>
+    </dialog>
+    <dialog id="selected-graph-dialog" class="graph-dialog">
+      <div class="graph-dialog-surface">
+        <header class="graph-dialog-header">
+          <strong>Selected Graphs</strong>
+          <button id="close-selected-graphs" class="panel-action" type="button">Close</button>
+        </header>
+        <div class="graph-tabs" role="tablist" aria-label="Selected graph views">
+          <button id="selected-graph-world-tab" class="graph-tab active" type="button" role="tab">World Graph</button>
+          <button id="selected-graph-logic-tab" class="graph-tab" type="button" role="tab">Logic Graph</button>
+          <div id="selected-graph-world-mode" class="graph-world-mode" aria-label="Selected world graph mode">
+            <button id="selected-graph-world-raw" class="graph-mode-button active" type="button">Raw</button>
+            <button id="selected-graph-world-folded" class="graph-mode-button" type="button">Folded</button>
+          </div>
+          <label class="graph-tag-toggle">
+            <input id="selected-graph-show-tags" type="checkbox" checked />
+            <span>Show Tag</span>
+          </label>
+          <div class="graph-zoom-controls" aria-label="Selected graph zoom">
+            <button id="selected-graph-zoom-out" class="graph-zoom-button" type="button" aria-label="Zoom out">-</button>
+            <button id="selected-graph-zoom-reset" class="graph-zoom-value" type="button" aria-label="Reset zoom">100%</button>
+            <button id="selected-graph-zoom-in" class="graph-zoom-button" type="button" aria-label="Zoom in">+</button>
+          </div>
+        </div>
+        <div id="selected-graph-status" class="graph-status">Select world graph nodes to open a focused graph.</div>
+        <div class="graph-viewer">
+          <div id="selected-graph-output" class="graph-output"></div>
+        </div>
+      </div>
+    </dialog>
+    <dialog id="selected-nbt-dialog" class="graph-dialog selected-nbt-dialog">
+      <div class="graph-dialog-surface selected-nbt-dialog-surface">
+        <header class="graph-dialog-header">
+          <strong>Selected NBT</strong>
+          <button id="close-selected-nbt" class="panel-action" type="button">Close</button>
+        </header>
+        <div id="selected-nbt-status" class="graph-status">Select world graph nodes to open focused NBT.</div>
+        <div class="selected-nbt-viewer">
+          <canvas id="selected-nbt-canvas"></canvas>
         </div>
       </div>
     </dialog>
@@ -213,13 +258,35 @@ const graphZoomOutButton = document.querySelector<HTMLButtonElement>('#graph-zoo
 const graphZoomResetButton = document.querySelector<HTMLButtonElement>('#graph-zoom-reset')!;
 const graphZoomInButton = document.querySelector<HTMLButtonElement>('#graph-zoom-in')!;
 const graphStatus = document.querySelector<HTMLElement>('#graph-status')!;
+const graphViewer = document.querySelector<HTMLElement>('.graph-viewer')!;
 const graphOutput = document.querySelector<HTMLElement>('#graph-output')!;
+const graphSelectionActions = document.querySelector<HTMLElement>('#graph-selection-actions')!;
+const openSelectedGraphButton = document.querySelector<HTMLButtonElement>('#open-selected-graph')!;
+const openSelectedNbtButton = document.querySelector<HTMLButtonElement>('#open-selected-nbt')!;
 const graphMinimap = document.querySelector<HTMLElement>('#graph-minimap')!;
 const graphMinimapContent = document.querySelector<HTMLElement>('#graph-minimap-content')!;
 const graphMinimapViewport = document.querySelector<HTMLElement>('#graph-minimap-viewport')!;
+const selectedGraphDialog = document.querySelector<HTMLDialogElement>('#selected-graph-dialog')!;
+const closeSelectedGraphsButton = document.querySelector<HTMLButtonElement>('#close-selected-graphs')!;
+const selectedGraphWorldTab = document.querySelector<HTMLButtonElement>('#selected-graph-world-tab')!;
+const selectedGraphLogicTab = document.querySelector<HTMLButtonElement>('#selected-graph-logic-tab')!;
+const selectedGraphWorldMode = document.querySelector<HTMLElement>('#selected-graph-world-mode')!;
+const selectedGraphWorldRawButton = document.querySelector<HTMLButtonElement>('#selected-graph-world-raw')!;
+const selectedGraphWorldFoldedButton = document.querySelector<HTMLButtonElement>('#selected-graph-world-folded')!;
+const selectedGraphShowTagsInput = document.querySelector<HTMLInputElement>('#selected-graph-show-tags')!;
+const selectedGraphZoomOutButton = document.querySelector<HTMLButtonElement>('#selected-graph-zoom-out')!;
+const selectedGraphZoomResetButton = document.querySelector<HTMLButtonElement>('#selected-graph-zoom-reset')!;
+const selectedGraphZoomInButton = document.querySelector<HTMLButtonElement>('#selected-graph-zoom-in')!;
+const selectedGraphStatus = document.querySelector<HTMLElement>('#selected-graph-status')!;
+const selectedGraphOutput = document.querySelector<HTMLElement>('#selected-graph-output')!;
+const selectedNbtDialog = document.querySelector<HTMLDialogElement>('#selected-nbt-dialog')!;
+const closeSelectedNbtButton = document.querySelector<HTMLButtonElement>('#close-selected-nbt')!;
+const selectedNbtStatus = document.querySelector<HTMLElement>('#selected-nbt-status')!;
+const selectedNbtCanvas = document.querySelector<HTMLCanvasElement>('#selected-nbt-canvas')!;
 
 const viewer = new StructureViewer(canvas);
 viewer.setSelectionHandler(renderSelection);
+const selectedNbtViewer = new StructureViewer(selectedNbtCanvas);
 
 let simulation: NbtSimulation | undefined;
 let selectedBlock: StructureBlock | undefined;
@@ -241,6 +308,11 @@ let graphMinimapScale = 1;
 let isDraggingGraphMinimap = false;
 let graphZoom = 1;
 let selectedGraphNode: string | undefined;
+let selectedGraphDot: GraphDotInfo | undefined;
+let selectedGraphTab: GraphTab = 'world';
+let selectedGraphWorldModeValue: GraphWorldMode = 'raw';
+let selectedGraphShowTags = true;
+let selectedGraphZoom = 1;
 
 folderInput.setAttribute('webkitdirectory', '');
 folderInput.setAttribute('directory', '');
@@ -338,6 +410,82 @@ graphZoomInButton.addEventListener('click', () => {
   setGraphZoom(graphZoom + 0.25);
 });
 
+openSelectedGraphButton.addEventListener('click', () => {
+  void openSelectedGraphView();
+});
+
+openSelectedNbtButton.addEventListener('click', () => {
+  void openSelectedNbtView();
+});
+
+closeSelectedGraphsButton.addEventListener('click', () => {
+  selectedGraphDialog.close();
+});
+
+selectedGraphDialog.addEventListener('click', event => {
+  if (event.target === selectedGraphDialog) {
+    selectedGraphDialog.close();
+  }
+});
+
+closeSelectedNbtButton.addEventListener('click', () => {
+  selectedNbtDialog.close();
+});
+
+selectedNbtDialog.addEventListener('click', event => {
+  if (event.target === selectedNbtDialog) {
+    selectedNbtDialog.close();
+  }
+});
+
+selectedGraphWorldTab.addEventListener('click', () => {
+  selectedGraphTab = 'world';
+  void renderSelectedGraphTab();
+});
+
+selectedGraphLogicTab.addEventListener('click', () => {
+  selectedGraphTab = 'logic';
+  void renderSelectedGraphTab();
+});
+
+selectedGraphWorldRawButton.addEventListener('click', () => {
+  selectedGraphWorldModeValue = 'raw';
+  void renderSelectedGraphTab();
+});
+
+selectedGraphWorldFoldedButton.addEventListener('click', () => {
+  selectedGraphWorldModeValue = 'folded';
+  void renderSelectedGraphTab();
+});
+
+selectedGraphShowTagsInput.addEventListener('change', () => {
+  selectedGraphShowTags = selectedGraphShowTagsInput.checked;
+  void renderSelectedGraphTab();
+});
+
+selectedGraphZoomOutButton.addEventListener('click', () => {
+  setSelectedGraphZoom(selectedGraphZoom - 0.25);
+});
+
+selectedGraphZoomResetButton.addEventListener('click', () => {
+  setSelectedGraphZoom(1);
+});
+
+selectedGraphZoomInButton.addEventListener('click', () => {
+  setSelectedGraphZoom(selectedGraphZoom + 0.25);
+});
+
+selectedGraphOutput.addEventListener(
+  'wheel',
+  event => {
+    if (!event.ctrlKey) return;
+
+    event.preventDefault();
+    zoomSelectedGraphAt(event.clientX, event.clientY, selectedGraphZoom * (event.deltaY < 0 ? 1.12 : 1 / 1.12));
+  },
+  { passive: false },
+);
+
 graphOutput.addEventListener('scroll', () => {
   updateGraphMinimapViewport();
 });
@@ -420,6 +568,8 @@ async function renderGraphTab(): Promise<void> {
   updateGraphTabs();
   graphOutput.replaceChildren();
   clearGraphMinimap();
+  graphSelectionActions.classList.add('hidden');
+  graphViewer.classList.remove('has-selection-action');
 
   if (!graphDot) {
     graphStatus.textContent = currentNbtBytes ? 'Generating graphs...' : 'Open an NBT file before viewing graphs.';
@@ -441,7 +591,7 @@ async function renderGraphTab(): Promise<void> {
     graphOutput.append(svg);
     installGraphNodeHitAreas(svg);
     bindGraphSelection(svg);
-    applyGraphZoom();
+    setGraphZoom(1);
     renderGraphMinimap(svg);
   } catch (error) {
     graphStatus.textContent = error instanceof Error ? error.message : String(error);
@@ -566,7 +716,66 @@ function updateGraphSelectionStatus(): void {
       : graphWorldModeValue === 'folded'
         ? 'World Graph - Folded'
         : 'World Graph - Raw';
-  graphStatus.textContent = selectedGraphNode ? `${title} - ${selectedGraphNode} selected` : title;
+  const selectedCount = selectedGraphNode ? graphOutput.querySelectorAll('svg g.node.graph-node-selected').length : 0;
+  graphStatus.textContent = selectedGraphNode ? `${title} - ${selectedGraphNode} selected (${selectedCount} nodes)` : title;
+  const canOpenSelection = graphTab === 'world' && selectedCount > 0;
+  graphSelectionActions.classList.toggle('hidden', !canOpenSelection);
+  graphViewer.classList.toggle('has-selection-action', canOpenSelection);
+}
+
+async function openSelectedGraphView(): Promise<void> {
+  const sourceSvg = graphOutput.querySelector<SVGSVGElement>('svg');
+  if (graphTab !== 'world' || !sourceSvg || !selectedGraphNode) return;
+
+  const nodeIds = selectedWorldGraphNodeIds(sourceSvg);
+  if (nodeIds.length === 0 || !currentNbtBytes) return;
+
+  if (!selectedGraphDialog.open) selectedGraphDialog.showModal();
+  selectedGraphOutput.replaceChildren();
+  selectedGraphStatus.textContent = 'Generating selected graph...';
+  selectedGraphDot = undefined;
+  selectedGraphTab = 'world';
+  selectedGraphWorldModeValue = graphWorldModeValue;
+  selectedGraphShowTags = graphShowTags;
+  selectedGraphShowTagsInput.checked = selectedGraphShowTags;
+
+  try {
+    selectedGraphDot = await NbtSimulation.selectedGraphDot(currentNbtBytes, graphWorldModeValue === 'folded', nodeIds);
+    await renderSelectedGraphTab();
+  } catch (error) {
+    selectedGraphStatus.textContent = error instanceof Error ? error.message : String(error);
+  }
+}
+
+async function openSelectedNbtView(): Promise<void> {
+  const sourceSvg = graphOutput.querySelector<SVGSVGElement>('svg');
+  if (graphTab !== 'world' || !sourceSvg || !selectedGraphNode) return;
+
+  const nodeIds = selectedWorldGraphNodeIds(sourceSvg);
+  if (nodeIds.length === 0 || !currentNbtBytes) return;
+
+  if (!selectedNbtDialog.open) selectedNbtDialog.showModal();
+  selectedNbtStatus.textContent = 'Generating selected NBT...';
+
+  try {
+    const selectedRoot = await NbtSimulation.selectedNbt(currentNbtBytes, graphWorldModeValue === 'folded', nodeIds);
+    const structure = toStructureModel(selectedRoot);
+    if (!structure) {
+      selectedNbtStatus.textContent = 'Selected graph did not produce a structure.';
+      return;
+    }
+
+    await selectedNbtViewer.setStructure(structure);
+    selectedNbtStatus.textContent = `Selected NBT - ${structure.blocks.length} blocks`;
+  } catch (error) {
+    selectedNbtStatus.textContent = error instanceof Error ? error.message : String(error);
+  }
+}
+
+function selectedWorldGraphNodeIds(sourceSvg: SVGSVGElement): number[] {
+  return Array.from(sourceSvg.querySelectorAll<SVGGElement>('g.node.graph-node-selected'))
+    .map(node => parseGraphNodeId(graphElementTitle(node)))
+    .filter((nodeId): nodeId is number => nodeId !== undefined);
 }
 
 function graphNodeElements(svg: SVGSVGElement): Map<string, SVGGElement> {
@@ -593,6 +802,62 @@ function parseGraphEdgeTitle(title: string | undefined): { source: string; targe
   const match = title?.match(/^(node\d+)(?::[^-]+)?->(node\d+)(?::.+)?$/);
   if (!match) return undefined;
   return { source: match[1], target: match[2] };
+}
+
+function parseGraphNodeId(title: string | undefined): number | undefined {
+  const match = title?.match(/^node(\d+)$/);
+  if (!match) return undefined;
+
+  const nodeId = Number(match[1]);
+  return Number.isInteger(nodeId) ? nodeId : undefined;
+}
+
+async function renderSelectedGraphTab(): Promise<void> {
+  updateSelectedGraphTabs();
+  selectedGraphOutput.replaceChildren();
+
+  if (!selectedGraphDot) {
+    selectedGraphStatus.textContent = 'Select world graph nodes to open a focused graph.';
+    return;
+  }
+
+  selectedGraphStatus.textContent =
+    selectedGraphTab === 'logic'
+      ? 'Selected Logic Graph'
+      : selectedGraphWorldModeValue === 'folded'
+        ? 'Selected World Graph - Folded'
+        : 'Selected World Graph - Raw';
+
+  try {
+    const viz = await loadViz();
+    const svg = viz.renderSVGElement(currentSelectedGraphDot(), { engine: 'dot' });
+    selectedGraphOutput.append(svg);
+    setSelectedGraphZoom(1);
+  } catch (error) {
+    selectedGraphStatus.textContent = error instanceof Error ? error.message : String(error);
+  }
+}
+
+function currentSelectedGraphDot(): string {
+  if (!selectedGraphDot) return '';
+
+  if (selectedGraphTab === 'logic') {
+    return selectedGraphShowTags ? selectedGraphDot.logicDot : selectedGraphDot.logicDotWithoutTags;
+  }
+
+  if (selectedGraphWorldModeValue === 'folded') {
+    return selectedGraphShowTags ? selectedGraphDot.foldedWorldDot : selectedGraphDot.foldedWorldDotWithoutTags;
+  }
+
+  return selectedGraphShowTags ? selectedGraphDot.rawWorldDot : selectedGraphDot.rawWorldDotWithoutTags;
+}
+
+function updateSelectedGraphTabs(): void {
+  selectedGraphWorldTab.classList.toggle('active', selectedGraphTab === 'world');
+  selectedGraphLogicTab.classList.toggle('active', selectedGraphTab === 'logic');
+  selectedGraphWorldMode.classList.toggle('hidden', selectedGraphTab !== 'world');
+  selectedGraphWorldRawButton.classList.toggle('active', selectedGraphWorldModeValue === 'raw');
+  selectedGraphWorldFoldedButton.classList.toggle('active', selectedGraphWorldModeValue === 'folded');
 }
 
 async function loadViz(): Promise<Viz> {
@@ -644,15 +909,54 @@ function applyGraphZoom(options: { refreshMinimap?: boolean } = {}): void {
 
 }
 
+function setSelectedGraphZoom(nextZoom: number): void {
+  selectedGraphZoom = Math.max(0.25, Math.min(3, nextZoom));
+  applySelectedGraphZoom();
+}
+
+function zoomSelectedGraphAt(clientX: number, clientY: number, nextZoom: number): void {
+  const previousZoom = selectedGraphZoom;
+  const clampedZoom = Math.max(0.25, Math.min(3, nextZoom));
+  if (clampedZoom === previousZoom) return;
+
+  const outputRect = selectedGraphOutput.getBoundingClientRect();
+  const focusX = selectedGraphOutput.scrollLeft + clientX - outputRect.left;
+  const focusY = selectedGraphOutput.scrollTop + clientY - outputRect.top;
+  selectedGraphZoom = clampedZoom;
+  applySelectedGraphZoom();
+
+  const ratio = clampedZoom / previousZoom;
+  selectedGraphOutput.scrollLeft = focusX * ratio - (clientX - outputRect.left);
+  selectedGraphOutput.scrollTop = focusY * ratio - (clientY - outputRect.top);
+}
+
+function applySelectedGraphZoom(): void {
+  selectedGraphZoomResetButton.textContent = `${Math.round(selectedGraphZoom * 100)}%`;
+  selectedGraphZoomOutButton.disabled = selectedGraphZoom <= 0.25;
+  selectedGraphZoomInButton.disabled = selectedGraphZoom >= 3;
+
+  const svg = selectedGraphOutput.querySelector<SVGSVGElement>('svg');
+  if (!svg) return;
+
+  const baseWidth = readSvgBaseSize(svg, 'width', selectedGraphZoom, selectedGraphOutput);
+  const baseHeight = readSvgBaseSize(svg, 'height', selectedGraphZoom, selectedGraphOutput);
+  svg.style.width = `${baseWidth * selectedGraphZoom}px`;
+  svg.style.height = `${baseHeight * selectedGraphZoom}px`;
+}
+
 function readGraphBaseSize(svg: SVGSVGElement, dimension: 'width' | 'height'): number {
+  return readSvgBaseSize(svg, dimension, graphZoom, graphOutput);
+}
+
+function readSvgBaseSize(svg: SVGSVGElement, dimension: 'width' | 'height', zoom: number, fallbackElement: HTMLElement): number {
   const dataKey = `base${dimension[0].toUpperCase()}${dimension.slice(1)}`;
   const cached = Number(svg.dataset[dataKey]);
   if (Number.isFinite(cached) && cached > 0) return cached;
 
   const rect = svg.getBoundingClientRect();
   const measured = dimension === 'width' ? rect.width : rect.height;
-  const fallback = dimension === 'width' ? graphOutput.clientWidth : graphOutput.clientHeight;
-  const value = Math.max(measured / graphZoom, fallback, 1);
+  const fallback = dimension === 'width' ? fallbackElement.clientWidth : fallbackElement.clientHeight;
+  const value = Math.max(measured / zoom, fallback, 1);
   svg.dataset[dataKey] = String(value);
   return value;
 }

@@ -1,10 +1,14 @@
+use std::collections::HashSet;
+
 use redstone_compiler::graph::graphviz::ToGraphvizGraph;
 use redstone_compiler::graph::world::WorldGraphBuilder;
+use redstone_compiler::graph::{GraphNodeId, GraphNodeKind};
 use redstone_compiler::nbt::{NBTRoot, ToNBT};
 use redstone_compiler::transform::world_to_logic::WorldToLogicTransformer;
 use redstone_compiler::world::block::BlockKind;
-use redstone_compiler::world::position::Position;
+use redstone_compiler::world::position::{DimSize, Position};
 use redstone_compiler::world::simulator::{SimulationSnapshot, SimulationTraceEntry, Simulator};
+use redstone_compiler::world::{World, World3D};
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
@@ -119,6 +123,72 @@ impl NbtSimulator {
         serde_wasm_bindgen::to_value(&graph_dot).map_err(to_js_error)
     }
 
+    pub fn selected_graph_dot(
+        nbt_bytes: &[u8],
+        folded: bool,
+        node_ids: JsValue,
+    ) -> Result<JsValue, JsValue> {
+        let selected_node_ids: Vec<GraphNodeId> =
+            serde_wasm_bindgen::from_value(node_ids).map_err(to_js_error)?;
+        let selected_node_ids = selected_node_ids.into_iter().collect::<HashSet<_>>();
+        let nbt = NBTRoot::from_nbt_bytes(nbt_bytes).map_err(to_js_error)?;
+        let world = nbt.to_world();
+        let raw_world_graph = WorldGraphBuilder::new(&world).build();
+        let source_world_graph = if folded {
+            let transformer =
+                WorldToLogicTransformer::new(raw_world_graph, true).map_err(to_js_error)?;
+            transformer.world_graph().clone()
+        } else {
+            raw_world_graph
+        };
+
+        let selected_world_graph =
+            source_world_graph.extract_subgraph_by_node_ids(&selected_node_ids);
+        let transformer = WorldToLogicTransformer::new(selected_world_graph.clone(), true)
+            .map_err(to_js_error)?;
+        let folded_world_dot = transformer.world_graph().to_graphviz();
+        let folded_world_dot_without_tags = transformer.world_graph().to_graphviz_without_tags();
+        let logic_graph = transformer.transform().map_err(to_js_error)?;
+        let graph_dot = GraphDotInfo {
+            raw_world_dot: selected_world_graph.to_graphviz(),
+            raw_world_dot_without_tags: selected_world_graph.to_graphviz_without_tags(),
+            folded_world_dot,
+            folded_world_dot_without_tags,
+            logic_dot: logic_graph.to_graphviz(),
+            logic_dot_without_tags: logic_graph.to_graphviz_without_tags(),
+        };
+
+        serde_wasm_bindgen::to_value(&graph_dot).map_err(to_js_error)
+    }
+
+    pub fn selected_nbt(
+        nbt_bytes: &[u8],
+        folded: bool,
+        node_ids: JsValue,
+    ) -> Result<JsValue, JsValue> {
+        let selected_node_ids: Vec<GraphNodeId> =
+            serde_wasm_bindgen::from_value(node_ids).map_err(to_js_error)?;
+        let selected_node_ids = selected_node_ids.into_iter().collect::<HashSet<_>>();
+        let nbt = NBTRoot::from_nbt_bytes(nbt_bytes).map_err(to_js_error)?;
+        let world = nbt.to_world();
+        let raw_world_graph = WorldGraphBuilder::new(&world).build();
+        let source_world_graph = if folded {
+            let transformer =
+                WorldToLogicTransformer::new(raw_world_graph.clone(), true).map_err(to_js_error)?;
+            transformer.world_graph().clone()
+        } else {
+            raw_world_graph.clone()
+        };
+        let selected_world = selected_world_from_graph(
+            &world,
+            &raw_world_graph,
+            &source_world_graph,
+            &selected_node_ids,
+        );
+
+        serde_wasm_bindgen::to_value(&selected_world.to_nbt()).map_err(to_js_error)
+    }
+
     pub fn switches(&self) -> Result<JsValue, JsValue> {
         let switches = self
             .sim
@@ -195,5 +265,75 @@ fn snapshots_to_info(snapshots: &[SimulationSnapshot]) -> Vec<SnapshotInfo> {
             cycle: snapshot.cycle,
             root: snapshot.world.to_nbt(),
         })
+        .collect()
+}
+
+fn selected_world_from_graph(
+    world: &World,
+    raw_world_graph: &redstone_compiler::graph::world::WorldGraph,
+    source_world_graph: &redstone_compiler::graph::world::WorldGraph,
+    selected_node_ids: &HashSet<GraphNodeId>,
+) -> World3D {
+    let mut positions = HashSet::new();
+    for node_id in selected_node_ids {
+        if let Some(position) = source_world_graph.positions.get(node_id) {
+            positions.insert(*position);
+        }
+
+        let Some(node) = source_world_graph.graph.find_node_by_id(*node_id) else {
+            continue;
+        };
+        if !matches!(node.kind, GraphNodeKind::Sequential(_)) && !node.tag.starts_with("Folded ") {
+            continue;
+        }
+        for source_node_id in source_node_ids_from_tag(&node.tag) {
+            if let Some(position) = raw_world_graph.positions.get(&source_node_id) {
+                positions.insert(*position);
+            }
+        }
+    }
+
+    compact_world_from_positions(world, &positions)
+}
+
+fn compact_world_from_positions(world: &World, positions: &HashSet<Position>) -> World3D {
+    if positions.is_empty() {
+        return World3D::new(DimSize(1, 1, 1));
+    }
+
+    let min_x = positions.iter().map(|position| position.0).min().unwrap();
+    let min_y = positions.iter().map(|position| position.1).min().unwrap();
+    let min_z = positions.iter().map(|position| position.2).min().unwrap();
+    let max_x = positions.iter().map(|position| position.0).max().unwrap();
+    let max_y = positions.iter().map(|position| position.1).max().unwrap();
+    let max_z = positions.iter().map(|position| position.2).max().unwrap();
+    let mut selected_world = World3D::new(DimSize(
+        max_x - min_x + 1,
+        max_y - min_y + 1,
+        max_z - min_z + 1,
+    ));
+
+    for (position, block) in &world.blocks {
+        if !positions.contains(position) {
+            continue;
+        }
+        selected_world[Position(position.0 - min_x, position.1 - min_y, position.2 - min_z)] =
+            *block;
+    }
+
+    selected_world
+}
+
+fn source_node_ids_from_tag(tag: &str) -> Vec<GraphNodeId> {
+    let Some(start) = tag.rfind('[') else {
+        return Vec::new();
+    };
+    let Some(end) = tag[start..].find(']') else {
+        return Vec::new();
+    };
+
+    tag[start + 1..start + end]
+        .split(',')
+        .filter_map(|value| value.trim().parse().ok())
         .collect()
 }
