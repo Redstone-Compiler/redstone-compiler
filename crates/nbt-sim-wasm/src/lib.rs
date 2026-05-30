@@ -5,7 +5,7 @@ use redstone_compiler::graph::world::WorldGraphBuilder;
 use redstone_compiler::graph::{GraphNodeId, GraphNodeKind};
 use redstone_compiler::nbt::{NBTRoot, ToNBT};
 use redstone_compiler::transform::world_to_logic::WorldToLogicTransformer;
-use redstone_compiler::world::block::BlockKind;
+use redstone_compiler::world::block::{Block, BlockKind, Direction};
 use redstone_compiler::world::position::{DimSize, Position};
 use redstone_compiler::world::simulator::{SimulationSnapshot, SimulationTraceEntry, Simulator};
 use redstone_compiler::world::{World, World3D};
@@ -293,7 +293,46 @@ fn selected_world_from_graph(
         }
     }
 
+    add_attached_blocks(world, &mut positions);
     compact_world_from_positions(world, &positions)
+}
+
+fn add_attached_blocks(world: &World, positions: &mut HashSet<Position>) {
+    let world3d = World3D::from(world);
+    let attached_positions = positions
+        .iter()
+        .filter_map(|position| {
+            let block = world.blocks.iter().find_map(|(block_position, block)| {
+                (block_position == position).then_some(block)
+            })?;
+            attached_block_position(*position, *block)
+        })
+        .filter(|position| world3d.size.bound_on(*position))
+        .filter(|position| !world3d[*position].kind.is_air())
+        .collect::<Vec<_>>();
+
+    positions.extend(attached_positions);
+}
+
+fn attached_block_position(position: Position, block: Block) -> Option<Position> {
+    match block.kind {
+        BlockKind::Redstone { .. } | BlockKind::Repeater { .. } => position.down(),
+        BlockKind::Switch { .. } | BlockKind::Torch { .. } => {
+            attached_direction(position, block.direction)
+        }
+        BlockKind::Air
+        | BlockKind::Cobble { .. }
+        | BlockKind::RedstoneBlock
+        | BlockKind::Piston { .. } => None,
+    }
+}
+
+fn attached_direction(position: Position, direction: Direction) -> Option<Position> {
+    if direction == Direction::None {
+        return None;
+    }
+
+    position.walk(direction)
 }
 
 fn compact_world_from_positions(world: &World, positions: &HashSet<Position>) -> World3D {
