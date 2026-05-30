@@ -132,7 +132,7 @@ pub fn route_point_to_point(
         }
 
         for next in neighbors(position, bound) {
-            if next != sink && blocked.contains(&next) {
+            if next != sink && !route_position_available(next, blocked) {
                 continue;
             }
             if !visited.insert(next) {
@@ -157,30 +157,41 @@ fn routing_bound(source: Position, sink: Position, blocked: &HashSet<Position>) 
         max.1 = max.1.max(position.1);
         max.2 = max.2.max(position.2);
     }
-    Position(max.0 + 2, max.1 + 2, max.2 + 1)
+    Position(max.0 + 2, max.1 + 2, max.2)
 }
 
 fn neighbors(position: Position, bound: Position) -> impl Iterator<Item = Position> {
     let mut result = Vec::new();
-    if position.0 + 1 <= bound.0 {
-        result.push(Position(position.0 + 1, position.1, position.2));
-    }
-    if position.1 + 1 <= bound.1 {
-        result.push(Position(position.0, position.1 + 1, position.2));
-    }
-    if position.2 + 1 <= bound.2 {
-        result.push(Position(position.0, position.1, position.2 + 1));
-    }
-    if position.0 > 0 {
-        result.push(Position(position.0 - 1, position.1, position.2));
-    }
-    if position.1 > 0 {
-        result.push(Position(position.0, position.1 - 1, position.2));
-    }
-    if position.2 > 0 {
-        result.push(Position(position.0, position.1, position.2 - 1));
+    let horizontal = [
+        (position.0.checked_add(1), Some(position.1)),
+        (Some(position.0), position.1.checked_add(1)),
+        (position.0.checked_sub(1), Some(position.1)),
+        (Some(position.0), position.1.checked_sub(1)),
+    ];
+
+    for (next_x, next_y) in horizontal {
+        let (Some(next_x), Some(next_y)) = (next_x, next_y) else {
+            continue;
+        };
+        if next_x > bound.0 || next_y > bound.1 {
+            continue;
+        }
+        result.push(Position(next_x, next_y, position.2));
+        if position.2 + 1 <= bound.2 {
+            result.push(Position(next_x, next_y, position.2 + 1));
+        }
+        if position.2 > 1 {
+            result.push(Position(next_x, next_y, position.2 - 1));
+        }
     }
     result.into_iter()
+}
+
+fn route_position_available(position: Position, blocked: &HashSet<Position>) -> bool {
+    let Some(support) = position.down() else {
+        return false;
+    };
+    !blocked.contains(&position) && !blocked.contains(&support)
 }
 
 fn reconstruct_path(
@@ -203,20 +214,32 @@ fn route_blocks(path: &[Position]) -> Vec<(Position, Block)> {
         .copied()
         .skip(1)
         .take(path.len().saturating_sub(2))
-        .map(|position| {
-            (
-                position,
-                Block {
-                    kind: BlockKind::Redstone {
-                        on_count: 0,
-                        state: 0,
-                        strength: 0,
-                    },
-                    direction: Direction::None,
-                },
-            )
+        .flat_map(|position| {
+            let support = position.down().expect("route path should have support");
+            [(support, cobble_block()), (position, redstone_block())]
         })
         .collect()
+}
+
+fn cobble_block() -> Block {
+    Block {
+        kind: BlockKind::Cobble {
+            on_count: 0,
+            on_base_count: 0,
+        },
+        direction: Direction::None,
+    }
+}
+
+fn redstone_block() -> Block {
+    Block {
+        kind: BlockKind::Redstone {
+            on_count: 0,
+            state: 0,
+            strength: 0,
+        },
+        direction: Direction::None,
+    }
 }
 
 #[cfg(test)]
@@ -232,25 +255,14 @@ mod tests {
     use crate::world::position::DimSize;
     use crate::world::World3D;
 
-    fn redstone() -> Block {
-        Block {
-            kind: BlockKind::Redstone {
-                on_count: 0,
-                state: 0,
-                strength: 0,
-            },
-            direction: Direction::None,
-        }
-    }
-
     fn candidate(
         module_name: &str,
         block_position: Position,
         port_name: &str,
         direction: PhysicalPortDirection,
     ) -> LayoutCandidate {
-        let mut world = World3D::new(DimSize(2, 1, 1));
-        world[block_position] = redstone();
+        let mut world = World3D::new(DimSize(2, 1, 2));
+        world[block_position] = redstone_block();
         LayoutCandidate::from_world(
             module_name.to_owned(),
             world,
@@ -261,6 +273,32 @@ mod tests {
             }],
         )
         .unwrap()
+    }
+
+    #[test]
+    fn route_point_to_point_places_support_cobble_under_redstone() {
+        let route = route_point_to_point(Position(0, 0, 1), Position(3, 0, 1), &Default::default())
+            .unwrap();
+
+        assert!(route
+            .blocks
+            .iter()
+            .any(|(position, block)| *position == Position(1, 0, 0) && block.kind.is_cobble()));
+        assert!(route
+            .blocks
+            .iter()
+            .any(|(position, block)| *position == Position(1, 0, 1) && block.kind.is_redstone()));
+    }
+
+    #[test]
+    fn route_point_to_point_avoids_blocked_support_space() {
+        let blocked = [Position(1, 0, 0)].into_iter().collect();
+        let route = route_point_to_point(Position(0, 0, 1), Position(2, 0, 1), &blocked).unwrap();
+
+        assert!(!route
+            .blocks
+            .iter()
+            .any(|(position, _)| *position == Position(1, 0, 1)));
     }
 
     #[test]
@@ -276,13 +314,13 @@ mod tests {
         let candidates = vec![
             candidate(
                 "left",
-                Position(0, 0, 0),
+                Position(0, 0, 1),
                 "out",
                 PhysicalPortDirection::Output,
             ),
             candidate(
                 "right",
-                Position(0, 0, 0),
+                Position(0, 0, 1),
                 "in",
                 PhysicalPortDirection::Input,
             ),

@@ -47,7 +47,7 @@ pub fn place_candidates_on_shelves(
         placed.push(PlacedModule {
             module_name: candidate.module_name.clone(),
             candidate_index,
-            origin: Position(cursor_x, cursor_y, 0),
+            origin: Position(cursor_x, cursor_y, candidate.bbox.min.2),
             bbox: candidate.bbox,
         });
 
