@@ -5,6 +5,7 @@ use itertools::Itertools;
 
 use crate::graph::world::WorldGraph;
 use crate::graph::{GraphNode, GraphNodeId, GraphNodeKind};
+use crate::sequential::SequentialPrimitive;
 use crate::world::block::{Block, BlockKind, Direction};
 
 pub struct WorldGraphTransformer {
@@ -134,6 +135,31 @@ impl WorldGraphTransformer {
         self.graph.graph.build_consumers();
     }
 
+    // Collapse physical RS-latch feedback loops before converting the world graph
+    // into logic. The downstream logic extraction walks nodes in topological order,
+    // so a cyclic torch/redstone latch core must become one sequential node first.
+    pub fn fold_rs_latch_feedback_components(&mut self) {
+        for component in self.graph.graph.strongly_connected_components() {
+            let component_set = component.iter().copied().collect::<HashSet<_>>();
+            if !is_rs_latch_feedback_component(&self.graph, &component, &component_set) {
+                continue;
+            }
+
+            let inputs = self.graph.graph.external_edges(&component_set, true);
+            if inputs.len() != 2 {
+                continue;
+            }
+            let outputs = self.graph.graph.external_edges(&component_set, false);
+            self.graph.replace_nodes_with(
+                &component_set,
+                GraphNodeKind::Sequential(SequentialPrimitive::rs_latch()),
+                inputs,
+                outputs,
+                format!("Folded RS latch feedback SCC {component:?}"),
+            );
+        }
+    }
+
     pub fn remove_redstone(&mut self) {
         self.remove_specific_kind_of_block(
             |kind| matches!(&kind, BlockKind::Redstone { .. }),
@@ -171,6 +197,44 @@ impl WorldGraphTransformer {
         self.graph.graph.build_producers();
         self.graph.graph.build_consumers();
     }
+}
+
+// Recognize the narrow post-redstone-fold shape used by the current RS latch
+// fixtures: two torches cross-coupled through two folded redstone routing nodes.
+// Input gating around that core, such as in a D latch, stays outside the SCC and
+// remains ordinary combinational logic.
+fn is_rs_latch_feedback_component(
+    graph: &WorldGraph,
+    component: &[GraphNodeId],
+    component_set: &HashSet<GraphNodeId>,
+) -> bool {
+    if component.len() != 4 {
+        return false;
+    }
+
+    let mut torch_count = 0;
+    let mut redstone_count = 0;
+    for node_id in component {
+        let Some(node) = graph.graph.find_node_by_id(*node_id) else {
+            return false;
+        };
+        match &node.kind {
+            GraphNodeKind::Block(block) if matches!(block.kind, BlockKind::Torch { .. }) => {
+                torch_count += 1;
+                if !node.inputs.iter().any(|id| component_set.contains(id))
+                    || !node.outputs.iter().any(|id| component_set.contains(id))
+                {
+                    return false;
+                }
+            }
+            GraphNodeKind::Block(block) if matches!(block.kind, BlockKind::Redstone { .. }) => {
+                redstone_count += 1;
+            }
+            _ => return false,
+        }
+    }
+
+    torch_count == 2 && redstone_count == 2
 }
 
 #[cfg(test)]

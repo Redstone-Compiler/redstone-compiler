@@ -23,6 +23,33 @@ impl Verify for WorldGraph {
     }
 }
 
+impl WorldGraph {
+    pub fn replace_nodes_with(
+        &mut self,
+        removed_nodes: &HashSet<GraphNodeId>,
+        kind: GraphNodeKind,
+        inputs: Vec<GraphNodeId>,
+        outputs: Vec<GraphNodeId>,
+        tag: String,
+    ) -> GraphNodeId {
+        let position = removed_nodes
+            .iter()
+            .find_map(|node_id| self.positions.get(node_id).copied());
+        let replacement_id =
+            self.graph
+                .replace_nodes_with(removed_nodes, kind, inputs, outputs, tag);
+        for node_id in removed_nodes {
+            self.positions.remove(node_id);
+            self.routings.remove(node_id);
+        }
+        if let Some(position) = position {
+            self.positions.insert(replacement_id, position);
+        }
+
+        replacement_id
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct WorldGraphBuilder {
     world: World3D,

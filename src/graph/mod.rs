@@ -225,6 +225,27 @@ impl Graph {
         components
     }
 
+    pub fn external_edges(&self, nodes: &HashSet<GraphNodeId>, incoming: bool) -> Vec<GraphNodeId> {
+        let mut edges = nodes
+            .iter()
+            .flat_map(|node_id| {
+                let node = self.find_node_by_id(*node_id).into_iter();
+                node.flat_map(move |node| {
+                    if incoming {
+                        node.inputs.iter()
+                    } else {
+                        node.outputs.iter()
+                    }
+                })
+            })
+            .filter(|node_id| !nodes.contains(node_id))
+            .copied()
+            .collect::<Vec<_>>();
+        edges.sort();
+        edges.dedup();
+        edges
+    }
+
     pub fn dominators(
         &self,
         target_root: GraphNodeId,
@@ -611,6 +632,52 @@ impl Graph {
         };
 
         self.nodes.remove(index);
+    }
+
+    pub fn replace_nodes_with(
+        &mut self,
+        removed_nodes: &HashSet<GraphNodeId>,
+        kind: GraphNodeKind,
+        inputs: Vec<GraphNodeId>,
+        outputs: Vec<GraphNodeId>,
+        tag: String,
+    ) -> GraphNodeId {
+        let replacement_id = self.max_node_id().unwrap_or(0) + 1;
+
+        for input in &inputs {
+            if let Some(node) = self.find_node_by_id_mut(*input) {
+                node.outputs.retain(|id| !removed_nodes.contains(id));
+                if !node.outputs.contains(&replacement_id) {
+                    node.outputs.push(replacement_id);
+                }
+            }
+        }
+        for output in &outputs {
+            if let Some(node) = self.find_node_by_id_mut(*output) {
+                node.inputs.retain(|id| !removed_nodes.contains(id));
+                if !node.inputs.contains(&replacement_id) {
+                    node.inputs.push(replacement_id);
+                }
+            }
+        }
+        for node_id in removed_nodes {
+            self.remove_by_node_id_lazy(*node_id);
+        }
+
+        self.nodes.push(GraphNode {
+            id: replacement_id,
+            kind,
+            inputs,
+            outputs,
+            tag,
+        });
+        self.nodes.sort_by_key(|node| node.id);
+        self.build_inputs();
+        self.build_outputs();
+        self.build_producers();
+        self.build_consumers();
+
+        replacement_id
     }
 
     // 노드 삭제하고 삭제한 노드의 Input Output끼리 연결함
