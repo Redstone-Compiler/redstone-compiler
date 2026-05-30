@@ -1,9 +1,10 @@
 use std::collections::HashSet;
 
 use redstone_compiler::graph::graphviz::ToGraphvizGraph;
-use redstone_compiler::graph::world::WorldGraphBuilder;
+use redstone_compiler::graph::world::{WorldGraph, WorldGraphBuilder};
 use redstone_compiler::graph::{GraphNodeId, GraphNodeKind};
 use redstone_compiler::nbt::{NBTRoot, ToNBT};
+use redstone_compiler::transform::place_and_route::place_bound::{PlaceBound, PropagateType};
 use redstone_compiler::transform::world_to_logic::WorldToLogicTransformer;
 use redstone_compiler::world::block::{Block, BlockKind, Direction};
 use redstone_compiler::world::position::{DimSize, Position};
@@ -275,6 +276,7 @@ fn selected_world_from_graph(
     selected_node_ids: &HashSet<GraphNodeId>,
 ) -> World3D {
     let mut positions = HashSet::new();
+    let mut raw_node_ids = HashSet::new();
     for node_id in selected_node_ids {
         if let Some(position) = source_world_graph.positions.get(node_id) {
             positions.insert(*position);
@@ -284,17 +286,88 @@ fn selected_world_from_graph(
             continue;
         };
         if !matches!(node.kind, GraphNodeKind::Sequential(_)) && !node.tag.starts_with("Folded ") {
+            raw_node_ids.insert(*node_id);
             continue;
         }
         for source_node_id in source_node_ids_from_tag(&node.tag) {
             if let Some(position) = raw_world_graph.positions.get(&source_node_id) {
                 positions.insert(*position);
+                raw_node_ids.insert(source_node_id);
             }
         }
     }
 
+    add_edge_routing_blocks(world, raw_world_graph, &raw_node_ids, &mut positions);
     add_attached_blocks(world, &mut positions);
     compact_world_from_positions(world, &positions)
+}
+
+fn add_edge_routing_blocks(
+    world: &World,
+    raw_world_graph: &WorldGraph,
+    raw_node_ids: &HashSet<GraphNodeId>,
+    positions: &mut HashSet<Position>,
+) {
+    let world3d = World3D::from(world);
+    let route_positions = raw_node_ids
+        .iter()
+        .flat_map(|source_node_id| {
+            let Some(source_node) = raw_world_graph.graph.find_node_by_id(*source_node_id) else {
+                return Vec::new();
+            };
+            let Some(source_position) = raw_world_graph.positions.get(source_node_id) else {
+                return Vec::new();
+            };
+            let source_outputs = source_node
+                .outputs
+                .iter()
+                .copied()
+                .filter(|target_node_id| raw_node_ids.contains(target_node_id))
+                .collect::<Vec<_>>();
+
+            source_outputs
+                .into_iter()
+                .filter_map(|target_node_id| raw_world_graph.positions.get(&target_node_id))
+                .flat_map(|target_position| {
+                    edge_routing_positions(
+                        *source_position,
+                        *target_position,
+                        &source_node.kind,
+                        &world3d,
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+
+    positions.extend(route_positions);
+}
+
+fn edge_routing_positions(
+    source_position: Position,
+    target_position: Position,
+    source_kind: &GraphNodeKind,
+    world: &World3D,
+) -> Vec<Position> {
+    let GraphNodeKind::Block(source_block) = source_kind else {
+        return Vec::new();
+    };
+
+    PlaceBound(PropagateType::Soft, source_position, source_block.direction)
+        .propagation_bound(&source_block.kind, Some(world))
+        .into_iter()
+        .filter(|bound| world.size.bound_on(bound.position()))
+        .filter(|bound| {
+            bound
+                .propagate_to(world)
+                .into_iter()
+                .any(|(_, position)| position == target_position)
+        })
+        .map(|bound| bound.position())
+        .filter(|position| *position != source_position && *position != target_position)
+        .filter(|position| world.size.bound_on(*position))
+        .filter(|position| !world[*position].kind.is_air())
+        .collect()
 }
 
 fn add_attached_blocks(world: &World, positions: &mut HashSet<Position>) {
