@@ -149,6 +149,7 @@ impl GraphNode {
 #[derive(Default, Debug, Clone)]
 pub struct Graph {
     pub nodes: Vec<GraphNode>,
+    pub(crate) next_node_id: GraphNodeId,
     pub producers: HashMap<GraphNodeId, Vec<GraphNodeId>>,
     pub consumers: HashMap<GraphNodeId, Vec<GraphNodeId>>,
 }
@@ -535,10 +536,25 @@ impl Graph {
     }
 
     pub fn next_node_id(&self) -> GraphNodeId {
-        self.max_node_id().map_or(0, |id| id + 1)
+        self.next_node_id
+            .max(self.max_node_id().map_or(0, |id| id + 1))
+    }
+
+    pub fn allocate_node_id(&mut self) -> GraphNodeId {
+        let id = self.next_node_id();
+        self.next_node_id = id + 1;
+        id
+    }
+
+    pub fn add_node(&mut self, mut node: GraphNode) -> GraphNodeId {
+        let id = self.allocate_node_id();
+        node.id = id;
+        self.insert_node(node);
+        id
     }
 
     pub fn insert_node(&mut self, node: GraphNode) {
+        self.next_node_id = self.next_node_id.max(node.id + 1);
         match self.nodes.binary_search_by_key(&node.id, |node| node.id) {
             Ok(index) => self.nodes[index] = node,
             Err(index) => self.nodes.insert(index, node),
@@ -577,6 +593,7 @@ impl Graph {
                 *index += base_index;
             }
         }
+        self.next_node_id = self.next_node_id();
 
         self.build_producers();
         self.build_consumers();
@@ -1361,6 +1378,23 @@ mod tests {
         };
 
         assert_eq!(graph.next_node_id(), 31);
+    }
+
+    #[test]
+    fn graph_allocator_does_not_reuse_removed_ids() {
+        let mut graph = Graph::default();
+        graph.insert_node(GraphNode {
+            id: 10,
+            ..Default::default()
+        });
+        graph.remove_by_node_id_lazy(10);
+
+        let id = graph.add_node(GraphNode::default());
+
+        assert_eq!(id, 11);
+        assert!(graph.find_node_by_id(10).is_none());
+        assert!(graph.find_node_by_id(11).is_some());
+        assert_eq!(graph.next_node_id(), 12);
     }
 
     #[test]
