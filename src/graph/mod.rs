@@ -496,7 +496,7 @@ impl Graph {
         self.consumers.extend(other.consumers);
     }
 
-    // src? other??input??媛숈? 寃??쇰━ ?곌껐?섏뿬 merge??
+    // src와 other의 input이 같은 것 끼리 연결하여 merge함
     pub fn merge_by_input(&mut self, mut other: Self) {
         if let Some(id) = self.max_node_id() {
             other.rebuild_node_id_base(id + 1);
@@ -543,7 +543,7 @@ impl Graph {
         self.build_consumers();
     }
 
-    // src??output??target??input怨??곌껐?섏뿬 merge??
+    // src의 output을 target의 input과 연결하여 merge함
     pub fn merge_by_outin(&mut self, mut target: Self, out_in: Vec<(&str, &str)>) {
         if let Some(id) = self.max_node_id() {
             target.rebuild_node_id_base(id + 1);
@@ -598,7 +598,7 @@ impl Graph {
         self.build_consumers();
     }
 
-    // self??input, output?ㅼ쓣 target??input怨??곌껐??
+    // self의 input, output들을 target의 input과 연결함
     pub fn merge(&mut self, mut target: Self) {
         if let Some(id) = self.max_node_id() {
             target.rebuild_node_id_base(id + 1);
@@ -844,7 +844,7 @@ impl Graph {
         replacement_id
     }
 
-    // ?몃뱶 ??젣?섍퀬 ??젣???몃뱶??Input Output?쇰━ ?곌껐??
+    // 노드 삭제하고 삭제한 노드의 Input Output끼리 연결함
     pub fn remove_and_reconnect_by_node_id_lazy(&mut self, node_id: GraphNodeId) {
         let Some(index) = self.nodes.iter().position(|node| node.id == node_id) else {
             return;
@@ -922,7 +922,7 @@ impl Graph {
         node.outputs.extend(to);
     }
 
-    // outputs??諛섎뱶??determine ?섏뼱?쇳븿
+    // outputs이 반드시 determine 되어야함
     pub fn build_inputs(&mut self) {
         let mut input_map: HashMap<usize, HashSet<usize>> = HashMap::new();
 
@@ -943,7 +943,7 @@ impl Graph {
         }
     }
 
-    // inputs??諛섎뱶??determine ?섏뼱?쇳븿
+    // inputs이 반드시 determine 되어야함
     pub fn build_outputs(&mut self) {
         let mut output_map: HashMap<usize, HashSet<usize>> = HashMap::new();
 
