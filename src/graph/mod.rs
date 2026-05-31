@@ -1,6 +1,7 @@
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Display;
 
+use indexmap::IndexMap;
 use itertools::Itertools;
 use module::GraphModuleBuilder;
 use petgraph::stable_graph::NodeIndex;
@@ -148,7 +149,7 @@ impl GraphNode {
 
 #[derive(Default, Debug, Clone)]
 pub struct GraphNodes {
-    nodes: BTreeMap<GraphNodeId, GraphNode>,
+    nodes: IndexMap<GraphNodeId, GraphNode>,
 }
 
 impl GraphNodes {
@@ -160,13 +161,11 @@ impl GraphNodes {
         self.nodes.is_empty()
     }
 
-    pub fn iter(&self) -> std::collections::btree_map::Values<'_, GraphNodeId, GraphNode> {
+    pub fn iter(&self) -> indexmap::map::Values<'_, GraphNodeId, GraphNode> {
         self.nodes.values()
     }
 
-    pub fn iter_mut(
-        &mut self,
-    ) -> std::collections::btree_map::ValuesMut<'_, GraphNodeId, GraphNode> {
+    pub fn iter_mut(&mut self) -> indexmap::map::ValuesMut<'_, GraphNodeId, GraphNode> {
         self.nodes.values_mut()
     }
 
@@ -176,13 +175,10 @@ impl GraphNodes {
     }
 
     pub fn remove(&mut self, index: usize) -> GraphNode {
-        let id = self
-            .nodes
-            .keys()
-            .nth(index)
-            .copied()
-            .expect("node index must exist");
-        self.nodes.remove(&id).unwrap()
+        self.nodes
+            .shift_remove_index(index)
+            .map(|(_, node)| node)
+            .expect("node index must exist")
     }
 
     pub fn extend(&mut self, nodes: impl IntoIterator<Item = GraphNode>) {
@@ -191,11 +187,13 @@ impl GraphNodes {
 
     pub fn insert(&mut self, node: GraphNode) {
         self.nodes.insert(node.id, node);
+        self.nodes.sort_by(|id, _, other_id, _| id.cmp(other_id));
     }
 }
 
 impl From<Vec<GraphNode>> for GraphNodes {
-    fn from(nodes: Vec<GraphNode>) -> Self {
+    fn from(mut nodes: Vec<GraphNode>) -> Self {
+        nodes.sort_by_key(|node| node.id);
         Self {
             nodes: nodes.into_iter().map(|node| (node.id, node)).collect(),
         }
@@ -204,7 +202,7 @@ impl From<Vec<GraphNode>> for GraphNodes {
 
 impl IntoIterator for GraphNodes {
     type Item = GraphNode;
-    type IntoIter = std::collections::btree_map::IntoValues<GraphNodeId, GraphNode>;
+    type IntoIter = indexmap::map::IntoValues<GraphNodeId, GraphNode>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.nodes.into_values()
@@ -213,7 +211,7 @@ impl IntoIterator for GraphNodes {
 
 impl<'a> IntoIterator for &'a GraphNodes {
     type Item = &'a GraphNode;
-    type IntoIter = std::collections::btree_map::Values<'a, GraphNodeId, GraphNode>;
+    type IntoIter = indexmap::map::Values<'a, GraphNodeId, GraphNode>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.nodes.values()
@@ -222,7 +220,7 @@ impl<'a> IntoIterator for &'a GraphNodes {
 
 impl<'a> IntoIterator for &'a mut GraphNodes {
     type Item = &'a mut GraphNode;
-    type IntoIter = std::collections::btree_map::ValuesMut<'a, GraphNodeId, GraphNode>;
+    type IntoIter = indexmap::map::ValuesMut<'a, GraphNodeId, GraphNode>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.nodes.values_mut()
