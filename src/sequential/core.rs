@@ -126,7 +126,7 @@ pub fn rs_latch_prefix_graph(graph: &Graph, core: &RsLatchCore) -> Option<LogicG
     nodes.sort_by_key(|node| node.id);
 
     let mut graph = Graph {
-        nodes,
+        nodes: nodes.into(),
         ..Default::default()
     };
     graph.build_outputs();

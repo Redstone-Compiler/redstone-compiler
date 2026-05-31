@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt::Display;
 
 use itertools::Itertools;
@@ -147,8 +147,91 @@ impl GraphNode {
 }
 
 #[derive(Default, Debug, Clone)]
+pub struct GraphNodes {
+    nodes: BTreeMap<GraphNodeId, GraphNode>,
+}
+
+impl GraphNodes {
+    pub fn len(&self) -> usize {
+        self.nodes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+    }
+
+    pub fn iter(&self) -> std::collections::btree_map::Values<'_, GraphNodeId, GraphNode> {
+        self.nodes.values()
+    }
+
+    pub fn iter_mut(
+        &mut self,
+    ) -> std::collections::btree_map::ValuesMut<'_, GraphNodeId, GraphNode> {
+        self.nodes.values_mut()
+    }
+
+    pub fn retain(&mut self, f: impl FnMut(&GraphNode) -> bool) {
+        let mut f = f;
+        self.nodes.retain(|_, node| f(node));
+    }
+
+    pub fn remove(&mut self, index: usize) -> GraphNode {
+        let id = self
+            .nodes
+            .keys()
+            .nth(index)
+            .copied()
+            .expect("node index must exist");
+        self.nodes.remove(&id).unwrap()
+    }
+
+    pub fn extend(&mut self, nodes: impl IntoIterator<Item = GraphNode>) {
+        nodes.into_iter().for_each(|node| self.insert(node));
+    }
+
+    pub fn insert(&mut self, node: GraphNode) {
+        self.nodes.insert(node.id, node);
+    }
+}
+
+impl From<Vec<GraphNode>> for GraphNodes {
+    fn from(nodes: Vec<GraphNode>) -> Self {
+        Self {
+            nodes: nodes.into_iter().map(|node| (node.id, node)).collect(),
+        }
+    }
+}
+
+impl IntoIterator for GraphNodes {
+    type Item = GraphNode;
+    type IntoIter = std::collections::btree_map::IntoValues<GraphNodeId, GraphNode>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.nodes.into_values()
+    }
+}
+
+impl<'a> IntoIterator for &'a GraphNodes {
+    type Item = &'a GraphNode;
+    type IntoIter = std::collections::btree_map::Values<'a, GraphNodeId, GraphNode>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.nodes.values()
+    }
+}
+
+impl<'a> IntoIterator for &'a mut GraphNodes {
+    type Item = &'a mut GraphNode;
+    type IntoIter = std::collections::btree_map::ValuesMut<'a, GraphNodeId, GraphNode>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.nodes.values_mut()
+    }
+}
+
+#[derive(Default, Debug, Clone)]
 pub struct Graph {
-    pub nodes: Vec<GraphNode>,
+    pub nodes: GraphNodes,
     pub(crate) next_node_id: GraphNodeId,
     pub producers: HashMap<GraphNodeId, Vec<GraphNodeId>>,
     pub consumers: HashMap<GraphNodeId, Vec<GraphNodeId>>,
@@ -540,6 +623,10 @@ impl Graph {
             .max(self.max_node_id().map_or(0, |id| id + 1))
     }
 
+    fn preserve_next_node_id_high_watermark(&mut self) {
+        self.next_node_id = self.next_node_id();
+    }
+
     pub fn allocate_node_id(&mut self) -> GraphNodeId {
         let id = self.next_node_id();
         self.next_node_id = id + 1;
@@ -555,10 +642,7 @@ impl Graph {
 
     pub fn insert_node(&mut self, node: GraphNode) {
         self.next_node_id = self.next_node_id.max(node.id + 1);
-        match self.nodes.binary_search_by_key(&node.id, |node| node.id) {
-            Ok(index) => self.nodes[index] = node,
-            Err(index) => self.nodes.insert(index, node),
-        }
+        self.nodes.insert(node);
     }
 
     pub fn find_node_by_input_name(&mut self, input_name: &str) -> Option<&mut GraphNode> {
@@ -582,6 +666,7 @@ impl Graph {
     }
 
     pub fn find_and_remove_node_by_id(&mut self, node_id: GraphNodeId) -> Option<GraphNode> {
+        self.preserve_next_node_id_high_watermark();
         let index = self.nodes.iter().position(|node| node.id == node_id)?;
         Some(self.nodes.remove(index))
     }
@@ -600,6 +685,7 @@ impl Graph {
     }
 
     pub fn remove_by_node_id_lazy(&mut self, node_id: GraphNodeId) {
+        self.preserve_next_node_id_high_watermark();
         let Some(index) = self.nodes.iter().position(|node| node.id == node_id) else {
             return;
         };
@@ -654,6 +740,7 @@ impl Graph {
 
     // 노드 삭제하고 삭제한 노드의 Input Output끼리 연결함
     pub fn remove_and_reconnect_by_node_id_lazy(&mut self, node_id: GraphNodeId) {
+        self.preserve_next_node_id_high_watermark();
         let Some(index) = self.nodes.iter().position(|node| node.id == node_id) else {
             return;
         };
@@ -823,7 +910,7 @@ impl Graph {
         nodes.sort_by_key(|node| node.id);
 
         let mut graph = Self {
-            nodes,
+            nodes: nodes.into(),
             ..Default::default()
         };
         graph.build_inputs();
@@ -892,6 +979,7 @@ impl Graph {
     }
 
     pub fn remove_input(&mut self, input_name: &str) {
+        self.preserve_next_node_id_high_watermark();
         let Some((index, _)) = self.nodes.iter().find_position(
             |node| matches!(&node.kind, GraphNodeKind::Output(name) if name == input_name),
         ) else {
@@ -905,6 +993,7 @@ impl Graph {
     }
 
     pub fn remove_output(&mut self, output_name: &str) -> Option<GraphNodeId> {
+        self.preserve_next_node_id_high_watermark();
         let (index, _) = self.nodes.iter().find_position(
             |node| matches!(&node.kind, GraphNodeKind::Output(name) if name == output_name),
         )?;
@@ -1039,7 +1128,7 @@ impl From<&SubGraphWithGraph<'_>> for Graph {
         }
 
         let mut graph = Graph {
-            nodes,
+            nodes: nodes.into(),
             ..Default::default()
         };
         graph.rebuild_node_id_base(0);
@@ -1137,7 +1226,9 @@ pub fn subgraphs_to_clustered_graph(graph: &Graph, subgraphs: &[SubGraph]) -> Cl
     }
 
     let mut graph = Graph {
-        nodes: [nodes, weighted_node.into_iter().flatten().collect_vec()].concat(),
+        nodes: [nodes, weighted_node.into_iter().flatten().collect_vec()]
+            .concat()
+            .into(),
         ..Default::default()
     };
 
@@ -1178,7 +1269,8 @@ mod tests {
                     inputs: vec![2, 0, 1],
                     ..Default::default()
                 },
-            ],
+            ]
+            .into(),
             ..Default::default()
         };
 
@@ -1221,7 +1313,8 @@ mod tests {
                     inputs: vec![2],
                     ..Default::default()
                 },
-            ],
+            ]
+            .into(),
             ..Default::default()
         };
         graph.build_producers();
@@ -1286,7 +1379,8 @@ mod tests {
                     inputs: vec![2],
                     ..Default::default()
                 },
-            ],
+            ]
+            .into(),
             ..Default::default()
         };
 
@@ -1319,7 +1413,8 @@ mod tests {
                     inputs: vec![10],
                     ..Default::default()
                 },
-            ],
+            ]
+            .into(),
             ..Default::default()
         };
 
@@ -1349,7 +1444,8 @@ mod tests {
                     inputs: vec![20],
                     ..Default::default()
                 },
-            ],
+            ]
+            .into(),
             ..Default::default()
         };
 
@@ -1373,11 +1469,49 @@ mod tests {
                     id: 30,
                     ..Default::default()
                 },
-            ],
+            ]
+            .into(),
             ..Default::default()
         };
 
         assert_eq!(graph.next_node_id(), 31);
+    }
+
+    #[test]
+    fn graph_nodes_are_keyed_by_id() {
+        let mut graph = Graph {
+            nodes: vec![
+                GraphNode {
+                    id: 30,
+                    tag: "thirty".to_owned(),
+                    ..Default::default()
+                },
+                GraphNode {
+                    id: 10,
+                    tag: "ten".to_owned(),
+                    ..Default::default()
+                },
+                GraphNode {
+                    id: 20,
+                    tag: "twenty".to_owned(),
+                    ..Default::default()
+                },
+            ]
+            .into(),
+            ..Default::default()
+        };
+
+        graph.insert_node(GraphNode {
+            id: 20,
+            tag: "replacement".to_owned(),
+            ..Default::default()
+        });
+
+        assert_eq!(
+            graph.nodes.iter().map(|node| node.id).collect_vec(),
+            vec![10, 20, 30]
+        );
+        assert_eq!(graph.find_node_by_id(20).unwrap().tag, "replacement");
     }
 
     #[test]
@@ -1409,7 +1543,8 @@ mod tests {
                     id: 30,
                     ..Default::default()
                 },
-            ],
+            ]
+            .into(),
             ..Default::default()
         };
 
@@ -1442,7 +1577,8 @@ mod tests {
                     id: 20,
                     ..Default::default()
                 },
-            ],
+            ]
+            .into(),
             ..Default::default()
         };
 

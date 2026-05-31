@@ -159,7 +159,8 @@ fn rs_latch_inner_graph() -> Graph {
                 inputs: vec![5],
                 ..Default::default()
             },
-        ],
+        ]
+        .into(),
         ..Default::default()
     };
     graph.build_outputs();
@@ -251,7 +252,8 @@ fn d_latch_inner_graph() -> Graph {
                 inputs: vec![8],
                 ..Default::default()
             },
-        ],
+        ]
+        .into(),
         ..Default::default()
     };
     graph.build_outputs();

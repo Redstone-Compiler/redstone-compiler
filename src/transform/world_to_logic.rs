@@ -84,7 +84,6 @@ impl WorldToLogicTransformer {
         let mut new_in_id = HashMap::new();
         let mut nodes = Vec::new();
 
-        let mut next_new_id = self.graph.graph.next_node_id();
         let mut input_count = 0;
 
         for id in self.graph.graph.topological_order() {
@@ -143,18 +142,19 @@ impl WorldToLogicTransformer {
                                 tag,
                             }]
                         } else {
+                            let not_node_id = self.graph.graph.allocate_node_id();
                             let or_node = GraphNode {
                                 id: node.id,
                                 kind: GraphNodeKind::Logic(Logic {
                                     logic_type: LogicType::Or,
                                 }),
                                 inputs,
-                                outputs: vec![next_new_id],
+                                outputs: vec![not_node_id],
                                 tag: tag.clone(),
                             };
 
                             let not_node = GraphNode {
-                                id: next_new_id,
+                                id: not_node_id,
                                 kind: GraphNodeKind::Logic(Logic {
                                     logic_type: LogicType::Not,
                                 }),
@@ -163,8 +163,7 @@ impl WorldToLogicTransformer {
                                 tag,
                             };
 
-                            new_in_id.insert(or_node.id, next_new_id);
-                            next_new_id += 1;
+                            new_in_id.insert(or_node.id, not_node_id);
 
                             vec![or_node, not_node]
                         }
@@ -178,11 +177,10 @@ impl WorldToLogicTransformer {
         }
 
         let mut graph = Graph {
-            nodes,
+            nodes: nodes.into(),
             ..Default::default()
         };
 
-        graph.nodes.sort_by_key(|node| node.id);
         graph.build_outputs();
         graph.build_producers();
         graph.build_consumers();
@@ -387,7 +385,8 @@ mod tests {
                     inputs: vec![10, 20],
                     ..Default::default()
                 },
-            ],
+            ]
+            .into(),
             ..Default::default()
         };
         graph.build_inputs();

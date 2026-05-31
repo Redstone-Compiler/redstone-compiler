@@ -98,7 +98,7 @@ impl WorldGraphBuilder {
 
         let (nodes, positions) = self.build_nodes();
         let mut graph = Graph {
-            nodes,
+            nodes: nodes.into(),
             ..Default::default()
         };
         graph.build_inputs();

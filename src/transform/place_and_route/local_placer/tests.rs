@@ -394,7 +394,8 @@ fn future_join_cost_weights_pairs_with_remaining_fanout() {
                 inputs: vec![3, 4],
                 ..Default::default()
             },
-        ],
+        ]
+        .into(),
         ..Default::default()
     };
     graph.build_outputs();
@@ -564,7 +565,8 @@ fn ranked_sampling_preserves_diverse_geometry_candidates() -> eyre::Result<()> {
             (world.clone(), compact_a),
             (world.clone(), compact_b),
             (world, spread),
-        ],
+        ]
+        .into(),
     );
     let sampled_b_positions = sampled
         .iter()
@@ -823,7 +825,8 @@ fn local_placer_accepts_q_only_sequential_primitives_with_macro_candidates() {
                 inputs: vec![2],
                 ..Default::default()
             },
-        ],
+        ]
+        .into(),
         ..Default::default()
     };
     graph.build_inputs();
@@ -842,7 +845,8 @@ fn local_placer_rejects_multi_output_sequential_primitives_until_edges_are_port_
             kind: GraphNodeKind::Sequential(SequentialPrimitive::rs_latch()),
             outputs: vec![1],
             ..Default::default()
-        }],
+        }]
+        .into(),
         ..Default::default()
     };
     graph.build_inputs();
@@ -870,7 +874,8 @@ fn local_placer_rejects_sequential_primitives_without_macro_candidates() {
             )),
             outputs: vec![1],
             ..Default::default()
-        }],
+        }]
+        .into(),
         ..Default::default()
     };
     graph.build_inputs();

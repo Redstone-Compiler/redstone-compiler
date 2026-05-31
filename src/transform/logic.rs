@@ -391,7 +391,7 @@ impl LogicGraphTransformer {
         nodes.push(output_node);
         nodes.sort_by_key(|node| node.id);
 
-        self.graph.graph.nodes = nodes;
+        self.graph.graph.nodes = nodes.into();
         self.graph.graph.build_outputs();
         self.graph.graph.build_producers();
         self.graph.graph.build_consumers();
@@ -724,7 +724,8 @@ mod tests {
                     inputs: vec![3],
                     ..Default::default()
                 },
-            ],
+            ]
+            .into(),
             ..Default::default()
         };
         graph.build_inputs();

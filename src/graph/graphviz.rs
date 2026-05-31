@@ -527,7 +527,8 @@ mod tests {
                 kind: GraphNodeKind::None,
                 tag: "Folded RS latch feedback SCC [1, 2, 3, 4]".to_owned(),
                 ..Default::default()
-            }],
+            }]
+            .into(),
             ..Default::default()
         };
 
@@ -547,7 +548,8 @@ mod tests {
                 kind: GraphNodeKind::None,
                 tag: "debug source tag".to_owned(),
                 ..Default::default()
-            }],
+            }]
+            .into(),
             ..Default::default()
         };
 

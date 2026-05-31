@@ -347,7 +347,7 @@ impl LogicGraphBuilder {
         self.do_parse(output_name);
 
         let mut graph = Graph {
-            nodes: self.nodes.clone(),
+            nodes: self.nodes.clone().into(),
             ..Default::default()
         };
         graph.build_outputs();
