@@ -1,7 +1,7 @@
 use crate::graph::analysis::equivalent_expression_groups;
 use crate::graph::graphviz::ToGraphvizGraph;
 use crate::graph::logic::predefined_logics;
-use crate::graph::{GraphNode, GraphNodeKind};
+use crate::graph::{GraphNode, GraphNodeKind, GraphNodeRef};
 use crate::nbt::{NBTRoot, ToNBT};
 use crate::sequential::{SequentialPrimitive, SequentialType};
 use crate::transform::place_and_route::estimate::world_compact_cost;
@@ -304,24 +304,25 @@ fn test_generate_component_rs_latch() -> eyre::Result<()> {
         vec!["s".to_owned(), "r".to_owned()],
         vec!["q".to_owned()],
     );
+    let node_id = 2;
     let node = GraphNode {
-        id: 2,
         kind: GraphNodeKind::Sequential(sequential.clone()),
         inputs: vec![0, 1],
         ..Default::default()
     };
+    let node_ref = GraphNodeRef::new(node_id, &node);
     let state = [(0, s), (1, r)].into_iter().collect();
 
     let pairs = select_rs_latch_not_pairs(
         &config,
-        &node,
+        node_ref,
         &sequential,
         &state,
         generate_rs_latch_not_pairs(&world),
     );
     let generated = pairs
         .into_iter()
-        .flat_map(|placed| route_rs_latch_branches(&config, &node, &sequential, &state, placed))
+        .flat_map(|placed| route_rs_latch_branches(&config, node_ref, &sequential, &state, placed))
         .collect::<Vec<_>>();
     assert!(!generated.is_empty());
     let valid = generated.into_iter().find_map(|placed| {
@@ -372,15 +373,16 @@ fn test_generate_component_d_latch() -> eyre::Result<()> {
         vec!["d".to_owned(), "en".to_owned()],
         vec!["q".to_owned()],
     );
+    let node_id = 2;
     let node = GraphNode {
-        id: 2,
         kind: GraphNodeKind::Sequential(sequential.clone()),
         inputs: vec![0, 1],
         ..Default::default()
     };
+    let node_ref = GraphNodeRef::new(node_id, &node);
     let state = [(0, d), (1, en)].into_iter().collect();
 
-    let generated = generate_d_latch_gate_routes(&config, &node, &sequential, &world, &state);
+    let generated = generate_d_latch_gate_routes(&config, node_ref, &sequential, &world, &state);
     assert!(!generated.is_empty());
     let mut checked = 0usize;
     let valid = generated.iter().find_map(|(world, state)| {
@@ -394,7 +396,7 @@ fn test_generate_component_d_latch() -> eyre::Result<()> {
                     eprintln!("candidate {checked} failed: {error}; q={q:?} nq={nq:?}");
                     let q_support = q.walk(world[q].direction).unwrap();
                     let nq_support = nq.walk(world[nq].direction).unwrap();
-                    let nodes = rs_latch_input_node_ids(node.id);
+                    let nodes = rs_latch_input_node_ids(node_id);
                     let _ = trace_d_latch_behavior(
                         world,
                         d,

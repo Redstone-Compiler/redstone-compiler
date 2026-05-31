@@ -95,8 +95,8 @@ impl WorldGraphTransformer {
         }
 
         for group_id in group_ids.iter().sorted() {
+            let node_id = next_id;
             let node = GraphNode {
-                id: next_id,
                 kind: GraphNodeKind::Block(Block {
                     kind: BlockKind::Redstone {
                         on_count: 0,
@@ -121,7 +121,7 @@ impl WorldGraphTransformer {
                     .find_node_by_id_mut(conn)
                     .unwrap()
                     .outputs
-                    .push(next_id);
+                    .push(node_id);
             });
             group_outputs[group_id].iter().for_each(|&conn| {
                 self.graph
@@ -129,11 +129,11 @@ impl WorldGraphTransformer {
                     .find_node_by_id_mut(conn)
                     .unwrap()
                     .inputs
-                    .push(next_id);
+                    .push(node_id);
             });
 
-            self.graph.routings.insert(node.id);
-            self.graph.graph.insert_node(node);
+            self.graph.routings.insert(node_id);
+            self.graph.graph.insert_node_with_id(node_id, node);
             next_id += 1;
         }
 

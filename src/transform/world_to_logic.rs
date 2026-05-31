@@ -99,71 +99,83 @@ impl WorldToLogicTransformer {
 
             let new_nodes = match node.kind {
                 GraphNodeKind::Sequential(sequential) => {
-                    vec![GraphNode {
-                        id: node.id,
-                        kind: GraphNodeKind::Sequential(sequential),
-                        inputs,
-                        outputs: node.outputs,
-                        tag,
-                    }]
+                    vec![(
+                        id,
+                        GraphNode {
+                            kind: GraphNodeKind::Sequential(sequential),
+                            inputs,
+                            outputs: node.outputs,
+                            tag,
+                        },
+                    )]
                 }
                 GraphNodeKind::Block(block) => match block.kind {
                     BlockKind::Switch { .. } => {
                         input_count += 1;
 
-                        vec![GraphNode {
-                            id: node.id,
-                            kind: GraphNodeKind::Input(format!("#{}", input_count)),
-                            inputs,
-                            outputs: node.outputs,
-                            tag,
-                        }]
-                    }
-                    BlockKind::Redstone { .. } | BlockKind::Repeater { .. } => {
-                        vec![GraphNode {
-                            id: node.id,
-                            kind: GraphNodeKind::Logic(Logic {
-                                logic_type: LogicType::Or,
-                            }),
-                            inputs,
-                            outputs: node.outputs,
-                            tag,
-                        }]
-                    }
-                    BlockKind::Torch { .. } => {
-                        if node.inputs.len() == 1 {
-                            vec![GraphNode {
-                                id: node.id,
-                                kind: GraphNodeKind::Logic(Logic {
-                                    logic_type: LogicType::Not,
-                                }),
+                        vec![(
+                            id,
+                            GraphNode {
+                                kind: GraphNodeKind::Input(format!("#{}", input_count)),
                                 inputs,
                                 outputs: node.outputs,
                                 tag,
-                            }]
-                        } else {
-                            let not_node_id = self.graph.graph.allocate_node_id();
-                            let or_node = GraphNode {
-                                id: node.id,
+                            },
+                        )]
+                    }
+                    BlockKind::Redstone { .. } | BlockKind::Repeater { .. } => {
+                        vec![(
+                            id,
+                            GraphNode {
                                 kind: GraphNodeKind::Logic(Logic {
                                     logic_type: LogicType::Or,
                                 }),
                                 inputs,
-                                outputs: vec![not_node_id],
-                                tag: tag.clone(),
-                            };
-
-                            let not_node = GraphNode {
-                                id: not_node_id,
-                                kind: GraphNodeKind::Logic(Logic {
-                                    logic_type: LogicType::Not,
-                                }),
-                                inputs: vec![or_node.id],
-                                outputs: node.outputs.clone(),
+                                outputs: node.outputs,
                                 tag,
-                            };
+                            },
+                        )]
+                    }
+                    BlockKind::Torch { .. } => {
+                        if node.inputs.len() == 1 {
+                            vec![(
+                                id,
+                                GraphNode {
+                                    kind: GraphNodeKind::Logic(Logic {
+                                        logic_type: LogicType::Not,
+                                    }),
+                                    inputs,
+                                    outputs: node.outputs,
+                                    tag,
+                                },
+                            )]
+                        } else {
+                            let not_node_id = self.graph.graph.allocate_node_id();
+                            let or_node = (
+                                id,
+                                GraphNode {
+                                    kind: GraphNodeKind::Logic(Logic {
+                                        logic_type: LogicType::Or,
+                                    }),
+                                    inputs,
+                                    outputs: vec![not_node_id],
+                                    tag: tag.clone(),
+                                },
+                            );
 
-                            new_in_id.insert(or_node.id, not_node_id);
+                            let not_node = (
+                                not_node_id,
+                                GraphNode {
+                                    kind: GraphNodeKind::Logic(Logic {
+                                        logic_type: LogicType::Not,
+                                    }),
+                                    inputs: vec![id],
+                                    outputs: node.outputs.clone(),
+                                    tag,
+                                },
+                            );
+
+                            new_in_id.insert(id, not_node_id);
 
                             vec![or_node, not_node]
                         }
@@ -176,7 +188,7 @@ impl WorldToLogicTransformer {
             nodes.extend(new_nodes);
         }
 
-        let mut graph = Graph::from_nodes(nodes);
+        let mut graph = Graph::from_nodes_with_ids(nodes);
 
         graph.build_outputs();
         graph.build_producers();
@@ -362,25 +374,31 @@ mod tests {
             kind: BlockKind::Torch { is_on: true },
             direction: Direction::Bottom,
         };
-        let mut graph = crate::graph::Graph::from_nodes(vec![
-            crate::graph::GraphNode {
-                id: 10,
-                kind: crate::graph::GraphNodeKind::Block(switch),
-                outputs: vec![30],
-                ..Default::default()
-            },
-            crate::graph::GraphNode {
-                id: 20,
-                kind: crate::graph::GraphNodeKind::Block(switch),
-                outputs: vec![30],
-                ..Default::default()
-            },
-            crate::graph::GraphNode {
-                id: 30,
-                kind: crate::graph::GraphNodeKind::Block(torch),
-                inputs: vec![10, 20],
-                ..Default::default()
-            },
+        let mut graph = crate::graph::Graph::from_nodes_with_ids(vec![
+            (
+                10,
+                crate::graph::GraphNode {
+                    kind: crate::graph::GraphNodeKind::Block(switch),
+                    outputs: vec![30],
+                    ..Default::default()
+                },
+            ),
+            (
+                20,
+                crate::graph::GraphNode {
+                    kind: crate::graph::GraphNodeKind::Block(switch),
+                    outputs: vec![30],
+                    ..Default::default()
+                },
+            ),
+            (
+                30,
+                crate::graph::GraphNode {
+                    kind: crate::graph::GraphNodeKind::Block(torch),
+                    inputs: vec![10, 20],
+                    ..Default::default()
+                },
+            ),
         ]);
         graph.build_inputs();
         graph.build_outputs();
