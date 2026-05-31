@@ -683,6 +683,7 @@ dependencies = [
  "fastanvil",
  "fastnbt",
  "flate2",
+ "indexmap 2.0.0",
  "indicatif",
  "itertools",
  "mimalloc",

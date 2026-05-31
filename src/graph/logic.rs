@@ -98,22 +98,18 @@ impl LogicGraph {
     where
         I: IntoIterator<Item = (String, GraphNodeId)>,
     {
-        let mut next_id = self.graph.max_node_id().map_or(0, |id| id + 1);
         for (name, source_id) in outputs {
             if self.find_node_by_id(source_id).is_none() {
                 eyre::bail!("cannot attach output {name}: missing source node {source_id}");
             }
 
-            self.graph.nodes.push(GraphNode {
-                id: next_id,
+            self.graph.add_node(GraphNode {
                 kind: GraphNodeKind::Output(name),
                 inputs: vec![source_id],
                 ..Default::default()
             });
-            next_id += 1;
         }
 
-        self.graph.nodes.sort_by_key(|node| node.id);
         self.graph.build_outputs();
         self.graph.build_producers();
         self.graph.build_consumers();
@@ -140,7 +136,7 @@ impl LogicGraph {
             .filter_map(|node| match &node.kind {
                 GraphNodeKind::Output(name) => output_source_ids
                     .contains(&node.inputs[0])
-                    .then_some(name.as_str()),
+                    .then_some(name.clone()),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -150,6 +146,7 @@ impl LogicGraph {
         }
 
         output_names.sort();
+        let output_names = output_names.iter().map(String::as_str).collect_vec();
         table.select_outputs(&output_names)
     }
 }
@@ -310,9 +307,8 @@ fn permuted_output_table_set(
 #[derive(Default)]
 pub struct LogicGraphBuilder {
     stmt: String,
-    node_id: usize,
     ptr: usize,
-    nodes: Vec<GraphNode>,
+    graph: Graph,
     inputs: HashMap<String, GraphNodeId>,
 }
 
@@ -347,19 +343,9 @@ impl LogicGraphBuilder {
     pub fn build(mut self, output_name: String) -> eyre::Result<LogicGraph> {
         self.do_parse(output_name);
 
-        let mut graph = Graph {
-            nodes: self.nodes.clone(),
-            ..Default::default()
-        };
-        graph.build_outputs();
+        self.graph.build_outputs();
 
-        Ok(LogicGraph { graph })
-    }
-
-    fn next_id(&mut self) -> usize {
-        let id = self.node_id;
-        self.node_id += 1;
-        id
+        Ok(LogicGraph { graph: self.graph })
     }
 
     fn next_ptr(&mut self) -> usize {
@@ -369,14 +355,11 @@ impl LogicGraphBuilder {
     }
 
     fn new_node(&mut self, kind: GraphNodeKind, inputs: Vec<GraphNodeId>) -> GraphNodeId {
-        let node = GraphNode {
-            id: self.next_id(),
+        self.graph.add_node(GraphNode {
             kind,
             inputs,
             ..Default::default()
-        };
-        self.nodes.push(node);
-        self.nodes.last().unwrap().clone().id
+        })
     }
 
     fn new_input_node(&mut self, name: String) -> GraphNodeId {
@@ -780,8 +763,7 @@ mod tests {
 
         let splits = finish.graph.split_with_outputs();
 
-        let mut graph: Graph = (&finish.graph.split_with_outputs()[0]).into();
-        graph = graph.rebuild_node_ids();
+        let graph: Graph = (&finish.graph.split_with_outputs()[0]).into();
         println!("{}", graph.to_graphviz());
 
         let mut transform = LogicGraphTransformer::new(LogicGraph { graph });
@@ -792,8 +774,7 @@ mod tests {
 
         #[allow(clippy::needless_range_loop)]
         for index in 1..2 {
-            let mut graph: Graph = (&splits[index]).into();
-            graph = graph.rebuild_node_ids();
+            let graph: Graph = (&splits[index]).into();
             println!("{}", graph.to_graphviz());
 
             let mut transform = LogicGraphTransformer::new(LogicGraph { graph });

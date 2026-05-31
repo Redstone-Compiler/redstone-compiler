@@ -6,7 +6,7 @@ use super::cluster::ClusteredGraph;
 use super::logic::LogicGraph;
 use super::module::{GraphModule, GraphWithSubGraphs};
 use super::world::WorldGraph;
-use super::{Graph, GraphNode, GraphNodeId, SubGraph};
+use super::{Graph, GraphNodeId, GraphNodeRef, SubGraph};
 use crate::graph::module::GraphModulePortTarget;
 
 pub struct GraphvizBuilder<'a> {
@@ -135,7 +135,7 @@ digraph {graph_name} {{
         }
     }
 
-    fn print_node(&self, node: &GraphNode) -> String {
+    fn print_node(&self, node: GraphNodeRef<'_>) -> String {
         let name = if self.show_node_id {
             format!("{} #{}", node.kind.name(), node.id)
         } else {
@@ -268,10 +268,14 @@ digraph {graph_name} {{
                     .nodes
                     .iter()
                     .flat_map(|node| {
-                        node.inputs.iter().map(|input| {
-                            let in_suffix = format!("in{}_{}", input, node.id);
-                            format!("    node{}:out->node{}:{}\n", input, node.id, in_suffix)
-                        })
+                        let node_id = node.id;
+                        node.inputs
+                            .iter()
+                            .map(move |input| {
+                                let in_suffix = format!("in{}_{}", input, node_id);
+                                format!("    node{}:out->node{}:{}\n", input, node_id, in_suffix)
+                            })
+                            .collect_vec()
                     })
                     .collect::<Vec<_>>()
                     .join("")
@@ -521,15 +525,11 @@ mod tests {
 
     #[test]
     fn table_graphviz_shows_node_tags() {
-        let graph = Graph {
-            nodes: vec![GraphNode {
-                id: 0,
-                kind: GraphNodeKind::None,
-                tag: "Folded RS latch feedback SCC [1, 2, 3, 4]".to_owned(),
-                ..Default::default()
-            }],
+        let graph = Graph::from_nodes(vec![GraphNode {
+            kind: GraphNodeKind::None,
+            tag: "Folded RS latch feedback SCC [1, 2, 3, 4]".to_owned(),
             ..Default::default()
-        };
+        }]);
 
         let dot = GraphvizBuilder::default()
             .with_graph(&graph)
@@ -541,15 +541,11 @@ mod tests {
 
     #[test]
     fn graphviz_can_hide_node_tags() {
-        let graph = Graph {
-            nodes: vec![GraphNode {
-                id: 0,
-                kind: GraphNodeKind::None,
-                tag: "debug source tag".to_owned(),
-                ..Default::default()
-            }],
+        let graph = Graph::from_nodes(vec![GraphNode {
+            kind: GraphNodeKind::None,
+            tag: "debug source tag".to_owned(),
             ..Default::default()
-        };
+        }]);
 
         let dot = GraphvizBuilder::default()
             .with_graph(&graph)

@@ -15,7 +15,7 @@ pub(super) struct RsLatchPrefixPlan {
 
 impl RsLatchPrefixPlan {
     pub(super) fn build(
-        node: &GraphNode,
+        node: GraphNodeRef<'_>,
         sequential: &SequentialPrimitive,
         state: &PlacementState,
     ) -> Option<Self> {
@@ -29,14 +29,14 @@ impl RsLatchPrefixPlan {
         let mut input_node_ids_by_port = HashMap::new();
         let mut input_positions_by_port = HashMap::new();
         for prefix_input in graph.nodes.iter().filter_map(|node| match &node.kind {
-            GraphNodeKind::Input(name) => Some((node.id, name.as_str())),
+            GraphNodeKind::Input(name) => Some((node.id, name.clone())),
             _ => None,
         }) {
-            let outer_input = outer_input_node_id(node, sequential, prefix_input.1)?;
+            let outer_input = outer_input_node_id(node, sequential, &prefix_input.1)?;
             let position = state.node_position(outer_input)?;
             input_mappings.push((prefix_input.0, outer_input));
-            input_node_ids_by_port.insert(prefix_input.1.to_owned(), outer_input);
-            input_positions_by_port.insert(prefix_input.1.to_owned(), position);
+            input_node_ids_by_port.insert(prefix_input.1.clone(), outer_input);
+            input_positions_by_port.insert(prefix_input.1, position);
         }
 
         Some(Self {
@@ -115,7 +115,7 @@ impl RsLatchPrefixPlan {
 }
 
 fn outer_input_node_id(
-    node: &GraphNode,
+    node: GraphNodeRef<'_>,
     sequential: &SequentialPrimitive,
     port: &str,
 ) -> Option<GraphNodeId> {

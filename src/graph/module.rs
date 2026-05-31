@@ -131,7 +131,8 @@ impl From<Graph> for GraphModule {
             .inputs()
             .iter()
             .map(|input| {
-                let input_name = value.find_node_by_id(*input).unwrap().kind.as_input();
+                let input_node = value.find_node_by_id(*input).unwrap();
+                let input_name = input_node.kind.as_input();
                 GraphModulePort {
                     port_type: GraphModulePortType::InputNet,
                     target: GraphModulePortTarget::Node(input_name.clone()),
@@ -143,7 +144,8 @@ impl From<Graph> for GraphModule {
             .outputs()
             .iter()
             .map(|output| {
-                let output_name = value.find_node_by_id(*output).unwrap().kind.as_output();
+                let output_node = value.find_node_by_id(*output).unwrap();
+                let output_name = output_node.kind.as_output();
                 GraphModulePort {
                     port_type: GraphModulePortType::OutputNet,
                     target: GraphModulePortTarget::Node(output_name.clone()),
@@ -244,7 +246,7 @@ impl From<(&GraphModuleContext, &GraphModule)> for GraphWithSubGraphs {
                 graph
                     .nodes
                     .iter_mut()
-                    .for_each(|node| match &mut node.kind {
+                    .for_each(|mut node| match &mut node.kind {
                         GraphNodeKind::Input(name) | GraphNodeKind::Output(name) => {
                             if let Some(port_name) = module_port_name
                                 .get_mut(instance)

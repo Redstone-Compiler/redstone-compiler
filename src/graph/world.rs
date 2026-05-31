@@ -97,10 +97,7 @@ impl WorldGraphBuilder {
         self.visit_blocks();
 
         let (nodes, positions) = self.build_nodes();
-        let mut graph = Graph {
-            nodes,
-            ..Default::default()
-        };
+        let mut graph = Graph::from_nodes_with_ids(nodes);
         graph.build_inputs();
 
         graph.build_producers();
@@ -146,7 +143,12 @@ impl WorldGraphBuilder {
         }
     }
 
-    fn build_nodes(&mut self) -> (Vec<GraphNode>, HashMap<GraphNodeId, Position>) {
+    fn build_nodes(
+        &mut self,
+    ) -> (
+        Vec<(GraphNodeId, GraphNode)>,
+        HashMap<GraphNodeId, Position>,
+    ) {
         let mut graph_id: HashMap<Position, GraphNodeId> = HashMap::new();
         let mut nodes: HashMap<Position, GraphNode> = HashMap::new();
 
@@ -157,10 +159,7 @@ impl WorldGraphBuilder {
             .enumerate()
         {
             graph_id.insert(*pos, index);
-            nodes.insert(
-                *pos,
-                GraphNode::new(index, GraphNodeKind::Block(self.world[*pos])),
-            );
+            nodes.insert(*pos, GraphNode::new(GraphNodeKind::Block(self.world[*pos])));
         }
 
         for pos in self
@@ -197,10 +196,16 @@ impl WorldGraphBuilder {
             }
         }
 
-        let positions = nodes.iter().map(|(pos, node)| (node.id, *pos)).collect();
-        let mut nodes = nodes.into_values().collect_vec();
+        let positions = nodes
+            .keys()
+            .map(|pos| (graph_id[pos], *pos))
+            .collect::<HashMap<_, _>>();
+        let mut nodes = nodes
+            .into_iter()
+            .map(|(pos, node)| (graph_id[&pos], node))
+            .collect_vec();
 
-        nodes.sort_by(|a, b| a.id.cmp(&b.id));
+        nodes.sort_by_key(|(id, _)| *id);
 
         (nodes, positions)
     }

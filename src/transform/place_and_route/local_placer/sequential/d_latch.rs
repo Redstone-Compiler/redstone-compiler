@@ -4,6 +4,7 @@ use super::prefix::RsLatchPrefixPlan;
 use super::rs_latch::generate_rs_latch_gate_routes;
 use super::scenario::{run_sequential_scenario, torch_output_value, SequentialScenarioStep};
 use super::*;
+use crate::graph::GraphNode;
 use crate::world::simulator::Simulator;
 use crate::world::World;
 
@@ -19,7 +20,7 @@ const D_LATCH_SIM_TRACE_LIMIT: usize = 0;
 
 pub(in super::super) fn generate_d_latch_gate_routes(
     config: &LocalPlacerConfig,
-    node: &GraphNode,
+    node: GraphNodeRef<'_>,
     sequential: &SequentialPrimitive,
     world: &World3D,
     state: &PlacementState,
@@ -37,11 +38,11 @@ pub(in super::super) fn generate_d_latch_gate_routes(
         sequential.output_ports.clone(),
     );
     let rs_node = GraphNode {
-        id: node.id,
         kind: GraphNodeKind::Sequential(rs_sequential.clone()),
         inputs: prefix_plan.rs_node_inputs(),
         ..Default::default()
     };
+    let rs_node = GraphNodeRef::new(node.id, &rs_node);
 
     let queue = prefix_plan.place(config, world, state);
     let queue = retain_valid_d_latch_prefix(config, queue, &prefix_plan);
@@ -52,7 +53,7 @@ pub(in super::super) fn generate_d_latch_gate_routes(
         &prefix_plan,
         data_input,
         enable_input,
-        &rs_node,
+        rs_node,
         &rs_sequential,
         queue,
     );
@@ -65,12 +66,12 @@ pub(in super::super) fn generate_d_latch_gate_routes(
 
 fn route_d_latch_core(
     config: &LocalPlacerConfig,
-    node: &GraphNode,
+    node: GraphNodeRef<'_>,
     outer_state: &PlacementState,
     prefix_plan: &RsLatchPrefixPlan,
     data_input: GraphNodeId,
     enable_input: GraphNodeId,
-    rs_node: &GraphNode,
+    rs_node: GraphNodeRef<'_>,
     rs_sequential: &SequentialPrimitive,
     queue: PlacerQueue,
 ) -> PlacerQueue {

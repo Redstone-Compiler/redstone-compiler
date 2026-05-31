@@ -28,7 +28,7 @@ pub(in super::super) struct RsLatchGatePlacement {
 
 pub(in super::super) fn generate_rs_latch_gate_routes(
     config: &LocalPlacerConfig,
-    node: &GraphNode,
+    node: GraphNodeRef<'_>,
     sequential: &SequentialPrimitive,
     world: &World3D,
     state: &PlacementState,
@@ -72,7 +72,7 @@ pub(in super::super) fn generate_rs_latch_gate_routes(
 
 pub(in super::super) fn select_rs_latch_not_pairs(
     config: &LocalPlacerConfig,
-    node: &GraphNode,
+    node: GraphNodeRef<'_>,
     sequential: &SequentialPrimitive,
     state: &PlacementState,
     mut pairs: Vec<RsLatchGatePlacement>,
@@ -130,7 +130,7 @@ fn lies_between(start: Position, end: Position, position: Position) -> bool {
 
 pub(in super::super) fn route_rs_latch_branches(
     config: &LocalPlacerConfig,
-    node: &GraphNode,
+    node: GraphNodeRef<'_>,
     sequential: &SequentialPrimitive,
     state: &PlacementState,
     placed: RsLatchGatePlacement,
@@ -259,7 +259,7 @@ fn redstone_route_network(
 }
 
 fn rs_latch_input_source(
-    node: &GraphNode,
+    node: GraphNodeRef<'_>,
     sequential: &SequentialPrimitive,
     state: &PlacementState,
     port: &str,

@@ -103,65 +103,54 @@ fn default_inner_graph(sequential_type: SequentialType) -> Graph {
 
 fn rs_latch_inner_graph() -> Graph {
     // q = ~(r | nq), nq = ~(s | q)
-    let mut graph = Graph {
-        nodes: vec![
-            GraphNode {
-                id: 0,
-                kind: GraphNodeKind::Input("s".to_owned()),
-                ..Default::default()
-            },
-            GraphNode {
-                id: 1,
-                kind: GraphNodeKind::Input("r".to_owned()),
-                ..Default::default()
-            },
-            GraphNode {
-                id: 2,
-                kind: GraphNodeKind::Logic(Logic {
-                    logic_type: LogicType::Or,
-                }),
-                inputs: vec![1, 5],
-                ..Default::default()
-            },
-            GraphNode {
-                id: 3,
-                kind: GraphNodeKind::Logic(Logic {
-                    logic_type: LogicType::Not,
-                }),
-                inputs: vec![2],
-                ..Default::default()
-            },
-            GraphNode {
-                id: 4,
-                kind: GraphNodeKind::Logic(Logic {
-                    logic_type: LogicType::Or,
-                }),
-                inputs: vec![0, 3],
-                ..Default::default()
-            },
-            GraphNode {
-                id: 5,
-                kind: GraphNodeKind::Logic(Logic {
-                    logic_type: LogicType::Not,
-                }),
-                inputs: vec![4],
-                ..Default::default()
-            },
-            GraphNode {
-                id: 6,
-                kind: GraphNodeKind::Output("q".to_owned()),
-                inputs: vec![3],
-                ..Default::default()
-            },
-            GraphNode {
-                id: 7,
-                kind: GraphNodeKind::Output("nq".to_owned()),
-                inputs: vec![5],
-                ..Default::default()
-            },
-        ],
-        ..Default::default()
-    };
+    let mut graph = Graph::from_nodes(vec![
+        GraphNode {
+            kind: GraphNodeKind::Input("s".to_owned()),
+            ..Default::default()
+        },
+        GraphNode {
+            kind: GraphNodeKind::Input("r".to_owned()),
+            ..Default::default()
+        },
+        GraphNode {
+            kind: GraphNodeKind::Logic(Logic {
+                logic_type: LogicType::Or,
+            }),
+            inputs: vec![1, 5],
+            ..Default::default()
+        },
+        GraphNode {
+            kind: GraphNodeKind::Logic(Logic {
+                logic_type: LogicType::Not,
+            }),
+            inputs: vec![2],
+            ..Default::default()
+        },
+        GraphNode {
+            kind: GraphNodeKind::Logic(Logic {
+                logic_type: LogicType::Or,
+            }),
+            inputs: vec![0, 3],
+            ..Default::default()
+        },
+        GraphNode {
+            kind: GraphNodeKind::Logic(Logic {
+                logic_type: LogicType::Not,
+            }),
+            inputs: vec![4],
+            ..Default::default()
+        },
+        GraphNode {
+            kind: GraphNodeKind::Output("q".to_owned()),
+            inputs: vec![3],
+            ..Default::default()
+        },
+        GraphNode {
+            kind: GraphNodeKind::Output("nq".to_owned()),
+            inputs: vec![5],
+            ..Default::default()
+        },
+    ]);
     graph.build_outputs();
     graph.build_producers();
     graph.build_consumers();
@@ -171,89 +160,75 @@ fn rs_latch_inner_graph() -> Graph {
 
 fn d_latch_inner_graph() -> Graph {
     // s = d & en, r = ~d & en, q = ~(r | nq), nq = ~(s | q)
-    let mut graph = Graph {
-        nodes: vec![
-            GraphNode {
-                id: 0,
-                kind: GraphNodeKind::Input("d".to_owned()),
-                ..Default::default()
-            },
-            GraphNode {
-                id: 1,
-                kind: GraphNodeKind::Input("en".to_owned()),
-                ..Default::default()
-            },
-            GraphNode {
-                id: 2,
-                kind: GraphNodeKind::Logic(Logic {
-                    logic_type: LogicType::And,
-                }),
-                inputs: vec![0, 1],
-                ..Default::default()
-            },
-            GraphNode {
-                id: 3,
-                kind: GraphNodeKind::Logic(Logic {
-                    logic_type: LogicType::Not,
-                }),
-                inputs: vec![0],
-                ..Default::default()
-            },
-            GraphNode {
-                id: 4,
-                kind: GraphNodeKind::Logic(Logic {
-                    logic_type: LogicType::And,
-                }),
-                inputs: vec![3, 1],
-                ..Default::default()
-            },
-            GraphNode {
-                id: 5,
-                kind: GraphNodeKind::Logic(Logic {
-                    logic_type: LogicType::Or,
-                }),
-                inputs: vec![4, 8],
-                ..Default::default()
-            },
-            GraphNode {
-                id: 6,
-                kind: GraphNodeKind::Logic(Logic {
-                    logic_type: LogicType::Not,
-                }),
-                inputs: vec![5],
-                ..Default::default()
-            },
-            GraphNode {
-                id: 7,
-                kind: GraphNodeKind::Logic(Logic {
-                    logic_type: LogicType::Or,
-                }),
-                inputs: vec![2, 6],
-                ..Default::default()
-            },
-            GraphNode {
-                id: 8,
-                kind: GraphNodeKind::Logic(Logic {
-                    logic_type: LogicType::Not,
-                }),
-                inputs: vec![7],
-                ..Default::default()
-            },
-            GraphNode {
-                id: 9,
-                kind: GraphNodeKind::Output("q".to_owned()),
-                inputs: vec![6],
-                ..Default::default()
-            },
-            GraphNode {
-                id: 10,
-                kind: GraphNodeKind::Output("nq".to_owned()),
-                inputs: vec![8],
-                ..Default::default()
-            },
-        ],
-        ..Default::default()
-    };
+    let mut graph = Graph::from_nodes(vec![
+        GraphNode {
+            kind: GraphNodeKind::Input("d".to_owned()),
+            ..Default::default()
+        },
+        GraphNode {
+            kind: GraphNodeKind::Input("en".to_owned()),
+            ..Default::default()
+        },
+        GraphNode {
+            kind: GraphNodeKind::Logic(Logic {
+                logic_type: LogicType::And,
+            }),
+            inputs: vec![0, 1],
+            ..Default::default()
+        },
+        GraphNode {
+            kind: GraphNodeKind::Logic(Logic {
+                logic_type: LogicType::Not,
+            }),
+            inputs: vec![0],
+            ..Default::default()
+        },
+        GraphNode {
+            kind: GraphNodeKind::Logic(Logic {
+                logic_type: LogicType::And,
+            }),
+            inputs: vec![3, 1],
+            ..Default::default()
+        },
+        GraphNode {
+            kind: GraphNodeKind::Logic(Logic {
+                logic_type: LogicType::Or,
+            }),
+            inputs: vec![4, 8],
+            ..Default::default()
+        },
+        GraphNode {
+            kind: GraphNodeKind::Logic(Logic {
+                logic_type: LogicType::Not,
+            }),
+            inputs: vec![5],
+            ..Default::default()
+        },
+        GraphNode {
+            kind: GraphNodeKind::Logic(Logic {
+                logic_type: LogicType::Or,
+            }),
+            inputs: vec![2, 6],
+            ..Default::default()
+        },
+        GraphNode {
+            kind: GraphNodeKind::Logic(Logic {
+                logic_type: LogicType::Not,
+            }),
+            inputs: vec![7],
+            ..Default::default()
+        },
+        GraphNode {
+            kind: GraphNodeKind::Output("q".to_owned()),
+            inputs: vec![6],
+            ..Default::default()
+        },
+        GraphNode {
+            kind: GraphNodeKind::Output("nq".to_owned()),
+            inputs: vec![8],
+            ..Default::default()
+        },
+    ]);
     graph.build_outputs();
     graph.build_producers();
     graph.build_consumers();

@@ -10,7 +10,7 @@ use super::place_bound::PlaceBound;
 use super::placed_node::PlacedNode;
 use super::sampling::SamplingPolicy;
 use crate::graph::logic::LogicGraph;
-use crate::graph::{GraphNode, GraphNodeId, GraphNodeKind};
+use crate::graph::{GraphNodeId, GraphNodeKind, GraphNodeRef};
 use crate::logic::LogicType;
 use crate::output::{OutputEndpoint, PlacedWorld};
 use crate::sequential::layout::SequentialMacro;
@@ -291,7 +291,7 @@ impl LocalPlacer {
 
     fn generate_place_and_route(
         &self,
-        node: &GraphNode,
+        node: GraphNodeRef<'_>,
         world: World3D,
         state: &PlacementState,
     ) -> PlacementGeneration {
@@ -482,7 +482,7 @@ impl LocalPlacer {
             .filter(|node| {
                 self.config.materialize_outputs || !matches!(node.kind, GraphNodeKind::Output(_))
             })
-            .flat_map(|node| node.inputs.iter().copied())
+            .flat_map(|node| node.inputs.clone())
             .chain(self.graph.externally_observable_output_source_ids())
             .chain(
                 self.config

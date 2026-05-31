@@ -65,7 +65,7 @@ impl WorldToLogicTransformer {
     }
 
     pub fn transform(mut self) -> eyre::Result<LogicGraph> {
-        self.transform_inner(true)
+        self.transform_inner()
     }
 
     pub fn positions(&self) -> &HashMap<GraphNodeId, Position> {
@@ -77,18 +77,24 @@ impl WorldToLogicTransformer {
     }
 
     pub fn transform_preserving_node_ids(mut self) -> eyre::Result<LogicGraph> {
-        self.transform_inner(false)
+        self.transform_inner()
     }
 
-    fn transform_inner(&mut self, rebuild_node_ids: bool) -> eyre::Result<LogicGraph> {
+    fn transform_inner(&mut self) -> eyre::Result<LogicGraph> {
         let mut new_in_id = HashMap::new();
-        let mut nodes = Vec::new();
+        let mut graph = Graph::from_nodes_with_ids(
+            self.graph
+                .graph
+                .nodes
+                .iter()
+                .map(|node| (node.id, GraphNode::default()))
+                .collect(),
+        );
 
-        let mut next_new_id = self.graph.graph.max_node_id().unwrap();
         let mut input_count = 0;
 
         for id in self.graph.graph.topological_order() {
-            let node = self.graph.graph.find_and_remove_node_by_id(id).unwrap();
+            let node = self.graph.graph.find_node_by_id(id).unwrap().clone_node();
 
             let inputs = node
                 .inputs
@@ -98,76 +104,62 @@ impl WorldToLogicTransformer {
                 .collect();
             let tag = transformed_tag(id, &node.tag);
 
-            let new_nodes = match node.kind {
-                GraphNodeKind::Sequential(sequential) => {
-                    vec![GraphNode {
-                        id: node.id,
-                        kind: GraphNodeKind::Sequential(sequential),
-                        inputs,
-                        outputs: node.outputs,
-                        tag,
-                    }]
-                }
+            let new_node = match node.kind {
+                GraphNodeKind::Sequential(sequential) => GraphNode {
+                    kind: GraphNodeKind::Sequential(sequential),
+                    inputs,
+                    outputs: node.outputs,
+                    tag,
+                },
                 GraphNodeKind::Block(block) => match block.kind {
                     BlockKind::Switch { .. } => {
                         input_count += 1;
 
-                        vec![GraphNode {
-                            id: node.id,
+                        GraphNode {
                             kind: GraphNodeKind::Input(format!("#{}", input_count)),
                             inputs,
                             outputs: node.outputs,
                             tag,
-                        }]
+                        }
                     }
-                    BlockKind::Redstone { .. } | BlockKind::Repeater { .. } => {
-                        vec![GraphNode {
-                            id: node.id,
-                            kind: GraphNodeKind::Logic(Logic {
-                                logic_type: LogicType::Or,
-                            }),
-                            inputs,
-                            outputs: node.outputs,
-                            tag,
-                        }]
-                    }
+                    BlockKind::Redstone { .. } | BlockKind::Repeater { .. } => GraphNode {
+                        kind: GraphNodeKind::Logic(Logic {
+                            logic_type: LogicType::Or,
+                        }),
+                        inputs,
+                        outputs: node.outputs,
+                        tag,
+                    },
                     BlockKind::Torch { .. } => {
                         if node.inputs.len() == 1 {
-                            vec![GraphNode {
-                                id: node.id,
+                            GraphNode {
                                 kind: GraphNodeKind::Logic(Logic {
                                     logic_type: LogicType::Not,
                                 }),
                                 inputs,
                                 outputs: node.outputs,
                                 tag,
-                            }]
+                            }
                         } else {
-                            next_new_id += 1;
+                            let not_node_id = graph.add_node(GraphNode {
+                                kind: GraphNodeKind::Logic(Logic {
+                                    logic_type: LogicType::Not,
+                                }),
+                                inputs: vec![id],
+                                outputs: node.outputs.clone(),
+                                tag: tag.clone(),
+                            });
 
-                            let or_node = GraphNode {
-                                id: node.id,
+                            new_in_id.insert(id, not_node_id);
+
+                            GraphNode {
                                 kind: GraphNodeKind::Logic(Logic {
                                     logic_type: LogicType::Or,
                                 }),
                                 inputs,
-                                outputs: vec![next_new_id],
+                                outputs: vec![not_node_id],
                                 tag: tag.clone(),
-                            };
-
-                            let not_node = GraphNode {
-                                id: next_new_id,
-                                kind: GraphNodeKind::Logic(Logic {
-                                    logic_type: LogicType::Not,
-                                }),
-                                inputs: vec![or_node.id],
-                                outputs: node.outputs.clone(),
-                                tag,
-                            };
-
-                            new_in_id.insert(or_node.id, next_new_id);
-
-                            vec![or_node, not_node]
+                            }
                         }
                     }
                     _ => todo!(),
@@ -175,22 +167,12 @@ impl WorldToLogicTransformer {
                 _ => todo!(),
             };
 
-            nodes.extend(new_nodes);
+            *graph.find_node_by_id_mut(id).unwrap() = new_node;
         }
 
-        let mut graph = Graph {
-            nodes,
-            ..Default::default()
-        };
-
-        if rebuild_node_ids {
-            graph = graph.rebuild_node_ids();
-        } else {
-            graph.nodes.sort_by_key(|node| node.id);
-            graph.build_outputs();
-            graph.build_producers();
-            graph.build_consumers();
-        }
+        graph.build_outputs();
+        graph.build_producers();
+        graph.build_consumers();
 
         Ok(LogicGraph { graph })
     }
@@ -358,6 +340,63 @@ mod tests {
             "shorted switch and inverted output should extract as a constant-high output, got {:?}",
             table
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn world_to_logic_transform_keeps_sparse_ids_and_appends_synthetic_nodes() -> eyre::Result<()> {
+        let switch = Block {
+            kind: BlockKind::Switch { is_on: false },
+            direction: Direction::None,
+        };
+        let torch = Block {
+            kind: BlockKind::Torch { is_on: true },
+            direction: Direction::Bottom,
+        };
+        let mut graph = crate::graph::Graph::from_nodes_with_ids(vec![
+            (
+                10,
+                crate::graph::GraphNode {
+                    kind: crate::graph::GraphNodeKind::Block(switch),
+                    outputs: vec![30],
+                    ..Default::default()
+                },
+            ),
+            (
+                20,
+                crate::graph::GraphNode {
+                    kind: crate::graph::GraphNodeKind::Block(switch),
+                    outputs: vec![30],
+                    ..Default::default()
+                },
+            ),
+            (
+                30,
+                crate::graph::GraphNode {
+                    kind: crate::graph::GraphNodeKind::Block(torch),
+                    inputs: vec![10, 20],
+                    ..Default::default()
+                },
+            ),
+        ]);
+        graph.build_inputs();
+        graph.build_outputs();
+        graph.build_producers();
+        graph.build_consumers();
+
+        let world_graph = crate::graph::world::WorldGraph {
+            graph,
+            ..Default::default()
+        };
+        let logic = WorldToLogicTransformer::new(world_graph, true)?.transform()?;
+
+        assert_eq!(
+            logic.graph.nodes.iter().map(|node| node.id).collect_vec(),
+            vec![10, 20, 30, 31]
+        );
+        assert_eq!(logic.graph.find_node_by_id(30).unwrap().outputs, vec![31]);
+        assert_eq!(logic.graph.find_node_by_id(31).unwrap().inputs, vec![30]);
 
         Ok(())
     }

@@ -6,7 +6,7 @@ use super::*;
 
 pub(in super::super) fn generate_sequential_macro_routes(
     config: &LocalPlacerConfig,
-    node: &GraphNode,
+    node: GraphNodeRef<'_>,
     sequential: &SequentialPrimitive,
     world: &World3D,
     state: &PlacementState,
@@ -73,7 +73,7 @@ pub(in super::super) fn place_sequential_macro(
 
 pub(in super::super) fn route_sequential_inputs(
     config: &LocalPlacerConfig,
-    node: &GraphNode,
+    node: GraphNodeRef<'_>,
     sequential: &SequentialPrimitive,
     state: &PlacementState,
     placed: &PlacedSequentialMacro,

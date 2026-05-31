@@ -63,12 +63,13 @@ fn main() -> eyre::Result<()> {
             .map(|node| (node.id, node.kind.name()))
             .collect::<HashMap<GraphNodeId, String>>();
 
-        let cyclic_components = kosaraju_scc(&graph.to_petgraph_only_edges())
+        let petgraph = graph.to_petgraph_only_edges();
+        let cyclic_components = kosaraju_scc(&petgraph)
             .into_iter()
             .map(|component| {
                 component
                     .into_iter()
-                    .map(|node| node.index())
+                    .map(|node| petgraph[node])
                     .filter(|id| world_graph.positions.contains_key(id))
                     .collect::<Vec<_>>()
             })
