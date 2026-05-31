@@ -492,7 +492,7 @@ impl Graph {
     }
 
     pub fn concat(&mut self, other: Self) {
-        self.append_node_entries_with_mapping(other.nodes, &HashMap::new());
+        self.append_graph_with_replacements(other, &HashMap::new());
         self.build_producers();
         self.build_consumers();
     }
@@ -520,21 +520,18 @@ impl Graph {
                 _ => None,
             })
             .collect();
-        let external_ids = shared_inputs
+        let old_to_existing_ids = shared_inputs
             .iter()
             .map(|(from, to, _)| (*from, *to))
             .collect::<HashMap<_, _>>();
 
-        let imported_ids = self.append_node_entries_with_mapping(
-            other
-                .nodes
-                .into_iter()
-                .filter(|node| !external_ids.contains_key(&node.id)),
-            &external_ids,
-        );
+        let old_to_current_ids = self.append_graph_with_replacements(other, &old_to_existing_ids);
 
         for (_, to, outputs) in shared_inputs {
-            let outputs = Self::translate_imported_node_ids(&outputs, &imported_ids, &external_ids);
+            let outputs = outputs
+                .iter()
+                .map(|id| old_to_current_ids.get(id).copied().unwrap_or(*id))
+                .collect_vec();
             self.find_node_by_id_mut(to)
                 .unwrap()
                 .outputs
@@ -572,29 +569,26 @@ impl Graph {
                 _ => None,
             })
             .collect();
-        let external_ids = out_in
+        let old_to_existing_ids = out_in
             .iter()
-            .map(|(output, input)| (target_inputs[*input].0, src_outputs[*output]))
+            .map(|(output, input)| {
+                let (target_input_id, _) = &target_inputs[*input];
+                (*target_input_id, src_outputs[*output])
+            })
             .collect::<HashMap<_, _>>();
-
-        let imported_ids = self.append_node_entries_with_mapping(
-            target
-                .nodes
-                .into_iter()
-                .filter(|node| !external_ids.contains_key(&node.id)),
-            &external_ids,
-        );
 
         self.nodes.retain(|node|
             !matches!(&node.kind, GraphNodeKind::Output(name) if src_outputs.contains_key(name.as_str())));
 
+        let old_to_current_ids = self.append_graph_with_replacements(target, &old_to_existing_ids);
+
         for (output, input) in out_in {
             let out_node = src_outputs[output];
-            let in_node = Self::translate_imported_node_ids(
-                &target_inputs[input].1,
-                &imported_ids,
-                &external_ids,
-            );
+            let (_, target_input_outputs) = &target_inputs[input];
+            let in_node = target_input_outputs
+                .iter()
+                .map(|id| old_to_current_ids.get(id).copied().unwrap_or(*id))
+                .collect_vec();
 
             self.find_node_by_id_mut(out_node).unwrap().outputs = in_node;
         }
@@ -658,29 +652,24 @@ impl Graph {
             })
             .collect();
 
-        let mut external_ids = HashMap::new();
+        let mut old_to_existing_ids = HashMap::new();
         for name in &targets {
+            let (target_input_id, _) = &target_inputs[name];
             if let Some(src_in) = src_inputs.get(name) {
-                external_ids.insert(target_inputs[name].0, *src_in);
+                old_to_existing_ids.insert(*target_input_id, *src_in);
             } else if let Some(src_out) = src_outputs.get(name) {
-                external_ids.insert(target_inputs[name].0, *src_out);
+                old_to_existing_ids.insert(*target_input_id, *src_out);
             }
         }
 
-        let imported_ids = self.append_node_entries_with_mapping(
-            target
-                .nodes
-                .into_iter()
-                .filter(|node| !external_ids.contains_key(&node.id)),
-            &external_ids,
-        );
+        let old_to_current_ids = self.append_graph_with_replacements(target, &old_to_existing_ids);
 
         for name in &targets {
-            let tar_in = Self::translate_imported_node_ids(
-                &target_inputs[name].1,
-                &imported_ids,
-                &external_ids,
-            );
+            let (_, target_input_outputs) = &target_inputs[name];
+            let tar_in = target_input_outputs
+                .iter()
+                .map(|id| old_to_current_ids.get(id).copied().unwrap_or(*id))
+                .collect_vec();
 
             if let Some(src_in) = src_inputs.get(name) {
                 self.find_node_by_id_mut(*src_in)
@@ -734,56 +723,39 @@ impl Graph {
         self.nodes.add(node)
     }
 
-    pub(crate) fn translate_imported_node_id(
-        node_id: GraphNodeId,
-        imported_ids: &HashMap<GraphNodeId, GraphNodeId>,
-        external_ids: &HashMap<GraphNodeId, GraphNodeId>,
-    ) -> GraphNodeId {
-        external_ids
-            .get(&node_id)
-            .or_else(|| imported_ids.get(&node_id))
-            .copied()
-            .unwrap_or(node_id)
-    }
-
-    pub(crate) fn translate_imported_node_ids(
-        node_ids: &[GraphNodeId],
-        imported_ids: &HashMap<GraphNodeId, GraphNodeId>,
-        external_ids: &HashMap<GraphNodeId, GraphNodeId>,
-    ) -> Vec<GraphNodeId> {
-        node_ids
-            .iter()
-            .map(|id| Self::translate_imported_node_id(*id, imported_ids, external_ids))
-            .collect_vec()
-    }
-
-    pub(crate) fn append_node_entries_with_mapping(
+    /// Appends `imported_graph` into this graph using fresh ids for every imported node.
+    /// Old ids in `old_to_existing_ids` are not inserted or overwritten; references to
+    /// those imported nodes are resolved to the existing node ids in this graph.
+    pub(crate) fn append_graph_with_replacements(
         &mut self,
-        nodes: impl IntoIterator<Item = GraphNodeEntry>,
-        external_ids: &HashMap<GraphNodeId, GraphNodeId>,
+        imported_graph: Self,
+        old_to_existing_ids: &HashMap<GraphNodeId, GraphNodeId>,
     ) -> HashMap<GraphNodeId, GraphNodeId> {
-        let nodes = nodes.into_iter().collect_vec();
-        let mut imported_ids = HashMap::new();
+        let nodes = imported_graph.nodes.into_iter().collect_vec();
+        let mut old_to_current_ids = old_to_existing_ids.clone();
+        let mut new_ids = Vec::new();
 
         for entry in nodes {
+            if old_to_existing_ids.contains_key(&entry.id) {
+                continue;
+            }
             let id = self.add_node(entry.node);
-            imported_ids.insert(entry.id, id);
+            old_to_current_ids.insert(entry.id, id);
+            new_ids.push(id);
         }
 
-        let new_ids = imported_ids.values().copied().collect_vec();
         for id in new_ids {
             if let Some(mut node) = self.find_node_by_id_mut(id) {
                 for input in &mut node.inputs {
-                    *input = Self::translate_imported_node_id(*input, &imported_ids, external_ids);
+                    *input = old_to_current_ids.get(input).copied().unwrap_or(*input);
                 }
                 for output in &mut node.outputs {
-                    *output =
-                        Self::translate_imported_node_id(*output, &imported_ids, external_ids);
+                    *output = old_to_current_ids.get(output).copied().unwrap_or(*output);
                 }
             }
         }
 
-        imported_ids
+        old_to_current_ids
     }
 
     pub fn find_node_by_input_name(&mut self, input_name: &str) -> Option<GraphNodeMut<'_>> {
@@ -1633,5 +1605,74 @@ mod tests {
         );
         assert_eq!(graph.find_node_by_id(10).unwrap().outputs, vec![11]);
         assert_eq!(graph.find_node_by_id(11).unwrap().inputs, vec![10]);
+    }
+
+    #[test]
+    fn merge_by_outin_preserves_imported_output_with_same_name_as_removed_output() {
+        let mut graph = Graph::from_nodes_with_ids(vec![
+            (
+                10,
+                GraphNode {
+                    outputs: vec![11],
+                    ..Default::default()
+                },
+            ),
+            (
+                11,
+                GraphNode {
+                    inputs: vec![10],
+                    outputs: vec![12],
+                    ..Default::default()
+                },
+            ),
+            (
+                12,
+                GraphNode {
+                    kind: GraphNodeKind::Output("z".to_owned()),
+                    inputs: vec![11],
+                    ..Default::default()
+                },
+            ),
+        ]);
+        let target = Graph::from_nodes_with_ids(vec![
+            (
+                100,
+                GraphNode {
+                    kind: GraphNodeKind::Input("i".to_owned()),
+                    outputs: vec![101],
+                    ..Default::default()
+                },
+            ),
+            (
+                101,
+                GraphNode {
+                    inputs: vec![100],
+                    outputs: vec![102],
+                    ..Default::default()
+                },
+            ),
+            (
+                102,
+                GraphNode {
+                    kind: GraphNodeKind::Output("z".to_owned()),
+                    inputs: vec![101],
+                    ..Default::default()
+                },
+            ),
+        ]);
+
+        graph.merge_by_outin(target, vec![("z", "i")]);
+
+        let outputs = graph
+            .nodes
+            .iter()
+            .filter(|node| matches!(&node.kind, GraphNodeKind::Output(name) if name == "z"))
+            .map(|node| node.id)
+            .collect_vec();
+        assert_eq!(outputs, vec![14]);
+        assert_eq!(graph.find_node_by_id(11).unwrap().outputs, vec![13]);
+        assert_eq!(graph.find_node_by_id(13).unwrap().inputs, vec![11]);
+        assert_eq!(graph.find_node_by_id(13).unwrap().outputs, vec![14]);
+        assert_eq!(graph.find_node_by_id(14).unwrap().inputs, vec![13]);
     }
 }

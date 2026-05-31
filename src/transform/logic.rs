@@ -222,29 +222,29 @@ impl LogicGraphTransformer {
             .collect_vec();
         let tar_output = tar.outputs()[0];
         let tar_output_input = tar.find_node_by_id(tar.outputs()[0]).unwrap().inputs[0];
-        let external_ids = HashMap::from([
+        let old_to_existing_ids = HashMap::from([
             (tar_inputs[0], src_inputs[0]),
             (tar_inputs[1], src_inputs[1]),
         ]);
 
-        tar.remove_by_node_id_lazy(tar_inputs[0]);
-        tar.remove_by_node_id_lazy(tar_inputs[1]);
         tar.remove_by_node_id_lazy(tar_output);
-        let imported_ids = g.append_node_entries_with_mapping(tar.nodes, &external_ids);
+        let old_to_current_ids = g.append_graph_with_replacements(tar, &old_to_existing_ids);
 
         for index in 0..=1 {
             if let Some(mut node) = g.find_node_by_id_mut(src_inputs[index]) {
-                node.outputs.extend(Graph::translate_imported_node_ids(
-                    &tar_inputs_outputs[index],
-                    &imported_ids,
-                    &external_ids,
-                ));
+                node.outputs.extend(
+                    tar_inputs_outputs[index]
+                        .iter()
+                        .map(|id| old_to_current_ids.get(id).copied().unwrap_or(*id)),
+                );
                 node.outputs.retain(|node_id| *node_id != src);
             }
         }
 
-        let tar_output_input =
-            Graph::translate_imported_node_id(tar_output_input, &imported_ids, &external_ids);
+        let tar_output_input = old_to_current_ids
+            .get(&tar_output_input)
+            .copied()
+            .unwrap_or(tar_output_input);
 
         g.replace_input_node_id_lazy(src, tar_output_input);
         g.remove_by_node_id_lazy(src);
