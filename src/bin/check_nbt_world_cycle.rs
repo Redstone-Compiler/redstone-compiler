@@ -6,7 +6,10 @@ use redstone_compiler::graph::logic::predefined_logics;
 use redstone_compiler::graph::world::WorldGraphBuilder;
 use redstone_compiler::graph::GraphNodeId;
 use redstone_compiler::nbt::NBTRoot;
-use redstone_compiler::transform::place_and_route::utils::world_to_logic;
+use redstone_compiler::output::OutputMetadata;
+use redstone_compiler::transform::place_and_route::utils::{
+    world_to_logic, world_to_logic_with_outputs,
+};
 use redstone_compiler::transform::world::WorldGraphTransformer;
 use redstone_compiler::world::block::BlockKind;
 use redstone_compiler::world::position::Position;
@@ -168,7 +171,14 @@ fn main() -> eyre::Result<()> {
         }
 
         if std::env::var_os("PRINT_LOGIC").is_some() {
-            let logic = world_to_logic(&world)?;
+            let metadata_path = output_metadata_path(&path);
+            let logic = if metadata_path.exists() {
+                let metadata = OutputMetadata::load(&metadata_path)?;
+                println!("  output metadata: {}", metadata_path.display());
+                world_to_logic_with_outputs(&world, &metadata)?
+            } else {
+                world_to_logic(&world)?
+            };
             println!("  logic graph:");
             for node in &logic.graph.nodes {
                 println!(
@@ -462,6 +472,12 @@ fn print_target_sequence(
         println!("    {name:<5} {:?}", sim.world()[target].kind);
     }
     Ok(())
+}
+
+fn output_metadata_path(path: &PathBuf) -> PathBuf {
+    let mut metadata_path = path.clone();
+    metadata_path.set_extension("outputs.json");
+    metadata_path
 }
 
 fn print_dff_activity(world: &redstone_compiler::world::World) -> eyre::Result<()> {
