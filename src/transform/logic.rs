@@ -209,8 +209,6 @@ impl LogicGraphTransformer {
 
     // replacable only (x, y) => (z)
     fn replace_binops_lazy(&mut self, src: GraphNodeId, mut tar: Graph) -> eyre::Result<()> {
-        tar.rebuild_node_id_base(self.graph.graph.max_node_id().unwrap() + 1);
-
         let g = &mut self.graph.graph;
 
         let src_inputs = g.find_node_by_id(src).unwrap().inputs.clone();
@@ -224,26 +222,33 @@ impl LogicGraphTransformer {
             .collect_vec();
         let tar_output = tar.outputs()[0];
         let tar_output_input = tar.find_node_by_id(tar.outputs()[0]).unwrap().inputs[0];
+        let external_ids = HashMap::from([
+            (tar_inputs[0], src_inputs[0]),
+            (tar_inputs[1], src_inputs[1]),
+        ]);
+
+        tar.remove_by_node_id_lazy(tar_inputs[0]);
+        tar.remove_by_node_id_lazy(tar_inputs[1]);
+        tar.remove_by_node_id_lazy(tar_output);
+        let imported_ids = g.append_node_entries_with_mapping(tar.nodes, &external_ids);
 
         for index in 0..=1 {
             if let Some(mut node) = g.find_node_by_id_mut(src_inputs[index]) {
-                node.outputs.extend(tar_inputs_outputs[index].clone());
+                node.outputs.extend(Graph::translate_imported_node_ids(
+                    &tar_inputs_outputs[index],
+                    &imported_ids,
+                    &external_ids,
+                ));
                 node.outputs.retain(|node_id| *node_id != src);
             }
         }
 
-        tar.replace_node_id_lazy(tar_inputs[0], src_inputs[0]);
-        tar.replace_node_id_lazy(tar_inputs[1], src_inputs[1]);
+        let tar_output_input =
+            Graph::translate_imported_node_id(tar_output_input, &imported_ids, &external_ids);
 
         g.replace_input_node_id_lazy(src, tar_output_input);
         g.remove_by_node_id_lazy(src);
-
-        tar.find_node_by_id_mut(tar_output_input).unwrap().outputs = src_outputs.clone();
-        tar.remove_by_node_id_lazy(tar_inputs[0]);
-        tar.remove_by_node_id_lazy(tar_inputs[1]);
-        tar.remove_by_node_id_lazy(tar_output);
-
-        g.nodes.extend(tar.nodes);
+        g.find_node_by_id_mut(tar_output_input).unwrap().outputs = src_outputs;
 
         Ok(())
     }
