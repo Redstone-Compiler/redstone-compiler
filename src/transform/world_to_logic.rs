@@ -176,10 +176,7 @@ impl WorldToLogicTransformer {
             nodes.extend(new_nodes);
         }
 
-        let mut graph = Graph {
-            nodes: nodes.into(),
-            ..Default::default()
-        };
+        let mut graph = Graph::from_nodes(nodes);
 
         graph.build_outputs();
         graph.build_producers();
@@ -365,30 +362,26 @@ mod tests {
             kind: BlockKind::Torch { is_on: true },
             direction: Direction::Bottom,
         };
-        let mut graph = crate::graph::Graph {
-            nodes: vec![
-                crate::graph::GraphNode {
-                    id: 10,
-                    kind: crate::graph::GraphNodeKind::Block(switch),
-                    outputs: vec![30],
-                    ..Default::default()
-                },
-                crate::graph::GraphNode {
-                    id: 20,
-                    kind: crate::graph::GraphNodeKind::Block(switch),
-                    outputs: vec![30],
-                    ..Default::default()
-                },
-                crate::graph::GraphNode {
-                    id: 30,
-                    kind: crate::graph::GraphNodeKind::Block(torch),
-                    inputs: vec![10, 20],
-                    ..Default::default()
-                },
-            ]
-            .into(),
-            ..Default::default()
-        };
+        let mut graph = crate::graph::Graph::from_nodes(vec![
+            crate::graph::GraphNode {
+                id: 10,
+                kind: crate::graph::GraphNodeKind::Block(switch),
+                outputs: vec![30],
+                ..Default::default()
+            },
+            crate::graph::GraphNode {
+                id: 20,
+                kind: crate::graph::GraphNodeKind::Block(switch),
+                outputs: vec![30],
+                ..Default::default()
+            },
+            crate::graph::GraphNode {
+                id: 30,
+                kind: crate::graph::GraphNodeKind::Block(torch),
+                inputs: vec![10, 20],
+                ..Default::default()
+            },
+        ]);
         graph.build_inputs();
         graph.build_outputs();
         graph.build_producers();

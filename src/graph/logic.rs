@@ -346,10 +346,7 @@ impl LogicGraphBuilder {
     pub fn build(mut self, output_name: String) -> eyre::Result<LogicGraph> {
         self.do_parse(output_name);
 
-        let mut graph = Graph {
-            nodes: self.nodes.clone().into(),
-            ..Default::default()
-        };
+        let mut graph = Graph::from_nodes(self.nodes.clone());
         graph.build_outputs();
 
         Ok(LogicGraph { graph })

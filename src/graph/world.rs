@@ -97,10 +97,7 @@ impl WorldGraphBuilder {
         self.visit_blocks();
 
         let (nodes, positions) = self.build_nodes();
-        let mut graph = Graph {
-            nodes: nodes.into(),
-            ..Default::default()
-        };
+        let mut graph = Graph::from_nodes(nodes);
         graph.build_inputs();
 
         graph.build_producers();

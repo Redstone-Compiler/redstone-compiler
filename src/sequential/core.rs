@@ -113,7 +113,7 @@ pub fn rs_latch_prefix_graph(graph: &Graph, core: &RsLatchCore) -> Option<LogicG
         })
         .collect::<Vec<_>>();
 
-    let mut next_node_id = graph.nodes.iter().map(|node| node.id).max().unwrap_or(0) + 1;
+    let mut next_node_id = graph.next_node_id();
     for (output_name, source_node_id) in output_roots {
         nodes.push(GraphNode {
             id: next_node_id,
@@ -123,12 +123,7 @@ pub fn rs_latch_prefix_graph(graph: &Graph, core: &RsLatchCore) -> Option<LogicG
         });
         next_node_id += 1;
     }
-    nodes.sort_by_key(|node| node.id);
-
-    let mut graph = Graph {
-        nodes: nodes.into(),
-        ..Default::default()
-    };
+    let mut graph = Graph::from_nodes(nodes);
     graph.build_outputs();
     graph.build_producers();
     graph.build_consumers();

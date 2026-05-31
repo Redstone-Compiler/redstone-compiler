@@ -389,9 +389,7 @@ impl LogicGraphTransformer {
             ..Default::default()
         };
         nodes.push(output_node);
-        nodes.sort_by_key(|node| node.id);
-
-        self.graph.graph.nodes = nodes.into();
+        self.graph.graph = Graph::from_nodes(nodes);
         self.graph.graph.build_outputs();
         self.graph.graph.build_producers();
         self.graph.graph.build_consumers();
@@ -684,50 +682,46 @@ mod tests {
 
     #[test]
     fn prepare_place_preserves_sequential_boundaries() -> eyre::Result<()> {
-        let mut graph = Graph {
-            nodes: vec![
-                GraphNode {
-                    id: 0,
-                    kind: GraphNodeKind::Input("s".to_owned()),
-                    outputs: vec![2],
-                    ..Default::default()
-                },
-                GraphNode {
-                    id: 1,
-                    kind: GraphNodeKind::Input("r".to_owned()),
-                    outputs: vec![2],
-                    ..Default::default()
-                },
-                GraphNode {
-                    id: 2,
-                    kind: GraphNodeKind::Sequential(SequentialPrimitive::new(
-                        SequentialType::RsLatch,
-                        vec!["s".to_owned(), "r".to_owned()],
-                        vec!["q".to_owned()],
-                    )),
-                    inputs: vec![0, 1],
-                    outputs: vec![3],
-                    ..Default::default()
-                },
-                GraphNode {
-                    id: 3,
-                    kind: GraphNodeKind::Logic(Logic {
-                        logic_type: LogicType::Not,
-                    }),
-                    inputs: vec![2],
-                    outputs: vec![4],
-                    ..Default::default()
-                },
-                GraphNode {
-                    id: 4,
-                    kind: GraphNodeKind::Output("not_q".to_owned()),
-                    inputs: vec![3],
-                    ..Default::default()
-                },
-            ]
-            .into(),
-            ..Default::default()
-        };
+        let mut graph = Graph::from_nodes(vec![
+            GraphNode {
+                id: 0,
+                kind: GraphNodeKind::Input("s".to_owned()),
+                outputs: vec![2],
+                ..Default::default()
+            },
+            GraphNode {
+                id: 1,
+                kind: GraphNodeKind::Input("r".to_owned()),
+                outputs: vec![2],
+                ..Default::default()
+            },
+            GraphNode {
+                id: 2,
+                kind: GraphNodeKind::Sequential(SequentialPrimitive::new(
+                    SequentialType::RsLatch,
+                    vec!["s".to_owned(), "r".to_owned()],
+                    vec!["q".to_owned()],
+                )),
+                inputs: vec![0, 1],
+                outputs: vec![3],
+                ..Default::default()
+            },
+            GraphNode {
+                id: 3,
+                kind: GraphNodeKind::Logic(Logic {
+                    logic_type: LogicType::Not,
+                }),
+                inputs: vec![2],
+                outputs: vec![4],
+                ..Default::default()
+            },
+            GraphNode {
+                id: 4,
+                kind: GraphNodeKind::Output("not_q".to_owned()),
+                inputs: vec![3],
+                ..Default::default()
+            },
+        ]);
         graph.build_inputs();
         graph.build_outputs();
 

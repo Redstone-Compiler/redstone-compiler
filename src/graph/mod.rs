@@ -238,6 +238,19 @@ pub struct Graph {
 }
 
 impl Graph {
+    pub fn from_nodes(nodes: Vec<GraphNode>) -> Self {
+        let next_node_id = nodes
+            .iter()
+            .map(|node| node.id)
+            .max()
+            .map_or(0, |id| id + 1);
+        Self {
+            nodes: nodes.into(),
+            next_node_id,
+            ..Default::default()
+        }
+    }
+
     fn to_petgraph_with_node_ids(&self) -> petgraph::Graph<GraphNodeId, ()> {
         let mut graph = petgraph::Graph::<GraphNodeId, ()>::new();
         let mut id_to_index = HashMap::new();
@@ -623,10 +636,6 @@ impl Graph {
             .max(self.max_node_id().map_or(0, |id| id + 1))
     }
 
-    fn preserve_next_node_id_high_watermark(&mut self) {
-        self.next_node_id = self.next_node_id();
-    }
-
     pub fn allocate_node_id(&mut self) -> GraphNodeId {
         let id = self.next_node_id();
         self.next_node_id = id + 1;
@@ -666,7 +675,6 @@ impl Graph {
     }
 
     pub fn find_and_remove_node_by_id(&mut self, node_id: GraphNodeId) -> Option<GraphNode> {
-        self.preserve_next_node_id_high_watermark();
         let index = self.nodes.iter().position(|node| node.id == node_id)?;
         Some(self.nodes.remove(index))
     }
@@ -685,7 +693,6 @@ impl Graph {
     }
 
     pub fn remove_by_node_id_lazy(&mut self, node_id: GraphNodeId) {
-        self.preserve_next_node_id_high_watermark();
         let Some(index) = self.nodes.iter().position(|node| node.id == node_id) else {
             return;
         };
@@ -740,7 +747,6 @@ impl Graph {
 
     // 노드 삭제하고 삭제한 노드의 Input Output끼리 연결함
     pub fn remove_and_reconnect_by_node_id_lazy(&mut self, node_id: GraphNodeId) {
-        self.preserve_next_node_id_high_watermark();
         let Some(index) = self.nodes.iter().position(|node| node.id == node_id) else {
             return;
         };
@@ -907,12 +913,7 @@ impl Graph {
             node.inputs.retain(|input| node_ids.contains(input));
             node.outputs.retain(|output| node_ids.contains(output));
         }
-        nodes.sort_by_key(|node| node.id);
-
-        let mut graph = Self {
-            nodes: nodes.into(),
-            ..Default::default()
-        };
+        let mut graph = Self::from_nodes(nodes);
         graph.build_inputs();
         graph.build_outputs();
         graph.build_producers();
@@ -979,7 +980,6 @@ impl Graph {
     }
 
     pub fn remove_input(&mut self, input_name: &str) {
-        self.preserve_next_node_id_high_watermark();
         let Some((index, _)) = self.nodes.iter().find_position(
             |node| matches!(&node.kind, GraphNodeKind::Output(name) if name == input_name),
         ) else {
@@ -993,7 +993,6 @@ impl Graph {
     }
 
     pub fn remove_output(&mut self, output_name: &str) -> Option<GraphNodeId> {
-        self.preserve_next_node_id_high_watermark();
         let (index, _) = self.nodes.iter().find_position(
             |node| matches!(&node.kind, GraphNodeKind::Output(name) if name == output_name),
         )?;
@@ -1127,10 +1126,7 @@ impl From<&SubGraphWithGraph<'_>> for Graph {
             node.outputs.retain(|output| node_ids.contains(output));
         }
 
-        let mut graph = Graph {
-            nodes: nodes.into(),
-            ..Default::default()
-        };
+        let mut graph = Graph::from_nodes(nodes);
         graph.rebuild_node_id_base(0);
 
         graph
@@ -1225,12 +1221,8 @@ pub fn subgraphs_to_clustered_graph(graph: &Graph, subgraphs: &[SubGraph]) -> Cl
         clustered_node.outputs = weighted_node[index].iter().map(|node| node.id).collect();
     }
 
-    let mut graph = Graph {
-        nodes: [nodes, weighted_node.into_iter().flatten().collect_vec()]
-            .concat()
-            .into(),
-        ..Default::default()
-    };
+    let mut graph =
+        Graph::from_nodes([nodes, weighted_node.into_iter().flatten().collect_vec()].concat());
 
     graph.build_inputs();
     graph.build_producers();
@@ -1247,32 +1239,28 @@ mod tests {
 
     #[test]
     fn build_inputs_and_outputs_are_sorted() {
-        let mut graph = Graph {
-            nodes: vec![
-                GraphNode {
-                    id: 0,
-                    outputs: vec![3],
-                    ..Default::default()
-                },
-                GraphNode {
-                    id: 1,
-                    outputs: vec![3],
-                    ..Default::default()
-                },
-                GraphNode {
-                    id: 2,
-                    outputs: vec![3],
-                    ..Default::default()
-                },
-                GraphNode {
-                    id: 3,
-                    inputs: vec![2, 0, 1],
-                    ..Default::default()
-                },
-            ]
-            .into(),
-            ..Default::default()
-        };
+        let mut graph = Graph::from_nodes(vec![
+            GraphNode {
+                id: 0,
+                outputs: vec![3],
+                ..Default::default()
+            },
+            GraphNode {
+                id: 1,
+                outputs: vec![3],
+                ..Default::default()
+            },
+            GraphNode {
+                id: 2,
+                outputs: vec![3],
+                ..Default::default()
+            },
+            GraphNode {
+                id: 3,
+                inputs: vec![2, 0, 1],
+                ..Default::default()
+            },
+        ]);
 
         graph.build_inputs();
         graph.build_outputs();
@@ -1285,38 +1273,34 @@ mod tests {
 
     #[test]
     fn extract_graph_by_node_ids_keeps_only_internal_edges() {
-        let mut graph = Graph {
-            nodes: vec![
-                GraphNode {
-                    id: 0,
-                    outputs: vec![2],
-                    ..Default::default()
-                },
-                GraphNode {
-                    id: 1,
-                    outputs: vec![2],
-                    ..Default::default()
-                },
-                GraphNode {
-                    id: 2,
-                    inputs: vec![0, 1],
-                    outputs: vec![3, 4],
-                    ..Default::default()
-                },
-                GraphNode {
-                    id: 3,
-                    inputs: vec![2],
-                    ..Default::default()
-                },
-                GraphNode {
-                    id: 4,
-                    inputs: vec![2],
-                    ..Default::default()
-                },
-            ]
-            .into(),
-            ..Default::default()
-        };
+        let mut graph = Graph::from_nodes(vec![
+            GraphNode {
+                id: 0,
+                outputs: vec![2],
+                ..Default::default()
+            },
+            GraphNode {
+                id: 1,
+                outputs: vec![2],
+                ..Default::default()
+            },
+            GraphNode {
+                id: 2,
+                inputs: vec![0, 1],
+                outputs: vec![3, 4],
+                ..Default::default()
+            },
+            GraphNode {
+                id: 3,
+                inputs: vec![2],
+                ..Default::default()
+            },
+            GraphNode {
+                id: 4,
+                inputs: vec![2],
+                ..Default::default()
+            },
+        ]);
         graph.build_producers();
         graph.build_consumers();
 
@@ -1348,41 +1332,37 @@ mod tests {
 
     #[test]
     fn sequential_node_kind_is_named_and_verified() -> eyre::Result<()> {
-        let mut graph = Graph {
-            nodes: vec![
-                GraphNode {
-                    id: 0,
-                    kind: GraphNodeKind::Input("s".to_owned()),
-                    outputs: vec![2],
-                    ..Default::default()
-                },
-                GraphNode {
-                    id: 1,
-                    kind: GraphNodeKind::Input("r".to_owned()),
-                    outputs: vec![2],
-                    ..Default::default()
-                },
-                GraphNode {
-                    id: 2,
-                    kind: GraphNodeKind::Sequential(SequentialPrimitive::new(
-                        SequentialType::RsLatch,
-                        vec!["s".to_owned(), "r".to_owned()],
-                        vec!["q".to_owned()],
-                    )),
-                    inputs: vec![0, 1],
-                    outputs: vec![3],
-                    ..Default::default()
-                },
-                GraphNode {
-                    id: 3,
-                    kind: GraphNodeKind::Output("q".to_owned()),
-                    inputs: vec![2],
-                    ..Default::default()
-                },
-            ]
-            .into(),
-            ..Default::default()
-        };
+        let mut graph = Graph::from_nodes(vec![
+            GraphNode {
+                id: 0,
+                kind: GraphNodeKind::Input("s".to_owned()),
+                outputs: vec![2],
+                ..Default::default()
+            },
+            GraphNode {
+                id: 1,
+                kind: GraphNodeKind::Input("r".to_owned()),
+                outputs: vec![2],
+                ..Default::default()
+            },
+            GraphNode {
+                id: 2,
+                kind: GraphNodeKind::Sequential(SequentialPrimitive::new(
+                    SequentialType::RsLatch,
+                    vec!["s".to_owned(), "r".to_owned()],
+                    vec!["q".to_owned()],
+                )),
+                inputs: vec![0, 1],
+                outputs: vec![3],
+                ..Default::default()
+            },
+            GraphNode {
+                id: 3,
+                kind: GraphNodeKind::Output("q".to_owned()),
+                inputs: vec![2],
+                ..Default::default()
+            },
+        ]);
 
         graph.build_inputs();
         graph.build_outputs();
@@ -1401,22 +1381,18 @@ mod tests {
 
     #[test]
     fn petgraph_conversion_does_not_materialize_sparse_node_ids() {
-        let graph = Graph {
-            nodes: vec![
-                GraphNode {
-                    id: 10,
-                    outputs: vec![20],
-                    ..Default::default()
-                },
-                GraphNode {
-                    id: 20,
-                    inputs: vec![10],
-                    ..Default::default()
-                },
-            ]
-            .into(),
-            ..Default::default()
-        };
+        let graph = Graph::from_nodes(vec![
+            GraphNode {
+                id: 10,
+                outputs: vec![20],
+                ..Default::default()
+            },
+            GraphNode {
+                id: 20,
+                inputs: vec![10],
+                ..Default::default()
+            },
+        ]);
 
         let petgraph = graph.to_petgraph_only_edges();
 
@@ -1426,28 +1402,24 @@ mod tests {
 
     #[test]
     fn graph_algorithms_preserve_sparse_node_ids() {
-        let graph = Graph {
-            nodes: vec![
-                GraphNode {
-                    id: 10,
-                    outputs: vec![20],
-                    ..Default::default()
-                },
-                GraphNode {
-                    id: 20,
-                    inputs: vec![10],
-                    outputs: vec![30],
-                    ..Default::default()
-                },
-                GraphNode {
-                    id: 30,
-                    inputs: vec![20],
-                    ..Default::default()
-                },
-            ]
-            .into(),
-            ..Default::default()
-        };
+        let graph = Graph::from_nodes(vec![
+            GraphNode {
+                id: 10,
+                outputs: vec![20],
+                ..Default::default()
+            },
+            GraphNode {
+                id: 20,
+                inputs: vec![10],
+                outputs: vec![30],
+                ..Default::default()
+            },
+            GraphNode {
+                id: 30,
+                inputs: vec![20],
+                ..Default::default()
+            },
+        ]);
 
         assert_eq!(graph.topological_order(), vec![10, 20, 30]);
         assert_eq!(
@@ -1459,47 +1431,57 @@ mod tests {
 
     #[test]
     fn next_node_id_is_append_only_for_sparse_graphs() {
-        let graph = Graph {
-            nodes: vec![
-                GraphNode {
-                    id: 10,
-                    ..Default::default()
-                },
-                GraphNode {
-                    id: 30,
-                    ..Default::default()
-                },
-            ]
-            .into(),
-            ..Default::default()
-        };
+        let graph = Graph::from_nodes(vec![
+            GraphNode {
+                id: 10,
+                ..Default::default()
+            },
+            GraphNode {
+                id: 30,
+                ..Default::default()
+            },
+        ]);
 
         assert_eq!(graph.next_node_id(), 31);
     }
 
     #[test]
+    fn from_nodes_initializes_next_node_id_from_existing_ids() {
+        let mut graph = Graph::from_nodes(vec![
+            GraphNode {
+                id: 10,
+                ..Default::default()
+            },
+            GraphNode {
+                id: 30,
+                ..Default::default()
+            },
+        ]);
+
+        graph.remove_by_node_id_lazy(30);
+
+        assert_eq!(graph.add_node(GraphNode::default()), 31);
+    }
+
+    #[test]
     fn graph_nodes_are_keyed_by_id() {
-        let mut graph = Graph {
-            nodes: vec![
-                GraphNode {
-                    id: 30,
-                    tag: "thirty".to_owned(),
-                    ..Default::default()
-                },
-                GraphNode {
-                    id: 10,
-                    tag: "ten".to_owned(),
-                    ..Default::default()
-                },
-                GraphNode {
-                    id: 20,
-                    tag: "twenty".to_owned(),
-                    ..Default::default()
-                },
-            ]
-            .into(),
-            ..Default::default()
-        };
+        let mut graph = Graph::from_nodes(vec![
+            GraphNode {
+                id: 30,
+                tag: "thirty".to_owned(),
+                ..Default::default()
+            },
+            GraphNode {
+                id: 10,
+                tag: "ten".to_owned(),
+                ..Default::default()
+            },
+            GraphNode {
+                id: 20,
+                tag: "twenty".to_owned(),
+                ..Default::default()
+            },
+        ]);
 
         graph.insert_node(GraphNode {
             id: 20,
@@ -1533,20 +1515,16 @@ mod tests {
 
     #[test]
     fn insert_node_keeps_nodes_sorted_by_id() {
-        let mut graph = Graph {
-            nodes: vec![
-                GraphNode {
-                    id: 10,
-                    ..Default::default()
-                },
-                GraphNode {
-                    id: 30,
-                    ..Default::default()
-                },
-            ]
-            .into(),
-            ..Default::default()
-        };
+        let mut graph = Graph::from_nodes(vec![
+            GraphNode {
+                id: 10,
+                ..Default::default()
+            },
+            GraphNode {
+                id: 30,
+                ..Default::default()
+            },
+        ]);
 
         graph.insert_node(GraphNode {
             id: 20,
@@ -1561,26 +1539,22 @@ mod tests {
 
     #[test]
     fn node_lookup_and_removal_do_not_require_sorted_nodes() {
-        let mut graph = Graph {
-            nodes: vec![
-                GraphNode {
-                    id: 30,
-                    inputs: vec![10],
-                    ..Default::default()
-                },
-                GraphNode {
-                    id: 10,
-                    outputs: vec![30],
-                    ..Default::default()
-                },
-                GraphNode {
-                    id: 20,
-                    ..Default::default()
-                },
-            ]
-            .into(),
-            ..Default::default()
-        };
+        let mut graph = Graph::from_nodes(vec![
+            GraphNode {
+                id: 30,
+                inputs: vec![10],
+                ..Default::default()
+            },
+            GraphNode {
+                id: 10,
+                outputs: vec![30],
+                ..Default::default()
+            },
+            GraphNode {
+                id: 20,
+                ..Default::default()
+            },
+        ]);
 
         assert_eq!(graph.find_node_by_id(10).unwrap().id, 10);
         graph.find_node_by_id_mut(20).unwrap().outputs = vec![30];

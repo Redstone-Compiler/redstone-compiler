@@ -521,16 +521,12 @@ mod tests {
 
     #[test]
     fn table_graphviz_shows_node_tags() {
-        let graph = Graph {
-            nodes: vec![GraphNode {
-                id: 0,
-                kind: GraphNodeKind::None,
-                tag: "Folded RS latch feedback SCC [1, 2, 3, 4]".to_owned(),
-                ..Default::default()
-            }]
-            .into(),
+        let graph = Graph::from_nodes(vec![GraphNode {
+            id: 0,
+            kind: GraphNodeKind::None,
+            tag: "Folded RS latch feedback SCC [1, 2, 3, 4]".to_owned(),
             ..Default::default()
-        };
+        }]);
 
         let dot = GraphvizBuilder::default()
             .with_graph(&graph)
@@ -542,16 +538,12 @@ mod tests {
 
     #[test]
     fn graphviz_can_hide_node_tags() {
-        let graph = Graph {
-            nodes: vec![GraphNode {
-                id: 0,
-                kind: GraphNodeKind::None,
-                tag: "debug source tag".to_owned(),
-                ..Default::default()
-            }]
-            .into(),
+        let graph = Graph::from_nodes(vec![GraphNode {
+            id: 0,
+            kind: GraphNodeKind::None,
+            tag: "debug source tag".to_owned(),
             ..Default::default()
-        };
+        }]);
 
         let dot = GraphvizBuilder::default()
             .with_graph(&graph)
