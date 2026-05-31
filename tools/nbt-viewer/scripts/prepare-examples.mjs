@@ -15,14 +15,25 @@ for (const entry of entries) {
 
   const source = join(sourceRoot, entry.name);
   const target = join(targetRoot, entry.name);
+  const outputsName = entry.name.replace(/\.nbt$/, '.outputs.json');
+  const outputsSource = join(sourceRoot, outputsName);
+  const outputsTarget = join(targetRoot, outputsName);
   const info = await stat(source);
   await copyFile(source, target);
-  examples.push({
+  const example = {
     name: entry.name,
     file: entry.name,
     path: `examples/${entry.name}`,
     size: info.size,
-  });
+  };
+  try {
+    await stat(outputsSource);
+    await copyFile(outputsSource, outputsTarget);
+    example.outputsPath = `examples/${outputsName}`;
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+  }
+  examples.push(example);
 }
 
 examples.sort((a, b) => a.name.localeCompare(b.name));

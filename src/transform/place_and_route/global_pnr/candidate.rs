@@ -1,5 +1,4 @@
 use eyre::ContextCompat;
-use itertools::Itertools;
 
 use crate::graph::logic::LogicGraph;
 use crate::graph::module::{GraphModule, GraphModulePortTarget, GraphModulePortType};
@@ -68,39 +67,47 @@ fn switchless_candidate_layout(
     inputs: &[crate::output::OutputEndpoint],
     outputs: &[crate::output::OutputEndpoint],
 ) -> (World3D, Vec<PhysicalPort>) {
-    let mut ports = module
-        .ports
-        .iter()
-        .filter_map(|port| match (&port.port_type, &port.target) {
-            (GraphModulePortType::InputNet, GraphModulePortTarget::Node(input_name)) => inputs
-                .iter()
-                .find(|input| input.name == *input_name)
-                .map(|input| input.position())
-                .or_else(|| {
-                    input_constraints
-                        .positions_for_input_name(input_name)
-                        .and_then(|positions| positions.into_iter().next())
-                })
-                .and_then(|position| {
-                    expose_switchless_input_port(&mut world, position).map(|position| {
-                        PhysicalPort {
-                            name: port.name.clone(),
-                            direction: PhysicalPortDirection::Input,
-                            position,
-                        }
-                    })
-                }),
-            (GraphModulePortType::OutputNet, GraphModulePortTarget::Node(output_name)) => outputs
-                .iter()
-                .find(|output| output.name == *output_name)
-                .map(|output| PhysicalPort {
-                    name: port.name.clone(),
-                    direction: PhysicalPortDirection::Output,
-                    position: expose_routeable_output_port(&world, output.position()),
-                }),
-            _ => None,
-        })
-        .collect_vec();
+    let mut ports = Vec::new();
+    let needs_output_isolation = module_contains_sequential(module);
+    for port in &module.ports {
+        match (&port.port_type, &port.target) {
+            (GraphModulePortType::InputNet, GraphModulePortTarget::Node(input_name)) => {
+                let position = inputs
+                    .iter()
+                    .find(|input| input.name == *input_name)
+                    .map(|input| input.position())
+                    .or_else(|| {
+                        input_constraints
+                            .positions_for_input_name(input_name)
+                            .and_then(|positions| positions.into_iter().next())
+                    });
+                if let Some(position) =
+                    position.and_then(|position| expose_switchless_input_port(&mut world, position))
+                {
+                    ports.push(PhysicalPort {
+                        name: port.name.clone(),
+                        direction: PhysicalPortDirection::Input,
+                        position,
+                        route_position: None,
+                    });
+                }
+            }
+            (GraphModulePortType::OutputNet, GraphModulePortTarget::Node(output_name)) => {
+                if let Some(output) = outputs.iter().find(|output| output.name == *output_name) {
+                    let position = output.position();
+                    let route_position = (!needs_output_isolation)
+                        .then(|| expose_routeable_output_port(&world, position));
+                    ports.push(PhysicalPort {
+                        name: port.name.clone(),
+                        direction: PhysicalPortDirection::Output,
+                        position,
+                        route_position,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
     for input in inputs {
         let _ = expose_switchless_input_port(&mut world, input.position());
     }
@@ -108,6 +115,15 @@ fn switchless_candidate_layout(
     ports.sort_by(|a, b| a.name.cmp(&b.name));
     world.initialize_redstone_states();
     (world, ports)
+}
+
+fn module_contains_sequential(module: &GraphModule) -> bool {
+    module.graph.as_ref().is_some_and(|graph| {
+        graph
+            .nodes
+            .iter()
+            .any(|node| matches!(node.kind, crate::graph::GraphNodeKind::Sequential(_)))
+    })
 }
 
 fn remove_local_input_switches(world: &mut World3D) {

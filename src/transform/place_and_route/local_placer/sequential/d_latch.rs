@@ -103,12 +103,12 @@ fn route_d_latch_core(
             let Some(nq) = state.port_position(node.id, "nq") else {
                 continue;
             };
-            if std::panic::catch_unwind(|| {
-                d_latch_candidate_behaves(&world, data_input, enable_input, &state, q, nq)
+            if let Some(reset_world) = std::panic::catch_unwind(|| {
+                d_latch_candidate_reset_world(&world, data_input, enable_input, &state, q, nq)
             })
-            .unwrap_or(false)
+            .unwrap_or(None)
             {
-                routed.push((world, state));
+                routed.push((reset_world, state));
                 break;
             }
         }
@@ -201,19 +201,19 @@ fn d_latch_input_gate_values(
     Some((set_value, reset_value))
 }
 
-fn d_latch_candidate_behaves(
+fn d_latch_candidate_reset_world(
     world: &World3D,
     data_node_id: GraphNodeId,
     enable_node_id: GraphNodeId,
     state: &PlacementState,
     q: Position,
     nq: Position,
-) -> bool {
+) -> Option<World3D> {
     let Some(data) = state.node_position(data_node_id) else {
-        return false;
+        return None;
     };
     let Some(enable) = state.node_position(enable_node_id) else {
-        return false;
+        return None;
     };
 
     let mut reset_world = pad_world_top_for_simulation(world, D_LATCH_SIM_EXTRA_Z);
@@ -222,7 +222,7 @@ fn d_latch_candidate_behaves(
     reset_world.initialize_redstone_states();
     let world = World::from(&reset_world);
     let Some(mut sim) = run_d_latch_simulation(&world) else {
-        return false;
+        return None;
     };
 
     #[derive(Clone, Copy)]
@@ -241,6 +241,17 @@ fn d_latch_candidate_behaves(
     let set_outputs = [(DLatchOutput::Q, true), (DLatchOutput::Nq, false)];
     let scenario = [
         // Start from en=1, d=0, so the latch must be reset.
+        SequentialScenarioStep::ExpectOutputs(&reset_outputs),
+        // While open, d changes must pass through immediately.
+        SequentialScenarioStep::SetInput {
+            input: DLatchInput::Data,
+            value: true,
+        },
+        SequentialScenarioStep::ExpectOutputs(&set_outputs),
+        SequentialScenarioStep::SetInput {
+            input: DLatchInput::Data,
+            value: false,
+        },
         SequentialScenarioStep::ExpectOutputs(&reset_outputs),
         // While closed, changing d must not change the latched value.
         SequentialScenarioStep::SetInput {
@@ -290,6 +301,32 @@ fn d_latch_candidate_behaves(
         D_LATCH_SIM_MAX_CYCLES,
         D_LATCH_SIM_MAX_EVENTS,
     )
+    .then(|| static_world_from_simulation(sim.world()))
+}
+
+fn static_world_from_simulation(world: &World3D) -> World3D {
+    let mut static_world = world.clone();
+    for (position, mut block) in world.iter_block() {
+        match block.kind {
+            BlockKind::Cobble { .. } => {
+                block.kind = BlockKind::Cobble {
+                    on_count: 0,
+                    on_base_count: 0,
+                };
+            }
+            BlockKind::Redstone { state, .. } => {
+                block.kind = BlockKind::Redstone {
+                    on_count: 0,
+                    state,
+                    strength: 0,
+                };
+            }
+            _ => {}
+        }
+        static_world[position] = block;
+    }
+    static_world.initialize_redstone_states();
+    static_world
 }
 
 fn run_d_latch_simulation(world: &World) -> Option<Simulator> {

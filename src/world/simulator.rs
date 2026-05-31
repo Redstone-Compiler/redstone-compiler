@@ -354,6 +354,40 @@ impl Simulator {
         Ok(sim)
     }
 
+    pub fn from_preserving_torch_states_with_limits_and_trace(
+        world: &World,
+        max_cycles: usize,
+        max_events: usize,
+        trace_limit: usize,
+    ) -> Result<Self, SimulationTraceError> {
+        let mut sim = Self::new(world, trace_limit);
+        let limits = SimulationLimits {
+            max_cycles: Some(max_cycles),
+            max_events: Some(max_events),
+        };
+
+        tracing::info!("Simulation target\n{:?}", sim.world);
+
+        sim.queue.push_back(VecDeque::new());
+        sim.world.initialize_redstone_states();
+        sim.init();
+        sim.enqueue_torch_reevaluations();
+
+        tracing::debug!("queue: {:?}", sim.queue);
+
+        sim.fill_event_id();
+
+        if let Err(error) = sim.run_inner(limits) {
+            return Err(SimulationTraceError {
+                message: error.to_string(),
+                trace: sim.trace,
+                snapshots: sim.snapshots,
+            });
+        }
+
+        Ok(sim)
+    }
+
     fn from_inner(
         world: &World,
         limits: SimulationLimits,
@@ -872,9 +906,6 @@ impl Simulator {
                     if output == Some(target) {
                         sources.insert(source_pos);
                         hard_sources.insert(source_pos);
-                    }
-                    if output.and_then(|position| position.down()) == Some(target) {
-                        sources.insert(source_pos);
                     }
                 }
                 _ => {}
@@ -1572,16 +1603,6 @@ impl Simulator {
                         });
                     }
 
-                    if let Some(pos) = walk.and_then(|pos| pos.down()) {
-                        self.push_event_to_next_tick(Event {
-                            id: None,
-                            from_id: event.id,
-                            event_type: EventType::SoftOn,
-                            target_position: pos,
-                            direction: Direction::Bottom,
-                        });
-                    }
-
                     tracing::info!("trigger repeater event: {event:?}, {block:?}");
                 }
             }
@@ -1606,16 +1627,6 @@ impl Simulator {
                             event_type: EventType::HardOff,
                             target_position: pos,
                             direction: pos.diff(event.target_position),
-                        });
-                    }
-
-                    if let Some(pos) = walk.and_then(|pos| pos.down()) {
-                        self.push_event_to_next_tick(Event {
-                            id: None,
-                            from_id: event.id,
-                            event_type: EventType::SoftOff,
-                            target_position: pos,
-                            direction: Direction::Bottom,
                         });
                     }
 
@@ -1644,6 +1655,27 @@ mod test {
     use crate::sequential::SequentialPrimitive;
     use crate::world::block::RedstoneState;
     use crate::world::position::DimSize;
+
+    #[test]
+    fn simulator_preserves_dff_latch_torch_state_on_init() -> eyre::Result<()> {
+        let nbt = NBTRoot::from_nbt_bytes(&std::fs::read("test/d-flip-flop-global-smoke.nbt")?)?;
+        let world = nbt.to_world();
+        let torch = Position(22, 6, 3);
+        let sim = Simulator::from_preserving_torch_states_with_limits_and_trace(
+            &world, 256, 50_000, 50_000,
+        )
+        .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
+        let torch_block = sim.world()[torch];
+        let support = torch.walk(torch_block.direction).unwrap();
+
+        let support_is_powered = sim.cobble_power_counts(support).0 > 0;
+        assert!(!sim.burned_out_torches.contains(&torch));
+        assert!(matches!(
+            sim.world()[torch].kind,
+            BlockKind::Torch { is_on } if is_on != support_is_powered
+        ));
+        Ok(())
+    }
 
     #[test]
     pub fn unittest_simulator_init_states() {
@@ -2370,6 +2402,65 @@ mod test {
         };
 
         assert_eq!(strength, 14)
+    }
+
+    #[test]
+    fn unittest_simulator_repeater_does_not_power_lower_front_redstone_directly() {
+        let repeater = Position(1, 1, 2);
+        let lower_front_redstone = Position(0, 1, 1);
+        let mock_world = World {
+            size: DimSize(3, 3, 3),
+            blocks: vec![
+                (repeater.down().unwrap(), test_cobble(0, 0)),
+                (
+                    repeater,
+                    Block {
+                        kind: BlockKind::Repeater {
+                            is_on: true,
+                            is_locked: false,
+                            delay: 1,
+                            lock_input1: None,
+                            lock_input2: None,
+                        },
+                        direction: Direction::East,
+                    },
+                ),
+                (lower_front_redstone.down().unwrap(), test_cobble(0, 0)),
+                (
+                    lower_front_redstone,
+                    Block {
+                        kind: BlockKind::Redstone {
+                            on_count: 0,
+                            state: 0,
+                            strength: 0,
+                        },
+                        direction: Direction::None,
+                    },
+                ),
+            ],
+        };
+
+        let mut sim = Simulator::new(&mock_world, DEFAULT_TRACE_LIMIT);
+        sim.queue.push_back(VecDeque::new());
+        let mut block = sim.world[repeater];
+
+        sim.propgate_repeater_event(
+            &mut block,
+            &Event {
+                id: None,
+                from_id: None,
+                event_type: EventType::RepeaterOn { delay: 0 },
+                target_position: repeater,
+                direction: Direction::East,
+            },
+        )
+        .unwrap();
+
+        assert!(!sim
+            .queue
+            .iter()
+            .flatten()
+            .any(|event| event.target_position == lower_front_redstone));
     }
 
     fn test_repeater(is_on: bool, is_locked: bool, direction: Direction) -> Block {

@@ -1,0 +1,13 @@
+{
+  "format": "redstone-compiler.outputs.v1",
+  "outputs": [
+    {
+      "name": "q",
+      "position": [
+        22,
+        12,
+        7
+      ]
+    }
+  ]
+}

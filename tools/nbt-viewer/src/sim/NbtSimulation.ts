@@ -5,6 +5,7 @@ type WasmModule = {
   NbtSimulator: {
     new (nbtBytes: Uint8Array): WasmSimulator;
     graph_dot(nbtBytes: Uint8Array): RawGraphDotInfo;
+    graph_dot_with_outputs(nbtBytes: Uint8Array, metadataJson: string): RawGraphDotInfo;
     selected_graph_dot(nbtBytes: Uint8Array, folded: boolean, nodeIds: number[]): RawGraphDotInfo;
     selected_nbt(nbtBytes: Uint8Array, folded: boolean, nodeIds: number[]): unknown;
     trace_init(nbtBytes: Uint8Array): TraceReport;
@@ -129,10 +130,12 @@ function samePos(a: [number, number, number], b: [number, number, number]): bool
 export class NbtSimulation {
   private constructor(private readonly sim: WasmSimulator) {}
 
-  static async graphDot(nbtBytes: Uint8Array): Promise<GraphDotInfo> {
+  static async graphDot(nbtBytes: Uint8Array, metadataJson?: string): Promise<GraphDotInfo> {
     const wasm = await loadWasmModule();
     await wasm.default(resolveAssetPath(wasmBinaryPath));
-    const graphDot = wasm.NbtSimulator.graph_dot(nbtBytes);
+    const graphDot = metadataJson
+      ? wasm.NbtSimulator.graph_dot_with_outputs(nbtBytes, metadataJson)
+      : wasm.NbtSimulator.graph_dot(nbtBytes);
 
     return mapGraphDotInfo(graphDot);
   }

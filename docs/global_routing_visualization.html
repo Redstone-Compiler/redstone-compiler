@@ -1,0 +1,482 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Global Routing Visualization</title>
+  <style>
+    :root {
+      --bg: #f5f7fb;
+      --ink: #172033;
+      --muted: #5a667d;
+      --line: #c8d0df;
+      --panel: #ffffff;
+      --red: #d13b3b;
+      --blue: #246bfe;
+      --green: #1c8f5a;
+      --orange: #d87918;
+      --violet: #7651cc;
+      --bad: #b3261e;
+      --good: #0b7a4b;
+      --shadow: 0 10px 30px rgba(23, 32, 51, 0.08);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--ink);
+      background: var(--bg);
+    }
+
+    header {
+      padding: 28px 32px 18px;
+      border-bottom: 1px solid var(--line);
+      background: var(--panel);
+    }
+
+    h1 {
+      margin: 0 0 8px;
+      font-size: 28px;
+      line-height: 1.2;
+      letter-spacing: 0;
+    }
+
+    header p {
+      margin: 0;
+      max-width: 980px;
+      color: var(--muted);
+      line-height: 1.55;
+    }
+
+    main {
+      display: grid;
+      grid-template-columns: minmax(680px, 1fr) 360px;
+      gap: 20px;
+      padding: 20px;
+    }
+
+    section, aside {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+    }
+
+    section {
+      overflow: hidden;
+    }
+
+    aside {
+      padding: 18px;
+      align-self: start;
+      position: sticky;
+      top: 16px;
+    }
+
+    h2 {
+      margin: 0;
+      padding: 16px 18px;
+      font-size: 18px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    h3 {
+      margin: 22px 0 8px;
+      font-size: 15px;
+    }
+
+    .canvas-wrap {
+      padding: 18px;
+    }
+
+    svg {
+      display: block;
+      width: 100%;
+      height: auto;
+      border: 1px solid #d8deeb;
+      border-radius: 6px;
+      background: #fbfcff;
+    }
+
+    .module {
+      fill: #ffffff;
+      stroke: #9aa8bf;
+      stroke-width: 2;
+    }
+
+    .module-title {
+      font-size: 15px;
+      font-weight: 700;
+      fill: var(--ink);
+    }
+
+    .module-subtitle,
+    .label,
+    .note {
+      font-size: 12px;
+      fill: var(--muted);
+    }
+
+    .port {
+      fill: #ffffff;
+      stroke-width: 2;
+    }
+
+    .port-label {
+      font-size: 11px;
+      fill: var(--ink);
+      font-weight: 600;
+    }
+
+    .route {
+      fill: none;
+      stroke-width: 4;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    .route.thin {
+      stroke-width: 2.5;
+      stroke-dasharray: 7 6;
+    }
+
+    .route.bad {
+      stroke: var(--bad);
+      stroke-dasharray: 9 6;
+    }
+
+    .route.good {
+      stroke: var(--good);
+    }
+
+    .route.clock {
+      stroke: var(--blue);
+    }
+
+    .route.data {
+      stroke: var(--green);
+    }
+
+    .route.internal {
+      stroke: var(--violet);
+    }
+
+    .route.warn {
+      stroke: var(--orange);
+    }
+
+    .callout {
+      fill: #fff7ed;
+      stroke: #f1b36d;
+      stroke-width: 1.5;
+    }
+
+    .callout-text {
+      font-size: 12px;
+      fill: #6b3b08;
+      font-weight: 600;
+    }
+
+    .legend {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px 18px;
+      padding: 0 18px 18px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .legend span {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .swatch {
+      width: 28px;
+      height: 4px;
+      border-radius: 999px;
+      display: inline-block;
+      background: var(--line);
+    }
+
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 10px;
+      padding: 18px;
+    }
+
+    .flow-step {
+      min-height: 86px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcff;
+    }
+
+    .flow-step strong {
+      display: block;
+      margin-bottom: 6px;
+      font-size: 13px;
+    }
+
+    .flow-step p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .problem-list {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .problem-list li {
+      padding: 12px 0;
+      border-bottom: 1px solid var(--line);
+      line-height: 1.5;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .problem-list li:last-child {
+      border-bottom: 0;
+    }
+
+    code {
+      padding: 2px 5px;
+      border-radius: 4px;
+      background: #eef2f8;
+      color: #26324a;
+      font-size: 12px;
+    }
+
+    .mini {
+      margin-top: 14px;
+      padding: 12px;
+      border-radius: 8px;
+      background: #f7f9fd;
+      border: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    @media (max-width: 1040px) {
+      main {
+        grid-template-columns: 1fr;
+      }
+
+      aside {
+        position: static;
+      }
+
+      .flow {
+        grid-template-columns: 1fr 1fr;
+      }
+    }
+
+    @media (max-width: 640px) {
+      header {
+        padding: 22px 18px 16px;
+      }
+
+      main {
+        padding: 12px;
+      }
+
+      .flow {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Global Routing 현재 구조와 DFF 실패 지점</h1>
+    <p>
+      이 페이지는 현재 global PnR이 child layout candidate를 배치하고 module 간 route를 잇는 흐름을
+      한 화면에서 보기 위한 설명용 시각화다. 핵심 문제는 sequential output을 단일 route point로 모델링하면서
+      latch 내부 feedback net과 외부 global route의 경계가 흐려지는 데 있다.
+    </p>
+  </header>
+
+  <main>
+    <section>
+      <h2>1. 현재 Global PnR Flow</h2>
+      <div class="flow">
+        <div class="flow-step">
+          <strong>GraphModule</strong>
+          <p>module, instance, port, var 연결을 논리적으로 표현한다.</p>
+        </div>
+        <div class="flow-step">
+          <strong>LayoutCandidate</strong>
+          <p>각 child module을 local placer로 `World3D` 후보로 만든다.</p>
+        </div>
+        <div class="flow-step">
+          <strong>Global Placement</strong>
+          <p>candidate들을 shelf 방식으로 배치하고 origin을 정한다.</p>
+        </div>
+        <div class="flow-step">
+          <strong>Global Routing</strong>
+          <p>top input과 module var를 point-to-point route로 연결한다.</p>
+        </div>
+        <div class="flow-step">
+          <strong>Verify / Metadata</strong>
+          <p>최종 world와 output metadata를 저장하고 simulation으로 확인한다.</p>
+        </div>
+      </div>
+
+      <h2>2. D Flip-Flop 예시</h2>
+      <div class="canvas-wrap">
+        <svg viewBox="0 0 1120 560" role="img" aria-label="D flip-flop global routing diagram">
+          <defs>
+            <marker id="arrow-blue" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+              <path d="M0,0 L0,6 L9,3 z" fill="#246bfe"></path>
+            </marker>
+            <marker id="arrow-green" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+              <path d="M0,0 L0,6 L9,3 z" fill="#1c8f5a"></path>
+            </marker>
+            <marker id="arrow-orange" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+              <path d="M0,0 L0,6 L9,3 z" fill="#d87918"></path>
+            </marker>
+            <marker id="arrow-red" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+              <path d="M0,0 L0,6 L9,3 z" fill="#b3261e"></path>
+            </marker>
+          </defs>
+
+          <rect x="60" y="90" width="210" height="135" rx="8" class="module"></rect>
+          <text x="82" y="124" class="module-title">not_clk</text>
+          <text x="82" y="148" class="module-subtitle">combinational NOT</text>
+          <circle cx="60" cy="180" r="8" class="port" stroke="#246bfe"></circle>
+          <text x="78" y="184" class="port-label">clk</text>
+          <circle cx="270" cy="150" r="8" class="port" stroke="#d87918"></circle>
+          <text x="190" y="154" class="port-label">clk_n</text>
+
+          <rect x="410" y="70" width="250" height="190" rx="8" class="module"></rect>
+          <text x="432" y="106" class="module-title">master D latch</text>
+          <text x="432" y="130" class="module-subtitle">transparent when clk_n = 1</text>
+          <circle cx="410" cy="135" r="8" class="port" stroke="#1c8f5a"></circle>
+          <text x="428" y="139" class="port-label">d</text>
+          <circle cx="410" cy="215" r="8" class="port" stroke="#d87918"></circle>
+          <text x="428" y="219" class="port-label">en</text>
+          <circle cx="660" cy="160" r="8" class="port" stroke="#b3261e"></circle>
+          <text x="628" y="184" class="port-label">q</text>
+          <path d="M500 176 C540 120, 595 120, 620 176 C595 232, 540 232, 500 176" class="route thin internal"></path>
+          <text x="500" y="244" class="note">internal RS feedback loop</text>
+
+          <rect x="810" y="70" width="250" height="190" rx="8" class="module"></rect>
+          <text x="832" y="106" class="module-title">slave D latch</text>
+          <text x="832" y="130" class="module-subtitle">transparent when clk = 1</text>
+          <circle cx="810" cy="135" r="8" class="port" stroke="#b3261e"></circle>
+          <text x="828" y="139" class="port-label">d</text>
+          <circle cx="810" cy="215" r="8" class="port" stroke="#246bfe"></circle>
+          <text x="828" y="219" class="port-label">en</text>
+          <circle cx="1060" cy="160" r="8" class="port" stroke="#1c8f5a"></circle>
+          <text x="1018" y="184" class="port-label">q</text>
+          <path d="M900 176 C940 120, 995 120, 1020 176 C995 232, 940 232, 900 176" class="route thin internal"></path>
+
+          <path d="M20 135 L410 135" class="route data" marker-end="url(#arrow-green)"></path>
+          <text x="24" y="122" class="label">top input d</text>
+
+          <path d="M20 180 L60 180" class="route clock" marker-end="url(#arrow-blue)"></path>
+          <path d="M20 280 C270 315, 665 315, 810 215" class="route clock" marker-end="url(#arrow-blue)"></path>
+          <text x="24" y="302" class="label">top input clk fans out to not_clk and slave.en</text>
+
+          <path d="M270 150 C330 160, 355 210, 410 215" class="route warn" marker-end="url(#arrow-orange)"></path>
+          <text x="296" y="132" class="label">not_clk.clk_n -> master.en</text>
+
+          <path d="M660 160 C710 100, 760 100, 810 135" class="route bad" marker-end="url(#arrow-red)"></path>
+          <text x="678" y="92" class="label">master.q -> slave.d</text>
+
+          <path d="M1060 160 L1100 160" class="route good" marker-end="url(#arrow-green)"></path>
+          <text x="1002" y="140" class="label">top output q</text>
+
+          <rect x="618" y="292" width="360" height="112" rx="8" class="callout"></rect>
+          <text x="640" y="324" class="callout-text">현재 병목</text>
+          <text x="640" y="350" class="note">PhysicalPort가 단일 route point만 갖는다.</text>
+          <text x="640" y="374" class="note">sequential q는 내부 feedback과 외부 route 경계가 필요하다.</text>
+          <text x="640" y="398" class="note">단일 point 선택은 latch 오염 또는 route 실패로 이어진다.</text>
+        </svg>
+      </div>
+      <div class="legend">
+        <span><i class="swatch" style="background: var(--blue)"></i>clock route</span>
+        <span><i class="swatch" style="background: var(--green)"></i>data / output route</span>
+        <span><i class="swatch" style="background: var(--orange)"></i>inverted clock route</span>
+        <span><i class="swatch" style="background: var(--bad)"></i>problematic sequential fanout</span>
+      </div>
+
+      <h2>3. Route Search State</h2>
+      <div class="canvas-wrap">
+        <svg viewBox="0 0 1120 300" role="img" aria-label="Route search state diagram">
+          <rect x="50" y="54" width="190" height="120" rx="8" class="module"></rect>
+          <text x="72" y="88" class="module-title">RouteSearchState</text>
+          <text x="72" y="118" class="note">world</text>
+          <text x="72" y="142" class="note">terminal</text>
+          <text x="72" y="166" class="note">signal_strength</text>
+
+          <path d="M240 114 L360 114" class="route good" marker-end="url(#arrow-green)"></path>
+          <rect x="360" y="54" width="190" height="120" rx="8" class="module"></rect>
+          <text x="382" y="88" class="module-title">place redstone</text>
+          <text x="382" y="118" class="note">strength -= 1</text>
+          <text x="382" y="142" class="note">needs support cobble</text>
+
+          <path d="M550 114 L680 114" class="route warn" marker-end="url(#arrow-orange)"></path>
+          <rect x="680" y="54" width="190" height="120" rx="8" class="module"></rect>
+          <text x="702" y="88" class="module-title">place repeater</text>
+          <text x="702" y="118" class="note">strength = 15</text>
+          <text x="702" y="142" class="note">directional terminal</text>
+
+          <path d="M870 114 L1010 114" class="route clock" marker-end="url(#arrow-blue)"></path>
+          <rect x="910" y="198" width="160" height="58" rx="8" class="callout"></rect>
+          <text x="930" y="232" class="callout-text">goal accepts?</text>
+          <text x="72" y="238" class="note">현재 fallback route는 주변 빈 칸을 탐색한다. 방향성 있는 source에서는 이 fallback이 물리적으로 불가능한 path를 만들 수 있다.</text>
+        </svg>
+      </div>
+    </section>
+
+    <aside>
+      <h3>현재 문제 요약</h3>
+      <ul class="problem-list">
+        <li>
+          <code>PhysicalPort</code>가 논리 output 위치와 routing access 위치를 충분히 분리하지 못한다.
+        </li>
+        <li>
+          sequential output을 내부 redstone tap으로 잡으면 RS latch feedback net에 외부 route가 합류한다.
+        </li>
+        <li>
+          q torch 자체를 source로 쓰면 global router가 route를 못 찾는 경우가 많다.
+        </li>
+        <li>
+          repeater stub를 미리 하나 고르면 target 방향과 안 맞아서 route가 막힐 수 있다.
+        </li>
+        <li>
+          shelf placement가 단순해서 DFF처럼 latch를 이어 붙이는 구조에서 포트 alignment가 우연에 의존한다.
+        </li>
+      </ul>
+
+      <h3>권장 다음 모델</h3>
+      <div class="mini">
+        <code>PhysicalPort</code>를 단일 위치가 아니라 복수 access 후보로 확장한다.
+        예를 들면 <code>logical_position</code>, <code>access_points[]</code>,
+        <code>requires_isolation</code>, <code>cost</code>를 둔다.
+      </div>
+      <div class="mini">
+        global router는 source access와 sink access 조합을 같이 고른다.
+        그러면 q torch, redstone tap, repeater-isolated tap 중 target에 맞는 후보를 선택할 수 있다.
+      </div>
+      <div class="mini">
+        global placement는 route 실패 시 spacing, y alignment, candidate 선택을 재시도할 수 있어야 한다.
+        지금처럼 shelf placement 한 번으로 끝내면 route 실패를 회복하기 어렵다.
+      </div>
+    </aside>
+  </main>
+</body>
+</html>

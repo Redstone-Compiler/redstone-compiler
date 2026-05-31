@@ -4,7 +4,9 @@ use redstone_compiler::graph::graphviz::ToGraphvizGraph;
 use redstone_compiler::graph::world::{WorldGraph, WorldGraphBuilder};
 use redstone_compiler::graph::{GraphNodeId, GraphNodeKind};
 use redstone_compiler::nbt::{NBTRoot, ToNBT};
+use redstone_compiler::output::OutputMetadata;
 use redstone_compiler::transform::place_and_route::place_bound::{PlaceBound, PropagateType};
+use redstone_compiler::transform::place_and_route::utils::world_to_logic_with_outputs;
 use redstone_compiler::transform::world_to_logic::WorldToLogicTransformer;
 use redstone_compiler::world::block::{Block, BlockKind, Direction};
 use redstone_compiler::world::position::{DimSize, Position};
@@ -90,7 +92,7 @@ impl NbtSimulator {
     pub fn new(nbt_bytes: &[u8]) -> Result<NbtSimulator, JsValue> {
         let nbt = NBTRoot::from_nbt_bytes(nbt_bytes).map_err(to_js_error)?;
         let world = nbt.to_world();
-        let sim = Simulator::from_with_limits_and_trace(
+        let sim = Simulator::from_preserving_torch_states_with_limits_and_trace(
             &world,
             MAX_SIMULATION_CYCLES,
             MAX_SIMULATION_EVENTS,
@@ -118,7 +120,7 @@ impl NbtSimulator {
     pub fn trace_init(nbt_bytes: &[u8]) -> Result<JsValue, JsValue> {
         let nbt = NBTRoot::from_nbt_bytes(nbt_bytes).map_err(to_js_error)?;
         let world = nbt.to_world();
-        let report = match Simulator::from_with_limits_and_trace(
+        let report = match Simulator::from_preserving_torch_states_with_limits_and_trace(
             &world,
             MAX_SIMULATION_CYCLES,
             MAX_SIMULATION_EVENTS,
@@ -144,24 +146,16 @@ impl NbtSimulator {
     }
 
     pub fn graph_dot(nbt_bytes: &[u8]) -> Result<JsValue, JsValue> {
-        let nbt = NBTRoot::from_nbt_bytes(nbt_bytes).map_err(to_js_error)?;
-        let world = nbt.to_world();
-        let raw_world_graph = WorldGraphBuilder::new(&world).build();
-        let transformer =
-            WorldToLogicTransformer::new(raw_world_graph.clone(), true).map_err(to_js_error)?;
-        let folded_world_dot = transformer.world_graph().to_graphviz();
-        let folded_world_dot_without_tags = transformer.world_graph().to_graphviz_without_tags();
-        let logic_graph = transformer.transform().map_err(to_js_error)?;
-        let graph_dot = GraphDotInfo {
-            raw_world_dot: raw_world_graph.to_graphviz(),
-            raw_world_dot_without_tags: raw_world_graph.to_graphviz_without_tags(),
-            folded_world_dot,
-            folded_world_dot_without_tags,
-            logic_dot: logic_graph.to_graphviz(),
-            logic_dot_without_tags: logic_graph.to_graphviz_without_tags(),
-        };
+        graph_dot_info(nbt_bytes, None)
+    }
 
-        serde_wasm_bindgen::to_value(&graph_dot).map_err(to_js_error)
+    pub fn graph_dot_with_outputs(
+        nbt_bytes: &[u8],
+        metadata_json: &str,
+    ) -> Result<JsValue, JsValue> {
+        let metadata =
+            serde_json::from_str::<OutputMetadata>(metadata_json).map_err(to_js_error)?;
+        graph_dot_info(nbt_bytes, Some(&metadata))
     }
 
     pub fn selected_graph_dot(
@@ -315,6 +309,31 @@ impl NbtSimulator {
 
 fn to_js_error(error: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&error.to_string())
+}
+
+fn graph_dot_info(nbt_bytes: &[u8], metadata: Option<&OutputMetadata>) -> Result<JsValue, JsValue> {
+    let nbt = NBTRoot::from_nbt_bytes(nbt_bytes).map_err(to_js_error)?;
+    let world = nbt.to_world();
+    let raw_world_graph = WorldGraphBuilder::new(&world).build();
+    let transformer =
+        WorldToLogicTransformer::new(raw_world_graph.clone(), true).map_err(to_js_error)?;
+    let folded_world_dot = transformer.world_graph().to_graphviz();
+    let folded_world_dot_without_tags = transformer.world_graph().to_graphviz_without_tags();
+    let logic_graph = if let Some(metadata) = metadata {
+        world_to_logic_with_outputs(&world, metadata).map_err(to_js_error)?
+    } else {
+        transformer.transform().map_err(to_js_error)?
+    };
+    let graph_dot = GraphDotInfo {
+        raw_world_dot: raw_world_graph.to_graphviz(),
+        raw_world_dot_without_tags: raw_world_graph.to_graphviz_without_tags(),
+        folded_world_dot,
+        folded_world_dot_without_tags,
+        logic_dot: logic_graph.to_graphviz(),
+        logic_dot_without_tags: logic_graph.to_graphviz_without_tags(),
+    };
+
+    serde_wasm_bindgen::to_value(&graph_dot).map_err(to_js_error)
 }
 
 fn snapshots_to_info(snapshots: &[SimulationSnapshot]) -> Vec<SnapshotInfo> {

@@ -18,10 +18,17 @@
     "size": 292
   },
   {
+    "name": "d-flip-flop-global-smoke.nbt",
+    "file": "d-flip-flop-global-smoke.nbt",
+    "path": "examples/d-flip-flop-global-smoke.nbt",
+    "size": 1521,
+    "outputsPath": "examples/d-flip-flop-global-smoke.outputs.json"
+  },
+  {
     "name": "d-latch.nbt",
     "file": "d-latch.nbt",
     "path": "examples/d-latch.nbt",
-    "size": 551
+    "size": 617
   },
   {
     "name": "full-adder.nbt",
@@ -33,7 +40,8 @@
     "name": "half-adder-generated-from-verilog.nbt",
     "file": "half-adder-generated-from-verilog.nbt",
     "path": "examples/half-adder-generated-from-verilog.nbt",
-    "size": 403
+    "size": 403,
+    "outputsPath": "examples/half-adder-generated-from-verilog.outputs.json"
   },
   {
     "name": "half-adder-generated.nbt",
@@ -87,7 +95,7 @@
     "name": "xor-gate-shortest.nbt",
     "file": "xor-gate-shortest.nbt",
     "path": "examples/xor-gate-shortest.nbt",
-    "size": 6958
+    "size": 7075
   },
   {
     "name": "xor-gate-simple.nbt",

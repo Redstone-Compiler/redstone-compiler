@@ -92,6 +92,81 @@ fn main() -> eyre::Result<()> {
             }
         }
 
+        if let Ok(center) = std::env::var("PRINT_NEAR") {
+            let parts = center
+                .split(',')
+                .map(str::trim)
+                .map(str::parse::<usize>)
+                .collect::<Result<Vec<_>, _>>()?;
+            eyre::ensure!(parts.len() == 3, "PRINT_NEAR must be x,y,z, got `{center}`");
+            print_nearby_blocks(&world, Position(parts[0], parts[1], parts[2]), 2);
+        }
+
+        if std::env::var_os("PRINT_UNSUPPORTED").is_some() {
+            print_unsupported_signal_blocks(&world);
+        }
+
+        if std::env::var_os("PRINT_REPEATERS").is_some() {
+            print_repeaters(&world);
+        }
+
+        if let Ok(center) = std::env::var("PRINT_EDGES_NEAR") {
+            let parts = center
+                .split(',')
+                .map(str::trim)
+                .map(str::parse::<usize>)
+                .collect::<Result<Vec<_>, _>>()?;
+            eyre::ensure!(
+                parts.len() == 3,
+                "PRINT_EDGES_NEAR must be x,y,z, got `{center}`"
+            );
+            print_edges_near(
+                graph,
+                &world_graph.positions,
+                &node_kind_by_id,
+                Position(parts[0], parts[1], parts[2]),
+                4,
+            );
+        }
+
+        if let Ok(target) = std::env::var("PRINT_TARGET_STATES") {
+            let parts = target
+                .split(',')
+                .map(str::trim)
+                .map(str::parse::<usize>)
+                .collect::<Result<Vec<_>, _>>()?;
+            eyre::ensure!(
+                parts.len() == 3,
+                "PRINT_TARGET_STATES must be x,y,z, got `{target}`"
+            );
+            print_target_states(&world, Position(parts[0], parts[1], parts[2]))?;
+        }
+
+        if let Ok(target) = std::env::var("PRINT_TARGET_SEQUENCE") {
+            let parts = target
+                .split(',')
+                .map(str::trim)
+                .map(str::parse::<usize>)
+                .collect::<Result<Vec<_>, _>>()?;
+            eyre::ensure!(
+                parts.len() == 3,
+                "PRINT_TARGET_SEQUENCE must be x,y,z, got `{target}`"
+            );
+            print_target_sequence(&world, Position(parts[0], parts[1], parts[2]))?;
+        }
+
+        if std::env::var_os("PRINT_DFF_ACTIVITY").is_some() {
+            print_dff_activity(&world)?;
+        }
+
+        if std::env::var_os("STRESS_DFF_SIM").is_some() {
+            stress_dff_simulation(&world)?;
+        }
+
+        if std::env::var_os("PRINT_DFF_WATCH").is_some() {
+            print_dff_watch_sequence(&world)?;
+        }
+
         if std::env::var_os("PRINT_LOGIC").is_some() {
             let logic = world_to_logic(&world)?;
             println!("  logic graph:");
@@ -233,6 +308,437 @@ fn main() -> eyre::Result<()> {
     }
 
     Ok(())
+}
+
+fn print_nearby_blocks(world: &redstone_compiler::world::World, center: Position, radius: usize) {
+    println!("  nearby blocks around {:?}:", center);
+    for (pos, block) in &world.blocks {
+        let dx = pos.0.abs_diff(center.0);
+        let dy = pos.1.abs_diff(center.1);
+        let dz = pos.2.abs_diff(center.2);
+        if dx <= radius && dy <= radius && dz <= radius {
+            println!("    {:?}: {:?} dir={:?}", pos, block.kind, block.direction);
+        }
+    }
+}
+
+fn print_unsupported_signal_blocks(world: &redstone_compiler::world::World) {
+    let blocks = world
+        .blocks
+        .iter()
+        .filter(|(pos, block)| {
+            matches!(
+                block.kind,
+                BlockKind::Redstone { .. } | BlockKind::Repeater { .. }
+            ) && pos.down().is_none_or(|bottom| {
+                !world
+                    .blocks
+                    .iter()
+                    .any(|(p, b)| *p == bottom && matches!(b.kind, BlockKind::Cobble { .. }))
+            })
+        })
+        .collect::<Vec<_>>();
+    println!("  unsupported signal blocks: {}", blocks.len());
+    for (pos, block) in blocks.iter().take(40) {
+        println!("    {:?}: {:?} dir={:?}", pos, block.kind, block.direction);
+    }
+}
+
+fn print_repeaters(world: &redstone_compiler::world::World) {
+    println!("  repeaters:");
+    for (pos, block) in &world.blocks {
+        if matches!(block.kind, BlockKind::Repeater { .. }) {
+            println!("    {:?}: {:?} dir={:?}", pos, block.kind, block.direction);
+        }
+    }
+}
+
+fn print_edges_near(
+    graph: &redstone_compiler::graph::Graph,
+    positions: &HashMap<GraphNodeId, Position>,
+    node_kind_by_id: &HashMap<GraphNodeId, String>,
+    center: Position,
+    radius: usize,
+) {
+    println!("  raw edges near {:?}:", center);
+    let nearby_ids = positions
+        .iter()
+        .filter_map(|(id, pos)| {
+            (pos.0.abs_diff(center.0) <= radius
+                && pos.1.abs_diff(center.1) <= radius
+                && pos.2.abs_diff(center.2) <= radius)
+                .then_some(*id)
+        })
+        .collect::<HashSet<_>>();
+    for node in graph
+        .nodes
+        .iter()
+        .filter(|node| nearby_ids.contains(&node.id))
+    {
+        let pos = positions[&node.id];
+        let kind = node_kind_by_id
+            .get(&node.id)
+            .map(String::as_str)
+            .unwrap_or("unknown");
+        println!("    {}: {} @ {:?}", node.id, kind, pos);
+        for input in &node.inputs {
+            if let Some(input_pos) = positions.get(input) {
+                let input_kind = node_kind_by_id
+                    .get(input)
+                    .map(String::as_str)
+                    .unwrap_or("unknown");
+                println!("      <- {}: {} @ {:?}", input, input_kind, input_pos);
+            }
+        }
+        for output in &node.outputs {
+            if let Some(output_pos) = positions.get(output) {
+                let output_kind = node_kind_by_id
+                    .get(output)
+                    .map(String::as_str)
+                    .unwrap_or("unknown");
+                println!("      -> {}: {} @ {:?}", output, output_kind, output_pos);
+            }
+        }
+    }
+}
+
+fn print_target_states(
+    world: &redstone_compiler::world::World,
+    target: Position,
+) -> eyre::Result<()> {
+    let switches = world
+        .blocks
+        .iter()
+        .filter_map(|(pos, block)| matches!(block.kind, BlockKind::Switch { .. }).then_some(*pos))
+        .collect::<Vec<_>>();
+    println!("  target states for {:?}, switches: {:?}", target, switches);
+    for mask in 0..(1usize << switches.len()) {
+        let mut sim =
+            Simulator::from_preserving_torch_states_with_limits_and_trace(world, 256, 50_000, 0)
+                .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
+        let states = switches
+            .iter()
+            .enumerate()
+            .map(|(index, pos)| (*pos, (mask & (1 << index)) != 0))
+            .collect::<Vec<_>>();
+        sim.change_state_with_limits(states, 256, 50_000)?;
+        println!(
+            "    mask={mask:0width$b} {:?}",
+            sim.world()[target].kind,
+            width = switches.len()
+        );
+    }
+    Ok(())
+}
+
+fn print_target_sequence(
+    world: &redstone_compiler::world::World,
+    target: Position,
+) -> eyre::Result<()> {
+    let switches = world
+        .blocks
+        .iter()
+        .filter_map(|(pos, block)| matches!(block.kind, BlockKind::Switch { .. }).then_some(*pos))
+        .collect::<Vec<_>>();
+    eyre::ensure!(switches.len() >= 2, "expected at least d and clk switches");
+    let d = switches[0];
+    let clk = switches[1];
+    let mut sim =
+        Simulator::from_preserving_torch_states_with_limits_and_trace(world, 256, 50_000, 0)
+            .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
+    println!(
+        "  target sequence for {:?}, d={:?}, clk={:?}",
+        target, d, clk
+    );
+    println!("    init {:?}", sim.world()[target].kind);
+    for (name, pos, value) in [
+        ("d=1", d, true),
+        ("clk=1", clk, true),
+        ("clk=0", clk, false),
+        ("d=0", d, false),
+        ("clk=1", clk, true),
+    ] {
+        sim.change_state_with_limits(vec![(pos, value)], 256, 50_000)?;
+        println!("    {name:<5} {:?}", sim.world()[target].kind);
+    }
+    Ok(())
+}
+
+fn print_dff_activity(world: &redstone_compiler::world::World) -> eyre::Result<()> {
+    let switches = world
+        .blocks
+        .iter()
+        .filter_map(|(pos, block)| matches!(block.kind, BlockKind::Switch { .. }).then_some(*pos))
+        .collect::<Vec<_>>();
+    eyre::ensure!(switches.len() >= 2, "expected d and clk switches");
+    let d = switches[0];
+    let clk = switches[1];
+    let q = Position(22, 6, 5);
+    let redstones = world
+        .blocks
+        .iter()
+        .filter_map(|(pos, block)| matches!(block.kind, BlockKind::Redstone { .. }).then_some(*pos))
+        .collect::<Vec<_>>();
+    let mut ever_on = HashSet::<Position>::new();
+    let mut sim =
+        Simulator::from_preserving_torch_states_with_limits_and_trace(world, 256, 50_000, 0)
+            .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
+    record_on_redstones(sim.world(), &redstones, &mut ever_on);
+
+    let randomish_steps = [
+        ("#1 on", d, true),
+        ("#2 on", clk, true),
+        ("#1 off", d, false),
+        ("#2 off", clk, false),
+        ("#2 on", clk, true),
+        ("#1 on", d, true),
+        ("#2 off", clk, false),
+        ("#1 off", d, false),
+        ("#1 on", d, true),
+        ("#2 on", clk, true),
+    ];
+    println!(
+        "  dff randomish activity: #1={:?}, #2={:?}, q={:?}",
+        d, clk, q
+    );
+    println!("    init q={}", block_power(sim.world(), q));
+    for (name, pos, value) in randomish_steps {
+        sim.change_state_with_limits(vec![(pos, value)], 256, 50_000)?;
+        record_on_redstones(sim.world(), &redstones, &mut ever_on);
+        println!("    {name:<7} q={}", block_power(sim.world(), q));
+    }
+
+    let never_on = redstones
+        .iter()
+        .copied()
+        .filter(|pos| !ever_on.contains(pos))
+        .collect::<Vec<_>>();
+    println!(
+        "    redstones never powered during randomish sequence: {} / {}",
+        never_on.len(),
+        redstones.len()
+    );
+    for pos in never_on.iter().take(80) {
+        println!("      never_on {:?}", pos);
+    }
+
+    print_dff_edge_checks(world, "assume #1=d #2=clk", d, clk, q)?;
+    print_dff_edge_checks(world, "assume #1=clk #2=d", clk, d, q)?;
+
+    Ok(())
+}
+
+fn print_dff_edge_checks(
+    world: &redstone_compiler::world::World,
+    label: &str,
+    d: Position,
+    clk: Position,
+    q: Position,
+) -> eyre::Result<()> {
+    println!("  dff edge checks {label}: d={:?}, clk={:?}", d, clk);
+    println!("    rising:");
+    for data in [false, true, false] {
+        let mut sim =
+            Simulator::from_preserving_torch_states_with_limits_and_trace(world, 256, 50_000, 0)
+                .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
+        sim.change_state_with_limits(vec![(clk, false)], 256, 50_000)?;
+        sim.change_state_with_limits(vec![(d, data)], 256, 50_000)?;
+        let before = block_power(sim.world(), q);
+        sim.change_state_with_limits(vec![(clk, true)], 256, 50_000)?;
+        let after = block_power(sim.world(), q);
+        println!("      d={data:<5} q_before_edge={before:<5} q_after_rising={after}");
+    }
+    println!("    falling:");
+    for data in [false, true, false] {
+        let mut sim =
+            Simulator::from_preserving_torch_states_with_limits_and_trace(world, 256, 50_000, 0)
+                .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
+        sim.change_state_with_limits(vec![(clk, true)], 256, 50_000)?;
+        sim.change_state_with_limits(vec![(d, data)], 256, 50_000)?;
+        let before = block_power(sim.world(), q);
+        sim.change_state_with_limits(vec![(clk, false)], 256, 50_000)?;
+        let after = block_power(sim.world(), q);
+        println!("      d={data:<5} q_before_edge={before:<5} q_after_falling={after}");
+    }
+    Ok(())
+}
+
+fn stress_dff_simulation(world: &redstone_compiler::world::World) -> eyre::Result<()> {
+    let switches = world
+        .blocks
+        .iter()
+        .filter_map(|(pos, block)| matches!(block.kind, BlockKind::Switch { .. }).then_some(*pos))
+        .collect::<Vec<_>>();
+    eyre::ensure!(switches.len() >= 2, "expected d and clk switches");
+    let output = Position(22, 6, 5);
+    let iterations = std::env::var("STRESS_DFF_SIM")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(500);
+
+    for (label, data, clock) in [
+        ("#1=data #2=clock", switches[0], switches[1]),
+        ("#1=clock #2=data", switches[1], switches[0]),
+    ] {
+        let mut signatures = HashMap::<Vec<bool>, usize>::new();
+        let mut edge_failures = Vec::new();
+        let mut runtime_failures = Vec::new();
+
+        for iteration in 0..iterations {
+            match run_dff_stress_sequence(world, data, clock, output) {
+                Ok(result) => {
+                    *signatures.entry(result.timeline.clone()).or_default() += 1;
+                    if !result.edge_expectations_hold {
+                        edge_failures.push((iteration, result.timeline));
+                    }
+                }
+                Err(error) => {
+                    runtime_failures.push((iteration, error.to_string()));
+                }
+            }
+        }
+
+        println!("  stress {label}: iterations={iterations}");
+        println!("    runtime failures: {}", runtime_failures.len());
+        for (iteration, error) in runtime_failures.iter().take(8) {
+            println!("      iter {iteration}: {error}");
+        }
+        println!("    distinct timelines: {}", signatures.len());
+        for (timeline, count) in &signatures {
+            println!("      {count}x {:?}", timeline);
+        }
+        println!("    edge expectation failures: {}", edge_failures.len());
+        for (iteration, timeline) in edge_failures.iter().take(8) {
+            println!("      iter {iteration}: {:?}", timeline);
+        }
+    }
+
+    Ok(())
+}
+
+fn print_dff_watch_sequence(world: &redstone_compiler::world::World) -> eyre::Result<()> {
+    let d = Position(28, 1, 1);
+    let clk = Position(30, 4, 1);
+    let watched = [
+        ("#1/d_switch", d),
+        ("#2/clk_switch", clk),
+        ("not_clk.in", Position(1, 0, 4)),
+        ("not_clk.out", Position(2, 1, 3)),
+        ("master.d", Position(7, 0, 1)),
+        ("master.en", Position(8, 5, 1)),
+        ("master.q", Position(10, 6, 5)),
+        ("slave.d", Position(19, 0, 1)),
+        ("slave.d.stub", Position(18, 1, 2)),
+        ("slave.en", Position(20, 5, 1)),
+        ("slave.q", Position(22, 6, 5)),
+    ];
+    let mut sim =
+        Simulator::from_preserving_torch_states_with_limits_and_trace(world, 256, 50_000, 0)
+            .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
+
+    println!("  dff watch sequence:");
+    print_watch_row("init", sim.world(), &watched);
+    for (name, pos, value) in [
+        ("d=1", d, true),
+        ("clk=1", clk, true),
+        ("clk=0", clk, false),
+        ("d=0", d, false),
+        ("clk=1", clk, true),
+        ("clk=0", clk, false),
+        ("d=1", d, true),
+        ("clk=1", clk, true),
+    ] {
+        sim.change_state_with_limits(vec![(pos, value)], 256, 50_000)?;
+        print_watch_row(name, sim.world(), &watched);
+    }
+    Ok(())
+}
+
+fn print_watch_row(
+    name: &str,
+    world: &redstone_compiler::world::World3D,
+    watched: &[(&str, Position)],
+) {
+    println!("    {name}:");
+    for (label, pos) in watched {
+        println!(
+            "      {label:<14} {:<5} {:?}",
+            block_power(world, *pos),
+            world[*pos].kind
+        );
+    }
+}
+
+struct DffStressResult {
+    timeline: Vec<bool>,
+    edge_expectations_hold: bool,
+}
+
+fn run_dff_stress_sequence(
+    world: &redstone_compiler::world::World,
+    data: Position,
+    clock: Position,
+    output: Position,
+) -> eyre::Result<DffStressResult> {
+    let mut sim =
+        Simulator::from_preserving_torch_states_with_limits_and_trace(world, 256, 50_000, 0)
+            .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
+
+    let mut timeline = Vec::new();
+    timeline.push(block_power(sim.world(), output));
+    for (pos, value) in [
+        (data, true),
+        (clock, true),
+        (clock, false),
+        (data, false),
+        (clock, true),
+        (clock, false),
+        (data, true),
+        (clock, true),
+        (data, false),
+        (clock, false),
+    ] {
+        sim.change_state_with_limits(vec![(pos, value)], 256, 50_000)?;
+        timeline.push(block_power(sim.world(), output));
+    }
+
+    // Positive-edge DFF expectation for the sequence above:
+    // initial q=false, then q captures data on each clock false->true transition.
+    let edge_expectations_hold = timeline[2] == true && timeline[5] == false && timeline[8] == true;
+
+    Ok(DffStressResult {
+        timeline,
+        edge_expectations_hold,
+    })
+}
+
+fn record_on_redstones(
+    world: &redstone_compiler::world::World3D,
+    redstones: &[Position],
+    ever_on: &mut HashSet<Position>,
+) {
+    for pos in redstones {
+        if block_power(world, *pos) {
+            ever_on.insert(*pos);
+        }
+    }
+}
+
+fn block_power(world: &redstone_compiler::world::World3D, pos: Position) -> bool {
+    match world[pos].kind {
+        BlockKind::Redstone {
+            strength, on_count, ..
+        } => strength > 0 || on_count > 0,
+        BlockKind::Torch { is_on }
+        | BlockKind::Repeater { is_on, .. }
+        | BlockKind::Switch { is_on } => is_on,
+        BlockKind::Cobble {
+            on_count,
+            on_base_count,
+        } => on_count > 0 || on_base_count > 0,
+        BlockKind::RedstoneBlock => true,
+        _ => false,
+    }
 }
 
 fn print_physical_components(
