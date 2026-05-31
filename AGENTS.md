@@ -1,15 +1,12 @@
 # Agent Notes
 
-## Project Notes
-
-- Local placer improvement context: `docs/local_placer_improvement.md`
-- Hierarchical placer design and SCC/primitive layout strategy: `docs/hierarchical_placer_design.md`
-- Sequential primitive and soft macro placement notes: `docs/sequential_primitives.md`
-- Verilog frontend incremental implementation plan: `docs/superpowers/plans/2026-05-24-verilog-frontend.md`
-
 ## Documentation
 
 When asked to create or preserve project documentation, add an appropriate file under `docs/` and link it from this file when it is useful for future agents.
+
+## Git
+
+When committing changes, include the intent behind the change in the commit message body.
 
 ## Testing
 
