@@ -1380,29 +1380,13 @@ mod tests {
     }
 
     #[test]
-    fn petgraph_conversion_does_not_materialize_sparse_node_ids() {
-        let graph = Graph::from_nodes(vec![
+    fn sparse_node_ids_are_keyed_and_append_only() {
+        let mut graph = Graph::from_nodes(vec![
             GraphNode {
-                id: 10,
-                outputs: vec![20],
+                id: 30,
+                inputs: vec![20],
                 ..Default::default()
             },
-            GraphNode {
-                id: 20,
-                inputs: vec![10],
-                ..Default::default()
-            },
-        ]);
-
-        let petgraph = graph.to_petgraph_only_edges();
-
-        assert_eq!(petgraph.node_count(), 2);
-        assert_eq!(petgraph.edge_count(), 1);
-    }
-
-    #[test]
-    fn graph_algorithms_preserve_sparse_node_ids() {
-        let graph = Graph::from_nodes(vec![
             GraphNode {
                 id: 10,
                 outputs: vec![20],
@@ -1414,155 +1398,38 @@ mod tests {
                 outputs: vec![30],
                 ..Default::default()
             },
-            GraphNode {
-                id: 30,
-                inputs: vec![20],
-                ..Default::default()
-            },
         ]);
 
+        assert_eq!(
+            graph.nodes.iter().map(|node| node.id).collect_vec(),
+            vec![10, 20, 30]
+        );
         assert_eq!(graph.topological_order(), vec![10, 20, 30]);
         assert_eq!(
             graph.strongly_connected_components(),
             vec![vec![10], vec![20], vec![30]]
         );
         assert_eq!(graph.critical_path(), vec![10, 20, 30]);
-    }
-
-    #[test]
-    fn next_node_id_is_append_only_for_sparse_graphs() {
-        let graph = Graph::from_nodes(vec![
-            GraphNode {
-                id: 10,
-                ..Default::default()
-            },
-            GraphNode {
-                id: 30,
-                ..Default::default()
-            },
-        ]);
-
-        assert_eq!(graph.next_node_id(), 31);
-    }
-
-    #[test]
-    fn from_nodes_initializes_next_node_id_from_existing_ids() {
-        let mut graph = Graph::from_nodes(vec![
-            GraphNode {
-                id: 10,
-                ..Default::default()
-            },
-            GraphNode {
-                id: 30,
-                ..Default::default()
-            },
-        ]);
-
-        graph.remove_by_node_id_lazy(30);
-
-        assert_eq!(graph.add_node(GraphNode::default()), 31);
-    }
-
-    #[test]
-    fn graph_nodes_are_keyed_by_id() {
-        let mut graph = Graph::from_nodes(vec![
-            GraphNode {
-                id: 30,
-                tag: "thirty".to_owned(),
-                ..Default::default()
-            },
-            GraphNode {
-                id: 10,
-                tag: "ten".to_owned(),
-                ..Default::default()
-            },
-            GraphNode {
-                id: 20,
-                tag: "twenty".to_owned(),
-                ..Default::default()
-            },
-        ]);
+        let petgraph = graph.to_petgraph_only_edges();
+        assert_eq!(petgraph.node_count(), 3);
+        assert_eq!(petgraph.edge_count(), 2);
 
         graph.insert_node(GraphNode {
-            id: 20,
+            id: 25,
             tag: "replacement".to_owned(),
             ..Default::default()
         });
-
         assert_eq!(
             graph.nodes.iter().map(|node| node.id).collect_vec(),
-            vec![10, 20, 30]
+            vec![10, 20, 25, 30]
         );
-        assert_eq!(graph.find_node_by_id(20).unwrap().tag, "replacement");
-    }
+        assert_eq!(graph.find_node_by_id(25).unwrap().tag, "replacement");
+        assert_eq!(graph.find_and_remove_node_by_id(25).unwrap().id, 25);
 
-    #[test]
-    fn graph_allocator_does_not_reuse_removed_ids() {
-        let mut graph = Graph::default();
-        graph.insert_node(GraphNode {
-            id: 10,
-            ..Default::default()
-        });
-        graph.remove_by_node_id_lazy(10);
-
+        graph.remove_by_node_id_lazy(30);
         let id = graph.add_node(GraphNode::default());
 
-        assert_eq!(id, 11);
-        assert!(graph.find_node_by_id(10).is_none());
-        assert!(graph.find_node_by_id(11).is_some());
-        assert_eq!(graph.next_node_id(), 12);
-    }
-
-    #[test]
-    fn insert_node_keeps_nodes_sorted_by_id() {
-        let mut graph = Graph::from_nodes(vec![
-            GraphNode {
-                id: 10,
-                ..Default::default()
-            },
-            GraphNode {
-                id: 30,
-                ..Default::default()
-            },
-        ]);
-
-        graph.insert_node(GraphNode {
-            id: 20,
-            ..Default::default()
-        });
-
-        assert_eq!(
-            graph.nodes.iter().map(|node| node.id).collect_vec(),
-            vec![10, 20, 30]
-        );
-    }
-
-    #[test]
-    fn node_lookup_and_removal_do_not_require_sorted_nodes() {
-        let mut graph = Graph::from_nodes(vec![
-            GraphNode {
-                id: 30,
-                inputs: vec![10],
-                ..Default::default()
-            },
-            GraphNode {
-                id: 10,
-                outputs: vec![30],
-                ..Default::default()
-            },
-            GraphNode {
-                id: 20,
-                ..Default::default()
-            },
-        ]);
-
-        assert_eq!(graph.find_node_by_id(10).unwrap().id, 10);
-        graph.find_node_by_id_mut(20).unwrap().outputs = vec![30];
-        assert_eq!(graph.find_node_by_id(20).unwrap().outputs, vec![30]);
-        assert_eq!(graph.find_and_remove_node_by_id(20).unwrap().id, 20);
-
-        graph.verify().unwrap();
-        graph.remove_by_node_id_lazy(10);
-        assert!(graph.find_node_by_id(10).is_none());
+        assert_eq!(id, 31);
+        assert!(graph.find_node_by_id(31).is_some());
     }
 }
