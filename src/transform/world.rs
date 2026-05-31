@@ -83,8 +83,6 @@ impl WorldGraphTransformer {
             );
         }
 
-        // make clustered node
-        let mut next_id = self.graph.graph.next_node_id();
         for members in group_members.values_mut() {
             members.sort_unstable();
         }
@@ -95,7 +93,6 @@ impl WorldGraphTransformer {
         }
 
         for group_id in group_ids.iter().sorted() {
-            let node_id = next_id;
             let node = GraphNode {
                 kind: GraphNodeKind::Block(Block {
                     kind: BlockKind::Redstone {
@@ -114,6 +111,7 @@ impl WorldGraphTransformer {
                 ),
                 ..Default::default()
             };
+            let node_id = self.graph.graph.add_node(node);
 
             group_inputs[group_id].iter().for_each(|&conn| {
                 self.graph
@@ -133,8 +131,6 @@ impl WorldGraphTransformer {
             });
 
             self.graph.routings.insert(node_id);
-            self.graph.graph.insert_node_with_id(node_id, node);
-            next_id += 1;
         }
 
         self.graph.graph.build_inputs();

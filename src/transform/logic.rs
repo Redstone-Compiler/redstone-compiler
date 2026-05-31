@@ -308,17 +308,11 @@ impl LogicGraphTransformer {
         )?
         .simplify();
 
-        let mut nodes = Vec::new();
-
         fn make_rc_form(
-            nodes: &mut Vec<(GraphNodeId, GraphNode)>,
-            id: &mut usize,
+            graph: &mut Graph,
             lookup: &Vec<(GraphNodeId, GraphNode)>,
             node: &quine_mc_cluskey::Bool,
         ) -> GraphNodeId {
-            let tid = *id;
-            *id += 1;
-
             let node = match node {
                 quine_mc_cluskey::Bool::Term(v) => GraphNode {
                     kind: GraphNodeKind::Input(lookup[*v as usize].1.kind.as_input().to_owned()),
@@ -330,7 +324,7 @@ impl LogicGraphTransformer {
                     }),
                     inputs: op
                         .iter()
-                        .map(|v| make_rc_form(nodes, id, lookup, v))
+                        .map(|v| make_rc_form(graph, lookup, v))
                         .collect_vec(),
                     ..Default::default()
                 },
@@ -340,7 +334,7 @@ impl LogicGraphTransformer {
                     }),
                     inputs: op
                         .iter()
-                        .map(|v| make_rc_form(nodes, id, lookup, v))
+                        .map(|v| make_rc_form(graph, lookup, v))
                         .collect_vec(),
                     ..Default::default()
                 },
@@ -348,29 +342,26 @@ impl LogicGraphTransformer {
                     kind: GraphNodeKind::Logic(Logic {
                         logic_type: LogicType::Not,
                     }),
-                    inputs: vec![make_rc_form(nodes, id, lookup, v)],
+                    inputs: vec![make_rc_form(graph, lookup, v)],
                     ..Default::default()
                 },
                 _ => unreachable!(),
             };
 
             if let GraphNodeKind::Input(name) = &node.kind {
-                if let Some((node_id, _)) = nodes.iter().find(
-                    |(_, node)| matches!(&node.kind, GraphNodeKind::Input(other) if name == other),
+                if let Some(existing) = graph.nodes.iter().find(
+                    |existing| matches!(&existing.kind, GraphNodeKind::Input(other) if name == other),
                 ) {
-                    *id -= 1;
-                    return *node_id;
+                    return existing.id;
                 }
             }
 
-            nodes.push((tid, node));
-            tid
+            graph.add_node(node)
         }
 
-        let mut id = 0;
-        let node = make_rc_form(&mut nodes, &mut id, &input_nodes, &results[0]);
-        let output_id = nodes.len();
-        let output_node = GraphNode {
+        let mut graph = Graph::default();
+        let node = make_rc_form(&mut graph, &input_nodes, &results[0]);
+        graph.add_node(GraphNode {
             kind: GraphNodeKind::Output(
                 self.graph
                     .graph
@@ -382,9 +373,8 @@ impl LogicGraphTransformer {
             ),
             inputs: vec![node],
             ..Default::default()
-        };
-        nodes.push((output_id, output_node));
-        self.graph.graph = Graph::from_nodes_with_ids(nodes);
+        });
+        self.graph.graph = graph;
         self.graph.graph.build_outputs();
         self.graph.graph.build_producers();
         self.graph.graph.build_consumers();
@@ -481,11 +471,28 @@ impl LogicGraphTransformer {
             }
         }
 
-        let mut next_id = self.graph.graph.next_node_id();
         for (from, to) in direct_edges {
-            let first_not = next_id;
-            let second_not = next_id + 1;
-            next_id += 2;
+            let first_not = self.graph.graph.add_node(GraphNode {
+                kind: GraphNodeKind::Logic(Logic {
+                    logic_type: LogicType::Not,
+                }),
+                inputs: vec![from],
+                tag: "auto-buffer".to_owned(),
+                ..Default::default()
+            });
+            let second_not = self.graph.graph.add_node(GraphNode {
+                kind: GraphNodeKind::Logic(Logic {
+                    logic_type: LogicType::Not,
+                }),
+                inputs: vec![first_not],
+                outputs: vec![to],
+                tag: "auto-buffer".to_owned(),
+            });
+            self.graph
+                .graph
+                .find_node_by_id_mut(first_not)
+                .unwrap()
+                .outputs = vec![second_not];
 
             self.graph
                 .graph
@@ -493,29 +500,6 @@ impl LogicGraphTransformer {
             self.graph
                 .graph
                 .replace_target_input_node_ids(to, from, vec![second_not]);
-
-            self.graph.graph.insert_node_with_id(
-                first_not,
-                GraphNode {
-                    kind: GraphNodeKind::Logic(Logic {
-                        logic_type: LogicType::Not,
-                    }),
-                    inputs: vec![from],
-                    outputs: vec![second_not],
-                    tag: "auto-buffer".to_owned(),
-                },
-            );
-            self.graph.graph.insert_node_with_id(
-                second_not,
-                GraphNode {
-                    kind: GraphNodeKind::Logic(Logic {
-                        logic_type: LogicType::Not,
-                    }),
-                    inputs: vec![first_not],
-                    outputs: vec![to],
-                    tag: "auto-buffer".to_owned(),
-                },
-            );
         }
 
         self.graph.graph.build_inputs();

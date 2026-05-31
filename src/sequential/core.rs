@@ -101,7 +101,7 @@ pub fn rs_latch_prefix_graph(graph: &Graph, core: &RsLatchCore) -> Option<LogicG
         }
     }
 
-    let mut nodes = graph
+    let nodes = graph
         .nodes
         .iter()
         .filter(|node| prefix_nodes.contains(&node.id))
@@ -115,19 +115,14 @@ pub fn rs_latch_prefix_graph(graph: &Graph, core: &RsLatchCore) -> Option<LogicG
         })
         .collect::<Vec<_>>();
 
-    let mut next_node_id = graph.next_node_id();
-    for (output_name, source_node_id) in output_roots {
-        nodes.push((
-            next_node_id,
-            GraphNode {
-                kind: GraphNodeKind::Output(output_name.to_owned()),
-                inputs: vec![source_node_id],
-                ..Default::default()
-            },
-        ));
-        next_node_id += 1;
-    }
     let mut graph = Graph::from_nodes_with_ids(nodes);
+    for (output_name, source_node_id) in output_roots {
+        graph.add_node(GraphNode {
+            kind: GraphNodeKind::Output(output_name.to_owned()),
+            inputs: vec![source_node_id],
+            ..Default::default()
+        });
+    }
     graph.build_outputs();
     graph.build_producers();
     graph.build_consumers();

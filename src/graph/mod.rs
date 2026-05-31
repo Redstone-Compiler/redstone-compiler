@@ -277,7 +277,7 @@ impl GraphNodes {
             .for_each(|entry| self.insert_with_id(entry.id, entry.node));
     }
 
-    pub fn insert_with_id(&mut self, id: GraphNodeId, node: GraphNode) {
+    fn insert_with_id(&mut self, id: GraphNodeId, node: GraphNode) {
         self.nodes.insert(id, node);
     }
 }
@@ -724,12 +724,12 @@ impl Graph {
             .map(|node| node.id)
     }
 
-    pub fn next_node_id(&self) -> GraphNodeId {
+    fn next_node_id(&self) -> GraphNodeId {
         self.next_node_id
             .max(self.max_node_id().map_or(0, |id| id + 1))
     }
 
-    pub fn allocate_node_id(&mut self) -> GraphNodeId {
+    fn allocate_node_id(&mut self) -> GraphNodeId {
         let id = self.next_node_id();
         self.next_node_id = id + 1;
         id
@@ -737,13 +737,8 @@ impl Graph {
 
     pub fn add_node(&mut self, node: GraphNode) -> GraphNodeId {
         let id = self.allocate_node_id();
-        self.insert_node_with_id(id, node);
-        id
-    }
-
-    pub(crate) fn insert_node_with_id(&mut self, id: GraphNodeId, node: GraphNode) {
-        self.next_node_id = self.next_node_id.max(id + 1);
         self.nodes.insert_with_id(id, node);
+        id
     }
 
     pub fn find_node_by_input_name(&mut self, input_name: &str) -> Option<GraphNodeMut<'_>> {
@@ -805,7 +800,7 @@ impl Graph {
         outputs: Vec<GraphNodeId>,
         tag: String,
     ) -> GraphNodeId {
-        let replacement_id = self.next_node_id();
+        let replacement_id = self.allocate_node_id();
 
         for input in &inputs {
             if let Some(mut node) = self.find_node_by_id_mut(*input) {
@@ -827,7 +822,7 @@ impl Graph {
             self.remove_by_node_id_lazy(*node_id);
         }
 
-        self.insert_node_with_id(
+        self.nodes.insert_with_id(
             replacement_id,
             GraphNode {
                 kind,
@@ -1259,7 +1254,10 @@ impl<'a> From<Vec<SubGraphWithGraph<'a>>> for Graph {
     }
 }
 
-pub fn subgraphs_to_clustered_graph(graph: &Graph, subgraphs: &[SubGraph]) -> ClusteredGraph {
+pub fn subgraphs_to_clustered_graph(
+    source_graph: &Graph,
+    subgraphs: &[SubGraph],
+) -> ClusteredGraph {
     // GraphNodeId, Cluster Index
     let cluster_index: HashMap<GraphNodeId, usize> = subgraphs
         .iter()
@@ -1267,7 +1265,7 @@ pub fn subgraphs_to_clustered_graph(graph: &Graph, subgraphs: &[SubGraph]) -> Cl
         .flat_map(|(index, sg)| sg.nodes.iter().map(|&id| (id, index)).collect_vec())
         .collect();
 
-    let mut nodes = subgraphs
+    let nodes = subgraphs
         .iter()
         .enumerate()
         .map(|(index, sg)| {
@@ -1284,6 +1282,7 @@ pub fn subgraphs_to_clustered_graph(graph: &Graph, subgraphs: &[SubGraph]) -> Cl
             )
         })
         .collect_vec();
+    let mut clustered_graph = Graph::from_nodes_with_ids(nodes);
 
     let weighted_node = subgraphs
         .iter()
@@ -1292,7 +1291,7 @@ pub fn subgraphs_to_clustered_graph(graph: &Graph, subgraphs: &[SubGraph]) -> Cl
             let consumers = sg
                 .nodes
                 .iter()
-                .flat_map(|node| graph.consumers[&node.id()].clone())
+                .flat_map(|node| source_graph.consumers[&node.id()].clone())
                 .collect_vec();
 
             // cluster_index, weight
@@ -1323,35 +1322,34 @@ pub fn subgraphs_to_clustered_graph(graph: &Graph, subgraphs: &[SubGraph]) -> Cl
         })
         .collect_vec();
 
-    let weighted_base_id = nodes.len();
-    let mut weighted_nodes = Vec::new();
-    let mut weighted_index = 0;
     let mut weighted_outputs = Vec::new();
     for nodes in weighted_node {
         let mut outputs = Vec::new();
         for node in nodes {
-            let id = weighted_base_id + weighted_index + 1;
+            let id = clustered_graph.add_node(node);
             outputs.push(id);
-            weighted_nodes.push((id, node));
-            weighted_index += 1;
         }
         weighted_outputs.push(outputs);
     }
 
     // Set output weighted node
-    for (index, (_, clustered_node)) in nodes.iter_mut().enumerate() {
+    for (index, mut clustered_node) in clustered_graph
+        .nodes
+        .iter_mut()
+        .take(weighted_outputs.len())
+        .enumerate()
+    {
         clustered_node.outputs = weighted_outputs[index].clone();
     }
 
-    nodes.extend(weighted_nodes);
-    let mut graph = Graph::from_nodes_with_ids(nodes);
+    clustered_graph.build_inputs();
+    clustered_graph.build_producers();
+    clustered_graph.build_consumers();
+    clustered_graph.verify().unwrap();
 
-    graph.build_inputs();
-    graph.build_producers();
-    graph.build_consumers();
-    graph.verify().unwrap();
-
-    ClusteredGraph { graph }
+    ClusteredGraph {
+        graph: clustered_graph,
+    }
 }
 
 #[cfg(test)]
@@ -1528,23 +1526,6 @@ mod tests {
         let petgraph = graph.to_petgraph_only_edges();
         assert_eq!(petgraph.node_count(), 3);
         assert_eq!(petgraph.edge_count(), 2);
-
-        graph.insert_node_with_id(
-            25,
-            GraphNode {
-                tag: "replacement".to_owned(),
-                ..Default::default()
-            },
-        );
-        assert_eq!(
-            graph.nodes.iter().map(|node| node.id).collect_vec(),
-            vec![10, 20, 30, 25]
-        );
-        assert_eq!(graph.find_node_by_id(25).unwrap().tag, "replacement");
-        assert_eq!(
-            graph.find_and_remove_node_by_id(25).unwrap().tag,
-            "replacement"
-        );
 
         graph.remove_by_node_id_lazy(30);
         let id = graph.add_node(GraphNode::default());

@@ -98,21 +98,16 @@ impl LogicGraph {
     where
         I: IntoIterator<Item = (String, GraphNodeId)>,
     {
-        let mut next_id = self.graph.next_node_id();
         for (name, source_id) in outputs {
             if self.find_node_by_id(source_id).is_none() {
                 eyre::bail!("cannot attach output {name}: missing source node {source_id}");
             }
 
-            self.graph.insert_node_with_id(
-                next_id,
-                GraphNode {
-                    kind: GraphNodeKind::Output(name),
-                    inputs: vec![source_id],
-                    ..Default::default()
-                },
-            );
-            next_id += 1;
+            self.graph.add_node(GraphNode {
+                kind: GraphNodeKind::Output(name),
+                inputs: vec![source_id],
+                ..Default::default()
+            });
         }
 
         self.graph.build_outputs();
@@ -312,9 +307,8 @@ fn permuted_output_table_set(
 #[derive(Default)]
 pub struct LogicGraphBuilder {
     stmt: String,
-    node_id: usize,
     ptr: usize,
-    nodes: Vec<(GraphNodeId, GraphNode)>,
+    graph: Graph,
     inputs: HashMap<String, GraphNodeId>,
 }
 
@@ -349,16 +343,9 @@ impl LogicGraphBuilder {
     pub fn build(mut self, output_name: String) -> eyre::Result<LogicGraph> {
         self.do_parse(output_name);
 
-        let mut graph = Graph::from_nodes_with_ids(self.nodes.clone());
-        graph.build_outputs();
+        self.graph.build_outputs();
 
-        Ok(LogicGraph { graph })
-    }
-
-    fn next_id(&mut self) -> usize {
-        let id = self.node_id;
-        self.node_id += 1;
-        id
+        Ok(LogicGraph { graph: self.graph })
     }
 
     fn next_ptr(&mut self) -> usize {
@@ -368,14 +355,11 @@ impl LogicGraphBuilder {
     }
 
     fn new_node(&mut self, kind: GraphNodeKind, inputs: Vec<GraphNodeId>) -> GraphNodeId {
-        let id = self.next_id();
-        let node = GraphNode {
+        self.graph.add_node(GraphNode {
             kind,
             inputs,
             ..Default::default()
-        };
-        self.nodes.push((id, node));
-        id
+        })
     }
 
     fn new_input_node(&mut self, name: String) -> GraphNodeId {
