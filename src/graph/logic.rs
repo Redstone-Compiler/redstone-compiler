@@ -98,13 +98,13 @@ impl LogicGraph {
     where
         I: IntoIterator<Item = (String, GraphNodeId)>,
     {
-        let mut next_id = self.graph.max_node_id().map_or(0, |id| id + 1);
+        let mut next_id = self.graph.next_node_id();
         for (name, source_id) in outputs {
             if self.find_node_by_id(source_id).is_none() {
                 eyre::bail!("cannot attach output {name}: missing source node {source_id}");
             }
 
-            self.graph.nodes.push(GraphNode {
+            self.graph.insert_node(GraphNode {
                 id: next_id,
                 kind: GraphNodeKind::Output(name),
                 inputs: vec![source_id],
@@ -113,7 +113,6 @@ impl LogicGraph {
             next_id += 1;
         }
 
-        self.graph.nodes.sort_by_key(|node| node.id);
         self.graph.build_outputs();
         self.graph.build_producers();
         self.graph.build_consumers();
@@ -780,8 +779,7 @@ mod tests {
 
         let splits = finish.graph.split_with_outputs();
 
-        let mut graph: Graph = (&finish.graph.split_with_outputs()[0]).into();
-        graph = graph.rebuild_node_ids();
+        let graph: Graph = (&finish.graph.split_with_outputs()[0]).into();
         println!("{}", graph.to_graphviz());
 
         let mut transform = LogicGraphTransformer::new(LogicGraph { graph });
@@ -792,8 +790,7 @@ mod tests {
 
         #[allow(clippy::needless_range_loop)]
         for index in 1..2 {
-            let mut graph: Graph = (&splits[index]).into();
-            graph = graph.rebuild_node_ids();
+            let graph: Graph = (&splits[index]).into();
             println!("{}", graph.to_graphviz());
 
             let mut transform = LogicGraphTransformer::new(LogicGraph { graph });

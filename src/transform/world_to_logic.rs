@@ -65,7 +65,7 @@ impl WorldToLogicTransformer {
     }
 
     pub fn transform(mut self) -> eyre::Result<LogicGraph> {
-        self.transform_inner(true)
+        self.transform_inner()
     }
 
     pub fn positions(&self) -> &HashMap<GraphNodeId, Position> {
@@ -77,14 +77,14 @@ impl WorldToLogicTransformer {
     }
 
     pub fn transform_preserving_node_ids(mut self) -> eyre::Result<LogicGraph> {
-        self.transform_inner(false)
+        self.transform_inner()
     }
 
-    fn transform_inner(&mut self, rebuild_node_ids: bool) -> eyre::Result<LogicGraph> {
+    fn transform_inner(&mut self) -> eyre::Result<LogicGraph> {
         let mut new_in_id = HashMap::new();
         let mut nodes = Vec::new();
 
-        let mut next_new_id = self.graph.graph.max_node_id().unwrap();
+        let mut next_new_id = self.graph.graph.next_node_id();
         let mut input_count = 0;
 
         for id in self.graph.graph.topological_order() {
@@ -143,8 +143,6 @@ impl WorldToLogicTransformer {
                                 tag,
                             }]
                         } else {
-                            next_new_id += 1;
-
                             let or_node = GraphNode {
                                 id: node.id,
                                 kind: GraphNodeKind::Logic(Logic {
@@ -166,6 +164,7 @@ impl WorldToLogicTransformer {
                             };
 
                             new_in_id.insert(or_node.id, next_new_id);
+                            next_new_id += 1;
 
                             vec![or_node, not_node]
                         }
@@ -183,14 +182,10 @@ impl WorldToLogicTransformer {
             ..Default::default()
         };
 
-        if rebuild_node_ids {
-            graph = graph.rebuild_node_ids();
-        } else {
-            graph.nodes.sort_by_key(|node| node.id);
-            graph.build_outputs();
-            graph.build_producers();
-            graph.build_consumers();
-        }
+        graph.nodes.sort_by_key(|node| node.id);
+        graph.build_outputs();
+        graph.build_producers();
+        graph.build_consumers();
 
         Ok(LogicGraph { graph })
     }
@@ -358,6 +353,60 @@ mod tests {
             "shorted switch and inverted output should extract as a constant-high output, got {:?}",
             table
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn world_to_logic_transform_keeps_sparse_ids_and_appends_synthetic_nodes() -> eyre::Result<()> {
+        let switch = Block {
+            kind: BlockKind::Switch { is_on: false },
+            direction: Direction::None,
+        };
+        let torch = Block {
+            kind: BlockKind::Torch { is_on: true },
+            direction: Direction::Bottom,
+        };
+        let mut graph = crate::graph::Graph {
+            nodes: vec![
+                crate::graph::GraphNode {
+                    id: 10,
+                    kind: crate::graph::GraphNodeKind::Block(switch),
+                    outputs: vec![30],
+                    ..Default::default()
+                },
+                crate::graph::GraphNode {
+                    id: 20,
+                    kind: crate::graph::GraphNodeKind::Block(switch),
+                    outputs: vec![30],
+                    ..Default::default()
+                },
+                crate::graph::GraphNode {
+                    id: 30,
+                    kind: crate::graph::GraphNodeKind::Block(torch),
+                    inputs: vec![10, 20],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        graph.build_inputs();
+        graph.build_outputs();
+        graph.build_producers();
+        graph.build_consumers();
+
+        let world_graph = crate::graph::world::WorldGraph {
+            graph,
+            ..Default::default()
+        };
+        let logic = WorldToLogicTransformer::new(world_graph, true)?.transform()?;
+
+        assert_eq!(
+            logic.graph.nodes.iter().map(|node| node.id).collect_vec(),
+            vec![10, 20, 30, 31]
+        );
+        assert_eq!(logic.graph.find_node_by_id(30).unwrap().outputs, vec![31]);
+        assert_eq!(logic.graph.find_node_by_id(31).unwrap().inputs, vec![30]);
 
         Ok(())
     }

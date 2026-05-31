@@ -154,15 +154,31 @@ pub struct Graph {
 }
 
 impl Graph {
-    pub fn to_petgraph_only_edges(&self) -> petgraph::Graph<(), ()> {
-        let edges = self.nodes.iter().flat_map(|node| {
-            node.outputs
-                .iter()
-                .map(|&id| (NodeIndex::new(node.id), NodeIndex::new(id)))
-                .collect_vec()
-        });
+    fn to_petgraph_with_node_ids(&self) -> petgraph::Graph<GraphNodeId, ()> {
+        let mut graph = petgraph::Graph::<GraphNodeId, ()>::new();
+        let mut id_to_index = HashMap::new();
 
-        petgraph::Graph::<(), ()>::from_edges(edges)
+        for node in &self.nodes {
+            let index = graph.add_node(node.id);
+            id_to_index.insert(node.id, index);
+        }
+
+        for node in &self.nodes {
+            let Some(source) = id_to_index.get(&node.id).copied() else {
+                continue;
+            };
+            for output in &node.outputs {
+                if let Some(target) = id_to_index.get(output).copied() {
+                    graph.add_edge(source, target, ());
+                }
+            }
+        }
+
+        graph
+    }
+
+    pub fn to_petgraph_only_edges(&self) -> petgraph::Graph<GraphNodeId, ()> {
+        self.to_petgraph_with_node_ids()
     }
 
     pub fn to_petgraph(&self) -> petgraph::Graph<GraphNodeKind, ()> {
@@ -184,25 +200,24 @@ impl Graph {
     }
 
     pub fn topological_order(&self) -> Vec<GraphNodeId> {
-        let nodes: HashSet<GraphNodeId> = self.nodes.iter().map(|node| node.id).collect();
-        petgraph::algo::toposort(&self.to_petgraph_only_edges(), None)
+        let graph = self.to_petgraph_only_edges();
+        petgraph::algo::toposort(&graph, None)
             .unwrap()
             .iter()
-            .map(|index| index.index())
-            .filter(|id| nodes.contains(id))
+            .map(|index| graph[*index])
             .collect_vec()
     }
 
     pub fn strongly_connected_components(&self) -> Vec<Vec<GraphNodeId>> {
         let node_ids: HashSet<GraphNodeId> = self.nodes.iter().map(|node| node.id).collect();
+        let graph = self.to_petgraph_only_edges();
         let mut seen = HashSet::new();
-        let mut components = petgraph::algo::kosaraju_scc(&self.to_petgraph_only_edges())
+        let mut components = petgraph::algo::kosaraju_scc(&graph)
             .into_iter()
             .filter_map(|component| {
                 let mut component = component
                     .into_iter()
-                    .map(|index| index.index())
-                    .filter(|id| node_ids.contains(id))
+                    .map(|index| graph[index])
                     .collect_vec();
                 component.sort();
                 if component.is_empty() {
@@ -250,10 +265,12 @@ impl Graph {
         &self,
         target_root: GraphNodeId,
     ) -> petgraph::algo::dominators::Dominators<NodeIndex> {
-        petgraph::algo::dominators::simple_fast(
-            &self.to_petgraph_only_edges(),
-            NodeIndex::new(target_root),
-        )
+        let graph = self.to_petgraph_only_edges();
+        let target_root = graph
+            .node_indices()
+            .find(|index| graph[*index] == target_root)
+            .expect("target root must exist in graph");
+        petgraph::algo::dominators::simple_fast(&graph, target_root)
     }
 
     pub fn inputs(&self) -> Vec<GraphNodeId> {
@@ -517,6 +534,17 @@ impl Graph {
             .map(|node| node.id)
     }
 
+    pub fn next_node_id(&self) -> GraphNodeId {
+        self.max_node_id().map_or(0, |id| id + 1)
+    }
+
+    pub fn insert_node(&mut self, node: GraphNode) {
+        match self.nodes.binary_search_by_key(&node.id, |node| node.id) {
+            Ok(index) => self.nodes[index] = node,
+            Err(index) => self.nodes.insert(index, node),
+        }
+    }
+
     pub fn find_node_by_input_name(&mut self, input_name: &str) -> Option<&mut GraphNode> {
         self.nodes
             .iter_mut()
@@ -530,27 +558,16 @@ impl Graph {
     }
 
     pub fn find_node_by_id(&self, node_id: GraphNodeId) -> Option<&GraphNode> {
-        // TODO: nodes is always sorted by id?
-        self.nodes
-            .binary_search_by_key(&node_id, |node| node.id)
-            .map(|index| &self.nodes[index])
-            .ok()
+        self.nodes.iter().find(|node| node.id == node_id)
     }
 
     pub fn find_node_by_id_mut(&mut self, node_id: GraphNodeId) -> Option<&mut GraphNode> {
-        // TODO: nodes is always sorted by id?
-        self.nodes
-            .binary_search_by_key(&node_id, |node| node.id)
-            .map(|index| &mut self.nodes[index])
-            .ok()
+        self.nodes.iter_mut().find(|node| node.id == node_id)
     }
 
     pub fn find_and_remove_node_by_id(&mut self, node_id: GraphNodeId) -> Option<GraphNode> {
-        // TODO: nodes is always sorted by id?
-        self.nodes
-            .binary_search_by_key(&node_id, |node| node.id)
-            .map(|index| self.nodes.remove(index))
-            .ok()
+        let index = self.nodes.iter().position(|node| node.id == node_id)?;
+        Some(self.nodes.remove(index))
     }
 
     pub fn rebuild_node_id_base(&mut self, base_index: usize) {
@@ -565,71 +582,8 @@ impl Graph {
         self.build_consumers();
     }
 
-    pub fn rebuild_node_ids_deprecated(self) -> Self {
-        // toposort가 기존에 없는 새로운 index를 창조함
-        // ???
-        let index_map = petgraph::algo::toposort(&self.to_petgraph_only_edges(), None)
-            .unwrap()
-            .iter()
-            .enumerate()
-            .map(|index| (index.1.index(), index.0))
-            .collect::<HashMap<_, _>>();
-
-        let mut nodes = self
-            .nodes
-            .into_iter()
-            .map(|node| GraphNode {
-                id: index_map[&node.id],
-                inputs: node.inputs.iter().map(|index| index_map[index]).collect(),
-                outputs: node.outputs.iter().map(|index| index_map[index]).collect(),
-                kind: node.kind,
-                tag: node.tag,
-                ..Default::default()
-            })
-            .collect::<Vec<_>>();
-        nodes.sort_by_key(|node| node.id);
-
-        let mut result = Self { nodes, ..self };
-        result.build_producers();
-        result.build_consumers();
-        result
-    }
-
-    pub fn rebuild_node_ids(mut self) -> Self {
-        self.nodes.sort_by_key(|node| match node.kind {
-            GraphNodeKind::Input(_) => 0,
-            GraphNodeKind::Output(_) => 1,
-            _ => 2,
-        });
-
-        let indexs: HashMap<_, _> = self
-            .nodes
-            .iter()
-            .enumerate()
-            .map(|(index, node)| (node.id, index))
-            .collect();
-
-        let nodes = self
-            .nodes
-            .into_iter()
-            .map(|node| GraphNode {
-                id: indexs[&node.id],
-                inputs: node.inputs.iter().map(|index| indexs[index]).collect(),
-                outputs: node.outputs.iter().map(|index| indexs[index]).collect(),
-                kind: node.kind,
-                tag: node.tag,
-                ..Default::default()
-            })
-            .collect::<Vec<_>>();
-
-        let mut result = Self { nodes, ..self };
-        result.build_producers();
-        result.build_consumers();
-        result
-    }
-
     pub fn remove_by_node_id_lazy(&mut self, node_id: GraphNodeId) {
-        let Ok(index) = self.nodes.binary_search_by_key(&node_id, |node| node.id) else {
+        let Some(index) = self.nodes.iter().position(|node| node.id == node_id) else {
             return;
         };
 
@@ -644,7 +598,7 @@ impl Graph {
         outputs: Vec<GraphNodeId>,
         tag: String,
     ) -> GraphNodeId {
-        let replacement_id = self.max_node_id().unwrap_or(0) + 1;
+        let replacement_id = self.next_node_id();
 
         for input in &inputs {
             if let Some(node) = self.find_node_by_id_mut(*input) {
@@ -666,14 +620,13 @@ impl Graph {
             self.remove_by_node_id_lazy(*node_id);
         }
 
-        self.nodes.push(GraphNode {
+        self.insert_node(GraphNode {
             id: replacement_id,
             kind,
             inputs,
             outputs,
             tag,
         });
-        self.nodes.sort_by_key(|node| node.id);
         self.build_inputs();
         self.build_outputs();
         self.build_producers();
@@ -684,7 +637,7 @@ impl Graph {
 
     // 노드 삭제하고 삭제한 노드의 Input Output끼리 연결함
     pub fn remove_and_reconnect_by_node_id_lazy(&mut self, node_id: GraphNodeId) {
-        let Ok(index) = self.nodes.binary_search_by_key(&node_id, |node| node.id) else {
+        let Some(index) = self.nodes.iter().position(|node| node.id == node_id) else {
             return;
         };
 
@@ -871,7 +824,7 @@ impl Graph {
     }
 
     pub fn critical_path(&self) -> Vec<GraphNodeId> {
-        fn find_longest_path(graph: &petgraph::Graph<(), ()>) -> Option<Vec<NodeIndex>> {
+        fn find_longest_path(graph: &petgraph::Graph<GraphNodeId, ()>) -> Option<Vec<NodeIndex>> {
             let topo_order = petgraph::algo::toposort(&graph, None).unwrap();
 
             let mut max_distances: Vec<Option<usize>> = vec![None; graph.node_count()];
@@ -907,10 +860,11 @@ impl Graph {
             longest_path.cloned().flatten()
         }
 
-        let mut path = find_longest_path(&self.to_petgraph_only_edges())
+        let graph = self.to_petgraph_only_edges();
+        let mut path = find_longest_path(&graph)
             .unwrap()
             .iter()
-            .map(|id| id.index())
+            .map(|id| graph[*id])
             .collect_vec();
         path.sort();
         path
@@ -947,10 +901,6 @@ impl Graph {
     }
 
     pub fn verify(&self) -> eyre::Result<()> {
-        if !self.nodes.windows(2).all(|w| w[0].id <= w[1].id) {
-            eyre::bail!("Nodes must be sorted by id!");
-        }
-
         let valid_ids: HashSet<GraphNodeId> = self.nodes.iter().map(|node| node.id).collect();
 
         for node in &self.nodes {
@@ -1336,5 +1286,139 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[test]
+    fn petgraph_conversion_does_not_materialize_sparse_node_ids() {
+        let graph = Graph {
+            nodes: vec![
+                GraphNode {
+                    id: 10,
+                    outputs: vec![20],
+                    ..Default::default()
+                },
+                GraphNode {
+                    id: 20,
+                    inputs: vec![10],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        let petgraph = graph.to_petgraph_only_edges();
+
+        assert_eq!(petgraph.node_count(), 2);
+        assert_eq!(petgraph.edge_count(), 1);
+    }
+
+    #[test]
+    fn graph_algorithms_preserve_sparse_node_ids() {
+        let graph = Graph {
+            nodes: vec![
+                GraphNode {
+                    id: 10,
+                    outputs: vec![20],
+                    ..Default::default()
+                },
+                GraphNode {
+                    id: 20,
+                    inputs: vec![10],
+                    outputs: vec![30],
+                    ..Default::default()
+                },
+                GraphNode {
+                    id: 30,
+                    inputs: vec![20],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(graph.topological_order(), vec![10, 20, 30]);
+        assert_eq!(
+            graph.strongly_connected_components(),
+            vec![vec![10], vec![20], vec![30]]
+        );
+        assert_eq!(graph.critical_path(), vec![10, 20, 30]);
+    }
+
+    #[test]
+    fn next_node_id_is_append_only_for_sparse_graphs() {
+        let graph = Graph {
+            nodes: vec![
+                GraphNode {
+                    id: 10,
+                    ..Default::default()
+                },
+                GraphNode {
+                    id: 30,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(graph.next_node_id(), 31);
+    }
+
+    #[test]
+    fn insert_node_keeps_nodes_sorted_by_id() {
+        let mut graph = Graph {
+            nodes: vec![
+                GraphNode {
+                    id: 10,
+                    ..Default::default()
+                },
+                GraphNode {
+                    id: 30,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        graph.insert_node(GraphNode {
+            id: 20,
+            ..Default::default()
+        });
+
+        assert_eq!(
+            graph.nodes.iter().map(|node| node.id).collect_vec(),
+            vec![10, 20, 30]
+        );
+    }
+
+    #[test]
+    fn node_lookup_and_removal_do_not_require_sorted_nodes() {
+        let mut graph = Graph {
+            nodes: vec![
+                GraphNode {
+                    id: 30,
+                    inputs: vec![10],
+                    ..Default::default()
+                },
+                GraphNode {
+                    id: 10,
+                    outputs: vec![30],
+                    ..Default::default()
+                },
+                GraphNode {
+                    id: 20,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(graph.find_node_by_id(10).unwrap().id, 10);
+        graph.find_node_by_id_mut(20).unwrap().outputs = vec![30];
+        assert_eq!(graph.find_node_by_id(20).unwrap().outputs, vec![30]);
+        assert_eq!(graph.find_and_remove_node_by_id(20).unwrap().id, 20);
+
+        graph.verify().unwrap();
+        graph.remove_by_node_id_lazy(10);
+        assert!(graph.find_node_by_id(10).is_none());
     }
 }

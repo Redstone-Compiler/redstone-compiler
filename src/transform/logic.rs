@@ -254,28 +254,45 @@ impl LogicGraphTransformer {
         }
 
         // optimize logic graph using quine mccluskey
+        let input_nodes = self
+            .graph
+            .graph
+            .nodes
+            .iter()
+            .filter(|node| matches!(node.kind, GraphNodeKind::Input(_)))
+            .cloned()
+            .collect_vec();
+        let input_terms = input_nodes
+            .iter()
+            .enumerate()
+            .map(|(index, node)| (node.id, index as u8))
+            .collect::<HashMap<_, _>>();
+
         fn make_qmc_form(
             graph: &Graph,
+            input_terms: &HashMap<GraphNodeId, u8>,
             node_id: GraphNodeId,
         ) -> eyre::Result<quine_mc_cluskey::Bool> {
             let node = graph.find_node_by_id(node_id).unwrap();
             match &node.kind {
-                GraphNodeKind::Input(_) => Ok(quine_mc_cluskey::Bool::Term(node_id as u8)),
-                GraphNodeKind::Output(_) => make_qmc_form(graph, node.inputs[0]),
+                GraphNodeKind::Input(_) => Ok(quine_mc_cluskey::Bool::Term(input_terms[&node_id])),
+                GraphNodeKind::Output(_) => make_qmc_form(graph, input_terms, node.inputs[0]),
                 GraphNodeKind::Logic(logic) => Ok(match &logic.logic_type {
-                    LogicType::Not => {
-                        quine_mc_cluskey::Bool::Not(Box::new(make_qmc_form(graph, node.inputs[0])?))
-                    }
+                    LogicType::Not => quine_mc_cluskey::Bool::Not(Box::new(make_qmc_form(
+                        graph,
+                        input_terms,
+                        node.inputs[0],
+                    )?)),
                     LogicType::And => quine_mc_cluskey::Bool::And(
                         node.inputs
                             .iter()
-                            .map(|input| make_qmc_form(graph, *input).unwrap())
+                            .map(|input| make_qmc_form(graph, input_terms, *input).unwrap())
                             .collect(),
                     ),
                     LogicType::Or => quine_mc_cluskey::Bool::Or(
                         node.inputs
                             .iter()
-                            .map(|input| make_qmc_form(graph, *input).unwrap())
+                            .map(|input| make_qmc_form(graph, input_terms, *input).unwrap())
                             .collect(),
                     ),
                     LogicType::Xor => unimplemented!(),
@@ -284,7 +301,12 @@ impl LogicGraphTransformer {
             }
         }
 
-        let results = make_qmc_form(&self.graph.graph, self.graph.graph.outputs()[0])?.simplify();
+        let results = make_qmc_form(
+            &self.graph.graph,
+            &input_terms,
+            self.graph.graph.outputs()[0],
+        )?
+        .simplify();
 
         let mut nodes = Vec::new();
 
@@ -351,7 +373,7 @@ impl LogicGraphTransformer {
         }
 
         let mut id = 0;
-        let node = make_rc_form(&mut nodes, &mut id, &self.graph.graph.nodes, &results[0]);
+        let node = make_rc_form(&mut nodes, &mut id, &input_nodes, &results[0]);
         let output_node = GraphNode {
             id: nodes.len(),
             kind: GraphNodeKind::Output(
@@ -466,7 +488,7 @@ impl LogicGraphTransformer {
             })
             .collect_vec();
 
-        let mut next_id = self.graph.graph.max_node_id().unwrap_or_default() + 1;
+        let mut next_id = self.graph.graph.next_node_id();
         for (from, to) in direct_edges {
             let first_not = next_id;
             let second_not = next_id + 1;
@@ -479,7 +501,7 @@ impl LogicGraphTransformer {
                 .graph
                 .replace_target_input_node_ids(to, from, vec![second_not]);
 
-            self.graph.graph.nodes.push(GraphNode {
+            self.graph.graph.insert_node(GraphNode {
                 id: first_not,
                 kind: GraphNodeKind::Logic(Logic {
                     logic_type: LogicType::Not,
@@ -488,7 +510,7 @@ impl LogicGraphTransformer {
                 outputs: vec![second_not],
                 tag: "auto-buffer".to_owned(),
             });
-            self.graph.graph.nodes.push(GraphNode {
+            self.graph.graph.insert_node(GraphNode {
                 id: second_not,
                 kind: GraphNodeKind::Logic(Logic {
                     logic_type: LogicType::Not,
