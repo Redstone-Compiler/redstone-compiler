@@ -29,6 +29,9 @@ pub fn place_candidates_on_shelves(
     candidates: &[LayoutCandidate],
     config: &GlobalPlacementConfig,
 ) -> Vec<PlacedModule> {
+    // TODO: 지금은 child layout을 순서대로 shelf에 올리는 단순 휴리스틱이다.
+    // module net length, routeability, port alignment, route congestion을 비용으로 넣는
+    // 일반 cost model을 도입해서 특수한 사후 위치 보정을 대체해야 한다.
     let mut placed = Vec::new();
     let mut cursor_x = 0usize;
     let mut cursor_y = 0usize;

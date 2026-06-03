@@ -173,14 +173,12 @@ impl LocalPlacer {
         finish_step: Option<usize>,
         input_constraints: &LocalPlacerInputConstraints,
     ) -> Vec<PlacedWorld> {
-        self.generate_queue(dim, finish_step, None, Some(input_constraints), None)
-            .into_iter()
-            .map(|(world, state)| PlacedWorld {
-                world,
-                inputs: self.input_endpoints(&state),
-                outputs: self.output_endpoints(&state),
-            })
-            .collect()
+        self.generate_with_outputs_and_input_constraints_progress(
+            dim,
+            finish_step,
+            input_constraints,
+            None,
+        )
     }
 
     pub fn generate_with_outputs_and_input_constraints_progress(
@@ -188,14 +186,14 @@ impl LocalPlacer {
         dim: DimSize,
         finish_step: Option<usize>,
         input_constraints: &LocalPlacerInputConstraints,
-        progress_label: &str,
+        progress_label: Option<&str>,
     ) -> Vec<PlacedWorld> {
         self.generate_queue(
             dim,
             finish_step,
             None,
             Some(input_constraints),
-            Some(progress_label),
+            progress_label,
         )
         .into_iter()
         .map(|(world, state)| PlacedWorld {

@@ -7,7 +7,7 @@ pub mod router;
 
 use eyre::ContextCompat;
 
-use crate::graph::module::{GraphModule, GraphModuleContext};
+use crate::graph::module::{GraphModule, GraphModuleContext, GraphModuleDesign};
 use crate::output::PlacedWorld;
 use crate::transform::place_and_route::global_pnr::assembly::assemble_world;
 use crate::transform::place_and_route::global_pnr::candidate::{
@@ -48,6 +48,20 @@ pub fn place_and_route_module(
     Ok(place_and_route_module_with_outputs(context, module, config)?.world)
 }
 
+pub fn place_and_route_design(
+    design: &GraphModuleDesign,
+    config: &GlobalPnrConfig,
+) -> eyre::Result<World3D> {
+    Ok(place_and_route_design_with_outputs(design, config)?.world)
+}
+
+pub fn place_and_route_design_with_outputs(
+    design: &GraphModuleDesign,
+    config: &GlobalPnrConfig,
+) -> eyre::Result<PlacedWorld> {
+    place_and_route_module_with_outputs(&design.context, design.top_module(), config)
+}
+
 pub fn place_and_route_module_with_outputs(
     context: &GraphModuleContext,
     module: &GraphModule,
@@ -60,19 +74,23 @@ pub fn place_and_route_module_with_outputs(
 
     progress.stage(1, 5, "generate child layout candidates");
     let candidates = generate_child_candidates(context, module, config, &progress)?;
+
     progress.stage(2, 5, "place child candidates");
-    let placed = place_child_candidates(module, &candidates, config);
-    print_candidate_summary(&candidates, &placed);
+    let placed = place_child_candidates(&candidates, config);
+
     progress.stage(3, 5, "route module ports and variables");
     let routed_nets = route_placed_module(module, &candidates, &placed, &progress)?;
+
     progress.stage(4, 5, "assemble world and collect outputs");
     let placed_world = assemble_placed_world(module, &candidates, &placed, &routed_nets)?;
+
     progress.stage(5, 5, "complete");
     progress.detail(format!(
         "outputs={} routes={}",
         placed_world.outputs.len(),
         routed_nets.len()
     ));
+
     Ok(placed_world)
 }
 
@@ -110,6 +128,7 @@ fn place_graph_backed_module(
     })
 }
 
+// 하위 모듈마다 local placer를 실행해서 global PnR이 배치할 layout 후보를 하나씩 뽑는다.
 fn generate_child_candidates(
     context: &GraphModuleContext,
     module: &GraphModule,
@@ -142,40 +161,15 @@ fn generate_child_candidates(
     Ok(candidates)
 }
 
+// 생성된 child layout 후보들을 global 좌표계에 배치하고, 연결될 포트들의 높이를 맞춘다.
 fn place_child_candidates(
-    module: &GraphModule,
     candidates: &[LayoutCandidate],
     config: &GlobalPnrConfig,
 ) -> Vec<PlacedModule> {
-    align_variable_targets_on_y(
-        module,
-        candidates,
-        place_candidates_on_shelves(candidates, &config.placement),
-    )
+    place_candidates_on_shelves(candidates, &config.placement)
 }
 
-fn print_candidate_summary(candidates: &[LayoutCandidate], placed: &[PlacedModule]) {
-    if std::env::var_os("PRINT_GLOBAL_PNR").is_some() {
-        for (candidate, placed_module) in candidates.iter().zip(placed) {
-            eprintln!(
-                "candidate {} origin {:?} bbox {:?}",
-                candidate.module_name, placed_module.origin, candidate.bbox
-            );
-            for port in &candidate.ports {
-                eprintln!(
-                    "  port {} {:?} {:?} {:?} route={:?} isolate={}",
-                    port.name,
-                    port.direction,
-                    port.position,
-                    candidate.world[port.position].kind,
-                    port.route_position,
-                    port.isolate_input
-                );
-            }
-        }
-    }
-}
-
+// 배치된 child module의 외부 포트들을 보고 top input과 module variable net을 실제 redstone route로 연결한다.
 fn route_placed_module(
     module: &GraphModule,
     candidates: &[LayoutCandidate],
@@ -185,6 +179,7 @@ fn route_placed_module(
     route_module_variables(module, candidates, placed, progress)
 }
 
+// 배치된 child layout과 routed net을 하나의 World3D로 합치고, top-level output metadata를 수집한다.
 fn assemble_placed_world(
     module: &GraphModule,
     candidates: &[LayoutCandidate],
@@ -200,69 +195,12 @@ fn assemble_placed_world(
     })
 }
 
-fn align_variable_targets_on_y(
-    module: &GraphModule,
-    candidates: &[crate::transform::place_and_route::global_pnr::ir::LayoutCandidate],
-    mut placed: Vec<crate::transform::place_and_route::global_pnr::placer::PlacedModule>,
-) -> Vec<crate::transform::place_and_route::global_pnr::placer::PlacedModule> {
-    for var in &module.vars {
-        let Some(source_index) = placed
-            .iter()
-            .position(|placed_module| placed_module.module_name == var.source.0)
-        else {
-            continue;
-        };
-        let Some(target_index) = placed
-            .iter()
-            .position(|placed_module| placed_module.module_name == var.target.0)
-        else {
-            continue;
-        };
-        let Some(source_port) = candidates[source_index]
-            .ports
-            .iter()
-            .find(|port| port.name == var.source.1)
-        else {
-            continue;
-        };
-        let Some(target_port) = candidates[target_index]
-            .ports
-            .iter()
-            .find(|port| port.name == var.target.1)
-        else {
-            continue;
-        };
-
-        let source_y = placed[source_index].origin.1 + source_port.position.1
-            - candidates[source_index].bbox.min.1;
-        let Some(target_origin_y) = source_y
-            .checked_add(candidates[target_index].bbox.min.1)
-            .and_then(|y| y.checked_sub(target_port.position.1))
-        else {
-            continue;
-        };
-        placed[target_index].origin.1 = target_origin_y;
-
-        let source_z = placed[source_index].origin.2 + source_port.position.2
-            - candidates[source_index].bbox.min.2;
-        let Some(target_origin_z) = source_z
-            .checked_add(candidates[target_index].bbox.min.2)
-            .and_then(|z| z.checked_sub(target_port.position.2))
-        else {
-            continue;
-        };
-        placed[target_index].origin.2 = target_origin_z;
-    }
-
-    placed
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::graph::logic::LogicGraph;
     use crate::graph::module::{
-        GraphModule, GraphModuleContext, GraphModulePort, GraphModulePortTarget,
+        GraphModule, GraphModuleContext, GraphModuleDesign, GraphModulePort, GraphModulePortTarget,
         GraphModulePortType, GraphModuleVariable,
     };
     use crate::graph::{Graph, GraphNode, GraphNodeKind};
@@ -305,6 +243,7 @@ mod tests {
         let mut module: GraphModule = LogicGraph::from_stmt("~a", "not_a")?.graph.into();
         module.name = "not_gate".to_owned();
         let context = GraphModuleContext::default();
+        let design = GraphModuleDesign::with_top_module(context, module);
         let config = GlobalPnrConfig {
             candidate: UnitCandidateConfig {
                 dim: DimSize(8, 8, 4),
@@ -315,7 +254,7 @@ mod tests {
             ..Default::default()
         };
 
-        let world = place_and_route_module(&context, &module, &config)?;
+        let world = place_and_route_design(&design, &config)?;
 
         assert!(!world.iter_block().is_empty());
         Ok(())
@@ -335,7 +274,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        context.append(module.clone());
+        let design = GraphModuleDesign::with_top_module(context, module);
         let config = GlobalPnrConfig {
             candidate: UnitCandidateConfig {
                 dim: DimSize(8, 8, 4),
@@ -346,7 +285,7 @@ mod tests {
             ..Default::default()
         };
 
-        let placed = place_and_route_module_with_outputs(&context, &module, &config)?;
+        let placed = place_and_route_design_with_outputs(&design, &config)?;
 
         assert_eq!(placed.outputs.len(), 1);
         assert_eq!(placed.outputs[0].name, "q");
@@ -366,8 +305,7 @@ mod tests {
         context.append(not_clk_module());
         context.append(d_latch_module("master"));
         context.append(d_latch_module("slave"));
-        let module = d_flip_flop_module();
-        context.append(module.clone());
+        let design = GraphModuleDesign::with_top_module(context, d_flip_flop_module());
         let config = GlobalPnrConfig {
             candidate: d_latch_child_candidate_config(sequential_local_config()),
             placement: GlobalPlacementConfig {
@@ -377,7 +315,7 @@ mod tests {
             ..Default::default()
         };
 
-        let placed = place_and_route_module_with_outputs(&context, &module, &config)?;
+        let placed = place_and_route_design_with_outputs(&design, &config)?;
 
         assert!(!placed.world.iter_block().is_empty());
         assert_eq!(placed.outputs.len(), 1);

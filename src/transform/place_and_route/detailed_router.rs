@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use crate::transform::place_and_route::place_bound::PlaceBound;
 use crate::transform::place_and_route::placed_node::PlacedNode;
-use crate::world::block::{Block, BlockKind, Direction};
+use crate::world::block::{BlockKind, Direction};
 use crate::world::position::Position;
 use crate::world::World3D;
 
@@ -122,7 +122,7 @@ pub fn place_redstone_with_cobble_and_allowed_shorts(
     }
     place_node(&mut new_world, redstone_node);
     new_world.update_redstone_states(prev);
-    if !target_powers_redstone(&new_world, prev, redstone_node.position) {
+    if !target_powers_position(&new_world, prev, redstone_node.position) {
         return PlaceRedstoneResult::Rejected(RouteRejectReason::DisconnectedRoute);
     }
     if redstone_node.has_short(&new_world, &short_except) {
@@ -156,19 +156,7 @@ pub fn place_repeater_with_cobble(
     let mut new_world = world.clone();
     place_node(&mut new_world, cobble_node);
 
-    let repeater_node = PlacedNode {
-        position: bound.position(),
-        block: Block {
-            kind: BlockKind::Repeater {
-                is_on: false,
-                is_locked: false,
-                delay: 1,
-                lock_input1: None,
-                lock_input2: None,
-            },
-            direction,
-        },
-    };
+    let repeater_node = PlacedNode::new_repeater(bound.position(), direction);
     let mut except = [prev, bound.position(), to, to.up()]
         .into_iter()
         .collect::<HashSet<_>>();
@@ -195,24 +183,6 @@ pub fn redstone_powers_cobble(world: &World3D, redstone: Position, cobble: Posit
             .propagation_bound(Some(world))
             .into_iter()
             .any(|bound| bound.position() == cobble)
-}
-
-pub fn target_powers_redstone(world: &World3D, target: Position, redstone: Position) -> bool {
-    if world[target].kind.is_air() || world[target].kind.is_cobble() {
-        return false;
-    }
-    let target_node = PlacedNode::new(target, world[target]);
-    target_node
-        .propagation_bound(Some(world))
-        .into_iter()
-        .filter(|bound| bound.is_bound_on(world))
-        .any(|bound| {
-            bound.position() == redstone
-                || bound
-                    .propagate_to(world)
-                    .into_iter()
-                    .any(|(_, position)| position == redstone)
-        })
 }
 
 pub fn target_powers_position(world: &World3D, target: Position, position: Position) -> bool {

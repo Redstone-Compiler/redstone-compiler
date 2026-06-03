@@ -43,6 +43,22 @@ impl PlacedNode {
         }
     }
 
+    pub fn new_repeater(position: Position, direction: Direction) -> Self {
+        Self {
+            position,
+            block: Block {
+                kind: BlockKind::Repeater {
+                    is_on: false,
+                    is_locked: false,
+                    delay: 1,
+                    lock_input1: None,
+                    lock_input2: None,
+                },
+                direction,
+            },
+        }
+    }
+
     pub fn is_propagation_target(&self) -> bool {
         self.block.kind.is_stick_to_redstone() || self.block.kind.is_repeater()
     }

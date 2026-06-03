@@ -52,20 +52,12 @@ pub fn generate_graph_module_candidates_with_progress_label(
     let graph = LogicGraph { graph }.prepare_place()?;
     let placer = LocalPlacer::new(graph, config.local_config)?;
 
-    let placed = if let Some(progress_label) = progress_label {
-        placer.generate_with_outputs_and_input_constraints_progress(
-            config.dim,
-            None,
-            &config.input_constraints,
-            progress_label,
-        )
-    } else {
-        placer.generate_with_outputs_and_input_constraints(
-            config.dim,
-            None,
-            &config.input_constraints,
-        )
-    };
+    let placed = placer.generate_with_outputs_and_input_constraints_progress(
+        config.dim,
+        None,
+        &config.input_constraints,
+        progress_label,
+    );
 
     placed
         .into_iter()
@@ -83,6 +75,10 @@ pub fn generate_graph_module_candidates_with_progress_label(
         .collect()
 }
 
+// Local placer媛 留뚮뱺 ?낅┰ ?ㅽ뻾??switch/output layout??global PnR??child layout?쇰줈 諛붽씔??
+// ?낅젰 switch???쒓굅?댁꽌 ?몃? route媛 臾쇰┫ port濡??몄텧?섍퀬, 異쒕젰 ?꾩튂??module port metadata濡?蹂댁〈?쒕떎.
+// TODO(high-level): make LocalPlacer produce either standalone layouts with switches
+// or child-module layouts with PhysicalPort metadata, instead of rewriting switches here.
 fn switchless_candidate_layout(
     module: &GraphModule,
     input_constraints: &LocalPlacerInputConstraints,
@@ -91,6 +87,7 @@ fn switchless_candidate_layout(
     outputs: &[crate::output::OutputEndpoint],
 ) -> (World3D, Vec<PhysicalPort>) {
     let mut ports = Vec::new();
+    // Sequential child layout? ?대? feedback/state signal???몃? route? 吏곸젒 ?욎씠硫?    // back-power??latch state ?ㅼ뿼???앷만 ???덉쑝誘濡?port ?곌껐??蹂댁닔?곸쑝濡?寃⑸━?쒕떎.
     let needs_output_isolation = module_contains_sequential(module);
     let needs_input_isolation = module_contains_sequential(module);
     for port in &module.ports {
@@ -162,6 +159,7 @@ fn remove_local_input_switches(world: &mut World3D) {
     }
 }
 
+// Torch/switch/repeater 異쒕젰 ?먯껜蹂대떎, 洹?異쒕젰???ㅼ젣濡??꾩썝??怨듦툒?섎뒗 redstone tap???덉쑝硫?// 洹?tap???몃? route ?쒖옉?먯쑝濡??몄텧?쒕떎. 議고빀?뚮줈 異쒕젰? ?대젃寃?湲곗〈 異쒕젰留앹뿉 route瑜?遺숈씤??
 fn expose_routeable_output_port(world: &World3D, output_position: Position) -> Position {
     if !world.size.bound_on(output_position)
         || (!world[output_position].kind.is_torch()
@@ -176,7 +174,7 @@ fn expose_routeable_output_port(world: &World3D, output_position: Position) -> P
         .into_iter()
         .filter(|(position, block)| {
             block.kind.is_redstone()
-                && detailed_router::target_powers_redstone(world, output_position, *position)
+                && detailed_router::target_powers_position(world, output_position, *position)
         })
         .map(|(position, _)| position)
         .min_by_key(|position| {
@@ -190,6 +188,10 @@ fn expose_routeable_output_port(world: &World3D, output_position: Position) -> P
         .unwrap_or(output_position)
 }
 
+// Local placer ?낅젰? 蹂댄넻 switch濡?留뚮뱾?댁졇 ?덉쑝誘濡?global PnR child layout?먯꽌??switch瑜??쒓굅?쒕떎.
+// switch媛 cobble??耳쒕뒗 援ъ“硫?cobble??port濡? redstone fanout??耳쒕뒗 援ъ“硫?switch ?먮━瑜?redstone port濡?諛붽씔??
+// TODO(low-level): replace this inference with explicit input-port placement metadata
+// from LocalPlacer, so this code does not need to guess from switch wiring.
 fn expose_switchless_input_port(world: &mut World3D, input_position: Position) -> Option<Position> {
     if !world.size.bound_on(input_position) {
         return None;
@@ -222,7 +224,7 @@ fn expose_switchless_input_port(world: &mut World3D, input_position: Position) -
 fn switch_powers_redstone(world: &World3D, input_position: Position) -> bool {
     world.iter_block().into_iter().any(|(position, block)| {
         block.kind.is_redstone()
-            && detailed_router::target_powers_redstone(world, input_position, position)
+            && detailed_router::target_powers_position(world, input_position, position)
     })
 }
 

@@ -97,12 +97,6 @@ pub fn route_module_variables(
                     )
                 })?;
             route_world = next_world;
-            if std::env::var_os("PRINT_GLOBAL_PNR").is_some() {
-                eprintln!(
-                    "route top input {}: {:?} -> {:?}",
-                    port.name, source, route.sink
-                );
-            }
             routes.push(route);
         }
     }
@@ -160,20 +154,6 @@ pub fn route_module_variables(
                 )
             })?;
             route_world = next_world;
-            if std::env::var_os("PRINT_GLOBAL_PNR").is_some() {
-                eprintln!(
-                    "route var {}.{} -> {}.{}: {:?} -> {:?}",
-                    var.source.0, var.source.1, var.target.0, var.target.1, source, route.sink
-                );
-                eprintln!(
-                    "  blocks: {:?}",
-                    route
-                        .blocks
-                        .iter()
-                        .map(|(position, block)| (*position, block.kind))
-                        .collect::<Vec<_>>()
-                );
-            }
             routes.push(route);
         }
     }
@@ -295,19 +275,7 @@ fn input_repeater_adapter_world(
     place_support_cobble_if_needed(&mut adapter_world, repeater_support_position)?;
     place_support_cobble_if_needed(&mut adapter_world, driver_support_position)?;
 
-    let repeater = PlacedNode {
-        position: repeater_position,
-        block: Block {
-            kind: BlockKind::Repeater {
-                is_on: false,
-                is_locked: false,
-                delay: 1,
-                lock_input1: None,
-                lock_input2: None,
-            },
-            direction,
-        },
-    };
+    let repeater = PlacedNode::new_repeater(repeater_position, direction);
     if repeater.has_conflict(&adapter_world, &[sink].into_iter().collect()) {
         return None;
     }
@@ -321,7 +289,7 @@ fn input_repeater_adapter_world(
     {
         return None;
     }
-    detailed_router::target_powers_redstone(&adapter_world, repeater_position, sink)
+    detailed_router::target_powers_position(&adapter_world, repeater_position, sink)
         .then_some((adapter_world, driver_position))
 }
 
@@ -459,7 +427,7 @@ fn observable_port_position(candidate: &LayoutCandidate, position: Position) -> 
         .into_iter()
         .filter(|(tap, block)| {
             block.kind.is_redstone()
-                && detailed_router::target_powers_redstone(&candidate.world, position, *tap)
+                && detailed_router::target_powers_position(&candidate.world, position, *tap)
         })
         .map(|(tap, _)| tap)
         .min_by_key(|tap| (position.manhattan_distance(tap), tap.0, tap.1, tap.2))
@@ -580,20 +548,13 @@ fn route_isolated_output_to_point(
     source: Position,
     sink: Position,
 ) -> Result<(RoutedNet, World3D), RouteFailure> {
-    let debug = std::env::var_os("PRINT_GLOBAL_PNR").is_some();
     let initial_states = isolated_output_initial_states(world, source, sink);
-    if debug {
-        debug_isolated_initial_states(&initial_states, source, sink);
-    }
     for initial in initial_states {
         let Ok((route, routed_world)) =
             route_point_to_point_from_initial_state(world, source, sink, initial)
         else {
             continue;
         };
-        if debug {
-            eprintln!("isolated route source {:?} -> {:?}", source, sink);
-        }
         return Ok((route, routed_world));
     }
 
@@ -610,12 +571,6 @@ fn route_isolated_output_to_point(
         else {
             continue;
         };
-        if debug {
-            eprintln!(
-                "isolated powered-tap route source {:?} tap {:?} -> {:?}",
-                source, tap, sink
-            );
-        }
         return Ok((
             RoutedNet {
                 source,
@@ -626,9 +581,6 @@ fn route_isolated_output_to_point(
         ));
     }
 
-    if debug {
-        eprintln!("isolated route failed {:?} -> {:?}", source, sink);
-    }
     Err(RouteFailure::Unreachable { source, sink })
 }
 
@@ -638,7 +590,7 @@ fn routeable_output_taps(world: &World3D, source: Position, sink: Position) -> V
         .into_iter()
         .filter(|(position, block)| {
             block.kind.is_redstone()
-                && detailed_router::target_powers_redstone(world, source, *position)
+                && detailed_router::target_powers_position(world, source, *position)
         })
         .map(|(position, _)| position)
         .collect::<Vec<_>>();
@@ -674,8 +626,8 @@ fn redstone_network_positions(world: &World3D, seeds: &[Position]) -> Vec<Positi
             if visited.contains(&next) {
                 continue;
             }
-            if detailed_router::target_powers_redstone(world, position, next)
-                || detailed_router::target_powers_redstone(world, next, position)
+            if detailed_router::target_powers_position(world, position, next)
+                || detailed_router::target_powers_position(world, next, position)
             {
                 visited.insert(next);
                 queue.push_back(next);
@@ -684,101 +636,6 @@ fn redstone_network_positions(world: &World3D, seeds: &[Position]) -> Vec<Positi
     }
 
     visited.into_iter().collect()
-}
-
-fn debug_isolated_initial_states(
-    initial_states: &[RouteSearchState],
-    source: Position,
-    sink: Position,
-) {
-    eprintln!(
-        "isolated initial states source {:?} -> {:?}: {}",
-        source,
-        sink,
-        initial_states.len()
-    );
-    if let Some(state) = initial_states.first() {
-        let mut nearby_blocks = Vec::new();
-        for (position, block) in state.world.iter_block() {
-            if source.manhattan_distance(&position) <= 3 && !block.kind.is_air() {
-                nearby_blocks.push((position, block.kind, block.direction));
-            }
-        }
-        nearby_blocks.sort_by_key(|(position, _, _)| {
-            (
-                source.manhattan_distance(position),
-                position.0,
-                position.1,
-                position.2,
-            )
-        });
-        eprintln!("  nearby blocks: {:?}", nearby_blocks);
-    }
-    for (index, state) in initial_states.iter().enumerate() {
-        let bounds = state.pending_bounds.as_deref().unwrap_or(&[]);
-        let mut redstone_placed = 0usize;
-        let mut repeater_placed = 0usize;
-        let mut redstone_rejected = 0usize;
-        let mut repeater_rejected = 0usize;
-        let mut repeater_routes = Vec::new();
-        let mut repeater_rejects = Vec::new();
-        for bound in bounds {
-            if !bound.is_bound_on(&state.world) {
-                continue;
-            }
-            match detailed_router::place_redstone_with_cobble_and_allowed_shorts(
-                &state.world,
-                *bound,
-                state.terminal,
-                sink,
-                None,
-            ) {
-                PlaceRedstoneResult::Placed(_, _) => redstone_placed += 1,
-                PlaceRedstoneResult::Rejected(_) => redstone_rejected += 1,
-            }
-            for direction in Direction::iter_direction_without_top()
-                .into_iter()
-                .filter(|direction| direction.is_cardinal())
-            {
-                match detailed_router::place_repeater_with_cobble(
-                    &state.world,
-                    *bound,
-                    state.terminal,
-                    sink,
-                    direction,
-                    None,
-                ) {
-                    PlaceRepeaterResult::Placed(next_world, repeater_node) => {
-                        repeater_placed += 1;
-                        let routes =
-                            route_point_to_point(&next_world, repeater_node.position, sink).is_ok();
-                        repeater_routes.push((repeater_node.position, direction, routes));
-                    }
-                    PlaceRepeaterResult::Rejected(reason) => {
-                        repeater_rejected += 1;
-                        repeater_rejects.push((bound.position(), direction, reason));
-                    }
-                }
-            }
-        }
-        eprintln!(
-            "  initial #{index}: bounds={} redstone placed/rejected={}/{} repeater placed/rejected={}/{}",
-            bounds.len(),
-            redstone_placed,
-            redstone_rejected,
-            repeater_placed,
-            repeater_rejected
-        );
-        eprintln!(
-            "    bounds: {:?}",
-            bounds
-                .iter()
-                .map(|bound| (bound.position(), bound.direction()))
-                .collect::<Vec<_>>()
-        );
-        eprintln!("    repeater route probes: {:?}", repeater_routes);
-        eprintln!("    repeater rejects: {:?}", repeater_rejects);
-    }
 }
 
 fn isolated_output_initial_states(
@@ -1110,7 +967,7 @@ impl RouteGoal {
     fn accepts(self, world: &World3D, redstone: Position) -> bool {
         match self {
             Self::ConnectPosition { target } => {
-                detailed_router::target_powers_redstone(world, target, redstone)
+                detailed_router::target_powers_position(world, target, redstone)
             }
             Self::PowerCobble { cobble } => {
                 detailed_router::redstone_powers_cobble(world, redstone, cobble)
@@ -1404,7 +1261,7 @@ mod tests {
                 .into_iter()
                 .any(|position| routed_world.size.bound_on(position)
                     && routed_world[position].kind.is_repeater()
-                    && detailed_router::target_powers_redstone(&routed_world, position, sink)),
+                    && detailed_router::target_powers_position(&routed_world, position, sink)),
             "the final repeater should power the input redstone"
         );
 
