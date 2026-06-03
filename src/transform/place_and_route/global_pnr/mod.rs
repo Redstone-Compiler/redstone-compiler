@@ -15,11 +15,11 @@ use crate::transform::place_and_route::global_pnr::candidate::{
 };
 use crate::transform::place_and_route::global_pnr::ir::LayoutCandidate;
 use crate::transform::place_and_route::global_pnr::placer::{
-    place_candidates_on_shelves, GlobalPlacementConfig, PlacedModule,
+    place_candidates_on_shelves, GlobalPlacementConfig,
 };
 use crate::transform::place_and_route::global_pnr::progress::GlobalPnrProgress;
 use crate::transform::place_and_route::global_pnr::router::{
-    collect_module_output_endpoints, route_module_variables, RoutedNet,
+    collect_module_output_endpoints, route_module_variables,
 };
 use crate::world::World3D;
 
@@ -76,13 +76,19 @@ pub fn place_and_route_module_with_outputs(
     let candidates = generate_child_candidates(context, module, config, &progress)?;
 
     progress.stage(2, 5, "place child candidates");
-    let placed = place_child_candidates(&candidates, config);
+    let placed = place_candidates_on_shelves(&candidates, &config.placement);
 
     progress.stage(3, 5, "route module ports and variables");
-    let routed_nets = route_placed_module(module, &candidates, &placed, &progress)?;
+    let routed_nets = route_module_variables(module, &candidates, &placed, &progress)?;
 
     progress.stage(4, 5, "assemble world and collect outputs");
-    let placed_world = assemble_placed_world(module, &candidates, &placed, &routed_nets)?;
+    let outputs = collect_module_output_endpoints(module, &candidates, &placed);
+    let world = assemble_world(&candidates, &placed, &routed_nets)?;
+    let placed_world = PlacedWorld {
+        world,
+        inputs: Vec::new(),
+        outputs,
+    };
 
     progress.stage(5, 5, "complete");
     progress.detail(format!(
@@ -159,40 +165,6 @@ fn generate_child_candidates(
         candidates.push(candidate);
     }
     Ok(candidates)
-}
-
-// 생성된 child layout 후보들을 global 좌표계에 배치하고, 연결될 포트들의 높이를 맞춘다.
-fn place_child_candidates(
-    candidates: &[LayoutCandidate],
-    config: &GlobalPnrConfig,
-) -> Vec<PlacedModule> {
-    place_candidates_on_shelves(candidates, &config.placement)
-}
-
-// 배치된 child module의 외부 포트들을 보고 top input과 module variable net을 실제 redstone route로 연결한다.
-fn route_placed_module(
-    module: &GraphModule,
-    candidates: &[LayoutCandidate],
-    placed: &[PlacedModule],
-    progress: &GlobalPnrProgress,
-) -> eyre::Result<Vec<RoutedNet>> {
-    route_module_variables(module, candidates, placed, progress)
-}
-
-// 배치된 child layout과 routed net을 하나의 World3D로 합치고, top-level output metadata를 수집한다.
-fn assemble_placed_world(
-    module: &GraphModule,
-    candidates: &[LayoutCandidate],
-    placed: &[PlacedModule],
-    routed_nets: &[RoutedNet],
-) -> eyre::Result<PlacedWorld> {
-    let outputs = collect_module_output_endpoints(module, &candidates, &placed);
-    let world = assemble_world(candidates, placed, routed_nets)?;
-    Ok(PlacedWorld {
-        world,
-        inputs: Vec::new(),
-        outputs,
-    })
 }
 
 #[cfg(test)]
