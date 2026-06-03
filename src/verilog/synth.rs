@@ -209,3 +209,147 @@ fn d_latch_graph_module(name: &str, data: &str, enable: &str, output: &str) -> G
     module.name = name.to_owned();
     module
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::verilog::parser::parse_module;
+    use crate::verilog::rtl::lower_rtl_module;
+
+    #[test]
+    fn synthesizes_latch_and_dff_cells() -> eyre::Result<()> {
+        let (rtl, netlist) = synthesize(d_latch_source())?;
+        assert_eq!(
+            netlist.cells,
+            vec![SynthCell::DLatch {
+                output: rtl.signal_ref("q")?,
+                data: rtl.signal_ref("d")?,
+                enable: rtl.signal_ref("en")?,
+            }]
+        );
+
+        let (rtl, netlist) = synthesize(dff_source())?;
+        assert_eq!(
+            netlist.cells,
+            vec![SynthCell::Dff {
+                output: rtl.signal_ref("q")?,
+                data: rtl.signal_expr("d")?,
+                clock: rtl.signal_ref("clk")?,
+            }]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn synthesizes_clocked_next_state_cells() -> eyre::Result<()> {
+        let (rtl, netlist) = synthesize(enabled_dff_source())?;
+        assert_eq!(
+            netlist.cells,
+            vec![SynthCell::Dff {
+                output: rtl.signal_ref("q")?,
+                data: RtlExpr::Mux {
+                    select: Box::new(rtl.signal_expr("en")?),
+                    when_true: Box::new(rtl.signal_expr("d")?),
+                    when_false: Box::new(rtl.signal_expr("q")?),
+                },
+                clock: rtl.signal_ref("clk")?,
+            }]
+        );
+
+        let (rtl, netlist) = synthesize(toggle_source())?;
+        assert_eq!(
+            netlist.cells,
+            vec![SynthCell::Dff {
+                output: rtl.signal_ref("q")?,
+                data: RtlExpr::Not(Box::new(rtl.signal_expr("q")?)),
+                clock: rtl.signal_ref("clk")?,
+            }]
+        );
+
+        let (rtl, netlist) = synthesize(counter_source())?;
+        assert_eq!(
+            netlist.cells,
+            vec![SynthCell::Register {
+                output: rtl.signal_ref("q")?,
+                data: RtlExpr::Add(
+                    Box::new(rtl.signal_expr("q")?),
+                    Box::new(RtlExpr::Const { value: 1, width: 1 }),
+                ),
+                clock: rtl.signal_ref("clk")?,
+            }]
+        );
+
+        Ok(())
+    }
+
+    fn synthesize(source: &str) -> eyre::Result<(RtlModule, SynthNetlist)> {
+        let rtl = lower_rtl_module(&parse_module(source)?)?;
+        let netlist = synthesize_module(&rtl)?;
+        Ok((rtl, netlist))
+    }
+
+    fn d_latch_source() -> &'static str {
+        r#"
+        module d_latch(d, en, q);
+          input d, en;
+          output reg q;
+          always @(*) begin
+            if (en) begin
+              q <= d;
+            end
+          end
+        endmodule
+        "#
+    }
+
+    fn dff_source() -> &'static str {
+        r#"
+        module dff(clk, d, q);
+          input clk, d;
+          output reg q;
+          always @(posedge clk) begin
+            q <= d;
+          end
+        endmodule
+        "#
+    }
+
+    fn enabled_dff_source() -> &'static str {
+        r#"
+        module dff_en(clk, en, d, q);
+          input clk, en, d;
+          output reg q;
+          always @(posedge clk) begin
+            if (en) begin
+              q <= d;
+            end
+          end
+        endmodule
+        "#
+    }
+
+    fn toggle_source() -> &'static str {
+        r#"
+        module toggle(clk, q);
+          input clk;
+          output reg q;
+          always @(posedge clk) begin
+            q <= ~q;
+          end
+        endmodule
+        "#
+    }
+
+    fn counter_source() -> &'static str {
+        r#"
+        module counter(clk, q);
+          input clk;
+          output reg [3:0] q;
+          always @(posedge clk) begin
+            q <= q + 1;
+          end
+        endmodule
+        "#
+    }
+}

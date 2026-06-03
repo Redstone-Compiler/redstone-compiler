@@ -284,3 +284,131 @@ fn signal_ref(
         .map(|signal| RtlSignalRef { signal })
         .with_context(|| format!("unknown RTL signal `{name}`"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::verilog::parser::parse_module;
+
+    #[test]
+    fn lowers_latch_and_clocked_process_shapes() -> eyre::Result<()> {
+        let rtl = lower(d_latch_source())?;
+        let process = single_process(&rtl);
+        assert_eq!(process.sensitivity, RtlSensitivity::Combinational);
+        assert_eq!(
+            process.statements.as_slice(),
+            [RtlStmt::If {
+                condition: rtl.signal_expr("en")?,
+                then_branch: vec![assign_stmt(&rtl, "q", rtl.signal_expr("d")?)?],
+                else_branch: Vec::new(),
+            }]
+        );
+
+        let rtl = lower(dff_source())?;
+        let process = single_process(&rtl);
+        assert_eq!(
+            process.sensitivity,
+            RtlSensitivity::Posedge(rtl.signal_ref("clk")?)
+        );
+        assert_eq!(
+            process.statements.as_slice(),
+            [assign_stmt(&rtl, "q", rtl.signal_expr("d")?)?]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn lowers_clocked_next_state_expressions() -> eyre::Result<()> {
+        let rtl = lower(toggle_source())?;
+        assert_eq!(
+            single_process(&rtl).statements.as_slice(),
+            [assign_stmt(
+                &rtl,
+                "q",
+                RtlExpr::Not(Box::new(rtl.signal_expr("q")?))
+            )?]
+        );
+
+        let rtl = lower(counter_source())?;
+        assert_eq!(
+            single_process(&rtl).statements.as_slice(),
+            [assign_stmt(
+                &rtl,
+                "q",
+                RtlExpr::Add(
+                    Box::new(rtl.signal_expr("q")?),
+                    Box::new(RtlExpr::Const { value: 1, width: 1 }),
+                ),
+            )?]
+        );
+
+        Ok(())
+    }
+
+    fn lower(source: &str) -> eyre::Result<RtlModule> {
+        lower_rtl_module(&parse_module(source)?)
+    }
+
+    fn single_process(rtl: &RtlModule) -> &RtlProcess {
+        rtl.processes.first().expect("expected one RTL process")
+    }
+
+    fn assign_stmt(rtl: &RtlModule, lhs: &str, rhs: RtlExpr) -> eyre::Result<RtlStmt> {
+        Ok(RtlStmt::Assign {
+            kind: RtlAssignKind::NonBlocking,
+            lhs: rtl.signal_ref(lhs)?,
+            rhs,
+        })
+    }
+
+    fn d_latch_source() -> &'static str {
+        r#"
+        module d_latch(d, en, q);
+          input d, en;
+          output reg q;
+          always @(*) begin
+            if (en) begin
+              q <= d;
+            end
+          end
+        endmodule
+        "#
+    }
+
+    fn dff_source() -> &'static str {
+        r#"
+        module dff(clk, d, q);
+          input clk, d;
+          output reg q;
+          always @(posedge clk) begin
+            q <= d;
+          end
+        endmodule
+        "#
+    }
+
+    fn toggle_source() -> &'static str {
+        r#"
+        module toggle(clk, q);
+          input clk;
+          output reg q;
+          always @(posedge clk) begin
+            q <= ~q;
+          end
+        endmodule
+        "#
+    }
+
+    fn counter_source() -> &'static str {
+        r#"
+        module counter(clk, q);
+          input clk;
+          output reg [3:0] q;
+          always @(posedge clk) begin
+            q <= q + 1;
+          end
+        endmodule
+        "#
+    }
+}
