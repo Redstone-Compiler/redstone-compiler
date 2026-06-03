@@ -22,7 +22,7 @@ impl SequentialMacro {
                 vec![rs_latch_macro()]
             }
             SequentialType::RsLatch => Vec::new(),
-            SequentialType::DLatch | SequentialType::DFlipFlop => Vec::new(),
+            SequentialType::DLatch => Vec::new(),
         }
     }
 }

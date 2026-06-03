@@ -890,30 +890,6 @@ fn local_placer_rejects_multi_output_sequential_primitives_until_edges_are_port_
 }
 
 #[test]
-fn local_placer_rejects_sequential_primitives_without_macro_candidates() {
-    let mut graph = Graph::from_nodes(vec![GraphNode {
-        kind: GraphNodeKind::Sequential(SequentialPrimitive::new(
-            SequentialType::DFlipFlop,
-            Vec::new(),
-            vec!["q".to_owned()],
-        )),
-        outputs: vec![1],
-        ..Default::default()
-    }]);
-    graph.build_inputs();
-    graph.build_outputs();
-
-    let err = match LocalPlacer::new(LogicGraph { graph }, config(1)) {
-        Ok(_) => panic!("expected unsupported sequential primitive to be rejected"),
-        Err(err) => err,
-    };
-
-    assert!(err
-        .to_string()
-        .contains("sequential primitive placement is not implemented"));
-}
-
-#[test]
 fn sequential_macro_generation_registers_output_port_positions() {
     let node_id = 7;
     let node = GraphNode {

@@ -83,15 +83,14 @@ GraphModuleDesign {
 enum SequentialType {
     RsLatch,
     DLatch,
-    DFlipFlop,
 }
 ```
 
 현황:
 
 - RS latch, D latch는 local placer 지원 경로가 있다.
-- `DFlipFlop` 타입은 존재하지만 기본 inner graph는 비어 있고 local placer sequential 지원도 RS latch/D latch 중심이다.
-- 현재 DFF global smoke는 monolithic `DFlipFlop` primitive가 아니라 `not_clk + master D latch + slave D latch` 구조를 global PnR로 조합한다.
+- DFF는 `SequentialPrimitive`가 아니라 `SynthCell::Dff`를 `not_clk + master D latch + slave D latch` 구조의 `GraphModule`로 낮추는 mapping 대상이다.
+- 현재 DFF global smoke도 monolithic sequential primitive가 아니라 `not_clk + master D latch + slave D latch` 구조를 global PnR로 조합한다.
 
 Counter를 `DFF + incrementer`로 가려면 DFF/register cell을 실제 PnR 단위로 표현하는 인터페이스가 필요하다. 지금처럼 D latch 두 개로 DFF를 구성하는 module을 생성할 수도 있고, 나중에는 prebuilt DFF cell 또는 state cell로 캐시할 수도 있다.
 
@@ -971,8 +970,7 @@ src/verilog/synth/graph_module.rs
 
 필요:
 
-- `DFlipFlop` primitive를 실제로 지원할지 결정
-- DFF를 D latch 두 개로 composed module로 만들지, leaf primitive로 만들지 결정
+- DFF는 `SequentialPrimitive`에 두지 않고 `SynthCell::Dff -> composed GraphModule` mapping으로 처리
 - Register primitive를 둘지 결정
 
 선택:

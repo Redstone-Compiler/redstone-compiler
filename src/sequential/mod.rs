@@ -8,7 +8,6 @@ pub mod layout;
 pub enum SequentialType {
     RsLatch,
     DLatch,
-    DFlipFlop,
 }
 
 impl SequentialType {
@@ -16,7 +15,6 @@ impl SequentialType {
         match self {
             SequentialType::RsLatch => "RsLatch".to_owned(),
             SequentialType::DLatch => "DLatch".to_owned(),
-            SequentialType::DFlipFlop => "DFlipFlop".to_owned(),
         }
     }
 }
@@ -97,7 +95,6 @@ fn default_inner_graph(sequential_type: SequentialType) -> Graph {
     match sequential_type {
         SequentialType::RsLatch => rs_latch_inner_graph(),
         SequentialType::DLatch => d_latch_inner_graph(),
-        SequentialType::DFlipFlop => Graph::default(),
     }
 }
 
