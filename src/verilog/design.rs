@@ -6,9 +6,9 @@ use crate::graph::module::{
     GraphModule, GraphModuleContext, GraphModuleDesign, GraphModulePort, GraphModulePortTarget,
     GraphModulePortType, GraphModuleVariable,
 };
-use crate::graph::{Graph, GraphNode, GraphNodeKind};
-use crate::sequential::{SequentialPrimitive, SequentialType};
-use crate::verilog::ast::{AlwaysSensitivity, AlwaysStmt, PortDirection, VerilogModule};
+use crate::verilog::ast::{PortDirection, VerilogModule};
+use crate::verilog::rtl::lower_rtl_module;
+use crate::verilog::synth::{graph_module_from_single_synth_cell, synthesize_module};
 
 pub fn lower_design_modules(modules: &[VerilogModule]) -> eyre::Result<GraphModuleDesign> {
     let Some(top_module) = modules.last() else {
@@ -67,13 +67,16 @@ fn graph_backed_module(
     module: &VerilogModule,
     instance_name: &str,
 ) -> eyre::Result<GraphModule> {
-    if let Some(latch) = recognized_d_latch(module) {
-        return Ok(d_latch_graph_module(
-            instance_name,
-            &latch.data,
-            &latch.enable,
-            &latch.output,
-        ));
+    let rtl = lower_rtl_module(module)?;
+    let netlist = synthesize_module(&rtl)?;
+    if let Some(module) = graph_module_from_single_synth_cell(&rtl, &netlist, instance_name)? {
+        return Ok(module);
+    }
+    if !netlist.cells.is_empty() {
+        eyre::bail!(
+            "synthesized Verilog module `{}` has no GraphModule adapter yet",
+            module.name
+        );
     }
 
     if !module.instances.is_empty() {
@@ -243,75 +246,6 @@ fn graph_module_port_type(direction: PortDirection) -> GraphModulePortType {
 
 fn is_output_direction(direction: PortDirection) -> bool {
     matches!(direction, PortDirection::Output | PortDirection::OutputReg)
-}
-
-struct RecognizedDLatch {
-    data: String,
-    enable: String,
-    output: String,
-}
-
-fn recognized_d_latch(module: &VerilogModule) -> Option<RecognizedDLatch> {
-    if !module.assignments.is_empty() || !module.instances.is_empty() {
-        return None;
-    }
-    let [always] = module.always_blocks.as_slice() else {
-        return None;
-    };
-    if always.sensitivity != AlwaysSensitivity::Any {
-        return None;
-    }
-    let AlwaysStmt::If {
-        condition,
-        then_branch,
-    } = &always.body
-    else {
-        return None;
-    };
-    let AlwaysStmt::NonBlockingAssign { output, data } = then_branch.as_ref() else {
-        return None;
-    };
-
-    Some(RecognizedDLatch {
-        data: data.clone(),
-        enable: condition.clone(),
-        output: output.clone(),
-    })
-}
-
-fn d_latch_graph_module(name: &str, data: &str, enable: &str, output: &str) -> GraphModule {
-    let mut graph = Graph::from_nodes(vec![
-        GraphNode {
-            kind: GraphNodeKind::Input(data.to_owned()),
-            ..Default::default()
-        },
-        GraphNode {
-            kind: GraphNodeKind::Input(enable.to_owned()),
-            ..Default::default()
-        },
-        GraphNode {
-            kind: GraphNodeKind::Sequential(SequentialPrimitive::new(
-                SequentialType::DLatch,
-                vec![data.to_owned(), enable.to_owned()],
-                vec![output.to_owned()],
-            )),
-            inputs: vec![0, 1],
-            ..Default::default()
-        },
-        GraphNode {
-            kind: GraphNodeKind::Output(output.to_owned()),
-            inputs: vec![2],
-            ..Default::default()
-        },
-    ]);
-    graph.build_outputs();
-    graph.build_producers();
-    graph.build_consumers();
-    graph.verify().unwrap();
-
-    let mut module: GraphModule = graph.into();
-    module.name = name.to_owned();
-    module
 }
 
 #[cfg(test)]

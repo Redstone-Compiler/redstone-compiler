@@ -8,6 +8,7 @@ pub enum Token {
     Wire,
     Assign,
     Always,
+    Posedge,
     Begin,
     End,
     If,
@@ -29,6 +30,7 @@ pub enum Token {
     And,
     Xor,
     Or,
+    Plus,
 }
 
 pub fn lex(source: &str) -> eyre::Result<Vec<Token>> {
@@ -59,6 +61,7 @@ pub fn lex(source: &str) -> eyre::Result<Vec<Token>> {
             '&' => tokens.push(Token::And),
             '^' => tokens.push(Token::Xor),
             '|' => tokens.push(Token::Or),
+            '+' => tokens.push(Token::Plus),
             '*' => tokens.push(Token::Star),
             '<' if chars.get(index + 1) == Some(&'=') => {
                 tokens.push(Token::Le);
@@ -91,6 +94,7 @@ pub fn lex(source: &str) -> eyre::Result<Vec<Token>> {
                     "wire" => Token::Wire,
                     "assign" => Token::Assign,
                     "always" => Token::Always,
+                    "posedge" => Token::Posedge,
                     "begin" => Token::Begin,
                     "end" => Token::End,
                     "if" => Token::If,

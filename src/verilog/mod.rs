@@ -3,6 +3,8 @@ pub mod design;
 pub mod lexer;
 pub mod lower;
 pub mod parser;
+pub mod rtl;
+pub mod synth;
 
 use std::fs;
 use std::path::Path;
@@ -186,5 +188,298 @@ mod tests {
             .collect::<Vec<_>>();
         input_names.sort();
         input_names
+    }
+}
+
+#[cfg(test)]
+mod rtl_interface_tests {
+    use crate::verilog::parser::parse_module;
+    use crate::verilog::rtl::{lower_rtl_module, RtlAssignKind, RtlExpr, RtlSensitivity, RtlStmt};
+    use crate::verilog::synth::{synthesize_module, SynthCell};
+
+    #[test]
+    fn lowers_d_latch_always_block_to_rtl_process() -> eyre::Result<()> {
+        let module = parse_module(
+            r#"
+            module d_latch(d, en, q);
+              input d, en;
+              output reg q;
+              always @(*) begin
+                if (en) begin
+                  q <= d;
+                end
+              end
+            endmodule
+            "#,
+        )?;
+
+        let rtl = lower_rtl_module(&module)?;
+        let process = rtl.processes.first().expect("expected always process");
+
+        assert_eq!(process.sensitivity, RtlSensitivity::Combinational);
+        assert_eq!(
+            process.statements.as_slice(),
+            [RtlStmt::If {
+                condition: rtl.signal_expr("en")?,
+                then_branch: vec![RtlStmt::Assign {
+                    kind: RtlAssignKind::NonBlocking,
+                    lhs: rtl.signal_ref("q")?,
+                    rhs: rtl.signal_expr("d")?,
+                }],
+                else_branch: Vec::new(),
+            }]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn synthesizes_d_latch_rtl_process_to_latch_cell() -> eyre::Result<()> {
+        let module = parse_module(
+            r#"
+            module d_latch(d, en, q);
+              input d, en;
+              output reg q;
+              always @(*) begin
+                if (en) begin
+                  q <= d;
+                end
+              end
+            endmodule
+            "#,
+        )?;
+
+        let rtl = lower_rtl_module(&module)?;
+        let netlist = synthesize_module(&rtl)?;
+
+        assert_eq!(
+            netlist.cells,
+            vec![SynthCell::DLatch {
+                output: rtl.signal_ref("q")?,
+                data: rtl.signal_ref("d")?,
+                enable: rtl.signal_ref("en")?,
+            }]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn lowers_posedge_dff_always_block_to_rtl_process() -> eyre::Result<()> {
+        let module = parse_module(
+            r#"
+            module dff(clk, d, q);
+              input clk, d;
+              output reg q;
+              always @(posedge clk) begin
+                q <= d;
+              end
+            endmodule
+            "#,
+        )?;
+
+        let rtl = lower_rtl_module(&module)?;
+        let process = rtl.processes.first().expect("expected clocked process");
+
+        assert_eq!(
+            process.sensitivity,
+            RtlSensitivity::Posedge(rtl.signal_ref("clk")?)
+        );
+        assert_eq!(
+            process.statements.as_slice(),
+            [RtlStmt::Assign {
+                kind: RtlAssignKind::NonBlocking,
+                lhs: rtl.signal_ref("q")?,
+                rhs: rtl.signal_expr("d")?,
+            }]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn synthesizes_posedge_dff_rtl_process_to_dff_cell() -> eyre::Result<()> {
+        let module = parse_module(
+            r#"
+            module dff(clk, d, q);
+              input clk, d;
+              output reg q;
+              always @(posedge clk) begin
+                q <= d;
+              end
+            endmodule
+            "#,
+        )?;
+
+        let rtl = lower_rtl_module(&module)?;
+        let netlist = synthesize_module(&rtl)?;
+
+        assert_eq!(
+            netlist.cells,
+            vec![SynthCell::Dff {
+                output: rtl.signal_ref("q")?,
+                data: rtl.signal_expr("d")?,
+                clock: rtl.signal_ref("clk")?,
+            }]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn synthesizes_posedge_enabled_dff_to_muxed_dff_cell() -> eyre::Result<()> {
+        let module = parse_module(
+            r#"
+            module dff_en(clk, en, d, q);
+              input clk, en, d;
+              output reg q;
+              always @(posedge clk) begin
+                if (en) begin
+                  q <= d;
+                end
+              end
+            endmodule
+            "#,
+        )?;
+
+        let rtl = lower_rtl_module(&module)?;
+        let netlist = synthesize_module(&rtl)?;
+
+        assert_eq!(
+            netlist.cells,
+            vec![SynthCell::Dff {
+                output: rtl.signal_ref("q")?,
+                data: RtlExpr::Mux {
+                    select: Box::new(rtl.signal_expr("en")?),
+                    when_true: Box::new(rtl.signal_expr("d")?),
+                    when_false: Box::new(rtl.signal_expr("q")?),
+                },
+                clock: rtl.signal_ref("clk")?,
+            }]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn lowers_posedge_dff_expression_data_to_rtl_process() -> eyre::Result<()> {
+        let module = parse_module(
+            r#"
+            module toggle(clk, q);
+              input clk;
+              output reg q;
+              always @(posedge clk) begin
+                q <= ~q;
+              end
+            endmodule
+            "#,
+        )?;
+
+        let rtl = lower_rtl_module(&module)?;
+        let process = rtl.processes.first().expect("expected clocked process");
+
+        assert_eq!(
+            process.statements.as_slice(),
+            [RtlStmt::Assign {
+                kind: RtlAssignKind::NonBlocking,
+                lhs: rtl.signal_ref("q")?,
+                rhs: RtlExpr::Not(Box::new(rtl.signal_expr("q")?)),
+            }]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn synthesizes_posedge_dff_expression_data_to_dff_cell() -> eyre::Result<()> {
+        let module = parse_module(
+            r#"
+            module toggle(clk, q);
+              input clk;
+              output reg q;
+              always @(posedge clk) begin
+                q <= ~q;
+              end
+            endmodule
+            "#,
+        )?;
+
+        let rtl = lower_rtl_module(&module)?;
+        let netlist = synthesize_module(&rtl)?;
+
+        assert_eq!(
+            netlist.cells,
+            vec![SynthCell::Dff {
+                output: rtl.signal_ref("q")?,
+                data: RtlExpr::Not(Box::new(rtl.signal_expr("q")?)),
+                clock: rtl.signal_ref("clk")?,
+            }]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn lowers_posedge_dff_add_expression_to_rtl_process() -> eyre::Result<()> {
+        let module = parse_module(
+            r#"
+            module counter(clk, q);
+              input clk;
+              output reg [3:0] q;
+              always @(posedge clk) begin
+                q <= q + 1;
+              end
+            endmodule
+            "#,
+        )?;
+
+        let rtl = lower_rtl_module(&module)?;
+        let process = rtl.processes.first().expect("expected clocked process");
+
+        assert_eq!(
+            process.statements.as_slice(),
+            [RtlStmt::Assign {
+                kind: RtlAssignKind::NonBlocking,
+                lhs: rtl.signal_ref("q")?,
+                rhs: RtlExpr::Add(
+                    Box::new(rtl.signal_expr("q")?),
+                    Box::new(RtlExpr::Const { value: 1, width: 1 }),
+                ),
+            }]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn synthesizes_posedge_vector_add_expression_to_register_cell() -> eyre::Result<()> {
+        let module = parse_module(
+            r#"
+            module counter(clk, q);
+              input clk;
+              output reg [3:0] q;
+              always @(posedge clk) begin
+                q <= q + 1;
+              end
+            endmodule
+            "#,
+        )?;
+
+        let rtl = lower_rtl_module(&module)?;
+        let netlist = synthesize_module(&rtl)?;
+
+        assert_eq!(
+            netlist.cells,
+            vec![SynthCell::Register {
+                output: rtl.signal_ref("q")?,
+                data: RtlExpr::Add(
+                    Box::new(rtl.signal_expr("q")?),
+                    Box::new(RtlExpr::Const { value: 1, width: 1 }),
+                ),
+                clock: rtl.signal_ref("clk")?,
+            }]
+        );
+
+        Ok(())
     }
 }
