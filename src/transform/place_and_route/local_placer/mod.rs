@@ -589,7 +589,7 @@ impl LocalPlacer {
                     self.config.materialize_outputs
                         || !matches!(node.kind, GraphNodeKind::Output(_))
                 })
-                .flat_map(|node| node.inputs.iter().copied())
+                .flat_map(|node| node.inputs.clone().into_iter())
                 .chain(self.graph.nodes.iter().filter_map(|node| {
                     matches!(node.kind, GraphNodeKind::Input(_)).then_some(node.id)
                 }))

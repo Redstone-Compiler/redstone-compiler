@@ -407,30 +407,24 @@ mod tests {
     }
 
     fn not_clk_module() -> GraphModule {
-        let mut graph = Graph {
-            nodes: vec![
-                GraphNode {
-                    id: 0,
-                    kind: GraphNodeKind::Input("clk".to_owned()),
-                    ..Default::default()
-                },
-                GraphNode {
-                    id: 1,
-                    kind: GraphNodeKind::Logic(crate::logic::Logic {
-                        logic_type: crate::logic::LogicType::Not,
-                    }),
-                    inputs: vec![0],
-                    ..Default::default()
-                },
-                GraphNode {
-                    id: 2,
-                    kind: GraphNodeKind::Output("clk_n".to_owned()),
-                    inputs: vec![1],
-                    ..Default::default()
-                },
-            ],
-            ..Default::default()
-        };
+        let mut graph = Graph::from_nodes(vec![
+            GraphNode {
+                kind: GraphNodeKind::Input("clk".to_owned()),
+                ..Default::default()
+            },
+            GraphNode {
+                kind: GraphNodeKind::Logic(crate::logic::Logic {
+                    logic_type: crate::logic::LogicType::Not,
+                }),
+                inputs: vec![0],
+                ..Default::default()
+            },
+            GraphNode {
+                kind: GraphNodeKind::Output("clk_n".to_owned()),
+                inputs: vec![1],
+                ..Default::default()
+            },
+        ]);
         graph.build_outputs();
         graph.build_producers();
         graph.build_consumers();
@@ -441,37 +435,30 @@ mod tests {
     }
 
     fn d_latch_module(name: &str) -> GraphModule {
-        let mut graph = Graph {
-            nodes: vec![
-                GraphNode {
-                    id: 0,
-                    kind: GraphNodeKind::Input("d".to_owned()),
-                    ..Default::default()
-                },
-                GraphNode {
-                    id: 1,
-                    kind: GraphNodeKind::Input("en".to_owned()),
-                    ..Default::default()
-                },
-                GraphNode {
-                    id: 2,
-                    kind: GraphNodeKind::Sequential(SequentialPrimitive::new(
-                        SequentialType::DLatch,
-                        vec!["d".to_owned(), "en".to_owned()],
-                        vec!["q".to_owned()],
-                    )),
-                    inputs: vec![0, 1],
-                    ..Default::default()
-                },
-                GraphNode {
-                    id: 3,
-                    kind: GraphNodeKind::Output("q".to_owned()),
-                    inputs: vec![2],
-                    ..Default::default()
-                },
-            ],
-            ..Default::default()
-        };
+        let mut graph = Graph::from_nodes(vec![
+            GraphNode {
+                kind: GraphNodeKind::Input("d".to_owned()),
+                ..Default::default()
+            },
+            GraphNode {
+                kind: GraphNodeKind::Input("en".to_owned()),
+                ..Default::default()
+            },
+            GraphNode {
+                kind: GraphNodeKind::Sequential(SequentialPrimitive::new(
+                    SequentialType::DLatch,
+                    vec!["d".to_owned(), "en".to_owned()],
+                    vec!["q".to_owned()],
+                )),
+                inputs: vec![0, 1],
+                ..Default::default()
+            },
+            GraphNode {
+                kind: GraphNodeKind::Output("q".to_owned()),
+                inputs: vec![2],
+                ..Default::default()
+            },
+        ]);
         graph.build_outputs();
         graph.build_producers();
         graph.build_consumers();
