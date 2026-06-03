@@ -343,6 +343,7 @@ let traceBaseRoot: unknown;
 let isTracePreviewActive = false;
 let traceAnimation: TraceAnimation | undefined;
 let traceAnimationToken = 0;
+let waveformResizeFrame: number | undefined;
 let graphDot: GraphDotInfo | undefined;
 let graphTab: GraphTab = 'world';
 let graphWorldModeValue: GraphWorldMode = 'raw';
@@ -448,6 +449,19 @@ waveformChangedOnlyInput.addEventListener('change', () => {
   renderWaveformLabels();
   renderWaveform(selectedIndex);
   scrollWaveformToTraceIndex(selectedIndex);
+});
+
+window.addEventListener('resize', () => {
+  if (waveformResizeFrame !== undefined) {
+    window.cancelAnimationFrame(waveformResizeFrame);
+  }
+
+  waveformResizeFrame = window.requestAnimationFrame(() => {
+    waveformResizeFrame = undefined;
+    const selectedIndex = Number(traceCycleInput.value);
+    renderWaveform(selectedIndex);
+    scrollWaveformToTraceIndex(selectedIndex);
+  });
 });
 
 traceExpandButton.addEventListener('click', event => {
@@ -634,6 +648,7 @@ function setTraceExpanded(expanded: boolean): void {
   const selectedIndex = Number(traceCycleInput.value);
   renderWaveform(selectedIndex);
   scrollWaveformToTraceIndex(selectedIndex);
+  window.requestAnimationFrame(() => scrollWaveformToTraceIndex(selectedIndex));
 }
 
 function updateTraceExpandAvailability(hasTraceContent: boolean): void {
