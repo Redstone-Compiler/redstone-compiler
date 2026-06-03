@@ -175,7 +175,12 @@ fn ensure_nonblocking(kind: RtlAssignKind) -> eyre::Result<()> {
     Ok(())
 }
 
-fn d_latch_graph_module(name: &str, data: &str, enable: &str, output: &str) -> GraphModule {
+pub(crate) fn d_latch_graph_module(
+    name: &str,
+    data: &str,
+    enable: &str,
+    output: &str,
+) -> GraphModule {
     let mut graph = Graph::from_nodes(vec![
         GraphNode {
             kind: GraphNodeKind::Input(data.to_owned()),

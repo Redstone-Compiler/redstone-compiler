@@ -77,6 +77,8 @@ pub fn route_module_variables(
             blocks: vec![(source, switch)],
         });
 
+        let mut route_sources = vec![source];
+        let mut route_source_set = HashSet::from([source]);
         for (sink_index, sink) in sinks.iter().copied().enumerate() {
             progress.item(
                 port_index + 1,
@@ -88,7 +90,7 @@ pub fn route_module_variables(
                     sinks.len()
                 ),
             );
-            let (route, next_world) = route_to_target_position(&route_world, source, sink)
+            let (route, next_world) = route_to_target_from_network(&route_world, &route_sources, sink)
                 .map_err(|failure| {
                     eyre::eyre!(
                         "failed to route top-level input {} -> {:?}: {failure:?}",
@@ -96,6 +98,11 @@ pub fn route_module_variables(
                         sink.position
                     )
                 })?;
+            for position in route_terminal_positions(&next_world, &route.blocks) {
+                if route_source_set.insert(position) {
+                    route_sources.push(position);
+                }
+            }
             route_world = next_world;
             routes.push(route);
         }
@@ -187,6 +194,38 @@ fn route_to_target_position(
     }
 
     route_point_to_point(world, source, sink.position)
+}
+
+fn route_to_target_from_network(
+    world: &World3D,
+    sources: &[Position],
+    sink: ResolvedPortTarget,
+) -> Result<(RoutedNet, World3D), RouteFailure> {
+    let mut sources = sources.to_vec();
+    sources.sort_by_key(|source| source.manhattan_distance(&sink.position));
+    let fallback_source = sources.first().copied().unwrap_or(sink.position);
+
+    for source in sources {
+        if !world.size.bound_on(source) || !is_route_terminal(world, source) {
+            continue;
+        }
+        if let Ok(route) = route_to_target_position(world, source, sink) {
+            return Ok(route);
+        }
+    }
+
+    Err(RouteFailure::Unreachable {
+        source: fallback_source,
+        sink: sink.position,
+    })
+}
+
+fn route_terminal_positions(world: &World3D, blocks: &[(Position, Block)]) -> Vec<Position> {
+    blocks
+        .iter()
+        .map(|(position, _)| *position)
+        .filter(|position| world.size.bound_on(*position) && is_route_terminal(world, *position))
+        .collect()
 }
 
 fn route_isolated_output_to_target_position(

@@ -330,6 +330,48 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    #[ignore = "search-heavy sequential global pnr smoke test"]
+    fn counter_module_generates_world_from_child_layout_candidates() -> eyre::Result<()> {
+        init_tracing_from_env();
+        let design = lower_design_modules(&parse_modules(
+            r#"
+            module counter(clk, q);
+              input clk;
+              output reg [3:0] q;
+              always @(posedge clk) begin
+                q <= q + 1;
+              end
+            endmodule
+            "#,
+        )?)?;
+        let config = GlobalPnrConfig {
+            candidate: d_latch_child_candidate_config(sequential_local_config()),
+            placement: GlobalPlacementConfig {
+                spacing: 4,
+                shelf_width: 64,
+            },
+            ..Default::default()
+        };
+
+        let placed = place_and_route_design_with_outputs(&design, &config)?;
+
+        assert!(!placed.world.iter_block().is_empty());
+        let mut output_names = placed
+            .outputs
+            .iter()
+            .map(|output| output.name.as_str())
+            .collect::<Vec<_>>();
+        output_names.sort();
+        assert_eq!(output_names, vec!["q_0", "q_1", "q_2", "q_3"]);
+        let nbt: NBTRoot = placed.world.to_nbt();
+        nbt.save("test/counter-global-smoke.nbt");
+        placed
+            .metadata()
+            .save("test/counter-global-smoke.outputs.json")?;
+        Ok(())
+    }
+
     fn init_tracing_from_env() {
         let Some(level) = rust_log_level() else {
             return;
