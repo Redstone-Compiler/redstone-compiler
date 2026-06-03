@@ -323,6 +323,7 @@ let currentNbtBytes: Uint8Array | undefined;
 let currentRoot: unknown;
 let currentTrace: TraceEntry[] = [];
 let traceCycles: number[] = [];
+let traceCycleDisplayOffset = 0;
 let currentSnapshots: SnapshotInfo[] = [];
 let currentWaveform: Waveform = emptyWaveform;
 let selectedWaveformSignal: WaveformSignal | undefined;
@@ -1618,6 +1619,10 @@ function getVisibleWaveformSignals(): WaveformSignal[] {
   return currentWaveform.signals.filter(signalHasWaveformChange);
 }
 
+function toTraceDisplayCycle(cycle: number): number {
+  return Math.max(1, cycle - traceCycleDisplayOffset);
+}
+
 function updateWaveformFilterControl(): void {
   waveformChangedOnlyInput.checked = waveformChangedOnly;
   waveformChangedOnlyInput.disabled = currentWaveform.signals.length === 0;
@@ -1649,6 +1654,7 @@ function renderTrace(
   }
   traceBaseRoot = baseRoot;
   traceCycles = Array.from(new Set([...trace.map(entry => entry.cycle), ...waveform.cycles])).sort((a, b) => a - b);
+  traceCycleDisplayOffset = traceCycles.length === 0 ? 0 : Math.max(0, traceCycles[0] - 1);
   traceCount.textContent =
     trace.length === 0 && waveform.signals.length === 0
       ? 'No events'
@@ -1718,7 +1724,7 @@ async function renderTraceCycle(index: number): Promise<void> {
   const positions = uniquePositions([...entries.map(entry => rustPosToRenderPos(entry.target_position)), ...selectedSignalPositions]);
   const snapshot = currentSnapshots.find(snapshot => snapshot.cycle === cycle);
   traceCycleInput.value = String(safeIndex);
-  traceCycleLabel.textContent = `cycle ${cycle} / ${entries.length} events`;
+  traceCycleLabel.textContent = `cycle ${toTraceDisplayCycle(cycle)} / ${entries.length} events`;
   traceOutput.textContent = formatTrace(entries);
   renderWaveform(safeIndex);
   await renderTraceSnapshot(snapshot, positions);
@@ -1855,7 +1861,7 @@ function drawWaveformHeader(context: CanvasRenderingContext2D, width: number): v
 
   traceCycles.forEach((cycle, index) => {
     const x = index * WAVEFORM_CYCLE_WIDTH;
-    context.fillText(String(cycle), x + 4, WAVEFORM_HEADER_HEIGHT / 2);
+    context.fillText(String(toTraceDisplayCycle(cycle)), x + 4, WAVEFORM_HEADER_HEIGHT / 2);
     context.strokeStyle = 'rgb(154 164 173 / 14%)';
     context.beginPath();
     context.moveTo(x + 0.5, 0);
@@ -1979,7 +1985,7 @@ function formatTrace(trace: TraceEntry[]): string {
       const pos = entry.target_position.join(',');
       return [
         `#${id}`,
-        `cycle=${entry.cycle}`,
+        `cycle=${toTraceDisplayCycle(entry.cycle)}`,
         entry.event_type,
         `target=${pos}`,
         `dir=${entry.direction}`,
