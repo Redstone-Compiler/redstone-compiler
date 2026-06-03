@@ -8,7 +8,9 @@ use redstone_compiler::transform::place_and_route::place_bound::{PlaceBound, Pro
 use redstone_compiler::transform::world_to_logic::WorldToLogicTransformer;
 use redstone_compiler::world::block::{Block, BlockKind, Direction};
 use redstone_compiler::world::position::{DimSize, Position};
-use redstone_compiler::world::simulator::{SimulationSnapshot, SimulationTraceEntry, Simulator};
+use redstone_compiler::world::simulator::{
+    SimulationSnapshot, SimulationTraceEntry, SimulationWaveform, Simulator,
+};
 use redstone_compiler::world::{World, World3D};
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
@@ -29,6 +31,7 @@ struct TraceReport {
     error: Option<String>,
     trace: Vec<SimulationTraceEntry>,
     snapshots: Vec<SnapshotInfo>,
+    waveform: SimulationWaveform,
 }
 
 #[derive(Serialize)]
@@ -52,6 +55,7 @@ pub struct NbtSimulator {
     sim: Simulator,
     last_trace: Vec<SimulationTraceEntry>,
     last_snapshots: Vec<SnapshotInfo>,
+    last_waveform: SimulationWaveform,
 }
 
 #[wasm_bindgen]
@@ -69,11 +73,13 @@ impl NbtSimulator {
         .map_err(to_js_error)?;
         let last_trace = sim.trace().to_vec();
         let last_snapshots = snapshots_to_info(sim.snapshots());
+        let last_waveform = sim.waveform();
 
         Ok(Self {
             sim,
             last_trace,
             last_snapshots,
+            last_waveform,
         })
     }
 
@@ -91,12 +97,14 @@ impl NbtSimulator {
                 error: None,
                 trace: sim.trace().to_vec(),
                 snapshots: snapshots_to_info(sim.snapshots()),
+                waveform: sim.waveform(),
             },
             Err(error) => TraceReport {
                 ok: false,
                 error: Some(error.message().to_owned()),
                 trace: error.trace().to_vec(),
                 snapshots: snapshots_to_info(error.snapshots()),
+                waveform: error.waveform(),
             },
         };
 
@@ -226,10 +234,12 @@ impl NbtSimulator {
         ) {
             self.last_trace = self.sim.trace().to_vec();
             self.last_snapshots = snapshots_to_info(self.sim.snapshots());
+            self.last_waveform = self.sim.waveform();
             return Err(to_js_error(error));
         }
         self.last_trace = self.sim.trace().to_vec();
         self.last_snapshots = snapshots_to_info(self.sim.snapshots());
+        self.last_waveform = self.sim.waveform();
         self.structure()
     }
 
@@ -239,6 +249,10 @@ impl NbtSimulator {
 
     pub fn snapshots(&self) -> Result<JsValue, JsValue> {
         serde_wasm_bindgen::to_value(&self.last_snapshots).map_err(to_js_error)
+    }
+
+    pub fn waveform(&self) -> Result<JsValue, JsValue> {
+        serde_wasm_bindgen::to_value(&self.last_waveform).map_err(to_js_error)
     }
 
     pub fn structure(&self) -> Result<JsValue, JsValue> {

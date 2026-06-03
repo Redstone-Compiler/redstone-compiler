@@ -106,6 +106,151 @@ pub struct SimulationSnapshot {
     pub world: World3D,
 }
 
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct SimulationWaveform {
+    pub cycles: Vec<usize>,
+    pub signals: Vec<SimulationWaveformSignal>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct SimulationWaveformSignal {
+    pub position: [usize; 3],
+    pub kind: String,
+    pub property: String,
+    pub label: String,
+    pub max_value: usize,
+    pub values: Vec<usize>,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct WaveformSignalDescriptor {
+    position: Position,
+    kind: &'static str,
+    property: &'static str,
+    max_value: usize,
+}
+
+impl WaveformSignalDescriptor {
+    fn sort_key(&self) -> (usize, Position, &'static str) {
+        (
+            waveform_signal_kind_order(self.kind),
+            self.position,
+            self.property,
+        )
+    }
+}
+
+impl SimulationWaveform {
+    pub fn from_snapshots(snapshots: &[SimulationSnapshot]) -> Self {
+        let mut descriptors = snapshots
+            .iter()
+            .flat_map(|snapshot| waveform_signal_descriptors(&snapshot.world))
+            .collect::<Vec<_>>();
+        descriptors.sort_by_key(WaveformSignalDescriptor::sort_key);
+        descriptors.dedup();
+
+        Self {
+            cycles: snapshots.iter().map(|snapshot| snapshot.cycle).collect(),
+            signals: descriptors
+                .into_iter()
+                .map(|descriptor| SimulationWaveformSignal {
+                    position: [
+                        descriptor.position.0,
+                        descriptor.position.1,
+                        descriptor.position.2,
+                    ],
+                    kind: descriptor.kind.to_owned(),
+                    property: descriptor.property.to_owned(),
+                    label: waveform_signal_label(descriptor),
+                    max_value: descriptor.max_value,
+                    values: snapshots
+                        .iter()
+                        .map(|snapshot| waveform_signal_value(&snapshot.world, descriptor))
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
+}
+
+fn waveform_signal_descriptors(world: &World3D) -> Vec<WaveformSignalDescriptor> {
+    let mut descriptors = world
+        .iter_block()
+        .into_iter()
+        .flat_map(|(position, block)| match block.kind {
+            BlockKind::Switch { .. } => vec![WaveformSignalDescriptor {
+                position,
+                kind: "switch",
+                property: "powered",
+                max_value: 1,
+            }],
+            BlockKind::Torch { .. } => vec![WaveformSignalDescriptor {
+                position,
+                kind: "torch",
+                property: "lit",
+                max_value: 1,
+            }],
+            BlockKind::Repeater { .. } => vec![
+                WaveformSignalDescriptor {
+                    position,
+                    kind: "repeater",
+                    property: "powered",
+                    max_value: 1,
+                },
+                WaveformSignalDescriptor {
+                    position,
+                    kind: "repeater",
+                    property: "locked",
+                    max_value: 1,
+                },
+            ],
+            BlockKind::Air
+            | BlockKind::Cobble { .. }
+            | BlockKind::Redstone { .. }
+            | BlockKind::RedstoneBlock
+            | BlockKind::Piston { .. } => Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    descriptors.sort_by_key(WaveformSignalDescriptor::sort_key);
+    descriptors
+}
+
+fn waveform_signal_kind_order(kind: &str) -> usize {
+    match kind {
+        "switch" => 0,
+        "repeater" => 1,
+        "torch" => 2,
+        _ => 5,
+    }
+}
+
+fn waveform_signal_value(world: &World3D, descriptor: WaveformSignalDescriptor) -> usize {
+    if !world.size.bound_on(descriptor.position) {
+        return 0;
+    }
+
+    match (world[descriptor.position].kind, descriptor.kind, descriptor.property) {
+        (BlockKind::Cobble { on_count, .. }, "cobble", "powered") => usize::from(on_count > 0),
+        (BlockKind::Switch { is_on }, "switch", "powered") => usize::from(is_on),
+        (BlockKind::Redstone { strength, .. }, "redstone", "power") => strength,
+        (BlockKind::Torch { is_on }, "torch", "lit") => usize::from(is_on),
+        (BlockKind::Repeater { is_on, .. }, "repeater", "powered") => usize::from(is_on),
+        (BlockKind::Repeater { is_locked, .. }, "repeater", "locked") => usize::from(is_locked),
+        _ => 0,
+    }
+}
+
+fn waveform_signal_label(descriptor: WaveformSignalDescriptor) -> String {
+    format!(
+        "{}.{} {},{},{}",
+        descriptor.kind,
+        descriptor.property,
+        descriptor.position.0,
+        descriptor.position.1,
+        descriptor.position.2
+    )
+}
+
 #[derive(Clone, Debug)]
 pub struct SimulationTraceError {
     message: String,
@@ -124,6 +269,10 @@ impl SimulationTraceError {
 
     pub fn snapshots(&self) -> &[SimulationSnapshot] {
         &self.snapshots
+    }
+
+    pub fn waveform(&self) -> SimulationWaveform {
+        SimulationWaveform::from_snapshots(&self.snapshots)
     }
 }
 
@@ -355,6 +504,10 @@ impl Simulator {
 
     pub fn snapshots(&self) -> &[SimulationSnapshot] {
         &self.snapshots
+    }
+
+    pub fn waveform(&self) -> SimulationWaveform {
+        SimulationWaveform::from_snapshots(&self.snapshots)
     }
 
     pub fn clear_trace(&mut self) {
@@ -1849,6 +2002,98 @@ mod test {
             .collect::<Vec<_>>();
         snapshot.sort_by_key(|(pos, _)| *pos);
         snapshot
+    }
+
+    #[test]
+    fn unittest_simulator_waveform_defaults_to_interactive_signal_blocks() {
+        let mut first = World3D::new(DimSize(5, 1, 1));
+        first[Position(0, 0, 0)] = Block {
+            kind: BlockKind::Switch { is_on: false },
+            direction: Direction::Top,
+        };
+        first[Position(1, 0, 0)] = Block {
+            kind: BlockKind::Redstone {
+                on_count: 0,
+                state: 0,
+                strength: 0,
+            },
+            direction: Direction::None,
+        };
+        first[Position(2, 0, 0)] = Block {
+            kind: BlockKind::Cobble {
+                on_count: 1,
+                on_base_count: 0,
+            },
+            direction: Direction::None,
+        };
+        first[Position(3, 0, 0)] = Block {
+            kind: BlockKind::Torch { is_on: true },
+            direction: Direction::Bottom,
+        };
+        first[Position(4, 0, 0)] = Block {
+            kind: BlockKind::Repeater {
+                is_on: false,
+                is_locked: false,
+                delay: 1,
+                lock_input1: None,
+                lock_input2: None,
+            },
+            direction: Direction::North,
+        };
+
+        let mut second = first.clone();
+        second[Position(0, 0, 0)].kind = BlockKind::Switch { is_on: true };
+        second[Position(1, 0, 0)].kind = BlockKind::Redstone {
+            on_count: 0,
+            state: 0,
+            strength: 12,
+        };
+        second[Position(2, 0, 0)].kind = BlockKind::Cobble {
+            on_count: 0,
+            on_base_count: 0,
+        };
+        second[Position(3, 0, 0)].kind = BlockKind::Torch { is_on: false };
+        second[Position(4, 0, 0)].kind = BlockKind::Repeater {
+            is_on: true,
+            is_locked: true,
+            delay: 1,
+            lock_input1: None,
+            lock_input2: None,
+        };
+
+        let waveform = SimulationWaveform::from_snapshots(&[
+            SimulationSnapshot {
+                cycle: 7,
+                world: first,
+            },
+            SimulationSnapshot {
+                cycle: 8,
+                world: second,
+            },
+        ]);
+
+        assert_eq!(waveform.cycles, vec![7, 8]);
+        assert_eq!(
+            waveform
+                .signals
+                .iter()
+                .map(|signal| format!("{}.{}", signal.kind, signal.property))
+                .collect::<Vec<_>>(),
+            vec![
+                "switch.powered",
+                "repeater.locked",
+                "repeater.powered",
+                "torch.lit"
+            ]
+        );
+        assert_eq!(waveform.signals[0].position, [0, 0, 0]);
+        assert_eq!(waveform.signals[0].values, vec![0, 1]);
+        assert_eq!(waveform.signals[1].position, [4, 0, 0]);
+        assert_eq!(waveform.signals[1].values, vec![0, 1]);
+        assert_eq!(waveform.signals[2].position, [4, 0, 0]);
+        assert_eq!(waveform.signals[2].values, vec![0, 1]);
+        assert_eq!(waveform.signals[3].position, [3, 0, 0]);
+        assert_eq!(waveform.signals[3].values, vec![1, 0]);
     }
 
     fn assert_matches_fresh_recompute(
