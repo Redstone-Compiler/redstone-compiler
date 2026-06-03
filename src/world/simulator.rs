@@ -11,6 +11,10 @@ const DEFAULT_TRACE_LIMIT: usize = 0;
 // not exact game ticks or redstone ticks.
 const TORCH_BURNOUT_WINDOW_CYCLES: usize = 60;
 const TORCH_BURNOUT_TOGGLE_LIMIT: usize = 8;
+// Torch support changes are evaluated after a small simulator delay, then
+// rechecked at application time so short transient power does not force a
+// stale torch state transition.
+const TORCH_UPDATE_DELAY_CYCLES: usize = 1;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum EventType {
@@ -229,7 +233,11 @@ fn waveform_signal_value(world: &World3D, descriptor: WaveformSignalDescriptor) 
         return 0;
     }
 
-    match (world[descriptor.position].kind, descriptor.kind, descriptor.property) {
+    match (
+        world[descriptor.position].kind,
+        descriptor.kind,
+        descriptor.property,
+    ) {
         (BlockKind::Cobble { on_count, .. }, "cobble", "powered") => usize::from(on_count > 0),
         (BlockKind::Switch { is_on }, "switch", "powered") => usize::from(is_on),
         (BlockKind::Redstone { strength, .. }, "redstone", "power") => strength,
@@ -342,7 +350,40 @@ impl Simulator {
                 snapshots: sim.snapshots,
             });
         }
-        sim.clear_transient_torch_burnout();
+
+        Ok(sim)
+    }
+
+    pub fn from_preserving_torch_states_with_limits_and_trace(
+        world: &World,
+        max_cycles: usize,
+        max_events: usize,
+        trace_limit: usize,
+    ) -> Result<Self, SimulationTraceError> {
+        let mut sim = Self::new(world, trace_limit);
+        let limits = SimulationLimits {
+            max_cycles: Some(max_cycles),
+            max_events: Some(max_events),
+        };
+
+        tracing::info!("Simulation target\n{:?}", sim.world);
+
+        sim.queue.push_back(VecDeque::new());
+        sim.world.initialize_redstone_states();
+        sim.init();
+        sim.enqueue_torch_reevaluations();
+
+        tracing::debug!("queue: {:?}", sim.queue);
+
+        sim.fill_event_id();
+
+        if let Err(error) = sim.run_inner(limits) {
+            return Err(SimulationTraceError {
+                message: error.to_string(),
+                trace: sim.trace,
+                snapshots: sim.snapshots,
+            });
+        }
 
         Ok(sim)
     }
@@ -365,7 +406,6 @@ impl Simulator {
 
         sim.fill_event_id();
         sim.run_inner(limits)?;
-        sim.clear_transient_torch_burnout();
 
         Ok(sim)
     }
@@ -488,7 +528,6 @@ impl Simulator {
             self.enqueue_torch_reevaluations();
             self.fill_event_id();
             self.run_inner(limits)?;
-            self.clear_transient_torch_burnout();
         }
 
         Ok(())
@@ -513,11 +552,6 @@ impl Simulator {
     pub fn clear_trace(&mut self) {
         self.trace.clear();
         self.snapshots.clear();
-    }
-
-    fn clear_transient_torch_burnout(&mut self) {
-        self.torch_toggle_cycles.clear();
-        self.burned_out_torches.clear();
     }
 
     pub fn run(&mut self) -> eyre::Result<usize> {
@@ -570,6 +604,13 @@ impl Simulator {
 
     fn push_event_to_next_tick(&mut self, event: Event) {
         self.queue.back_mut().unwrap().push_back(event);
+    }
+
+    fn schedule_event(&mut self, delay_cycles: usize, event: Event) {
+        while self.queue.len() <= delay_cycles {
+            self.queue.push_back(VecDeque::new());
+        }
+        self.queue[delay_cycles].push_back(event);
     }
 
     fn normalize_torches_on(&mut self) {
@@ -658,10 +699,9 @@ impl Simulator {
             })
             .collect::<Vec<_>>();
 
-        if events.is_empty() {
-            return;
+        for event in events {
+            self.schedule_event(TORCH_UPDATE_DELAY_CYCLES, event);
         }
-        self.queue.push_back(events.into());
     }
 
     fn redstone_propagate_targets(&self, pos: Position, state: usize) -> Vec<Position> {
@@ -866,9 +906,6 @@ impl Simulator {
                     if output == Some(target) {
                         sources.insert(source_pos);
                         hard_sources.insert(source_pos);
-                    }
-                    if output.and_then(|position| position.down()) == Some(target) {
-                        sources.insert(source_pos);
                     }
                 }
                 _ => {}
@@ -1396,15 +1433,13 @@ impl Simulator {
             eyre::bail!("unreachable");
         };
 
-        let next_is_on = !event.event_type.is_on();
+        let support_is_powered = self.cobble_power_counts(support_position).0 > 0;
+        let next_is_on = !support_is_powered;
         if *is_on == next_is_on {
             return Ok(());
         }
         if next_is_on && self.burned_out_torches.contains(&event.target_position) {
-            if self.torch_is_still_burned_out(event.target_position) {
-                return Ok(());
-            }
-            self.burned_out_torches.remove(&event.target_position);
+            return Ok(());
         }
         let burned_out = self.record_torch_toggle(event.target_position);
         if burned_out {
@@ -1463,13 +1498,6 @@ impl Simulator {
         let history = self.torch_toggle_cycles.entry(position).or_default();
         history.push_back(self.cycle);
         history.len() >= TORCH_BURNOUT_TOGGLE_LIMIT
-    }
-
-    fn torch_is_still_burned_out(&mut self, position: Position) -> bool {
-        self.prune_torch_toggle_history(position);
-        self.torch_toggle_cycles
-            .get(&position)
-            .is_some_and(|history| history.len() >= TORCH_BURNOUT_TOGGLE_LIMIT)
     }
 
     fn prune_torch_toggle_history(&mut self, position: Position) {
@@ -1575,16 +1603,6 @@ impl Simulator {
                         });
                     }
 
-                    if let Some(pos) = walk.and_then(|pos| pos.down()) {
-                        self.push_event_to_next_tick(Event {
-                            id: None,
-                            from_id: event.id,
-                            event_type: EventType::SoftOn,
-                            target_position: pos,
-                            direction: Direction::Bottom,
-                        });
-                    }
-
                     tracing::info!("trigger repeater event: {event:?}, {block:?}");
                 }
             }
@@ -1609,16 +1627,6 @@ impl Simulator {
                             event_type: EventType::HardOff,
                             target_position: pos,
                             direction: pos.diff(event.target_position),
-                        });
-                    }
-
-                    if let Some(pos) = walk.and_then(|pos| pos.down()) {
-                        self.push_event_to_next_tick(Event {
-                            id: None,
-                            from_id: event.id,
-                            event_type: EventType::SoftOff,
-                            target_position: pos,
-                            direction: Direction::Bottom,
                         });
                     }
 
@@ -1647,6 +1655,27 @@ mod test {
     use crate::sequential::SequentialPrimitive;
     use crate::world::block::RedstoneState;
     use crate::world::position::DimSize;
+
+    #[test]
+    fn simulator_preserves_dff_latch_torch_state_on_init() -> eyre::Result<()> {
+        let nbt = NBTRoot::from_nbt_bytes(&std::fs::read("test/d-flip-flop-global-smoke.nbt")?)?;
+        let world = nbt.to_world();
+        let torch = Position(22, 6, 3);
+        let sim = Simulator::from_preserving_torch_states_with_limits_and_trace(
+            &world, 256, 50_000, 50_000,
+        )
+        .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
+        let torch_block = sim.world()[torch];
+        let support = torch.walk(torch_block.direction).unwrap();
+
+        let support_is_powered = sim.cobble_power_counts(support).0 > 0;
+        assert!(!sim.burned_out_torches.contains(&torch));
+        assert!(matches!(
+            sim.world()[torch].kind,
+            BlockKind::Torch { is_on } if is_on != support_is_powered
+        ));
+        Ok(())
+    }
 
     #[test]
     pub fn unittest_simulator_init_states() {
@@ -1900,6 +1929,108 @@ mod test {
             "simulator should not panic on out-of-bounds events"
         );
         result.unwrap()?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn unittest_simulator_torch_reevaluation_uses_current_support_power() -> eyre::Result<()> {
+        let torch = Position(1, 1, 1);
+        let support = Position(1, 1, 0);
+        let mock_world = World {
+            size: DimSize(3, 3, 2),
+            blocks: vec![
+                (
+                    support,
+                    Block {
+                        kind: BlockKind::Cobble {
+                            on_count: 0,
+                            on_base_count: 0,
+                        },
+                        direction: Direction::None,
+                    },
+                ),
+                (
+                    torch,
+                    Block {
+                        kind: BlockKind::Torch { is_on: true },
+                        direction: Direction::Bottom,
+                    },
+                ),
+            ],
+        };
+        let mut sim = Simulator::new(&mock_world, DEFAULT_TRACE_LIMIT);
+        sim.queue.push_back(VecDeque::new());
+        let mut block = sim.world[torch];
+
+        sim.propgate_torch_event(
+            &mut block,
+            &Event {
+                id: None,
+                from_id: None,
+                event_type: EventType::SoftOn,
+                target_position: torch,
+                direction: Direction::Bottom,
+            },
+        )?;
+
+        assert!(
+            matches!(block.kind, BlockKind::Torch { is_on: true }),
+            "stale powered-support reevaluation should not turn the torch off"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn unittest_simulator_burned_out_torch_does_not_recover_during_session() -> eyre::Result<()> {
+        let torch = Position(1, 1, 1);
+        let support = Position(1, 1, 0);
+        let mock_world = World {
+            size: DimSize(3, 3, 2),
+            blocks: vec![
+                (
+                    support,
+                    Block {
+                        kind: BlockKind::Cobble {
+                            on_count: 0,
+                            on_base_count: 0,
+                        },
+                        direction: Direction::None,
+                    },
+                ),
+                (
+                    torch,
+                    Block {
+                        kind: BlockKind::Torch { is_on: false },
+                        direction: Direction::Bottom,
+                    },
+                ),
+            ],
+        };
+        let mut sim = Simulator::new(&mock_world, DEFAULT_TRACE_LIMIT);
+        sim.queue.push_back(VecDeque::new());
+        sim.cycle = TORCH_BURNOUT_WINDOW_CYCLES * 2;
+        sim.burned_out_torches.insert(torch);
+        sim.torch_toggle_cycles
+            .insert(torch, VecDeque::from([0, 1, 2, 3, 4, 5, 6, 7]));
+        let mut block = sim.world[torch];
+
+        sim.propgate_torch_event(
+            &mut block,
+            &Event {
+                id: None,
+                from_id: None,
+                event_type: EventType::SoftOff,
+                target_position: torch,
+                direction: Direction::Bottom,
+            },
+        )?;
+
+        assert!(
+            matches!(block.kind, BlockKind::Torch { is_on: false }),
+            "burnout is a simulator-session stabilization state and should not recover by age"
+        );
 
         Ok(())
     }
@@ -2271,6 +2402,65 @@ mod test {
         };
 
         assert_eq!(strength, 14)
+    }
+
+    #[test]
+    fn unittest_simulator_repeater_does_not_power_lower_front_redstone_directly() {
+        let repeater = Position(1, 1, 2);
+        let lower_front_redstone = Position(0, 1, 1);
+        let mock_world = World {
+            size: DimSize(3, 3, 3),
+            blocks: vec![
+                (repeater.down().unwrap(), test_cobble(0, 0)),
+                (
+                    repeater,
+                    Block {
+                        kind: BlockKind::Repeater {
+                            is_on: true,
+                            is_locked: false,
+                            delay: 1,
+                            lock_input1: None,
+                            lock_input2: None,
+                        },
+                        direction: Direction::East,
+                    },
+                ),
+                (lower_front_redstone.down().unwrap(), test_cobble(0, 0)),
+                (
+                    lower_front_redstone,
+                    Block {
+                        kind: BlockKind::Redstone {
+                            on_count: 0,
+                            state: 0,
+                            strength: 0,
+                        },
+                        direction: Direction::None,
+                    },
+                ),
+            ],
+        };
+
+        let mut sim = Simulator::new(&mock_world, DEFAULT_TRACE_LIMIT);
+        sim.queue.push_back(VecDeque::new());
+        let mut block = sim.world[repeater];
+
+        sim.propgate_repeater_event(
+            &mut block,
+            &Event {
+                id: None,
+                from_id: None,
+                event_type: EventType::RepeaterOn { delay: 0 },
+                target_position: repeater,
+                direction: Direction::East,
+            },
+        )
+        .unwrap();
+
+        assert!(!sim
+            .queue
+            .iter()
+            .flatten()
+            .any(|event| event.target_position == lower_front_redstone));
     }
 
     fn test_repeater(is_on: bool, is_locked: bool, direction: Direction) -> Block {

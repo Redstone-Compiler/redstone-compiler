@@ -5,6 +5,7 @@ use crate::graph::world::WorldGraph;
 use crate::graph::{GraphNodeId, GraphNodeKind};
 use crate::output::OutputMetadata;
 use crate::transform::logic::LogicGraphTransformer;
+use crate::transform::world::WorldGraphTransformer;
 use crate::transform::world_to_logic::WorldToLogicTransformer;
 use crate::world::block::BlockKind;
 use crate::world::{World, World3D};
@@ -96,7 +97,7 @@ fn resolve_folded_output_source(
     let component_inputs = component_external_edges(raw_graph, &component, true);
     let component_outputs = component_external_edges(raw_graph, &component, false);
 
-    folded_graph
+    if let Some(node_id) = folded_graph
         .graph
         .nodes
         .iter()
@@ -108,7 +109,42 @@ fn resolve_folded_output_source(
                     == component_outputs
         })
         .map(|node| node.id)
+    {
+        return Ok(node_id);
+    }
+
+    let mut redstone_only_transform = WorldGraphTransformer::new(raw_graph.clone());
+    redstone_only_transform.fold_redstone();
+    let redstone_folded_graph = redstone_only_transform.finish();
+    let Some(redstone_folded_id) = redstone_folded_graph
+        .graph
+        .nodes
+        .iter()
+        .find(|node| {
+            matches!(&node.kind, GraphNodeKind::Block(block) if matches!(block.kind, BlockKind::Redstone { .. }))
+                && node.inputs.iter().copied().collect::<std::collections::HashSet<_>>()
+                    == component_inputs
+                && node.outputs.iter().copied().collect::<std::collections::HashSet<_>>()
+                    == component_outputs
+        })
+        .map(|node| node.id)
+    else {
+        eyre::bail!("missing folded redstone source for raw node {raw_source_id}");
+    };
+
+    folded_graph
+        .graph
+        .nodes
+        .iter()
+        .find(|node| tag_mentions_node_id(&node.tag, redstone_folded_id))
+        .map(|node| node.id)
         .ok_or_else(|| eyre::eyre!("missing folded redstone source for raw node {raw_source_id}"))
+}
+
+fn tag_mentions_node_id(tag: &str, node_id: GraphNodeId) -> bool {
+    tag.split(|ch: char| !ch.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .any(|part| part.parse::<GraphNodeId>().ok() == Some(node_id))
 }
 
 fn collect_redstone_component(

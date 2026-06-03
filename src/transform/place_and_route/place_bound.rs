@@ -127,10 +127,6 @@ impl PlaceBound {
                     result.push(PlaceBound(PropagateType::Repeater, pos, dir));
                 }
 
-                if let Some(pos) = walk.and_then(|pos| pos.down()) {
-                    result.push(PlaceBound(PropagateType::Soft, pos, Direction::Bottom));
-                }
-
                 result
             }
             BlockKind::RedstoneBlock => pos

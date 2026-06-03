@@ -1,4 +1,8 @@
+use std::collections::HashMap;
+
+use crate::graph::GraphNodeId;
 use crate::transform::place_and_route::sampling::SamplingPolicy;
+use crate::world::position::Position;
 
 #[derive(Copy, Clone)]
 pub struct LocalPlacerConfig {
@@ -51,6 +55,53 @@ pub enum InputPlacementStrategy {
     Boundary,
     /// 입력을 search 영역 내부 어디에나 배치할 수 있다.
     Anywhere,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
+pub struct LocalPlacerInputConstraints {
+    positions_by_node_id: HashMap<GraphNodeId, Vec<Position>>,
+    positions_by_input_name: HashMap<String, Vec<Position>>,
+}
+
+impl LocalPlacerInputConstraints {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_node_positions(
+        mut self,
+        node_id: GraphNodeId,
+        positions: impl IntoIterator<Item = Position>,
+    ) -> Self {
+        self.positions_by_node_id
+            .insert(node_id, positions.into_iter().collect());
+        self
+    }
+
+    pub fn with_input_positions(
+        mut self,
+        input_name: impl Into<String>,
+        positions: impl IntoIterator<Item = Position>,
+    ) -> Self {
+        self.positions_by_input_name
+            .insert(input_name.into(), positions.into_iter().collect());
+        self
+    }
+
+    pub(super) fn positions_for(
+        &self,
+        node_id: GraphNodeId,
+        input_name: &str,
+    ) -> Option<Vec<Position>> {
+        self.positions_by_node_id
+            .get(&node_id)
+            .or_else(|| self.positions_by_input_name.get(input_name))
+            .cloned()
+    }
+
+    pub fn positions_for_input_name(&self, input_name: &str) -> Option<Vec<Position>> {
+        self.positions_by_input_name.get(input_name).cloned()
+    }
 }
 
 #[derive(Default, Debug, Copy, Clone, PartialEq, Eq)]

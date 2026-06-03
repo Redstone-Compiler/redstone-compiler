@@ -4,9 +4,13 @@ pub enum Token {
     EndModule,
     Input,
     Output,
+    Reg,
     Wire,
     Assign,
     Always,
+    Begin,
+    End,
+    If,
     Ident(String),
     Number(usize),
     LParen,
@@ -18,7 +22,9 @@ pub enum Token {
     Semi,
     Colon,
     Eq,
+    Le,
     At,
+    Star,
     Not,
     And,
     Xor,
@@ -53,6 +59,12 @@ pub fn lex(source: &str) -> eyre::Result<Vec<Token>> {
             '&' => tokens.push(Token::And),
             '^' => tokens.push(Token::Xor),
             '|' => tokens.push(Token::Or),
+            '*' => tokens.push(Token::Star),
+            '<' if chars.get(index + 1) == Some(&'=') => {
+                tokens.push(Token::Le);
+                index += 2;
+                continue;
+            }
             ch if ch.is_ascii_digit() => {
                 let start = index;
                 index += 1;
@@ -75,9 +87,13 @@ pub fn lex(source: &str) -> eyre::Result<Vec<Token>> {
                     "endmodule" => Token::EndModule,
                     "input" => Token::Input,
                     "output" => Token::Output,
+                    "reg" => Token::Reg,
                     "wire" => Token::Wire,
                     "assign" => Token::Assign,
                     "always" => Token::Always,
+                    "begin" => Token::Begin,
+                    "end" => Token::End,
+                    "if" => Token::If,
                     _ => Token::Ident(text),
                 });
                 continue;

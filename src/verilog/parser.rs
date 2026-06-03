@@ -1,5 +1,6 @@
 use crate::verilog::ast::{
-    Assignment, BinaryOp, Declaration, Expr, Instance, PortDirection, Range, VerilogModule,
+    AlwaysBlock, AlwaysSensitivity, AlwaysStmt, Assignment, BinaryOp, Declaration, Expr, Instance,
+    PortDirection, Range, VerilogModule,
 };
 use crate::verilog::lexer::{lex, Token};
 
@@ -43,6 +44,7 @@ impl Parser {
 
         let mut declarations = Vec::new();
         let mut assignments = Vec::new();
+        let mut always_blocks = Vec::new();
         let mut instances = Vec::new();
         while !self.consume(&Token::EndModule) {
             match self.peek() {
@@ -51,7 +53,7 @@ impl Parser {
                 }
                 Some(Token::Assign) => assignments.push(self.parse_assignment()?),
                 Some(Token::Ident(_)) => instances.push(self.parse_instance()?),
-                Some(Token::Always) => eyre::bail!("unsupported Verilog construct: always block"),
+                Some(Token::Always) => always_blocks.push(self.parse_always_block()?),
                 Some(token) => eyre::bail!("unsupported Verilog token in module body: {token:?}"),
                 None => eyre::bail!("expected endmodule"),
             }
@@ -62,6 +64,7 @@ impl Parser {
             ports,
             declarations,
             assignments,
+            always_blocks,
             instances,
         })
     }
@@ -69,7 +72,13 @@ impl Parser {
     fn parse_declaration(&mut self) -> eyre::Result<Declaration> {
         let direction = match self.next() {
             Some(Token::Input) => PortDirection::Input,
-            Some(Token::Output) => PortDirection::Output,
+            Some(Token::Output) => {
+                if self.consume(&Token::Reg) {
+                    PortDirection::OutputReg
+                } else {
+                    PortDirection::Output
+                }
+            }
             Some(Token::Wire) => PortDirection::Wire,
             Some(token) => eyre::bail!("expected declaration direction, got {token:?}"),
             None => eyre::bail!("expected declaration direction"),
@@ -93,6 +102,63 @@ impl Parser {
         self.expect(Token::Semi)?;
 
         Ok(Assignment { output, expr })
+    }
+
+    fn parse_always_block(&mut self) -> eyre::Result<AlwaysBlock> {
+        self.expect(Token::Always)?;
+        let sensitivity = self.parse_always_sensitivity()?;
+        let body = self.parse_always_stmt()?;
+
+        Ok(AlwaysBlock { sensitivity, body })
+    }
+
+    fn parse_always_sensitivity(&mut self) -> eyre::Result<AlwaysSensitivity> {
+        self.expect(Token::At)?;
+        self.expect(Token::LParen)?;
+        self.expect(Token::Star)?;
+        self.expect(Token::RParen)?;
+        Ok(AlwaysSensitivity::Any)
+    }
+
+    fn parse_always_stmt(&mut self) -> eyre::Result<AlwaysStmt> {
+        self.expect(Token::Begin)?;
+        let stmt = self.parse_always_stmt_inner()?;
+        self.expect(Token::End)?;
+        Ok(stmt)
+    }
+
+    fn parse_always_stmt_inner(&mut self) -> eyre::Result<AlwaysStmt> {
+        // TODO: Extend this to parse a real Verilog procedural statement list.
+        // For now, the design lower only consumes a single `if (...) begin ... end`
+        // latch pattern or a single nonblocking assignment.
+        if self.peek() == Some(&Token::If) {
+            return self.parse_always_if_stmt();
+        }
+
+        self.parse_nonblocking_assignment_stmt()
+    }
+
+    fn parse_always_if_stmt(&mut self) -> eyre::Result<AlwaysStmt> {
+        self.expect(Token::If)?;
+        self.expect(Token::LParen)?;
+        let condition = self.parse_signal_name()?;
+        self.expect(Token::RParen)?;
+        self.expect(Token::Begin)?;
+        let then_branch = self.parse_always_stmt_inner()?;
+        self.expect(Token::End)?;
+
+        Ok(AlwaysStmt::If {
+            condition,
+            then_branch: Box::new(then_branch),
+        })
+    }
+
+    fn parse_nonblocking_assignment_stmt(&mut self) -> eyre::Result<AlwaysStmt> {
+        let output = self.parse_signal_name()?;
+        self.expect(Token::Le)?;
+        let data = self.parse_signal_name()?;
+        self.expect(Token::Semi)?;
+        Ok(AlwaysStmt::NonBlockingAssign { output, data })
     }
 
     fn parse_instance(&mut self) -> eyre::Result<Instance> {
@@ -281,7 +347,7 @@ impl Parser {
 #[cfg(test)]
 mod tests {
     use super::parse_module;
-    use crate::verilog::ast::{BinaryOp, Expr, PortDirection};
+    use crate::verilog::ast::{AlwaysSensitivity, AlwaysStmt, BinaryOp, Expr, PortDirection};
 
     #[test]
     fn parses_half_adder_module() -> eyre::Result<()> {
@@ -343,19 +409,39 @@ mod tests {
     }
 
     #[test]
-    fn rejects_always_blocks_with_clear_message() {
-        let error = parse_module(
+    fn parses_d_latch_always_subset() -> eyre::Result<()> {
+        let module = parse_module(
             r#"
-            module bad(clk, q);
-              input clk;
-              output q;
-              always @(posedge clk) q = ~q;
+            module d_latch(d, en, q);
+              input d, en;
+              output reg q;
+              always @(*) begin
+                if (en) begin
+                  q <= d;
+                end
+              end
             endmodule
             "#,
-        )
-        .unwrap_err();
+        )?;
 
-        assert!(error.to_string().contains("always block"));
+        assert_eq!(
+            module.declarations[1].direction,
+            Some(PortDirection::OutputReg)
+        );
+        assert_eq!(module.always_blocks.len(), 1);
+        assert_eq!(module.always_blocks[0].sensitivity, AlwaysSensitivity::Any);
+        assert_eq!(
+            module.always_blocks[0].body,
+            AlwaysStmt::If {
+                condition: "en".to_owned(),
+                then_branch: Box::new(AlwaysStmt::NonBlockingAssign {
+                    output: "q".to_owned(),
+                    data: "d".to_owned()
+                })
+            }
+        );
+
+        Ok(())
     }
 
     #[test]

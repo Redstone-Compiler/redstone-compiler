@@ -192,6 +192,31 @@ impl Index<&str> for GraphModuleContext {
 }
 
 #[derive(Clone, Debug)]
+pub struct GraphModuleDesign {
+    pub context: GraphModuleContext,
+    pub top: String,
+}
+
+impl GraphModuleDesign {
+    pub fn new(context: GraphModuleContext, top: impl Into<String>) -> Self {
+        Self {
+            context,
+            top: top.into(),
+        }
+    }
+
+    pub fn with_top_module(mut context: GraphModuleContext, top_module: GraphModule) -> Self {
+        let top = top_module.name.clone();
+        context.append(top_module);
+        Self::new(context, top)
+    }
+
+    pub fn top_module(&self) -> &GraphModule {
+        &self.context[self.top.as_str()]
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct GraphWithSubGraphs(pub Graph, pub Vec<Vec<GraphNodeId>>);
 
 impl From<(&GraphModuleContext, &GraphModule)> for GraphWithSubGraphs {

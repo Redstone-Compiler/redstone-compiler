@@ -69,6 +69,7 @@ type ExampleFile = {
   name: string;
   path: string;
   size: number;
+  outputsPath?: string;
 };
 
 const TRACE_ANIMATION_INTERVAL_MS = 50;
@@ -345,6 +346,7 @@ let traceAnimation: TraceAnimation | undefined;
 let traceAnimationToken = 0;
 let waveformResizeFrame: number | undefined;
 let graphDot: GraphDotInfo | undefined;
+let currentOutputMetadataJson: string | undefined;
 let graphTab: GraphTab = 'world';
 let graphWorldModeValue: GraphWorldMode = 'raw';
 let graphShowTags = true;
@@ -676,7 +678,7 @@ async function openGraphDialog(): Promise<void> {
     graphOutput.replaceChildren();
     graphStatus.textContent = 'Generating graphs...';
     try {
-      graphDot = await NbtSimulation.graphDot(currentNbtBytes);
+      graphDot = await NbtSimulation.graphDot(currentNbtBytes, currentOutputMetadataJson);
     } catch (error) {
       graphStatus.textContent = error instanceof Error ? error.message : String(error);
       return;
@@ -1527,16 +1529,25 @@ async function openExample(example: ExampleFile, selectedEntry?: Element | null)
   const response = await fetch(resolveAssetPath(example.path));
   if (!response.ok) throw new Error(`Failed to load ${example.path}: ${response.status}`);
   const file = new File([await response.arrayBuffer()], example.name, { type: 'application/octet-stream' });
-  await openFile(file, selectedEntry);
+  const outputMetadataJson = example.outputsPath ? await loadExampleMetadata(example.outputsPath) : undefined;
+  await openFile(file, selectedEntry, outputMetadataJson);
 }
 
-async function openFile(file: File, selectedEntry?: Element | null): Promise<void> {
+async function loadExampleMetadata(path: string): Promise<string | undefined> {
+  const response = await fetch(resolveAssetPath(path));
+  if (response.status === 404) return undefined;
+  if (!response.ok) throw new Error(`Failed to load ${path}: ${response.status}`);
+  return response.text();
+}
+
+async function openFile(file: File, selectedEntry?: Element | null, outputMetadataJson?: string): Promise<void> {
   try {
     const parsed = await loadNbtFile(file);
     const structure = toStructureModel(parsed.root);
     simulation = undefined;
     currentNbtBytes = parsed.bytes;
     currentRoot = parsed.root;
+    currentOutputMetadataJson = outputMetadataJson;
     graphDot = undefined;
     graphTab = 'world';
     graphWorldModeValue = 'raw';
@@ -1563,6 +1574,7 @@ async function openFile(file: File, selectedEntry?: Element | null): Promise<voi
     simulation = undefined;
     currentNbtBytes = undefined;
     currentRoot = undefined;
+    currentOutputMetadataJson = undefined;
     graphDot = undefined;
     graphTab = 'world';
     graphWorldModeValue = 'raw';
