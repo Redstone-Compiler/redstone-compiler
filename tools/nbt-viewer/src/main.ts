@@ -194,6 +194,10 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
             <button id="graph-logic-raw" class="graph-mode-button active" type="button">Raw</button>
             <button id="graph-logic-simplified" class="graph-mode-button" type="button">Simplified</button>
           </div>
+          <label id="graph-high-level-toggle" class="graph-tag-toggle hidden">
+            <input id="graph-high-level-gates" type="checkbox" />
+            <span>High-level Gates</span>
+          </label>
           <label class="graph-tag-toggle">
             <input id="graph-show-tags" type="checkbox" checked />
             <span>Show Tag</span>
@@ -235,6 +239,10 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
             <button id="selected-graph-logic-raw" class="graph-mode-button active" type="button">Raw</button>
             <button id="selected-graph-logic-simplified" class="graph-mode-button" type="button">Simplified</button>
           </div>
+          <label id="selected-graph-high-level-toggle" class="graph-tag-toggle hidden">
+            <input id="selected-graph-high-level-gates" type="checkbox" />
+            <span>High-level Gates</span>
+          </label>
           <label class="graph-tag-toggle">
             <input id="selected-graph-show-tags" type="checkbox" checked />
             <span>Show Tag</span>
@@ -311,6 +319,8 @@ const graphWorldFoldedButton = document.querySelector<HTMLButtonElement>('#graph
 const graphLogicMode = document.querySelector<HTMLElement>('#graph-logic-mode')!;
 const graphLogicRawButton = document.querySelector<HTMLButtonElement>('#graph-logic-raw')!;
 const graphLogicSimplifiedButton = document.querySelector<HTMLButtonElement>('#graph-logic-simplified')!;
+const graphHighLevelToggle = document.querySelector<HTMLElement>('#graph-high-level-toggle')!;
+const graphHighLevelInput = document.querySelector<HTMLInputElement>('#graph-high-level-gates')!;
 const graphShowTagsInput = document.querySelector<HTMLInputElement>('#graph-show-tags')!;
 const graphZoomOutButton = document.querySelector<HTMLButtonElement>('#graph-zoom-out')!;
 const graphZoomResetButton = document.querySelector<HTMLButtonElement>('#graph-zoom-reset')!;
@@ -334,6 +344,8 @@ const selectedGraphWorldFoldedButton = document.querySelector<HTMLButtonElement>
 const selectedGraphLogicMode = document.querySelector<HTMLElement>('#selected-graph-logic-mode')!;
 const selectedGraphLogicRawButton = document.querySelector<HTMLButtonElement>('#selected-graph-logic-raw')!;
 const selectedGraphLogicSimplifiedButton = document.querySelector<HTMLButtonElement>('#selected-graph-logic-simplified')!;
+const selectedGraphHighLevelToggle = document.querySelector<HTMLElement>('#selected-graph-high-level-toggle')!;
+const selectedGraphHighLevelInput = document.querySelector<HTMLInputElement>('#selected-graph-high-level-gates')!;
 const selectedGraphShowTagsInput = document.querySelector<HTMLInputElement>('#selected-graph-show-tags')!;
 const selectedGraphZoomOutButton = document.querySelector<HTMLButtonElement>('#selected-graph-zoom-out')!;
 const selectedGraphZoomResetButton = document.querySelector<HTMLButtonElement>('#selected-graph-zoom-reset')!;
@@ -377,6 +389,7 @@ let currentOutputMetadataJson: string | undefined;
 let graphTab: GraphTab = 'world';
 let graphWorldModeValue: GraphWorldMode = 'raw';
 let graphLogicModeValue: GraphLogicMode = 'raw';
+let graphHighLevelLogic = false;
 let graphShowTags = true;
 let vizPromise: Promise<Viz> | undefined;
 let graphMinimapScale = 1;
@@ -387,6 +400,7 @@ let selectedGraphDot: GraphDotInfo | undefined;
 let selectedGraphTab: GraphTab = 'world';
 let selectedGraphWorldModeValue: GraphWorldMode = 'raw';
 let selectedGraphLogicModeValue: GraphLogicMode = 'raw';
+let selectedGraphHighLevelLogic = false;
 let selectedGraphShowTags = true;
 let selectedGraphZoom = 1;
 
@@ -545,6 +559,11 @@ graphLogicSimplifiedButton.addEventListener('click', () => {
   void setGraphLogicMode('simplified');
 });
 
+graphHighLevelInput.addEventListener('change', () => {
+  graphHighLevelLogic = graphHighLevelInput.checked;
+  void renderGraphTab();
+});
+
 graphShowTagsInput.addEventListener('change', () => {
   graphShowTags = graphShowTagsInput.checked;
   void renderGraphTab();
@@ -617,6 +636,11 @@ selectedGraphLogicRawButton.addEventListener('click', () => {
 
 selectedGraphLogicSimplifiedButton.addEventListener('click', () => {
   selectedGraphLogicModeValue = 'simplified';
+  void renderSelectedGraphTab();
+});
+
+selectedGraphHighLevelInput.addEventListener('change', () => {
+  selectedGraphHighLevelLogic = selectedGraphHighLevelInput.checked;
   void renderSelectedGraphTab();
 });
 
@@ -777,9 +801,7 @@ async function renderGraphTab(): Promise<void> {
 
   graphStatus.textContent =
     graphTab === 'logic'
-      ? graphLogicModeValue === 'simplified'
-        ? 'Logic Graph - Simplified'
-        : 'Logic Graph - Raw'
+      ? graphLogicStatusTitle()
       : graphWorldModeValue === 'folded'
         ? 'World Graph - Folded'
         : 'World Graph - Raw';
@@ -804,6 +826,10 @@ function currentGraphDot(): string {
 
   if (graphTab === 'logic') {
     if (graphLogicModeValue === 'simplified') {
+      if (graphHighLevelLogic) {
+        return graphShowTags ? graphDot.highLevelLogicDot : graphDot.highLevelLogicDotWithoutTags;
+      }
+
       return graphShowTags ? graphDot.simplifiedLogicDot : graphDot.simplifiedLogicDotWithoutTags;
     }
 
@@ -917,9 +943,7 @@ function collectGraphCone(
 function updateGraphSelectionStatus(): void {
   const title =
     graphTab === 'logic'
-      ? graphLogicModeValue === 'simplified'
-        ? 'Logic Graph - Simplified'
-        : 'Logic Graph - Raw'
+      ? graphLogicStatusTitle()
       : graphWorldModeValue === 'folded'
         ? 'World Graph - Folded'
         : 'World Graph - Raw';
@@ -944,7 +968,9 @@ async function openSelectedGraphView(): Promise<void> {
   selectedGraphTab = 'world';
   selectedGraphWorldModeValue = graphWorldModeValue;
   selectedGraphLogicModeValue = graphLogicModeValue;
+  selectedGraphHighLevelLogic = graphHighLevelLogic;
   selectedGraphShowTags = graphShowTags;
+  selectedGraphHighLevelInput.checked = selectedGraphHighLevelLogic;
   selectedGraphShowTagsInput.checked = selectedGraphShowTags;
 
   try {
@@ -1031,9 +1057,7 @@ async function renderSelectedGraphTab(): Promise<void> {
 
   selectedGraphStatus.textContent =
     selectedGraphTab === 'logic'
-      ? selectedGraphLogicModeValue === 'simplified'
-        ? 'Selected Logic Graph - Simplified'
-        : 'Selected Logic Graph - Raw'
+      ? selectedGraphLogicStatusTitle()
       : selectedGraphWorldModeValue === 'folded'
         ? 'Selected World Graph - Folded'
         : 'Selected World Graph - Raw';
@@ -1053,6 +1077,10 @@ function currentSelectedGraphDot(): string {
 
   if (selectedGraphTab === 'logic') {
     if (selectedGraphLogicModeValue === 'simplified') {
+      if (selectedGraphHighLevelLogic) {
+        return selectedGraphShowTags ? selectedGraphDot.highLevelLogicDot : selectedGraphDot.highLevelLogicDotWithoutTags;
+      }
+
       return selectedGraphShowTags ? selectedGraphDot.simplifiedLogicDot : selectedGraphDot.simplifiedLogicDotWithoutTags;
     }
 
@@ -1071,10 +1099,31 @@ function updateSelectedGraphTabs(): void {
   selectedGraphLogicTab.classList.toggle('active', selectedGraphTab === 'logic');
   selectedGraphWorldMode.classList.toggle('hidden', selectedGraphTab !== 'world');
   selectedGraphLogicMode.classList.toggle('hidden', selectedGraphTab !== 'logic');
+  selectedGraphHighLevelToggle.classList.toggle(
+    'hidden',
+    selectedGraphTab !== 'logic' || selectedGraphLogicModeValue !== 'simplified',
+  );
   selectedGraphWorldRawButton.classList.toggle('active', selectedGraphWorldModeValue === 'raw');
   selectedGraphWorldFoldedButton.classList.toggle('active', selectedGraphWorldModeValue === 'folded');
   selectedGraphLogicRawButton.classList.toggle('active', selectedGraphLogicModeValue === 'raw');
   selectedGraphLogicSimplifiedButton.classList.toggle('active', selectedGraphLogicModeValue === 'simplified');
+  selectedGraphHighLevelInput.checked = selectedGraphHighLevelLogic;
+}
+
+function graphLogicStatusTitle(): string {
+  if (graphLogicModeValue === 'raw') {
+    return 'Logic Graph - Raw';
+  }
+
+  return graphHighLevelLogic ? 'Logic Graph - Simplified + High-level' : 'Logic Graph - Simplified';
+}
+
+function selectedGraphLogicStatusTitle(): string {
+  if (selectedGraphLogicModeValue === 'raw') {
+    return 'Selected Logic Graph - Raw';
+  }
+
+  return selectedGraphHighLevelLogic ? 'Selected Logic Graph - Simplified + High-level' : 'Selected Logic Graph - Simplified';
 }
 
 async function loadViz(): Promise<Viz> {
@@ -1303,10 +1352,12 @@ function updateGraphTabs(): void {
 
   graphWorldMode.classList.toggle('hidden', graphTab !== 'world');
   graphLogicMode.classList.toggle('hidden', graphTab !== 'logic');
+  graphHighLevelToggle.classList.toggle('hidden', graphTab !== 'logic' || graphLogicModeValue !== 'simplified');
   graphWorldRawButton.classList.toggle('active', graphWorldModeValue === 'raw');
   graphWorldFoldedButton.classList.toggle('active', graphWorldModeValue === 'folded');
   graphLogicRawButton.classList.toggle('active', graphLogicModeValue === 'raw');
   graphLogicSimplifiedButton.classList.toggle('active', graphLogicModeValue === 'simplified');
+  graphHighLevelInput.checked = graphHighLevelLogic;
   graphShowTagsInput.checked = graphShowTags;
 }
 
@@ -1657,6 +1708,7 @@ async function openFile(file: File, selectedEntry?: Element | null, outputMetada
     graphTab = 'world';
     graphWorldModeValue = 'raw';
     graphLogicModeValue = 'raw';
+    graphHighLevelLogic = false;
 
     markSelectedFile(selectedEntry);
 
@@ -1685,6 +1737,7 @@ async function openFile(file: File, selectedEntry?: Element | null, outputMetada
     graphTab = 'world';
     graphWorldModeValue = 'raw';
     graphLogicModeValue = 'raw';
+    graphHighLevelLogic = false;
     selectedBlock = undefined;
     toggleSwitchButton.classList.add('hidden');
     viewerEmpty.classList.remove('hidden');
