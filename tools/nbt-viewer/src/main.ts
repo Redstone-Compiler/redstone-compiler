@@ -60,6 +60,7 @@ type TraceAnimation = {
 };
 type GraphTab = 'world' | 'logic';
 type GraphWorldMode = 'raw' | 'folded';
+type GraphLogicMode = 'raw' | 'simplified';
 type GraphEdgeInfo = {
   element: SVGGElement;
   source: string;
@@ -189,6 +190,10 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
             <button id="graph-world-raw" class="graph-mode-button active" type="button">Raw</button>
             <button id="graph-world-folded" class="graph-mode-button" type="button">Folded</button>
           </div>
+          <div id="graph-logic-mode" class="graph-world-mode hidden" aria-label="Logic graph mode">
+            <button id="graph-logic-raw" class="graph-mode-button active" type="button">Raw</button>
+            <button id="graph-logic-simplified" class="graph-mode-button" type="button">Simplified</button>
+          </div>
           <label class="graph-tag-toggle">
             <input id="graph-show-tags" type="checkbox" checked />
             <span>Show Tag</span>
@@ -225,6 +230,10 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
           <div id="selected-graph-world-mode" class="graph-world-mode" aria-label="Selected world graph mode">
             <button id="selected-graph-world-raw" class="graph-mode-button active" type="button">Raw</button>
             <button id="selected-graph-world-folded" class="graph-mode-button" type="button">Folded</button>
+          </div>
+          <div id="selected-graph-logic-mode" class="graph-world-mode hidden" aria-label="Selected logic graph mode">
+            <button id="selected-graph-logic-raw" class="graph-mode-button active" type="button">Raw</button>
+            <button id="selected-graph-logic-simplified" class="graph-mode-button" type="button">Simplified</button>
           </div>
           <label class="graph-tag-toggle">
             <input id="selected-graph-show-tags" type="checkbox" checked />
@@ -299,6 +308,9 @@ const graphLogicTab = document.querySelector<HTMLButtonElement>('#graph-logic-ta
 const graphWorldMode = document.querySelector<HTMLElement>('#graph-world-mode')!;
 const graphWorldRawButton = document.querySelector<HTMLButtonElement>('#graph-world-raw')!;
 const graphWorldFoldedButton = document.querySelector<HTMLButtonElement>('#graph-world-folded')!;
+const graphLogicMode = document.querySelector<HTMLElement>('#graph-logic-mode')!;
+const graphLogicRawButton = document.querySelector<HTMLButtonElement>('#graph-logic-raw')!;
+const graphLogicSimplifiedButton = document.querySelector<HTMLButtonElement>('#graph-logic-simplified')!;
 const graphShowTagsInput = document.querySelector<HTMLInputElement>('#graph-show-tags')!;
 const graphZoomOutButton = document.querySelector<HTMLButtonElement>('#graph-zoom-out')!;
 const graphZoomResetButton = document.querySelector<HTMLButtonElement>('#graph-zoom-reset')!;
@@ -319,6 +331,9 @@ const selectedGraphLogicTab = document.querySelector<HTMLButtonElement>('#select
 const selectedGraphWorldMode = document.querySelector<HTMLElement>('#selected-graph-world-mode')!;
 const selectedGraphWorldRawButton = document.querySelector<HTMLButtonElement>('#selected-graph-world-raw')!;
 const selectedGraphWorldFoldedButton = document.querySelector<HTMLButtonElement>('#selected-graph-world-folded')!;
+const selectedGraphLogicMode = document.querySelector<HTMLElement>('#selected-graph-logic-mode')!;
+const selectedGraphLogicRawButton = document.querySelector<HTMLButtonElement>('#selected-graph-logic-raw')!;
+const selectedGraphLogicSimplifiedButton = document.querySelector<HTMLButtonElement>('#selected-graph-logic-simplified')!;
 const selectedGraphShowTagsInput = document.querySelector<HTMLInputElement>('#selected-graph-show-tags')!;
 const selectedGraphZoomOutButton = document.querySelector<HTMLButtonElement>('#selected-graph-zoom-out')!;
 const selectedGraphZoomResetButton = document.querySelector<HTMLButtonElement>('#selected-graph-zoom-reset')!;
@@ -361,6 +376,7 @@ let graphDot: GraphDotInfo | undefined;
 let currentOutputMetadataJson: string | undefined;
 let graphTab: GraphTab = 'world';
 let graphWorldModeValue: GraphWorldMode = 'raw';
+let graphLogicModeValue: GraphLogicMode = 'raw';
 let graphShowTags = true;
 let vizPromise: Promise<Viz> | undefined;
 let graphMinimapScale = 1;
@@ -370,6 +386,7 @@ let selectedGraphNode: string | undefined;
 let selectedGraphDot: GraphDotInfo | undefined;
 let selectedGraphTab: GraphTab = 'world';
 let selectedGraphWorldModeValue: GraphWorldMode = 'raw';
+let selectedGraphLogicModeValue: GraphLogicMode = 'raw';
 let selectedGraphShowTags = true;
 let selectedGraphZoom = 1;
 
@@ -520,6 +537,14 @@ graphWorldFoldedButton.addEventListener('click', () => {
   void setGraphWorldMode('folded');
 });
 
+graphLogicRawButton.addEventListener('click', () => {
+  void setGraphLogicMode('raw');
+});
+
+graphLogicSimplifiedButton.addEventListener('click', () => {
+  void setGraphLogicMode('simplified');
+});
+
 graphShowTagsInput.addEventListener('change', () => {
   graphShowTags = graphShowTagsInput.checked;
   void renderGraphTab();
@@ -582,6 +607,16 @@ selectedGraphWorldRawButton.addEventListener('click', () => {
 
 selectedGraphWorldFoldedButton.addEventListener('click', () => {
   selectedGraphWorldModeValue = 'folded';
+  void renderSelectedGraphTab();
+});
+
+selectedGraphLogicRawButton.addEventListener('click', () => {
+  selectedGraphLogicModeValue = 'raw';
+  void renderSelectedGraphTab();
+});
+
+selectedGraphLogicSimplifiedButton.addEventListener('click', () => {
+  selectedGraphLogicModeValue = 'simplified';
   void renderSelectedGraphTab();
 });
 
@@ -720,6 +755,14 @@ async function setGraphWorldMode(nextMode: GraphWorldMode): Promise<void> {
   }
 }
 
+async function setGraphLogicMode(nextMode: GraphLogicMode): Promise<void> {
+  graphLogicModeValue = nextMode;
+  updateGraphTabs();
+  if (graphTab === 'logic') {
+    await renderGraphTab();
+  }
+}
+
 async function renderGraphTab(): Promise<void> {
   updateGraphTabs();
   graphOutput.replaceChildren();
@@ -734,7 +777,9 @@ async function renderGraphTab(): Promise<void> {
 
   graphStatus.textContent =
     graphTab === 'logic'
-      ? 'Logic Graph'
+      ? graphLogicModeValue === 'simplified'
+        ? 'Logic Graph - Simplified'
+        : 'Logic Graph - Raw'
       : graphWorldModeValue === 'folded'
         ? 'World Graph - Folded'
         : 'World Graph - Raw';
@@ -758,6 +803,10 @@ function currentGraphDot(): string {
   if (!graphDot) return '';
 
   if (graphTab === 'logic') {
+    if (graphLogicModeValue === 'simplified') {
+      return graphShowTags ? graphDot.simplifiedLogicDot : graphDot.simplifiedLogicDotWithoutTags;
+    }
+
     return graphShowTags ? graphDot.logicDot : graphDot.logicDotWithoutTags;
   }
 
@@ -868,7 +917,9 @@ function collectGraphCone(
 function updateGraphSelectionStatus(): void {
   const title =
     graphTab === 'logic'
-      ? 'Logic Graph'
+      ? graphLogicModeValue === 'simplified'
+        ? 'Logic Graph - Simplified'
+        : 'Logic Graph - Raw'
       : graphWorldModeValue === 'folded'
         ? 'World Graph - Folded'
         : 'World Graph - Raw';
@@ -892,6 +943,7 @@ async function openSelectedGraphView(): Promise<void> {
   selectedGraphDot = undefined;
   selectedGraphTab = 'world';
   selectedGraphWorldModeValue = graphWorldModeValue;
+  selectedGraphLogicModeValue = graphLogicModeValue;
   selectedGraphShowTags = graphShowTags;
   selectedGraphShowTagsInput.checked = selectedGraphShowTags;
 
@@ -979,7 +1031,9 @@ async function renderSelectedGraphTab(): Promise<void> {
 
   selectedGraphStatus.textContent =
     selectedGraphTab === 'logic'
-      ? 'Selected Logic Graph'
+      ? selectedGraphLogicModeValue === 'simplified'
+        ? 'Selected Logic Graph - Simplified'
+        : 'Selected Logic Graph - Raw'
       : selectedGraphWorldModeValue === 'folded'
         ? 'Selected World Graph - Folded'
         : 'Selected World Graph - Raw';
@@ -998,6 +1052,10 @@ function currentSelectedGraphDot(): string {
   if (!selectedGraphDot) return '';
 
   if (selectedGraphTab === 'logic') {
+    if (selectedGraphLogicModeValue === 'simplified') {
+      return selectedGraphShowTags ? selectedGraphDot.simplifiedLogicDot : selectedGraphDot.simplifiedLogicDotWithoutTags;
+    }
+
     return selectedGraphShowTags ? selectedGraphDot.logicDot : selectedGraphDot.logicDotWithoutTags;
   }
 
@@ -1012,8 +1070,11 @@ function updateSelectedGraphTabs(): void {
   selectedGraphWorldTab.classList.toggle('active', selectedGraphTab === 'world');
   selectedGraphLogicTab.classList.toggle('active', selectedGraphTab === 'logic');
   selectedGraphWorldMode.classList.toggle('hidden', selectedGraphTab !== 'world');
+  selectedGraphLogicMode.classList.toggle('hidden', selectedGraphTab !== 'logic');
   selectedGraphWorldRawButton.classList.toggle('active', selectedGraphWorldModeValue === 'raw');
   selectedGraphWorldFoldedButton.classList.toggle('active', selectedGraphWorldModeValue === 'folded');
+  selectedGraphLogicRawButton.classList.toggle('active', selectedGraphLogicModeValue === 'raw');
+  selectedGraphLogicSimplifiedButton.classList.toggle('active', selectedGraphLogicModeValue === 'simplified');
 }
 
 async function loadViz(): Promise<Viz> {
@@ -1241,8 +1302,11 @@ function updateGraphTabs(): void {
   }
 
   graphWorldMode.classList.toggle('hidden', graphTab !== 'world');
+  graphLogicMode.classList.toggle('hidden', graphTab !== 'logic');
   graphWorldRawButton.classList.toggle('active', graphWorldModeValue === 'raw');
   graphWorldFoldedButton.classList.toggle('active', graphWorldModeValue === 'folded');
+  graphLogicRawButton.classList.toggle('active', graphLogicModeValue === 'raw');
+  graphLogicSimplifiedButton.classList.toggle('active', graphLogicModeValue === 'simplified');
   graphShowTagsInput.checked = graphShowTags;
 }
 
@@ -1592,6 +1656,7 @@ async function openFile(file: File, selectedEntry?: Element | null, outputMetada
     graphDot = undefined;
     graphTab = 'world';
     graphWorldModeValue = 'raw';
+    graphLogicModeValue = 'raw';
 
     markSelectedFile(selectedEntry);
 
@@ -1619,6 +1684,7 @@ async function openFile(file: File, selectedEntry?: Element | null, outputMetada
     graphDot = undefined;
     graphTab = 'world';
     graphWorldModeValue = 'raw';
+    graphLogicModeValue = 'raw';
     selectedBlock = undefined;
     toggleSwitchButton.classList.add('hidden');
     viewerEmpty.classList.remove('hidden');

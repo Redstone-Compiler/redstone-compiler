@@ -1,10 +1,12 @@
 use std::collections::HashSet;
 
 use redstone_compiler::graph::graphviz::ToGraphvizGraph;
+use redstone_compiler::graph::logic::LogicGraph;
 use redstone_compiler::graph::world::{WorldGraph, WorldGraphBuilder};
 use redstone_compiler::graph::{GraphNodeId, GraphNodeKind};
 use redstone_compiler::nbt::{NBTRoot, ToNBT};
 use redstone_compiler::output::OutputMetadata;
+use redstone_compiler::transform::logic::LogicGraphTransformer;
 use redstone_compiler::transform::place_and_route::place_bound::{PlaceBound, PropagateType};
 use redstone_compiler::transform::place_and_route::utils::world_to_logic_with_outputs_unoptimized;
 use redstone_compiler::transform::world_to_logic::WorldToLogicTransformer;
@@ -50,6 +52,8 @@ struct GraphDotInfo {
     folded_world_dot_without_tags: String,
     logic_dot: String,
     logic_dot_without_tags: String,
+    simplified_logic_dot: String,
+    simplified_logic_dot_without_tags: String,
 }
 
 #[wasm_bindgen]
@@ -201,6 +205,8 @@ impl NbtSimulator {
         let folded_world_dot = transformer.world_graph().to_graphviz();
         let folded_world_dot_without_tags = transformer.world_graph().to_graphviz_without_tags();
         let logic_graph = transformer.transform().map_err(to_js_error)?;
+        let simplified_logic_graph =
+            simplified_logic_graph(logic_graph.clone()).map_err(to_js_error)?;
         let graph_dot = GraphDotInfo {
             raw_world_dot: selected_world_graph.to_graphviz(),
             raw_world_dot_without_tags: selected_world_graph.to_graphviz_without_tags(),
@@ -208,6 +214,8 @@ impl NbtSimulator {
             folded_world_dot_without_tags,
             logic_dot: logic_graph.to_graphviz(),
             logic_dot_without_tags: logic_graph.to_graphviz_without_tags(),
+            simplified_logic_dot: simplified_logic_graph.to_graphviz(),
+            simplified_logic_dot_without_tags: simplified_logic_graph.to_graphviz_without_tags(),
         };
 
         serde_wasm_bindgen::to_value(&graph_dot).map_err(to_js_error)
@@ -354,6 +362,8 @@ fn graph_dot_info(nbt_bytes: &[u8], metadata: Option<&OutputMetadata>) -> Result
     } else {
         transformer.transform().map_err(to_js_error)?
     };
+    let simplified_logic_graph =
+        simplified_logic_graph(logic_graph.clone()).map_err(to_js_error)?;
     let graph_dot = GraphDotInfo {
         raw_world_dot: raw_world_graph.to_graphviz(),
         raw_world_dot_without_tags: raw_world_graph.to_graphviz_without_tags(),
@@ -361,9 +371,20 @@ fn graph_dot_info(nbt_bytes: &[u8], metadata: Option<&OutputMetadata>) -> Result
         folded_world_dot_without_tags,
         logic_dot: logic_graph.to_graphviz(),
         logic_dot_without_tags: logic_graph.to_graphviz_without_tags(),
+        simplified_logic_dot: simplified_logic_graph.to_graphviz(),
+        simplified_logic_dot_without_tags: simplified_logic_graph.to_graphviz_without_tags(),
     };
 
     serde_wasm_bindgen::to_value(&graph_dot).map_err(to_js_error)
+}
+
+fn simplified_logic_graph(logic_graph: LogicGraph) -> eyre::Result<LogicGraph> {
+    let mut transformer = LogicGraphTransformer::new(logic_graph);
+    transformer.remove_double_neg_expression();
+    transformer.optimize_cse()?;
+    transformer.fold_or_chains()?;
+    transformer.optimize_cse()?;
+    Ok(transformer.finish())
 }
 
 fn snapshots_to_info(snapshots: &[SimulationSnapshot]) -> Vec<SnapshotInfo> {
