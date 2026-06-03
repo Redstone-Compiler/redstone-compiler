@@ -8,7 +8,9 @@ use redstone_compiler::transform::place_and_route::place_bound::{PlaceBound, Pro
 use redstone_compiler::transform::world_to_logic::WorldToLogicTransformer;
 use redstone_compiler::world::block::{Block, BlockKind, Direction};
 use redstone_compiler::world::position::{DimSize, Position};
-use redstone_compiler::world::simulator::{SimulationSnapshot, SimulationTraceEntry, Simulator};
+use redstone_compiler::world::simulator::{
+    SimulationSnapshot, SimulationTraceEntry, SimulationWaveform, Simulator,
+};
 use redstone_compiler::world::{World, World3D};
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
@@ -29,6 +31,7 @@ struct TraceReport {
     error: Option<String>,
     trace: Vec<SimulationTraceEntry>,
     snapshots: Vec<SnapshotInfo>,
+    waveform: SimulationWaveform,
 }
 
 #[derive(Serialize)]
@@ -52,6 +55,33 @@ pub struct NbtSimulator {
     sim: Simulator,
     last_trace: Vec<SimulationTraceEntry>,
     last_snapshots: Vec<SnapshotInfo>,
+    last_waveform: SimulationWaveform,
+    history_trace: Vec<SimulationTraceEntry>,
+    history_snapshots: Vec<SnapshotInfo>,
+    history_waveform: SimulationWaveform,
+}
+
+impl NbtSimulator {
+    fn refresh_trace_views_from_cycle(&mut self, start_cycle: usize) {
+        let trace = self.sim.trace();
+        let snapshots = self.sim.snapshots();
+        let trace_start = trace
+            .iter()
+            .position(|entry| entry.cycle >= start_cycle)
+            .unwrap_or(trace.len());
+        let snapshot_start = snapshots
+            .iter()
+            .position(|snapshot| snapshot.cycle >= start_cycle)
+            .unwrap_or(snapshots.len());
+        let last_snapshots = &snapshots[snapshot_start..];
+
+        self.last_trace = trace[trace_start..].to_vec();
+        self.last_snapshots = snapshots_to_info(last_snapshots);
+        self.last_waveform = SimulationWaveform::from_snapshots(last_snapshots);
+        self.history_trace = trace.to_vec();
+        self.history_snapshots = snapshots_to_info(snapshots);
+        self.history_waveform = self.sim.waveform();
+    }
 }
 
 #[wasm_bindgen]
@@ -69,11 +99,19 @@ impl NbtSimulator {
         .map_err(to_js_error)?;
         let last_trace = sim.trace().to_vec();
         let last_snapshots = snapshots_to_info(sim.snapshots());
+        let last_waveform = sim.waveform();
+        let history_trace = sim.trace().to_vec();
+        let history_snapshots = snapshots_to_info(sim.snapshots());
+        let history_waveform = sim.waveform();
 
         Ok(Self {
             sim,
             last_trace,
             last_snapshots,
+            last_waveform,
+            history_trace,
+            history_snapshots,
+            history_waveform,
         })
     }
 
@@ -91,12 +129,14 @@ impl NbtSimulator {
                 error: None,
                 trace: sim.trace().to_vec(),
                 snapshots: snapshots_to_info(sim.snapshots()),
+                waveform: sim.waveform(),
             },
             Err(error) => TraceReport {
                 ok: false,
                 error: Some(error.message().to_owned()),
                 trace: error.trace().to_vec(),
                 snapshots: snapshots_to_info(error.snapshots()),
+                waveform: error.waveform(),
             },
         };
 
@@ -218,18 +258,20 @@ impl NbtSimulator {
         z: usize,
         is_on: bool,
     ) -> Result<JsValue, JsValue> {
-        self.sim.clear_trace();
+        let start_cycle = self
+            .sim
+            .snapshots()
+            .last()
+            .map_or(1, |snapshot| snapshot.cycle + 1);
         if let Err(error) = self.sim.change_state_with_limits(
             vec![(Position(x, y, z), is_on)],
             MAX_SIMULATION_CYCLES,
             MAX_SIMULATION_EVENTS,
         ) {
-            self.last_trace = self.sim.trace().to_vec();
-            self.last_snapshots = snapshots_to_info(self.sim.snapshots());
+            self.refresh_trace_views_from_cycle(start_cycle);
             return Err(to_js_error(error));
         }
-        self.last_trace = self.sim.trace().to_vec();
-        self.last_snapshots = snapshots_to_info(self.sim.snapshots());
+        self.refresh_trace_views_from_cycle(start_cycle);
         self.structure()
     }
 
@@ -239,6 +281,22 @@ impl NbtSimulator {
 
     pub fn snapshots(&self) -> Result<JsValue, JsValue> {
         serde_wasm_bindgen::to_value(&self.last_snapshots).map_err(to_js_error)
+    }
+
+    pub fn waveform(&self) -> Result<JsValue, JsValue> {
+        serde_wasm_bindgen::to_value(&self.last_waveform).map_err(to_js_error)
+    }
+
+    pub fn history_trace(&self) -> Result<JsValue, JsValue> {
+        serde_wasm_bindgen::to_value(&self.history_trace).map_err(to_js_error)
+    }
+
+    pub fn history_snapshots(&self) -> Result<JsValue, JsValue> {
+        serde_wasm_bindgen::to_value(&self.history_snapshots).map_err(to_js_error)
+    }
+
+    pub fn history_waveform(&self) -> Result<JsValue, JsValue> {
+        serde_wasm_bindgen::to_value(&self.history_waveform).map_err(to_js_error)
     }
 
     pub fn structure(&self) -> Result<JsValue, JsValue> {

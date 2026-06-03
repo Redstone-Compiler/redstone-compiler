@@ -277,12 +277,21 @@ input {
   overflow: hidden;
 }
 
+.inspector-panel.hidden-by-trace {
+  display: none;
+}
+
 .trace-panel {
   left: 16px;
   bottom: 16px;
   width: min(720px, calc(100vw - 408px));
-  max-height: min(34vh, 300px);
+  max-height: min(46vh, 460px);
   overflow: hidden;
+}
+
+.trace-panel.expanded {
+  width: calc(100vw - 32px);
+  max-height: min(56vh, 560px);
 }
 
 .trace-panel > summary {
@@ -303,16 +312,56 @@ input {
   display: none;
 }
 
+.trace-summary-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  margin-left: auto;
+}
+
+.trace-expand-button {
+  min-width: 56px;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid rgb(154 164 173 / 34%);
+  border-radius: 4px;
+  background: rgb(22 27 31 / 82%);
+  color: #dce3e7;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.trace-expand-button:hover:not(:disabled) {
+  background: rgb(211 50 50 / 26%);
+  color: #fff;
+}
+
+.trace-expand-button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
 #trace-count {
   color: #9ea9b3;
   font-size: 12px;
+  white-space: nowrap;
+}
+
+.trace-content {
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .trace-controls {
   display: grid;
-  grid-template-columns: auto minmax(120px, 1fr) auto auto;
+  grid-template-columns: auto minmax(120px, 1fr) auto auto auto;
   align-items: center;
   gap: 8px;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
   padding: 8px 10px;
   border-top: 1px solid rgb(154 164 173 / 18%);
 }
@@ -339,6 +388,28 @@ input {
   accent-color: #d33232;
 }
 
+.trace-cycle-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #cbd4db;
+  cursor: pointer;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.trace-cycle-mode input {
+  width: 13px;
+  height: 13px;
+  margin: 0;
+  accent-color: #d33232;
+}
+
+.trace-cycle-mode:has(input:disabled) {
+  cursor: default;
+  opacity: 0.45;
+}
+
 #trace-cycle-label {
   min-width: 112px;
   color: #cbd4db;
@@ -346,6 +417,124 @@ input {
   font-size: 11px;
   text-align: right;
   white-space: nowrap;
+}
+
+.waveform-viewer {
+  position: relative;
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 116px;
+  max-height: 176px;
+  overflow: hidden;
+  border-top: 1px solid rgb(154 164 173 / 18%);
+  background: #101419;
+}
+
+.waveform-filter-floating {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 24px;
+  padding: 3px 8px;
+  border: 1px solid rgb(154 164 173 / 28%);
+  border-radius: 4px;
+  background: rgb(18 22 26 / 88%);
+  color: #dce3e7;
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+  box-shadow: 0 6px 18px rgb(0 0 0 / 28%);
+}
+
+.waveform-filter-floating input {
+  width: 13px;
+  height: 13px;
+  margin: 0;
+  accent-color: #d33232;
+}
+
+.waveform-filter-floating:has(input:disabled) {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.waveform-labels {
+  flex: 0 0 auto;
+  overflow: hidden;
+  border-right: 1px solid rgb(154 164 173 / 18%);
+  background: #151a20;
+}
+
+.waveform-label-spacer {
+  border-bottom: 1px solid rgb(154 164 173 / 14%);
+  background: #161b20;
+}
+
+.waveform-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 24px;
+  padding: 0 8px;
+  overflow: hidden;
+  border: 0;
+  border-bottom: 1px solid rgb(154 164 173 / 10%);
+  background: transparent;
+  color: #dce3e7;
+  cursor: pointer;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 11px;
+  text-align: left;
+}
+
+.waveform-label:hover,
+.waveform-label.selected {
+  background: rgb(211 50 50 / 20%);
+  color: #fff;
+}
+
+.waveform-label-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.waveform-label-range {
+  margin-left: auto;
+  color: #9ea9b3;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.waveform-scroll {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  overflow: auto;
+}
+
+#waveform-canvas {
+  display: block;
+}
+
+.waveform-empty {
+  display: grid;
+  height: 100%;
+  min-height: 116px;
+  place-items: center;
+  padding: 12px;
+  color: #7f8992;
+  font-size: 12px;
+  text-align: center;
 }
 
 .trace-log {
@@ -378,7 +567,7 @@ input {
 }
 
 #trace-output {
-  max-height: calc(min(34vh, 300px) - 106px);
+  max-height: 132px;
   margin: 0;
   overflow: auto;
   padding: 10px 12px;
@@ -388,6 +577,41 @@ input {
   font-size: 11px;
   line-height: 1.45;
   white-space: pre;
+}
+
+.trace-content-expanded {
+  min-height: 0;
+  min-width: 0;
+}
+
+.trace-content-expanded {
+  display: grid;
+  grid-template-rows: auto minmax(160px, 1fr) auto;
+  height: min(48vh, 480px);
+}
+
+.trace-content-expanded > * {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.trace-content-expanded .trace-controls {
+  border-top: 1px solid rgb(154 164 173 / 18%);
+}
+
+.trace-content-expanded .waveform-viewer {
+  min-height: 180px;
+  max-height: none;
+  height: 100%;
+}
+
+.trace-content-expanded .trace-log {
+  max-height: min(20vh, 160px);
+  overflow: auto;
+}
+
+.trace-content-expanded #trace-output {
+  max-height: 140px;
 }
 
 .panel-header {
@@ -804,11 +1028,15 @@ input {
     left: 12px;
     bottom: calc(32vh + 24px);
     width: calc(100vw - 24px);
-    max-height: 28vh;
+    max-height: 36vh;
   }
 
   #trace-output {
-    max-height: calc(28vh - 76px);
+    max-height: 96px;
+  }
+
+  .waveform-viewer {
+    max-height: 128px;
   }
 
   .graph-minimap {

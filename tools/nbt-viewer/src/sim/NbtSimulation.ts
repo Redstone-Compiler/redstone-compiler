@@ -12,11 +12,15 @@ type WasmModule = {
 };
 
 type WasmSimulator = {
+  history_snapshots(): SnapshotInfo[];
+  history_trace(): TraceEntry[];
+  history_waveform(): Waveform;
   switches(): SwitchInfo[];
   snapshots(): SnapshotInfo[];
   structure(): unknown;
   trace(): TraceEntry[];
   toggle_switch(x: number, y: number, z: number, isOn: boolean): unknown;
+  waveform(): Waveform;
 };
 
 export type SwitchInfo = {
@@ -40,11 +44,26 @@ export type TraceReport = {
   error?: string;
   trace: TraceEntry[];
   snapshots: SnapshotInfo[];
+  waveform: Waveform;
 };
 
 export type SnapshotInfo = {
   cycle: number;
   root: unknown;
+};
+
+export type Waveform = {
+  cycles: number[];
+  signals: WaveformSignal[];
+};
+
+export type WaveformSignal = {
+  position: [number, number, number];
+  kind: string;
+  property: string;
+  label: string;
+  max_value: number;
+  values: number[];
 };
 
 type RawGraphDotInfo = {
@@ -66,11 +85,24 @@ export type GraphDotInfo = {
 };
 
 export class NbtSimulationError extends Error {
-  constructor(message: string, readonly trace: TraceEntry[], readonly snapshots: SnapshotInfo[]) {
+  constructor(
+    message: string,
+    readonly trace: TraceEntry[],
+    readonly snapshots: SnapshotInfo[],
+    readonly waveform: Waveform,
+    readonly historyTrace: TraceEntry[] = trace,
+    readonly historySnapshots: SnapshotInfo[] = snapshots,
+    readonly historyWaveform: Waveform = waveform,
+  ) {
     super(message);
     this.name = 'NbtSimulationError';
   }
 }
+
+export const emptyWaveform: Waveform = {
+  cycles: [],
+  signals: [],
+};
 
 const wasmModulePath = 'wasm/nbt-sim/nbt_sim_wasm.js';
 const wasmBinaryPath = 'wasm/nbt-sim/nbt_sim_wasm_bg.wasm';
@@ -128,7 +160,7 @@ export class NbtSimulation {
       return new NbtSimulation(new wasm.NbtSimulator(nbtBytes));
     } catch (error) {
       const report = wasm.NbtSimulator.trace_init(nbtBytes);
-      throw new NbtSimulationError(report.error ?? getErrorMessage(error), report.trace, report.snapshots);
+      throw new NbtSimulationError(report.error ?? getErrorMessage(error), report.trace, report.snapshots, report.waveform);
     }
   }
 
@@ -142,6 +174,22 @@ export class NbtSimulation {
 
   snapshots(): SnapshotInfo[] {
     return this.sim.snapshots();
+  }
+
+  waveform(): Waveform {
+    return this.sim.waveform();
+  }
+
+  historyTrace(): TraceEntry[] {
+    return this.sim.history_trace();
+  }
+
+  historySnapshots(): SnapshotInfo[] {
+    return this.sim.history_snapshots();
+  }
+
+  historyWaveform(): Waveform {
+    return this.sim.history_waveform();
   }
 
   getSwitch(block: StructureBlock): SwitchInfo | undefined {
@@ -166,7 +214,15 @@ export class NbtSimulation {
     try {
       return this.sim.toggle_switch(x, y, z, isOn);
     } catch (error) {
-      throw new NbtSimulationError(getErrorMessage(error), this.trace(), this.snapshots());
+      throw new NbtSimulationError(
+        getErrorMessage(error),
+        this.trace(),
+        this.snapshots(),
+        this.waveform(),
+        this.historyTrace(),
+        this.historySnapshots(),
+        this.historyWaveform(),
+      );
     }
   }
 }

@@ -6,9 +6,12 @@ import { StructureViewer } from './render/StructureViewer';
 import {
   NbtSimulation,
   NbtSimulationError,
+  emptyWaveform,
   type GraphDotInfo,
   type SnapshotInfo,
   type TraceEntry,
+  type Waveform,
+  type WaveformSignal,
 } from './sim/NbtSimulation';
 import type { StructureBlock, StructureModel, StructurePaletteEntry } from './types';
 
@@ -69,6 +72,10 @@ type ExampleFile = {
 };
 
 const TRACE_ANIMATION_INTERVAL_MS = 50;
+const WAVEFORM_LABEL_WIDTH = 188;
+const WAVEFORM_ROW_HEIGHT = 24;
+const WAVEFORM_CYCLE_WIDTH = 34;
+const WAVEFORM_HEADER_HEIGHT = 20;
 const GRAPH_MINIMAP_INSET = 0;
 const GRAPH_MINIMAP_MAX_WIDTH = 360;
 const GRAPH_MINIMAP_MAX_HEIGHT = 240;
@@ -125,18 +132,37 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
         <details id="trace-panel" class="floating-panel trace-panel">
           <summary>
             <span>Trace</span>
-            <span id="trace-count">No events</span>
+            <span class="trace-summary-actions">
+              <button id="trace-expand" class="trace-expand-button" type="button" aria-label="Expand trace" title="Expand trace" disabled>Expand</button>
+              <span id="trace-count">No events</span>
+            </span>
           </summary>
-          <div class="trace-controls">
-            <button id="trace-prev" type="button" aria-label="Previous cycle">Prev</button>
-            <input id="trace-cycle" type="range" min="0" max="0" value="0" />
-            <button id="trace-next" type="button" aria-label="Next cycle">Next</button>
-            <span id="trace-cycle-label">cycle -</span>
+          <div id="trace-content" class="trace-content">
+            <div class="trace-controls">
+              <button id="trace-prev" type="button" aria-label="Previous cycle">Prev</button>
+              <input id="trace-cycle" type="range" min="0" max="0" value="0" />
+              <button id="trace-next" type="button" aria-label="Next cycle">Next</button>
+              <label class="trace-cycle-mode" title="Show actual simulator cycle numbers">
+                <input id="trace-show-actual-cycles" type="checkbox" />
+                <span>Actual cycles</span>
+              </label>
+              <span id="trace-cycle-label">cycle -</span>
+            </div>
+            <div id="waveform-viewer" class="waveform-viewer">
+              <label class="waveform-filter-floating" title="Show only signals with value changes">
+                <input id="waveform-changed-only" type="checkbox" />
+                <span>Changed only</span>
+              </label>
+              <div id="waveform-labels" class="waveform-labels"></div>
+              <div id="waveform-scroll" class="waveform-scroll">
+                <canvas id="waveform-canvas"></canvas>
+              </div>
+            </div>
+            <details class="trace-log">
+              <summary>Log</summary>
+              <pre id="trace-output">Run a simulation to inspect events.</pre>
+            </details>
           </div>
-          <details class="trace-log">
-            <summary>Log</summary>
-            <pre id="trace-output">Run a simulation to inspect events.</pre>
-          </details>
         </details>
         <div id="viewer-empty" class="viewer-empty">Drop an .nbt file or use Open NBT.</div>
       </section>
@@ -230,15 +256,23 @@ const filesList = document.querySelector<HTMLElement>('#files-list')!;
 const filesCount = document.querySelector<HTMLElement>('#files-count')!;
 const canvas = document.querySelector<HTMLCanvasElement>('#structure-canvas')!;
 const viewerEmpty = document.querySelector<HTMLElement>('#viewer-empty')!;
+const inspectorPanel = document.querySelector<HTMLElement>('.inspector-panel')!;
 const inspector = document.querySelector<HTMLElement>('#inspector')!;
 const toggleSwitchButton = document.querySelector<HTMLButtonElement>('#toggle-switch')!;
 const tracePanel = document.querySelector<HTMLDetailsElement>('#trace-panel')!;
+const traceExpandButton = document.querySelector<HTMLButtonElement>('#trace-expand')!;
+const traceContent = document.querySelector<HTMLElement>('#trace-content')!;
 const traceCount = document.querySelector<HTMLElement>('#trace-count')!;
 const traceOutput = document.querySelector<HTMLElement>('#trace-output')!;
 const traceCycleInput = document.querySelector<HTMLInputElement>('#trace-cycle')!;
 const traceCycleLabel = document.querySelector<HTMLElement>('#trace-cycle-label')!;
 const tracePrevButton = document.querySelector<HTMLButtonElement>('#trace-prev')!;
 const traceNextButton = document.querySelector<HTMLButtonElement>('#trace-next')!;
+const traceShowActualCyclesInput = document.querySelector<HTMLInputElement>('#trace-show-actual-cycles')!;
+const waveformLabels = document.querySelector<HTMLElement>('#waveform-labels')!;
+const waveformScroll = document.querySelector<HTMLElement>('#waveform-scroll')!;
+const waveformCanvas = document.querySelector<HTMLCanvasElement>('#waveform-canvas')!;
+const waveformChangedOnlyInput = document.querySelector<HTMLInputElement>('#waveform-changed-only')!;
 const switchesPanel = document.querySelector<HTMLDetailsElement>('#switches-panel')!;
 const switchesActions = document.querySelector<HTMLElement>('#switches-actions')!;
 const switchesAllOnButton = document.querySelector<HTMLButtonElement>('#switches-all-on')!;
@@ -294,11 +328,22 @@ let currentNbtBytes: Uint8Array | undefined;
 let currentRoot: unknown;
 let currentTrace: TraceEntry[] = [];
 let traceCycles: number[] = [];
+let historyTrace: TraceEntry[] = [];
+let historySnapshots: SnapshotInfo[] = [];
+let historyWaveform: Waveform = emptyWaveform;
+let historyTraceCycles: number[] = [];
+let traceCycleDisplayOffset = 0;
+let traceShowActualCycles = false;
 let currentSnapshots: SnapshotInfo[] = [];
+let currentWaveform: Waveform = emptyWaveform;
+let selectedWaveformSignal: WaveformSignal | undefined;
+let waveformChangedOnly = false;
+let isTraceExpanded = false;
 let traceBaseRoot: unknown;
 let isTracePreviewActive = false;
 let traceAnimation: TraceAnimation | undefined;
 let traceAnimationToken = 0;
+let waveformResizeFrame: number | undefined;
 let graphDot: GraphDotInfo | undefined;
 let graphTab: GraphTab = 'world';
 let graphWorldModeValue: GraphWorldMode = 'raw';
@@ -353,14 +398,76 @@ traceCycleInput.addEventListener('input', () => {
 
 tracePrevButton.addEventListener('click', () => {
   cancelTraceAnimation();
-  traceCycleInput.value = String(Math.max(0, Number(traceCycleInput.value) - 1));
+  const axisCycles = getTraceAxisCycles();
+  traceCycleInput.value = String(Math.max(0, Math.min(axisCycles.length - 1, Number(traceCycleInput.value) - 1)));
   void renderTraceCycle(Number(traceCycleInput.value));
 });
 
 traceNextButton.addEventListener('click', () => {
   cancelTraceAnimation();
-  traceCycleInput.value = String(Math.min(traceCycles.length - 1, Number(traceCycleInput.value) + 1));
+  const axisCycles = getTraceAxisCycles();
+  traceCycleInput.value = String(Math.min(axisCycles.length - 1, Number(traceCycleInput.value) + 1));
   void renderTraceCycle(Number(traceCycleInput.value));
+});
+
+traceShowActualCyclesInput.addEventListener('change', () => {
+  cancelTraceAnimation();
+  const cycle = selectedTraceCycle();
+  traceShowActualCycles = traceShowActualCyclesInput.checked;
+  pruneSelectedWaveformSignal();
+  updateWaveformFilterControl();
+  renderWaveformLabels();
+  const selectedIndex = updateTraceCycleControls(findTraceAxisIndexForCycle(cycle));
+  void renderTraceCycle(selectedIndex);
+});
+
+waveformCanvas.addEventListener('click', event => {
+  const axisCycles = getTraceAxisCycles();
+  if (axisCycles.length === 0) return;
+
+  cancelTraceAnimation();
+  const rect = waveformCanvas.getBoundingClientRect();
+  const x = event.clientX - rect.left;
+  const y = event.clientY - rect.top + waveformScroll.scrollTop;
+  const cycleIndex = Math.max(0, Math.min(axisCycles.length - 1, Math.floor(x / WAVEFORM_CYCLE_WIDTH)));
+  const signalIndex = Math.floor((y - WAVEFORM_HEADER_HEIGHT) / WAVEFORM_ROW_HEIGHT);
+  const visibleSignals = getVisibleWaveformSignals();
+  if (visibleSignals[signalIndex]) {
+    focusWaveformSignal(visibleSignals[signalIndex]);
+  }
+  traceCycleInput.value = String(cycleIndex);
+  void renderTraceCycle(cycleIndex);
+});
+
+waveformScroll.addEventListener('scroll', () => {
+  waveformLabels.scrollTop = waveformScroll.scrollTop;
+});
+
+waveformChangedOnlyInput.addEventListener('change', () => {
+  waveformChangedOnly = waveformChangedOnlyInput.checked;
+  const selectedIndex = Number(traceCycleInput.value);
+  renderWaveformLabels();
+  renderWaveform(selectedIndex);
+  scrollWaveformToTraceIndex(selectedIndex);
+});
+
+window.addEventListener('resize', () => {
+  if (waveformResizeFrame !== undefined) {
+    window.cancelAnimationFrame(waveformResizeFrame);
+  }
+
+  waveformResizeFrame = window.requestAnimationFrame(() => {
+    waveformResizeFrame = undefined;
+    const selectedIndex = Number(traceCycleInput.value);
+    renderWaveform(selectedIndex);
+    scrollWaveformToTraceIndex(selectedIndex);
+  });
+});
+
+traceExpandButton.addEventListener('click', event => {
+  event.preventDefault();
+  event.stopPropagation();
+  setTraceExpanded(!isTraceExpanded);
 });
 
 openGraphsButton.addEventListener('click', () => {
@@ -524,6 +631,35 @@ graphMinimap.addEventListener('pointercancel', event => {
   isDraggingGraphMinimap = false;
   graphMinimap.releasePointerCapture(event.pointerId);
 });
+
+function setTraceExpanded(expanded: boolean): void {
+  if (expanded && traceExpandButton.disabled) return;
+
+  isTraceExpanded = expanded;
+  if (expanded) {
+    tracePanel.open = true;
+  }
+  tracePanel.classList.toggle('expanded', expanded);
+  traceContent.classList.toggle('trace-content-expanded', expanded);
+  inspectorPanel.classList.toggle('hidden-by-trace', expanded);
+  traceExpandButton.textContent = expanded ? 'Collapse' : 'Expand';
+  traceExpandButton.setAttribute('aria-label', expanded ? 'Collapse trace' : 'Expand trace');
+  traceExpandButton.title = expanded ? 'Collapse trace' : 'Expand trace';
+  const selectedIndex = Number(traceCycleInput.value);
+  renderWaveform(selectedIndex);
+  scrollWaveformToTraceIndex(selectedIndex);
+  window.requestAnimationFrame(() => scrollWaveformToTraceIndex(selectedIndex));
+}
+
+function updateTraceExpandAvailability(hasTraceContent: boolean): void {
+  traceExpandButton.disabled = !hasTraceContent;
+  if (!hasTraceContent) {
+    setTraceExpanded(false);
+    traceExpandButton.title = 'Run a simulation before expanding trace';
+    return;
+  }
+  traceExpandButton.title = isTraceExpanded ? 'Collapse trace' : 'Expand trace';
+}
 
 async function openGraphDialog(): Promise<void> {
   if (!graphDialog.open) graphDialog.showModal();
@@ -1146,7 +1282,14 @@ async function applySimulatedRoot(
   viewer.setSelectedBlock(nextSelectedBlock);
   renderSelection(nextSelectedBlock);
   renderSwitches(structure);
-  renderTrace(activeSimulation.trace(), activeSimulation.snapshots(), baseRoot, { animateTo: 'last' });
+  renderTrace(activeSimulation.trace(), activeSimulation.snapshots(), activeSimulation.waveform(), baseRoot, {
+    animateTo: 'last',
+    history: {
+      trace: activeSimulation.historyTrace(),
+      snapshots: activeSimulation.historySnapshots(),
+      waveform: activeSimulation.historyWaveform(),
+    },
+  });
 }
 
 dropZone.addEventListener('dragover', event => {
@@ -1409,12 +1552,12 @@ async function openFile(file: File, selectedEntry?: Element | null): Promise<voi
         `palette: ${structure.palette.length}`,
         `blocks: ${structure.blocks.length}`,
       ].join('\n');
-      renderTrace([], [], undefined);
+      renderTrace([], [], emptyWaveform, undefined);
     } else {
       viewerEmpty.classList.remove('hidden');
       inspector.textContent = 'This NBT file does not look like a Minecraft structure file.';
       renderSwitches();
-      renderTrace([], [], undefined);
+      renderTrace([], [], emptyWaveform, undefined);
     }
   } catch (error) {
     simulation = undefined;
@@ -1428,7 +1571,7 @@ async function openFile(file: File, selectedEntry?: Element | null): Promise<voi
     viewerEmpty.classList.remove('hidden');
     inspector.textContent = error instanceof Error ? error.message : String(error);
     renderSwitches();
-    renderTrace([], [], undefined);
+    renderTrace([], [], emptyWaveform, undefined);
   }
 }
 
@@ -1507,10 +1650,135 @@ function samePos(a: [number, number, number], b: [number, number, number]): bool
   return a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
 }
 
+function sameWaveformSignal(a: WaveformSignal, b: WaveformSignal): boolean {
+  return samePos(a.position, b.position) && a.kind === b.kind && a.property === b.property;
+}
+
+function collectTraceCycles(trace: TraceEntry[], waveform: Waveform): number[] {
+  return Array.from(new Set([...trace.map(entry => entry.cycle), ...waveform.cycles])).sort((a, b) => a - b);
+}
+
+function getActiveTrace(): TraceEntry[] {
+  return traceShowActualCycles ? historyTrace : currentTrace;
+}
+
+function getActiveSnapshots(): SnapshotInfo[] {
+  return traceShowActualCycles ? historySnapshots : currentSnapshots;
+}
+
+function getActiveWaveform(): Waveform {
+  return traceShowActualCycles ? historyWaveform : currentWaveform;
+}
+
+function pruneSelectedWaveformSignal(): void {
+  const activeWaveform = getActiveWaveform();
+  if (selectedWaveformSignal && !activeWaveform.signals.some(signal => sameWaveformSignal(signal, selectedWaveformSignal!))) {
+    selectedWaveformSignal = undefined;
+  }
+}
+
+function signalHasWaveformChange(signal: WaveformSignal): boolean {
+  if (signal.values.length <= 1) return false;
+
+  const firstValue = signal.values[0] ?? 0;
+  return signal.values.some(value => value !== firstValue);
+}
+
+function getVisibleWaveformSignals(): WaveformSignal[] {
+  const activeWaveform = getActiveWaveform();
+  if (!waveformChangedOnly) return activeWaveform.signals;
+
+  return activeWaveform.signals.filter(signalHasWaveformChange);
+}
+
+function toTraceDisplayCycle(cycle: number): number {
+  if (traceShowActualCycles) return cycle;
+
+  return Math.max(1, cycle - traceCycleDisplayOffset);
+}
+
+function getTraceAxisCycles(): number[] {
+  if (!traceShowActualCycles) return traceCycles;
+  if (historyTraceCycles.length === 0) return [];
+
+  const latestCycle = historyTraceCycles[historyTraceCycles.length - 1];
+  return Array.from({ length: latestCycle }, (_, index) => index + 1);
+}
+
+function findTraceAxisIndexForCycle(cycle: number | undefined, axisCycles = getTraceAxisCycles()): number {
+  if (cycle === undefined || axisCycles.length === 0) return -1;
+
+  if (traceShowActualCycles && cycle >= 1 && cycle <= axisCycles[axisCycles.length - 1]) {
+    return cycle - 1;
+  }
+
+  const exactIndex = axisCycles.indexOf(cycle);
+  if (exactIndex >= 0) return exactIndex;
+
+  const nextIndex = axisCycles.findIndex(axisCycle => axisCycle >= cycle);
+  return nextIndex >= 0 ? nextIndex : axisCycles.length - 1;
+}
+
+function selectedTraceCycle(): number | undefined {
+  const axisCycles = getTraceAxisCycles();
+  return axisCycles[Number(traceCycleInput.value)];
+}
+
+function updateTraceCycleControls(selectedIndex: number): number {
+  const axisCycles = getTraceAxisCycles();
+  const disabled = axisCycles.length === 0;
+  const safeIndex = disabled ? -1 : Math.max(0, Math.min(axisCycles.length - 1, selectedIndex));
+  traceCycleInput.max = String(Math.max(0, axisCycles.length - 1));
+  traceCycleInput.value = String(Math.max(0, safeIndex));
+  traceCycleInput.disabled = disabled;
+  tracePrevButton.disabled = disabled;
+  traceNextButton.disabled = disabled;
+  updateTraceCycleModeControl();
+  return safeIndex;
+}
+
+function updateTraceCycleModeControl(): void {
+  traceShowActualCyclesInput.checked = traceShowActualCycles;
+  traceShowActualCyclesInput.disabled = traceCycles.length === 0 && historyTraceCycles.length === 0;
+}
+
+function updateWaveformFilterControl(): void {
+  const activeWaveform = getActiveWaveform();
+  waveformChangedOnlyInput.checked = waveformChangedOnly;
+  waveformChangedOnlyInput.disabled = activeWaveform.signals.length === 0;
+}
+
+function getCurrentWindowStartCycle(): number | undefined {
+  return traceCycles[0];
+}
+
+function getCurrentWindowEndCycle(): number | undefined {
+  return traceCycles[traceCycles.length - 1];
+}
+
+function getTraceAnimationStartIndex(axisCycles: number[]): number {
+  if (axisCycles.length === 0) return -1;
+  const startCycle = traceShowActualCycles ? getCurrentWindowStartCycle() : axisCycles[0];
+  return findTraceAxisIndexForCycle(startCycle ?? axisCycles[0], axisCycles);
+}
+
+function getTraceAnimationTargetIndex(axisCycles: number[]): number {
+  if (axisCycles.length === 0) return -1;
+  const targetCycle = traceShowActualCycles ? getCurrentWindowEndCycle() : axisCycles[axisCycles.length - 1];
+  return findTraceAxisIndexForCycle(targetCycle ?? axisCycles[axisCycles.length - 1], axisCycles);
+}
+
 function renderSimulationError(error: unknown): void {
   if (error instanceof NbtSimulationError) {
     inspector.textContent = error.message;
-    renderTrace(error.trace, error.snapshots, currentRoot, { open: true });
+    renderTrace(error.trace, error.snapshots, error.waveform, currentRoot, {
+      open: true,
+      history: {
+        trace: error.historyTrace,
+        snapshots: error.historySnapshots,
+        waveform: error.historyWaveform,
+      },
+    });
     return;
   }
 
@@ -1520,27 +1788,52 @@ function renderSimulationError(error: unknown): void {
 function renderTrace(
   trace: TraceEntry[],
   snapshots: SnapshotInfo[],
+  waveform: Waveform,
   baseRoot: unknown,
-  options: { animateTo?: 'last'; open?: boolean; select?: 'first' | 'last' } = {},
+  options: {
+    animateTo?: 'last';
+    history?: {
+      trace: TraceEntry[];
+      snapshots: SnapshotInfo[];
+      waveform: Waveform;
+    };
+    open?: boolean;
+    select?: 'first' | 'last';
+  } = {},
 ): void {
   cancelTraceAnimation();
   currentTrace = trace;
   currentSnapshots = snapshots;
+  currentWaveform = waveform;
+  historyTrace = options.history?.trace ?? trace;
+  historySnapshots = options.history?.snapshots ?? snapshots;
+  historyWaveform = options.history?.waveform ?? waveform;
+  pruneSelectedWaveformSignal();
   traceBaseRoot = baseRoot;
-  traceCycles = Array.from(new Set(trace.map(entry => entry.cycle))).sort((a, b) => a - b);
-  traceCount.textContent = trace.length === 0 ? 'No events' : `${trace.length} events`;
-  traceCycleInput.max = String(Math.max(0, traceCycles.length - 1));
-  const selectedIndex = options.animateTo === 'last' ? 0 : options.select === 'last' ? traceCycles.length - 1 : 0;
-  traceCycleInput.value = String(Math.max(0, selectedIndex));
-  traceCycleInput.disabled = traceCycles.length === 0;
-  tracePrevButton.disabled = traceCycles.length === 0;
-  traceNextButton.disabled = traceCycles.length === 0;
-  void renderTraceCycle(traceCycles.length === 0 ? -1 : selectedIndex);
+  traceCycles = collectTraceCycles(trace, waveform);
+  historyTraceCycles = collectTraceCycles(historyTrace, historyWaveform);
+  traceCycleDisplayOffset = traceCycles.length === 0 ? 0 : Math.max(0, traceCycles[0] - 1);
+  traceCount.textContent =
+    trace.length === 0 && waveform.signals.length === 0
+      ? 'No events'
+      : `${trace.length} events / ${waveform.signals.length} signals`;
+  updateTraceExpandAvailability(trace.length > 0 || waveform.signals.length > 0 || historyTrace.length > 0 || historyWaveform.signals.length > 0);
+  const axisCycles = getTraceAxisCycles();
+  const selectedIndex = updateTraceCycleControls(
+    options.animateTo === 'last'
+      ? getTraceAnimationStartIndex(axisCycles)
+      : options.select === 'last'
+        ? axisCycles.length - 1
+        : 0,
+  );
+  updateWaveformFilterControl();
+  renderWaveformLabels();
+  void renderTraceCycle(selectedIndex);
   if (options.open || trace.length > 0) {
     tracePanel.open = true;
   }
   if (options.animateTo === 'last') {
-    startTraceAnimation(traceCycles.length - 1);
+    startTraceAnimation(getTraceAnimationTargetIndex(axisCycles));
   }
 }
 
@@ -1553,7 +1846,7 @@ function cancelTraceAnimation(): void {
 }
 
 function startTraceAnimation(targetIndex: number): void {
-  if (targetIndex <= 0) return;
+  if (targetIndex <= Number(traceCycleInput.value)) return;
 
   const token = traceAnimationToken + 1;
   traceAnimationToken = token;
@@ -1573,22 +1866,31 @@ function startTraceAnimation(targetIndex: number): void {
 }
 
 async function renderTraceCycle(index: number): Promise<void> {
-  if (index < 0 || traceCycles.length === 0) {
+  const axisCycles = getTraceAxisCycles();
+  if (index < 0 || axisCycles.length === 0) {
     traceCycleLabel.textContent = 'cycle -';
     traceOutput.textContent = 'Run a simulation to inspect events.';
+    renderWaveform(-1);
     viewer.setTraceHighlights([]);
     await restoreCurrentStructurePreview();
     return;
   }
 
-  const safeIndex = Math.max(0, Math.min(traceCycles.length - 1, index));
-  const cycle = traceCycles[safeIndex];
-  const entries = currentTrace.filter(entry => entry.cycle === cycle);
-  const positions = uniquePositions(entries.map(entry => rustPosToRenderPos(entry.target_position)));
-  const snapshot = currentSnapshots.find(snapshot => snapshot.cycle === cycle);
+  const safeIndex = Math.max(0, Math.min(axisCycles.length - 1, index));
+  const cycle = axisCycles[safeIndex];
+  const activeTrace = getActiveTrace();
+  const activeSnapshots = getActiveSnapshots();
+  const entries = activeTrace.filter(entry => entry.cycle === cycle);
+  const selectedSignalPositions: Array<[number, number, number]> = selectedWaveformSignal
+    ? [rustPosToRenderPos(selectedWaveformSignal.position)]
+    : [];
+  const positions = uniquePositions([...entries.map(entry => rustPosToRenderPos(entry.target_position)), ...selectedSignalPositions]);
+  const snapshot = activeSnapshots.find(snapshot => snapshot.cycle === cycle);
   traceCycleInput.value = String(safeIndex);
-  traceCycleLabel.textContent = `cycle ${cycle} / ${entries.length} events`;
+  traceCycleLabel.textContent = `cycle ${toTraceDisplayCycle(cycle)} / ${entries.length} events`;
   traceOutput.textContent = formatTrace(entries);
+  renderWaveform(safeIndex);
+  scrollWaveformToTraceIndex(safeIndex);
   await renderTraceSnapshot(snapshot, positions);
 }
 
@@ -1596,8 +1898,10 @@ async function renderTraceSnapshot(
   snapshot: SnapshotInfo | undefined,
   highlights: Array<[number, number, number]>,
 ): Promise<void> {
-  if (snapshot && traceBaseRoot) {
-    const structure = toStructureModel(mergeSimulatedState(traceBaseRoot, snapshot.root));
+  if (snapshot) {
+    const previewBaseRoot = traceShowActualCycles ? currentRoot : traceBaseRoot;
+    const previewRoot = previewBaseRoot ? mergeSimulatedState(previewBaseRoot, snapshot.root) : snapshot.root;
+    const structure = toStructureModel(previewRoot);
     if (structure) {
       isTracePreviewActive = true;
       await viewer.setStructure(structure, { preserveSelection: true, preserveView: true });
@@ -1605,6 +1909,263 @@ async function renderTraceSnapshot(
   }
 
   viewer.setTraceHighlights(highlights);
+}
+
+function renderWaveformLabels(): void {
+  const activeWaveform = getActiveWaveform();
+  const visibleSignals = getVisibleWaveformSignals();
+  waveformLabels.replaceChildren();
+  waveformLabels.style.width = `${WAVEFORM_LABEL_WIDTH}px`;
+  waveformLabels.style.minWidth = `${WAVEFORM_LABEL_WIDTH}px`;
+
+  if (activeWaveform.signals.length === 0 || visibleSignals.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'waveform-empty';
+    empty.textContent = activeWaveform.signals.length === 0 ? 'No waveform' : 'No changed signals';
+    waveformLabels.append(empty);
+    return;
+  }
+
+  const spacer = document.createElement('div');
+  spacer.className = 'waveform-label-spacer';
+  spacer.style.height = `${WAVEFORM_HEADER_HEIGHT}px`;
+  waveformLabels.append(spacer);
+
+  for (const signal of visibleSignals) {
+    const button = document.createElement('button');
+    button.className = 'waveform-label';
+    button.type = 'button';
+    button.title = signal.label;
+    button.classList.toggle('selected', selectedWaveformSignal ? sameWaveformSignal(signal, selectedWaveformSignal) : false);
+
+    const name = document.createElement('span');
+    name.className = 'waveform-label-name';
+    name.textContent = signal.label;
+
+    const range = document.createElement('span');
+    range.className = 'waveform-label-range';
+    range.textContent = signal.max_value > 1 ? `0-${signal.max_value}` : '0/1';
+
+    button.append(name, range);
+    button.addEventListener('click', () => {
+      focusWaveformSignal(signal);
+      renderWaveform(Number(traceCycleInput.value));
+      renderWaveformLabels();
+    });
+    waveformLabels.append(button);
+  }
+}
+
+function focusWaveformSignal(signal: WaveformSignal): void {
+  selectedWaveformSignal = signal;
+  const renderPos = rustPosToRenderPos(signal.position);
+  viewer.setTraceHighlights([renderPos]);
+
+  const structure = toStructureModel(currentRoot);
+  const block = structure?.blocks.find(item => samePos(item.pos, renderPos));
+  if (block) {
+    viewer.setSelectedBlock(block);
+    renderSelection(block);
+  }
+}
+
+function renderWaveform(selectedTraceIndex: number): void {
+  const activeWaveform = getActiveWaveform();
+  const axisCycles = getTraceAxisCycles();
+  const visibleSignals = getVisibleWaveformSignals();
+  const width = Math.max(1, axisCycles.length * WAVEFORM_CYCLE_WIDTH);
+  const height = Math.max(WAVEFORM_HEADER_HEIGHT + WAVEFORM_ROW_HEIGHT, WAVEFORM_HEADER_HEIGHT + visibleSignals.length * WAVEFORM_ROW_HEIGHT);
+  const pixelRatio = window.devicePixelRatio || 1;
+  waveformCanvas.style.width = `${width}px`;
+  waveformCanvas.style.height = `${height}px`;
+  waveformCanvas.width = Math.ceil(width * pixelRatio);
+  waveformCanvas.height = Math.ceil(height * pixelRatio);
+
+  const context = waveformCanvas.getContext('2d');
+  if (!context) return;
+  context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+  context.clearRect(0, 0, width, height);
+  context.fillStyle = '#12161a';
+  context.fillRect(0, 0, width, height);
+
+  drawWaveformHeader(context, width, axisCycles);
+  if (activeWaveform.signals.length === 0 || axisCycles.length === 0) {
+    context.fillStyle = '#7f8992';
+    context.font = '12px "Cascadia Mono", Consolas, monospace';
+    context.fillText('No waveform data', 10, WAVEFORM_HEADER_HEIGHT + 16);
+    return;
+  }
+
+  if (visibleSignals.length === 0) {
+    context.fillStyle = '#7f8992';
+    context.font = '12px "Cascadia Mono", Consolas, monospace';
+    context.fillText('No changed signals', 10, WAVEFORM_HEADER_HEIGHT + 16);
+    return;
+  }
+
+  const waveformCycleIndexByCycle = new Map(activeWaveform.cycles.map((cycle, index) => [cycle, index]));
+  visibleSignals.forEach((signal, signalIndex) => {
+    drawWaveformRow(context, signal, signalIndex, activeWaveform, waveformCycleIndexByCycle, axisCycles);
+  });
+
+  if (selectedTraceIndex >= 0 && selectedTraceIndex < axisCycles.length) {
+    const x = selectedTraceIndex * WAVEFORM_CYCLE_WIDTH;
+    context.fillStyle = 'rgb(211 50 50 / 18%)';
+    context.fillRect(x, 0, WAVEFORM_CYCLE_WIDTH, height);
+    context.strokeStyle = '#ff6b6b';
+    context.lineWidth = 1;
+    context.beginPath();
+    context.moveTo(x + 0.5, 0);
+    context.lineTo(x + 0.5, height);
+    context.stroke();
+  }
+}
+
+function scrollWaveformToTraceIndex(selectedTraceIndex: number): void {
+  if (selectedTraceIndex < 0 || waveformScroll.clientWidth <= 0) return;
+
+  const cycleLeft = selectedTraceIndex * WAVEFORM_CYCLE_WIDTH;
+  const cycleRight = cycleLeft + WAVEFORM_CYCLE_WIDTH;
+  const padding = WAVEFORM_CYCLE_WIDTH * 2;
+  const visibleLeft = waveformScroll.scrollLeft;
+  const visibleRight = visibleLeft + waveformScroll.clientWidth;
+
+  if (cycleLeft < visibleLeft + padding) {
+    waveformScroll.scrollLeft = Math.max(0, cycleLeft - padding);
+  } else if (cycleRight > visibleRight - padding) {
+    waveformScroll.scrollLeft = Math.max(0, cycleRight - waveformScroll.clientWidth + padding);
+  }
+}
+
+function drawWaveformHeader(context: CanvasRenderingContext2D, width: number, axisCycles: number[]): void {
+  context.fillStyle = '#161b20';
+  context.fillRect(0, 0, width, WAVEFORM_HEADER_HEIGHT);
+  context.fillStyle = '#9ea9b3';
+  context.font = '10px "Cascadia Mono", Consolas, monospace';
+  context.textBaseline = 'middle';
+
+  axisCycles.forEach((cycle, index) => {
+    const x = index * WAVEFORM_CYCLE_WIDTH;
+    context.fillText(String(toTraceDisplayCycle(cycle)), x + 4, WAVEFORM_HEADER_HEIGHT / 2);
+    context.strokeStyle = 'rgb(154 164 173 / 14%)';
+    context.beginPath();
+    context.moveTo(x + 0.5, 0);
+    context.lineTo(x + 0.5, WAVEFORM_HEADER_HEIGHT);
+    context.stroke();
+  });
+}
+
+function drawWaveformRow(
+  context: CanvasRenderingContext2D,
+  signal: WaveformSignal,
+  signalIndex: number,
+  waveform: Waveform,
+  waveformCycleIndexByCycle: Map<number, number>,
+  axisCycles: number[],
+): void {
+  const y = WAVEFORM_HEADER_HEIGHT + signalIndex * WAVEFORM_ROW_HEIGHT;
+  context.fillStyle = signalIndex % 2 === 0 ? '#101419' : '#151a20';
+  context.fillRect(0, y, axisCycles.length * WAVEFORM_CYCLE_WIDTH, WAVEFORM_ROW_HEIGHT);
+
+  if (selectedWaveformSignal && sameWaveformSignal(signal, selectedWaveformSignal)) {
+    context.fillStyle = 'rgb(211 50 50 / 15%)';
+    context.fillRect(0, y, axisCycles.length * WAVEFORM_CYCLE_WIDTH, WAVEFORM_ROW_HEIGHT);
+  }
+
+  context.strokeStyle = 'rgb(154 164 173 / 12%)';
+  context.beginPath();
+  context.moveTo(0, y + WAVEFORM_ROW_HEIGHT + 0.5);
+  context.lineTo(axisCycles.length * WAVEFORM_CYCLE_WIDTH, y + WAVEFORM_ROW_HEIGHT + 0.5);
+  context.stroke();
+
+  if (signal.max_value <= 1) {
+    drawDigitalSignal(context, signal, y, waveform, waveformCycleIndexByCycle, axisCycles);
+  } else {
+    drawStrengthSignal(context, signal, y, waveform, waveformCycleIndexByCycle, axisCycles);
+  }
+}
+
+function waveformValueAtCycle(
+  signal: WaveformSignal,
+  cycle: number,
+  waveform: Waveform,
+  waveformCycleIndexByCycle: Map<number, number>,
+): number {
+  const exactIndex = waveformCycleIndexByCycle.get(cycle);
+  if (exactIndex !== undefined) return signal.values[exactIndex] ?? 0;
+  if (!traceShowActualCycles || waveform.cycles.length === 0) return 0;
+
+  let low = 0;
+  let high = waveform.cycles.length - 1;
+  let nearestIndex = 0;
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    if (waveform.cycles[mid] <= cycle) {
+      nearestIndex = mid;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+
+  return signal.values[nearestIndex] ?? 0;
+}
+
+function drawDigitalSignal(
+  context: CanvasRenderingContext2D,
+  signal: WaveformSignal,
+  y: number,
+  waveform: Waveform,
+  waveformCycleIndexByCycle: Map<number, number>,
+  axisCycles: number[],
+): void {
+  context.strokeStyle = '#f45d5d';
+  context.lineWidth = 2;
+  context.beginPath();
+
+  let previousY: number | undefined;
+  axisCycles.forEach((cycle, index) => {
+    const x = index * WAVEFORM_CYCLE_WIDTH;
+    const value = waveformValueAtCycle(signal, cycle, waveform, waveformCycleIndexByCycle);
+    const signalY = y + (value > 0 ? 7 : WAVEFORM_ROW_HEIGHT - 7);
+
+    if (previousY === undefined) {
+      context.moveTo(x, signalY);
+    } else if (previousY !== signalY) {
+      context.lineTo(x, previousY);
+      context.lineTo(x, signalY);
+    } else {
+      context.lineTo(x, signalY);
+    }
+    context.lineTo(x + WAVEFORM_CYCLE_WIDTH, signalY);
+    previousY = signalY;
+  });
+  context.stroke();
+}
+
+function drawStrengthSignal(
+  context: CanvasRenderingContext2D,
+  signal: WaveformSignal,
+  y: number,
+  waveform: Waveform,
+  waveformCycleIndexByCycle: Map<number, number>,
+  axisCycles: number[],
+): void {
+  context.textBaseline = 'middle';
+  context.font = '10px "Cascadia Mono", Consolas, monospace';
+
+  axisCycles.forEach((cycle, index) => {
+    const value = waveformValueAtCycle(signal, cycle, waveform, waveformCycleIndexByCycle);
+    const normalized = Math.max(0, Math.min(1, value / Math.max(1, signal.max_value)));
+    const x = index * WAVEFORM_CYCLE_WIDTH;
+    const fillHeight = Math.max(2, Math.round((WAVEFORM_ROW_HEIGHT - 7) * normalized));
+    const red = Math.round(96 + normalized * 159);
+    const green = Math.round(58 + normalized * 82);
+    context.fillStyle = value > 0 ? `rgb(${red} ${green} 72 / 82%)` : 'rgb(255 255 255 / 8%)';
+    context.fillRect(x + 3, y + WAVEFORM_ROW_HEIGHT - fillHeight - 3, WAVEFORM_CYCLE_WIDTH - 6, fillHeight);
+    context.fillStyle = value > 0 ? '#f7fbfd' : '#7f8992';
+    context.fillText(String(value), x + 8, y + WAVEFORM_ROW_HEIGHT / 2);
+  });
 }
 
 async function restoreCurrentStructurePreview(): Promise<void> {
@@ -1639,7 +2200,7 @@ function formatTrace(trace: TraceEntry[]): string {
       const pos = entry.target_position.join(',');
       return [
         `#${id}`,
-        `cycle=${entry.cycle}`,
+        `cycle=${toTraceDisplayCycle(entry.cycle)}`,
         entry.event_type,
         `target=${pos}`,
         `dir=${entry.direction}`,
