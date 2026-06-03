@@ -21,6 +21,12 @@ const GLOBAL_ROUTE_PADDING: usize = 8;
 const GLOBAL_ROUTE_MAX_STEPS: usize = 128;
 const MAX_REDSTONE_STRENGTH: usize = 15;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ResolvedPortTarget {
+    position: Position,
+    isolate_input: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct RoutedNet {
     pub source: Position,
@@ -60,11 +66,12 @@ pub fn route_module_variables(
         });
 
         for sink in sinks {
-            let (route, next_world) =
-                route_point_to_point(&route_world, source, sink).map_err(|failure| {
+            let (route, next_world) = route_to_target_position(&route_world, source, sink)
+                .map_err(|failure| {
                     eyre::eyre!(
-                        "failed to route top-level input {} -> {sink:?}: {failure:?}",
-                        port.name
+                        "failed to route top-level input {} -> {:?}: {failure:?}",
+                        port.name,
+                        sink.position
                     )
                 })?;
             route_world = next_world;
@@ -91,59 +98,209 @@ pub fn route_module_variables(
         let source = translate_port_route_position(source_port, source_candidate, source_placed);
         let logical_source =
             translate_candidate_position(source_port.position, source_candidate, source_placed);
-        let sink = resolve_port_position(candidates, placed_modules, &var.target.0, &var.target.1)
-            .with_context(|| {
-                format!(
-                    "target port {}.{} is not placed",
-                    var.target.0, var.target.1
+        let sinks = resolve_port_targets(candidates, placed_modules, &var.target.0, &var.target.1);
+        if sinks.is_empty() {
+            return Err(eyre::eyre!(
+                "target port {}.{} is not placed",
+                var.target.0,
+                var.target.1
+            ));
+        }
+        for sink in sinks {
+            let (route, next_world) = route_source_to_target_position(
+                &route_world,
+                source_port,
+                logical_source,
+                source,
+                sink,
+            )
+            .map_err(|failure| {
+                eyre::eyre!(
+                    "failed to route {}.{} -> {}.{} at {:?}: {failure:?}",
+                    var.source.0,
+                    var.source.1,
+                    var.target.0,
+                    var.target.1,
+                    sink.position
                 )
             })?;
-        let (route, next_world) =
-            route_source_to_point(&route_world, source_port, logical_source, source, sink)
-                .map_err(|failure| {
-                    eyre::eyre!(
-                        "failed to route {}.{} -> {}.{}: {failure:?}",
-                        var.source.0,
-                        var.source.1,
-                        var.target.0,
-                        var.target.1
-                    )
-                })?;
-        route_world = next_world;
-        if std::env::var_os("PRINT_GLOBAL_PNR").is_some() {
-            eprintln!(
-                "route var {}.{} -> {}.{}: {:?} -> {:?}",
-                var.source.0, var.source.1, var.target.0, var.target.1, source, route.sink
-            );
-            eprintln!(
-                "  blocks: {:?}",
-                route
-                    .blocks
-                    .iter()
-                    .map(|(position, block)| (*position, block.kind))
-                    .collect::<Vec<_>>()
-            );
+            route_world = next_world;
+            if std::env::var_os("PRINT_GLOBAL_PNR").is_some() {
+                eprintln!(
+                    "route var {}.{} -> {}.{}: {:?} -> {:?}",
+                    var.source.0, var.source.1, var.target.0, var.target.1, source, route.sink
+                );
+                eprintln!(
+                    "  blocks: {:?}",
+                    route
+                        .blocks
+                        .iter()
+                        .map(|(position, block)| (*position, block.kind))
+                        .collect::<Vec<_>>()
+                );
+            }
+            routes.push(route);
         }
-        routes.push(route);
     }
 
     Ok(routes)
 }
 
-fn route_source_to_point(
+fn route_source_to_target_position(
     world: &World3D,
     source_port: &PhysicalPort,
     logical_source: Position,
     route_source: Position,
-    sink: Position,
+    sink: ResolvedPortTarget,
 ) -> Result<(RoutedNet, World3D), RouteFailure> {
     if source_port.direction == PhysicalPortDirection::Output
         && source_port.route_position.is_none()
     {
-        return route_isolated_output_to_point(world, logical_source, sink);
+        return route_isolated_output_to_target_position(world, logical_source, sink);
     }
 
-    route_point_to_point(world, route_source, sink)
+    route_to_target_position(world, route_source, sink)
+}
+
+fn route_to_target_position(
+    world: &World3D,
+    source: Position,
+    sink: ResolvedPortTarget,
+) -> Result<(RoutedNet, World3D), RouteFailure> {
+    if sink.isolate_input {
+        return route_to_redstone_input_through_repeater(world, source, sink.position);
+    }
+
+    route_point_to_point(world, source, sink.position)
+}
+
+fn route_isolated_output_to_target_position(
+    world: &World3D,
+    source: Position,
+    sink: ResolvedPortTarget,
+) -> Result<(RoutedNet, World3D), RouteFailure> {
+    if sink.isolate_input {
+        for (adapter_world, driver_position) in
+            redstone_input_repeater_adapters(world, sink.position)
+        {
+            let Ok((_, routed_world)) =
+                route_isolated_output_to_point(&adapter_world, source, driver_position)
+            else {
+                continue;
+            };
+            return Ok((
+                RoutedNet {
+                    source,
+                    sink: sink.position,
+                    blocks: added_route_blocks(world, &routed_world),
+                },
+                routed_world,
+            ));
+        }
+    }
+
+    route_isolated_output_to_point(world, source, sink.position)
+}
+
+fn route_to_redstone_input_through_repeater(
+    world: &World3D,
+    source: Position,
+    sink: Position,
+) -> Result<(RoutedNet, World3D), RouteFailure> {
+    for (adapter_world, driver_position) in redstone_input_repeater_adapters(world, sink) {
+        let Ok((_, routed_world)) = route_point_to_point(&adapter_world, source, driver_position)
+        else {
+            continue;
+        };
+        return Ok((
+            RoutedNet {
+                source,
+                sink,
+                blocks: added_route_blocks(world, &routed_world),
+            },
+            routed_world,
+        ));
+    }
+
+    Err(RouteFailure::Unreachable { source, sink })
+}
+
+fn redstone_input_repeater_adapters(world: &World3D, sink: Position) -> Vec<(World3D, Position)> {
+    sink.cardinal()
+        .into_iter()
+        .filter_map(|repeater_position| {
+            let direction = repeater_position.diff(sink).inverse();
+            input_repeater_adapter_world(world, sink, repeater_position, direction)
+        })
+        .collect()
+}
+
+fn input_repeater_adapter_world(
+    world: &World3D,
+    sink: Position,
+    repeater_position: Position,
+    direction: Direction,
+) -> Option<(World3D, Position)> {
+    if !world.size.bound_on(repeater_position) || !world[repeater_position].kind.is_air() {
+        return None;
+    }
+    let driver_position = repeater_position.walk(direction)?;
+    if !world.size.bound_on(driver_position) || !world[driver_position].kind.is_air() {
+        return None;
+    }
+    let repeater_support_position = repeater_position.down()?;
+    let driver_support_position = driver_position.down()?;
+    if !world.size.bound_on(repeater_support_position)
+        || !world.size.bound_on(driver_support_position)
+    {
+        return None;
+    }
+
+    let mut adapter_world = world.clone();
+    place_support_cobble_if_needed(&mut adapter_world, repeater_support_position)?;
+    place_support_cobble_if_needed(&mut adapter_world, driver_support_position)?;
+
+    let repeater = PlacedNode {
+        position: repeater_position,
+        block: Block {
+            kind: BlockKind::Repeater {
+                is_on: false,
+                is_locked: false,
+                delay: 1,
+                lock_input1: None,
+                lock_input2: None,
+            },
+            direction,
+        },
+    };
+    if repeater.has_conflict(&adapter_world, &[sink].into_iter().collect()) {
+        return None;
+    }
+    detailed_router::place_node(&mut adapter_world, repeater);
+    let driver = PlacedNode::new_redstone(driver_position);
+    if driver.has_conflict(&adapter_world, &[repeater_position].into_iter().collect()) {
+        return None;
+    }
+    detailed_router::place_node(&mut adapter_world, driver);
+    if !detailed_router::target_powers_position(&adapter_world, driver_position, repeater_position)
+    {
+        return None;
+    }
+    detailed_router::target_powers_redstone(&adapter_world, repeater_position, sink)
+        .then_some((adapter_world, driver_position))
+}
+
+fn place_support_cobble_if_needed(world: &mut World3D, position: Position) -> Option<()> {
+    if world[position].kind.is_air() {
+        let support = PlacedNode::new_cobble(position);
+        if support.has_conflict(world, &HashSet::new()) {
+            return None;
+        }
+        detailed_router::place_node(world, support);
+    } else if !world[position].kind.is_cobble() {
+        return None;
+    }
+    Some(())
 }
 
 pub fn collect_module_output_endpoints(
@@ -188,17 +345,15 @@ fn resolve_port_target_positions(
     candidates: &[LayoutCandidate],
     placed_modules: &[PlacedModule],
     target: &GraphModulePortTarget,
-) -> Vec<Position> {
+) -> Vec<ResolvedPortTarget> {
     match target {
         GraphModulePortTarget::Module(module_name, port_name) => {
-            resolve_port_position(candidates, placed_modules, module_name, port_name)
-                .into_iter()
-                .collect()
+            resolve_port_targets(candidates, placed_modules, module_name, port_name)
         }
         GraphModulePortTarget::Wire(targets) => targets
             .iter()
-            .filter_map(|(module_name, port_name)| {
-                resolve_port_position(candidates, placed_modules, module_name, port_name)
+            .flat_map(|(module_name, port_name)| {
+                resolve_port_targets(candidates, placed_modules, module_name, port_name)
             })
             .collect(),
         GraphModulePortTarget::Node(_) => Vec::new(),
@@ -223,15 +378,23 @@ fn input_switch_block() -> Block {
     }
 }
 
-fn resolve_port_position(
+fn resolve_port_targets(
     candidates: &[LayoutCandidate],
     placed_modules: &[PlacedModule],
     module_name: &str,
     port_name: &str,
-) -> Option<Position> {
-    resolve_port(candidates, placed_modules, module_name, port_name).map(
-        |(port, candidate, placed)| translate_candidate_position(port.position, candidate, placed),
-    )
+) -> Vec<ResolvedPortTarget> {
+    let Some((port, candidate, placed)) =
+        resolve_port(candidates, placed_modules, module_name, port_name)
+    else {
+        return Vec::new();
+    };
+
+    let position = port.position;
+    vec![ResolvedPortTarget {
+        position: translate_candidate_position(position, candidate, placed),
+        isolate_input: port.isolate_input && candidate.world[position].kind.is_redstone(),
+    }]
 }
 
 fn resolve_observable_port_position(
@@ -400,7 +563,16 @@ fn route_isolated_output_to_point(
     }
 
     for tap in routeable_output_taps(world, source, sink) {
-        let Ok((_, routed_world)) = route_point_to_point(world, tap, sink) else {
+        let initial = RouteSearchState {
+            world: world.clone(),
+            terminal: tap,
+            route: vec![tap],
+            signal_strength: MAX_REDSTONE_STRENGTH,
+            pending_bounds: None,
+        };
+        let Ok((_, routed_world)) =
+            route_point_to_point_from_initial_state(world, source, sink, initial)
+        else {
             continue;
         };
         if debug {
@@ -1026,6 +1198,7 @@ mod tests {
                 direction,
                 position: block_position,
                 route_position: None,
+                isolate_input: false,
             }],
         )
         .unwrap()
@@ -1160,6 +1333,50 @@ mod tests {
         assert!(
             matches!(sim.world()[sink].kind, BlockKind::Redstone { strength, .. } if strength > 0),
             "sink redstone should be powered through the inserted repeater"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn route_to_redstone_input_finishes_with_repeater_diode() -> eyre::Result<()> {
+        let source = Position(10, 1, 1);
+        let sink = Position(1, 1, 1);
+        let world = route_test_world_with_switch_source(source, sink, DimSize(13, 4, 3));
+
+        let (route, routed_world) = route_to_target_position(
+            &world,
+            source,
+            ResolvedPortTarget {
+                position: sink,
+                isolate_input: true,
+            },
+        )
+        .unwrap();
+
+        assert!(
+            route
+                .blocks
+                .iter()
+                .any(|(_, block)| block.kind.is_repeater()),
+            "redstone input routes should end through a repeater diode"
+        );
+        assert!(
+            sink.cardinal()
+                .into_iter()
+                .any(|position| routed_world.size.bound_on(position)
+                    && routed_world[position].kind.is_repeater()
+                    && detailed_router::target_powers_redstone(&routed_world, position, sink)),
+            "the final repeater should power the input redstone"
+        );
+
+        let world = World::from(&routed_world);
+        let mut sim = Simulator::from_with_limits_and_trace(&world, 128, 20_000, 0)
+            .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
+        sim.change_state_with_limits(vec![(source, true)], 128, 20_000)?;
+
+        assert!(
+            matches!(sim.world()[sink].kind, BlockKind::Redstone { strength, .. } if strength > 0),
+            "input redstone should be powered through the repeater diode"
         );
         Ok(())
     }

@@ -9,6 +9,7 @@ use crate::transform::place_and_route::global_pnr::ir::{
 use crate::transform::place_and_route::local_placer::{
     LocalPlacer, LocalPlacerConfig, LocalPlacerInputConstraints,
 };
+use crate::transform::place_and_route::placed_node::PlacedNode;
 use crate::world::block::Block;
 use crate::world::position::{DimSize, Position};
 use crate::world::World3D;
@@ -69,6 +70,7 @@ fn switchless_candidate_layout(
 ) -> (World3D, Vec<PhysicalPort>) {
     let mut ports = Vec::new();
     let needs_output_isolation = module_contains_sequential(module);
+    let needs_input_isolation = module_contains_sequential(module);
     for port in &module.ports {
         match (&port.port_type, &port.target) {
             (GraphModulePortType::InputNet, GraphModulePortTarget::Node(input_name)) => {
@@ -81,14 +83,17 @@ fn switchless_candidate_layout(
                             .positions_for_input_name(input_name)
                             .and_then(|positions| positions.into_iter().next())
                     });
-                if let Some(position) =
-                    position.and_then(|position| expose_switchless_input_port(&mut world, position))
-                {
+                if let Some(input_position) = position {
+                    let Some(position) = expose_switchless_input_port(&mut world, input_position)
+                    else {
+                        continue;
+                    };
                     ports.push(PhysicalPort {
                         name: port.name.clone(),
                         direction: PhysicalPortDirection::Input,
                         position,
                         route_position: None,
+                        isolate_input: needs_input_isolation && world[position].kind.is_redstone(),
                     });
                 }
             }
@@ -102,6 +107,7 @@ fn switchless_candidate_layout(
                         direction: PhysicalPortDirection::Output,
                         position,
                         route_position,
+                        isolate_input: false,
                     });
                 }
             }
@@ -171,14 +177,46 @@ fn expose_switchless_input_port(world: &mut World3D, input_position: Position) -
     }
 
     let switch_target = input_position.walk(world[input_position].direction);
-    let port_position = switch_target
+    if let Some(target) = switch_target
         .filter(|position| world.size.bound_on(*position) && world[*position].kind.is_cobble())
-        .unwrap_or_else(|| expose_routeable_output_port(world, input_position));
-    if port_position == input_position {
+    {
+        world[input_position] = Block::default();
+        return Some(target);
+    }
+
+    if switch_powers_redstone(world, input_position) {
+        ensure_redstone_support(world, input_position)?;
+        world[input_position] = PlacedNode::new_redstone(input_position).block;
+        return Some(input_position);
+    }
+
+    let port_position = expose_routeable_output_port(world, input_position);
+    (port_position != input_position).then(|| {
+        world[input_position] = Block::default();
+        port_position
+    })
+}
+
+fn switch_powers_redstone(world: &World3D, input_position: Position) -> bool {
+    world.iter_block().into_iter().any(|(position, block)| {
+        block.kind.is_redstone()
+            && detailed_router::target_powers_redstone(world, input_position, position)
+    })
+}
+
+fn ensure_redstone_support(world: &mut World3D, position: Position) -> Option<()> {
+    let support_position = position.down()?;
+    if !world.size.bound_on(support_position) {
         return None;
     }
-    world[input_position] = Block::default();
-    Some(port_position)
+    if world[support_position].kind.is_cobble() {
+        return Some(());
+    }
+    if !world[support_position].kind.is_air() {
+        return None;
+    }
+    world[support_position] = PlacedNode::new_cobble(support_position).block;
+    Some(())
 }
 
 pub fn d_latch_child_candidate_config(local_config: LocalPlacerConfig) -> UnitCandidateConfig {

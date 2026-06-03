@@ -18,6 +18,7 @@ pub struct PhysicalPort {
     pub direction: PhysicalPortDirection,
     pub position: Position,
     pub route_position: Option<Position>,
+    pub isolate_input: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

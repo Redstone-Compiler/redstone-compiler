@@ -78,8 +78,13 @@ pub fn place_and_route_module_with_outputs(
             );
             for port in &candidate.ports {
                 eprintln!(
-                    "  port {} {:?} {:?} {:?}",
-                    port.name, port.direction, port.position, candidate.world[port.position].kind
+                    "  port {} {:?} {:?} {:?} route={:?} isolate={}",
+                    port.name,
+                    port.direction,
+                    port.position,
+                    candidate.world[port.position].kind,
+                    port.route_position,
+                    port.isolate_input
                 );
             }
         }
@@ -169,7 +174,10 @@ mod tests {
     };
     use crate::transform::place_and_route::sampling::SamplingPolicy;
     use crate::transform::place_and_route::utils::world_to_logic_with_outputs;
-    use crate::world::position::DimSize;
+    use crate::world::block::BlockKind;
+    use crate::world::position::{DimSize, Position};
+    use crate::world::simulator::Simulator;
+    use crate::world::World;
 
     fn sequential_local_config() -> LocalPlacerConfig {
         LocalPlacerConfig {
@@ -250,6 +258,7 @@ mod tests {
     #[test]
     #[ignore = "search-heavy sequential global pnr smoke test"]
     fn d_flip_flop_module_generates_world_from_child_layout_candidates() -> eyre::Result<()> {
+        init_tracing_from_env();
         let mut context = GraphModuleContext::default();
         context.append(not_clk_module());
         context.append(d_latch_module("master"));
@@ -279,7 +288,78 @@ mod tests {
             .nodes
             .iter()
             .any(|node| matches!(&node.kind, GraphNodeKind::Output(name) if name == "q")));
+        assert_positive_edge_dff_behavior(&placed)?;
         Ok(())
+    }
+
+    fn init_tracing_from_env() {
+        let Some(level) = rust_log_level() else {
+            return;
+        };
+        let _ = tracing_subscriber::fmt().with_max_level(level).try_init();
+    }
+
+    fn rust_log_level() -> Option<tracing::Level> {
+        let value = std::env::var("RUST_LOG").ok()?;
+        value
+            .split(',')
+            .filter_map(|part| part.rsplit('=').next())
+            .find_map(|level| match level.trim().to_ascii_lowercase().as_str() {
+                "trace" => Some(tracing::Level::TRACE),
+                "debug" => Some(tracing::Level::DEBUG),
+                "info" => Some(tracing::Level::INFO),
+                "warn" | "warning" => Some(tracing::Level::WARN),
+                "error" => Some(tracing::Level::ERROR),
+                _ => None,
+            })
+    }
+
+    fn assert_positive_edge_dff_behavior(placed: &PlacedWorld) -> eyre::Result<()> {
+        let mut switches = placed
+            .world
+            .iter_block()
+            .into_iter()
+            .filter_map(|(position, block)| block.kind.is_switch().then_some(position))
+            .collect::<Vec<_>>();
+        switches.sort();
+        eyre::ensure!(switches.len() >= 2, "expected d and clk switches");
+        let data = switches[0];
+        let clock = switches[1];
+        let output = placed.outputs[0].position();
+        let world = World::from(&placed.world);
+        let mut sim =
+            Simulator::from_preserving_torch_states_with_limits_and_trace(&world, 256, 50_000, 0)
+                .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
+
+        assert!(!block_power(sim.world(), output));
+        sim.change_state_with_limits(vec![(data, true)], 256, 50_000)?;
+        assert!(!block_power(sim.world(), output));
+        sim.change_state_with_limits(vec![(clock, true)], 256, 50_000)?;
+        assert!(block_power(sim.world(), output));
+        sim.change_state_with_limits(vec![(clock, false)], 256, 50_000)?;
+        assert!(block_power(sim.world(), output));
+        sim.change_state_with_limits(vec![(data, false)], 256, 50_000)?;
+        assert!(block_power(sim.world(), output));
+        sim.change_state_with_limits(vec![(clock, true)], 256, 50_000)?;
+        assert!(!block_power(sim.world(), output));
+        Ok(())
+    }
+
+    fn block_power(world: &crate::world::World3D, position: Position) -> bool {
+        match world[position].kind {
+            BlockKind::Redstone {
+                strength, on_count, ..
+            } => strength > 0 || on_count > 0,
+            BlockKind::Torch { is_on }
+            | BlockKind::Repeater { is_on, .. }
+            | BlockKind::Switch { is_on } => is_on,
+            BlockKind::Cobble {
+                on_count,
+                on_base_count,
+            } => on_count > 0 || on_base_count > 0,
+            BlockKind::RedstoneBlock => true,
+            BlockKind::Air | BlockKind::Piston { .. } => false,
+        }
     }
 
     fn d_flip_flop_module() -> GraphModule {

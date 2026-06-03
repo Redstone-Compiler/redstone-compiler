@@ -159,11 +159,11 @@ fn main() -> eyre::Result<()> {
         }
 
         if std::env::var_os("PRINT_DFF_ACTIVITY").is_some() {
-            print_dff_activity(&world)?;
+            print_dff_activity(&world, metadata_output_position(&path, "q")?)?;
         }
 
         if std::env::var_os("STRESS_DFF_SIM").is_some() {
-            stress_dff_simulation(&world)?;
+            stress_dff_simulation(&world, metadata_output_position(&path, "q")?)?;
         }
 
         if std::env::var_os("PRINT_DFF_WATCH").is_some() {
@@ -480,7 +480,22 @@ fn output_metadata_path(path: &PathBuf) -> PathBuf {
     metadata_path
 }
 
-fn print_dff_activity(world: &redstone_compiler::world::World) -> eyre::Result<()> {
+fn metadata_output_position(path: &PathBuf, name: &str) -> eyre::Result<Option<Position>> {
+    let metadata_path = output_metadata_path(path);
+    if !metadata_path.exists() {
+        return Ok(None);
+    }
+    Ok(OutputMetadata::load(metadata_path)?
+        .outputs
+        .into_iter()
+        .find(|output| output.name == name)
+        .map(|output| output.position()))
+}
+
+fn print_dff_activity(
+    world: &redstone_compiler::world::World,
+    output: Option<Position>,
+) -> eyre::Result<()> {
     let switches = world
         .blocks
         .iter()
@@ -489,7 +504,7 @@ fn print_dff_activity(world: &redstone_compiler::world::World) -> eyre::Result<(
     eyre::ensure!(switches.len() >= 2, "expected d and clk switches");
     let d = switches[0];
     let clk = switches[1];
-    let q = Position(22, 6, 5);
+    let q = output.unwrap_or(Position(22, 6, 5));
     let redstones = world
         .blocks
         .iter()
@@ -579,14 +594,17 @@ fn print_dff_edge_checks(
     Ok(())
 }
 
-fn stress_dff_simulation(world: &redstone_compiler::world::World) -> eyre::Result<()> {
+fn stress_dff_simulation(
+    world: &redstone_compiler::world::World,
+    output: Option<Position>,
+) -> eyre::Result<()> {
     let switches = world
         .blocks
         .iter()
         .filter_map(|(pos, block)| matches!(block.kind, BlockKind::Switch { .. }).then_some(*pos))
         .collect::<Vec<_>>();
     eyre::ensure!(switches.len() >= 2, "expected d and clk switches");
-    let output = Position(22, 6, 5);
+    let output = output.unwrap_or(Position(22, 6, 5));
     let iterations = std::env::var("STRESS_DFF_SIM")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())

@@ -304,7 +304,7 @@ fn output_step_routes_visible_redstone_endpoint_from_or_source() -> eyre::Result
     place_node(&mut world, PlacedNode::new_redstone(source));
     let state = [(or_id, source)].into_iter().collect();
 
-    let result = placer.do_step(output_step, vec![(world, state)], None);
+    let result = placer.do_step(output_step, vec![(world, state)], None, false);
 
     assert!(!result.queue.is_empty());
     assert!(result.queue.iter().any(|(world, state)| {
@@ -349,7 +349,7 @@ fn output_step_routes_visible_redstone_endpoint_from_torch_source() -> eyre::Res
     );
     let state = [(not_id, source)].into_iter().collect();
 
-    let result = placer.do_step(output_step, vec![(world, state)], None);
+    let result = placer.do_step(output_step, vec![(world, state)], None, false);
 
     assert!(!result.queue.is_empty());
     assert!(result.queue.iter().any(|(world, state)| {

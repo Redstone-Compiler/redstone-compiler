@@ -271,11 +271,18 @@ impl LocalPlacer {
         input_constraints: Option<&LocalPlacerInputConstraints>,
     ) -> PlacerQueue {
         tracing::info!("generate starts");
+        let print_progress = print_local_placer_progress_enabled();
+        if print_progress {
+            eprintln!(
+                "local placer: generate starts ({} steps)",
+                self.visit_orders.len()
+            );
+        }
 
         let mut step = 0;
         while step < self.visit_orders.len() && Some(step) != finish_step {
             let prev_len = queue.len();
-            let result = self.do_step(step, queue, input_constraints);
+            let result = self.do_step(step, queue, input_constraints, print_progress);
             let next_len = result.queue.len();
 
             let compacted = self.compact_queue_after_step(step, result.queue);
@@ -292,9 +299,20 @@ impl LocalPlacer {
             tracing::info!(
                 "from {prev_len} -> generated {next_len} -> compacted {compacted_len} -> sampled {sampled_len}"
             );
+            if print_progress {
+                eprintln!(
+                    "local placer: from {prev_len} -> generated {next_len} -> compacted {compacted_len} -> sampled {sampled_len}"
+                );
+            }
         }
 
         tracing::info!("generate complete");
+        if print_progress {
+            eprintln!(
+                "local placer: generate complete ({} candidates)",
+                queue.len()
+            );
+        }
         queue
     }
 
@@ -303,9 +321,17 @@ impl LocalPlacer {
         step: usize,
         queue: PlacerQueue,
         input_constraints: Option<&LocalPlacerInputConstraints>,
+        print_progress: bool,
     ) -> StepResult {
         let node = self.graph.find_node_by_id(self.visit_orders[step]).unwrap();
         tracing::info!("[{}/{}] {node}", step + 1, self.visit_orders.len());
+        if print_progress {
+            eprintln!(
+                "local placer: [{}/{}] {node}",
+                step + 1,
+                self.visit_orders.len()
+            );
+        }
 
         let input_positions = queue
             .first()
@@ -831,6 +857,10 @@ fn local_density(world: &World3D, position: Position) -> usize {
         .filter(|&pos| world.size.bound_on(pos))
         .filter(|&pos| !world[pos].kind.is_air())
         .count()
+}
+
+fn print_local_placer_progress_enabled() -> bool {
+    std::env::var_os("PRINT_LOCAL_PLACER_PROGRESS").is_some()
 }
 
 struct StepResult {
