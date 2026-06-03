@@ -161,6 +161,7 @@ impl LocalPlacer {
             .into_iter()
             .map(|(world, state)| PlacedWorld {
                 world,
+                inputs: self.input_endpoints(&state),
                 outputs: self.output_endpoints(&state),
             })
             .collect()
@@ -176,6 +177,7 @@ impl LocalPlacer {
             .into_iter()
             .map(|(world, state)| PlacedWorld {
                 world,
+                inputs: self.input_endpoints(&state),
                 outputs: self.output_endpoints(&state),
             })
             .collect()
@@ -199,6 +201,20 @@ impl LocalPlacer {
         self.generate_queue(dim, finish_step, debug, None)
             .into_iter()
             .map(|(world, _)| world)
+            .collect()
+    }
+
+    fn input_endpoints(&self, state: &PlacementState) -> Vec<OutputEndpoint> {
+        self.graph
+            .nodes
+            .iter()
+            .filter_map(|node| match &node.kind {
+                GraphNodeKind::Input(name) => state
+                    .node_position(node.id)
+                    .map(|position| OutputEndpoint::new(name.clone(), position)),
+                _ => None,
+            })
+            .sorted_by(|a, b| a.name.cmp(&b.name))
             .collect()
     }
 
@@ -538,28 +554,32 @@ impl LocalPlacer {
     // 다시 라우팅해야 할 때만 tap 차이를 보존하고, 아니면 같은 후보로 본다.
     fn compact_queue_after_step(&self, step: usize, queue: PlacerQueue) -> PlacerQueue {
         let mut queue = queue;
-        let live_node_ids = self
-            .visit_orders
-            .iter()
-            .skip(step + 1)
-            .filter_map(|node_id| self.graph.find_node_by_id(*node_id))
-            .filter(|node| {
-                self.config.materialize_outputs || !matches!(node.kind, GraphNodeKind::Output(_))
-            })
-            .flat_map(|node| node.inputs.clone())
-            .chain(self.graph.externally_observable_output_source_ids())
-            .chain(
-                self.config
-                    .materialize_outputs
-                    .then(|| {
-                        self.graph.nodes.iter().filter_map(|node| {
-                            matches!(node.kind, GraphNodeKind::Output(_)).then_some(node.id)
+        let live_node_ids =
+            self.visit_orders
+                .iter()
+                .skip(step + 1)
+                .filter_map(|node_id| self.graph.find_node_by_id(*node_id))
+                .filter(|node| {
+                    self.config.materialize_outputs
+                        || !matches!(node.kind, GraphNodeKind::Output(_))
+                })
+                .flat_map(|node| node.inputs.iter().copied())
+                .chain(self.graph.nodes.iter().filter_map(|node| {
+                    matches!(node.kind, GraphNodeKind::Input(_)).then_some(node.id)
+                }))
+                .chain(self.graph.externally_observable_output_source_ids())
+                .chain(
+                    self.config
+                        .materialize_outputs
+                        .then(|| {
+                            self.graph.nodes.iter().filter_map(|node| {
+                                matches!(node.kind, GraphNodeKind::Output(_)).then_some(node.id)
+                            })
                         })
-                    })
-                    .into_iter()
-                    .flatten(),
-            )
-            .collect::<HashSet<_>>();
+                        .into_iter()
+                        .flatten(),
+                )
+                .collect::<HashSet<_>>();
 
         for (_, state) in &mut queue {
             state.retain_nodes(&live_node_ids);

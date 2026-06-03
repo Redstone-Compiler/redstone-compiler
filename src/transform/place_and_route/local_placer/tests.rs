@@ -379,6 +379,22 @@ fn generate_with_outputs_reports_materialized_output_positions() -> eyre::Result
 }
 
 #[test]
+fn generate_with_outputs_reports_input_positions_after_queue_compaction() -> eyre::Result<()> {
+    let graph = LogicGraph::from_stmt("~a", "out")?.prepare_place()?;
+    let placer = LocalPlacer::new(graph, config(1))?;
+
+    let placed = placer.generate_with_outputs(DimSize(5, 5, 3), None);
+
+    assert!(!placed.is_empty());
+    assert!(placed.iter().any(|placed| {
+        placed.inputs.iter().any(|endpoint| {
+            endpoint.name == "a" && placed.world[endpoint.position()].kind.is_switch()
+        })
+    }));
+    Ok(())
+}
+
+#[test]
 fn future_join_cost_weights_pairs_with_remaining_fanout() {
     let mut graph = Graph::from_nodes(vec![
         GraphNode {

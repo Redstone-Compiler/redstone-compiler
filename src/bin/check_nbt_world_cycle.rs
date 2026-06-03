@@ -277,12 +277,18 @@ fn print_physical_components(
         let has_torch = component
             .iter()
             .any(|id| node_kind_by_id.get(id).is_some_and(|kind| kind == "Torch"));
-        let has_repeater = component
-            .iter()
-            .any(|id| node_kind_by_id.get(id).is_some_and(|kind| kind == "Repeater"));
+        let has_repeater = component.iter().any(|id| {
+            node_kind_by_id
+                .get(id)
+                .is_some_and(|kind| kind == "Repeater")
+        });
         let redstone_count = component
             .iter()
-            .filter(|id| node_kind_by_id.get(id).is_some_and(|kind| kind == "Redstone"))
+            .filter(|id| {
+                node_kind_by_id
+                    .get(id)
+                    .is_some_and(|kind| kind == "Redstone")
+            })
             .count();
 
         println!(

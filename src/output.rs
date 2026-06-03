@@ -11,6 +11,7 @@ const FORMAT: &str = "redstone-compiler.outputs.v1";
 #[derive(Debug, Clone)]
 pub struct PlacedWorld {
     pub world: World3D,
+    pub inputs: Vec<OutputEndpoint>,
     pub outputs: Vec<OutputEndpoint>,
 }
 

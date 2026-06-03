@@ -229,7 +229,11 @@ fn waveform_signal_value(world: &World3D, descriptor: WaveformSignalDescriptor) 
         return 0;
     }
 
-    match (world[descriptor.position].kind, descriptor.kind, descriptor.property) {
+    match (
+        world[descriptor.position].kind,
+        descriptor.kind,
+        descriptor.property,
+    ) {
         (BlockKind::Cobble { on_count, .. }, "cobble", "powered") => usize::from(on_count > 0),
         (BlockKind::Switch { is_on }, "switch", "powered") => usize::from(is_on),
         (BlockKind::Redstone { strength, .. }, "redstone", "power") => strength,
