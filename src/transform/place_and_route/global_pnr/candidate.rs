@@ -37,6 +37,14 @@ pub fn generate_graph_module_candidates(
     module: &GraphModule,
     config: &UnitCandidateConfig,
 ) -> eyre::Result<Vec<LayoutCandidate>> {
+    generate_graph_module_candidates_with_progress_label(module, config, None)
+}
+
+pub fn generate_graph_module_candidates_with_progress_label(
+    module: &GraphModule,
+    config: &UnitCandidateConfig,
+    progress_label: Option<&str>,
+) -> eyre::Result<Vec<LayoutCandidate>> {
     let graph = module
         .graph
         .clone()
@@ -44,8 +52,22 @@ pub fn generate_graph_module_candidates(
     let graph = LogicGraph { graph }.prepare_place()?;
     let placer = LocalPlacer::new(graph, config.local_config)?;
 
-    placer
-        .generate_with_outputs_and_input_constraints(config.dim, None, &config.input_constraints)
+    let placed = if let Some(progress_label) = progress_label {
+        placer.generate_with_outputs_and_input_constraints_progress(
+            config.dim,
+            None,
+            &config.input_constraints,
+            progress_label,
+        )
+    } else {
+        placer.generate_with_outputs_and_input_constraints(
+            config.dim,
+            None,
+            &config.input_constraints,
+        )
+    };
+
+    placed
         .into_iter()
         .take(config.max_candidates)
         .map(|placed| {

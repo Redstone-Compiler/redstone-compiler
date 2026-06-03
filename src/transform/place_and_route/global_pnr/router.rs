@@ -11,6 +11,7 @@ use crate::transform::place_and_route::global_pnr::ir::{
     LayoutCandidate, PhysicalPort, PhysicalPortDirection,
 };
 use crate::transform::place_and_route::global_pnr::placer::PlacedModule;
+use crate::transform::place_and_route::global_pnr::progress::GlobalPnrProgress;
 use crate::transform::place_and_route::place_bound::{PlaceBound, PropagateType};
 use crate::transform::place_and_route::placed_node::PlacedNode;
 use crate::world::block::{Block, BlockKind, Direction};
@@ -43,14 +44,25 @@ pub fn route_module_variables(
     module: &GraphModule,
     candidates: &[LayoutCandidate],
     placed_modules: &[PlacedModule],
+    progress: &GlobalPnrProgress,
 ) -> eyre::Result<Vec<RoutedNet>> {
     let mut route_world = placed_candidate_world(candidates, placed_modules)?;
     let mut routes = Vec::new();
     let mut top_input_index = 0;
+    let top_inputs = module
+        .ports
+        .iter()
+        .filter(|port| port.port_type.is_input())
+        .collect::<Vec<_>>();
 
-    for port in module.ports.iter().filter(|port| port.port_type.is_input()) {
+    for (port_index, port) in top_inputs.iter().enumerate() {
         let sinks = resolve_port_target_positions(candidates, placed_modules, &port.target);
         if sinks.is_empty() {
+            progress.item(
+                port_index + 1,
+                top_inputs.len(),
+                format!("skip top input `{}` with no placed sinks", port.name),
+            );
             continue;
         }
 
@@ -65,7 +77,17 @@ pub fn route_module_variables(
             blocks: vec![(source, switch)],
         });
 
-        for sink in sinks {
+        for (sink_index, sink) in sinks.iter().copied().enumerate() {
+            progress.item(
+                port_index + 1,
+                top_inputs.len(),
+                format!(
+                    "route top input `{}` sink {}/{}",
+                    port.name,
+                    sink_index + 1,
+                    sinks.len()
+                ),
+            );
             let (route, next_world) = route_to_target_position(&route_world, source, sink)
                 .map_err(|failure| {
                     eyre::eyre!(
@@ -85,7 +107,7 @@ pub fn route_module_variables(
         }
     }
 
-    for var in &module.vars {
+    for (var_index, var) in module.vars.iter().enumerate() {
         let (source_port, source_candidate, source_placed) =
             resolve_port(candidates, placed_modules, &var.source.0, &var.source.1).with_context(
                 || {
@@ -106,7 +128,20 @@ pub fn route_module_variables(
                 var.target.1
             ));
         }
-        for sink in sinks {
+        for (sink_index, sink) in sinks.iter().copied().enumerate() {
+            progress.item(
+                var_index + 1,
+                module.vars.len(),
+                format!(
+                    "route net `{}.{}` -> `{}.{}` sink {}/{}",
+                    var.source.0,
+                    var.source.1,
+                    var.target.0,
+                    var.target.1,
+                    sink_index + 1,
+                    sinks.len()
+                ),
+            );
             let (route, next_world) = route_source_to_target_position(
                 &route_world,
                 source_port,
@@ -1261,6 +1296,10 @@ mod tests {
         }
     }
 
+    fn silent_progress() -> GlobalPnrProgress {
+        GlobalPnrProgress::new(false, "test")
+    }
+
     #[test]
     fn route_point_to_point_places_support_cobble_under_redstone() {
         let source = Position(0, 1, 1);
@@ -1437,7 +1476,8 @@ mod tests {
             },
         );
 
-        let routes = route_module_variables(&module, &candidates, &placed)?;
+        let progress = silent_progress();
+        let routes = route_module_variables(&module, &candidates, &placed, &progress)?;
 
         assert_eq!(routes.len(), 1);
         assert!(!routes[0].blocks.is_empty());
@@ -1462,7 +1502,8 @@ mod tests {
         )];
         let placed = place_candidates_on_shelves(&candidates, &GlobalPlacementConfig::default());
 
-        let routes = route_module_variables(&module, &candidates, &placed)?;
+        let progress = silent_progress();
+        let routes = route_module_variables(&module, &candidates, &placed, &progress)?;
 
         assert!(routes.is_empty());
         Ok(())

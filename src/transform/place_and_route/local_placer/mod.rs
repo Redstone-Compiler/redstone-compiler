@@ -146,7 +146,7 @@ impl LocalPlacer {
         finish_step: Option<usize>,
         input_constraints: &LocalPlacerInputConstraints,
     ) -> Vec<World3D> {
-        self.generate_queue(dim, finish_step, None, Some(input_constraints))
+        self.generate_queue(dim, finish_step, None, Some(input_constraints), None)
             .into_iter()
             .map(|(world, _)| world)
             .collect()
@@ -157,7 +157,7 @@ impl LocalPlacer {
         dim: DimSize,
         finish_step: Option<usize>,
     ) -> Vec<PlacedWorld> {
-        self.generate_queue(dim, finish_step, None, None)
+        self.generate_queue(dim, finish_step, None, None, None)
             .into_iter()
             .map(|(world, state)| PlacedWorld {
                 world,
@@ -173,7 +173,7 @@ impl LocalPlacer {
         finish_step: Option<usize>,
         input_constraints: &LocalPlacerInputConstraints,
     ) -> Vec<PlacedWorld> {
-        self.generate_queue(dim, finish_step, None, Some(input_constraints))
+        self.generate_queue(dim, finish_step, None, Some(input_constraints), None)
             .into_iter()
             .map(|(world, state)| PlacedWorld {
                 world,
@@ -181,6 +181,29 @@ impl LocalPlacer {
                 outputs: self.output_endpoints(&state),
             })
             .collect()
+    }
+
+    pub fn generate_with_outputs_and_input_constraints_progress(
+        &self,
+        dim: DimSize,
+        finish_step: Option<usize>,
+        input_constraints: &LocalPlacerInputConstraints,
+        progress_label: &str,
+    ) -> Vec<PlacedWorld> {
+        self.generate_queue(
+            dim,
+            finish_step,
+            None,
+            Some(input_constraints),
+            Some(progress_label),
+        )
+        .into_iter()
+        .map(|(world, state)| PlacedWorld {
+            world,
+            inputs: self.input_endpoints(&state),
+            outputs: self.output_endpoints(&state),
+        })
+        .collect()
     }
 
     pub fn generate_with_debug(
@@ -198,7 +221,7 @@ impl LocalPlacer {
         finish_step: Option<usize>,
         debug: Option<&mut LocalPlacerDebug>,
     ) -> Vec<World3D> {
-        self.generate_queue(dim, finish_step, debug, None)
+        self.generate_queue(dim, finish_step, debug, None, None)
             .into_iter()
             .map(|(world, _)| world)
             .collect()
@@ -243,6 +266,7 @@ impl LocalPlacer {
         finish_step: Option<usize>,
         debug: Option<&mut LocalPlacerDebug>,
         input_constraints: Option<&LocalPlacerInputConstraints>,
+        progress_label: Option<&str>,
     ) -> PlacerQueue {
         let mut queue = PlacerQueue::new();
         queue.push((World3D::new(dim), Default::default()));
@@ -251,6 +275,7 @@ impl LocalPlacer {
             finish_step,
             debug,
             input_constraints,
+            progress_label,
         )
     }
 
@@ -260,7 +285,7 @@ impl LocalPlacer {
         finish_step: Option<usize>,
         debug: Option<&mut LocalPlacerDebug>,
     ) -> PlacerQueue {
-        self.generate_queue_from_with_input_constraints(queue, finish_step, debug, None)
+        self.generate_queue_from_with_input_constraints(queue, finish_step, debug, None, None)
     }
 
     fn generate_queue_from_with_input_constraints(
@@ -269,12 +294,14 @@ impl LocalPlacer {
         finish_step: Option<usize>,
         mut debug: Option<&mut LocalPlacerDebug>,
         input_constraints: Option<&LocalPlacerInputConstraints>,
+        progress_label: Option<&str>,
     ) -> PlacerQueue {
         tracing::info!("generate starts");
-        let print_progress = print_local_placer_progress_enabled();
-        if print_progress {
+        let print_progress = local_placer_progress_label(progress_label);
+        if let Some(progress) = print_progress {
             eprintln!(
-                "local placer: generate starts ({} steps)",
+                "{}: generate starts ({} steps)",
+                progress.label(),
                 self.visit_orders.len()
             );
         }
@@ -299,17 +326,19 @@ impl LocalPlacer {
             tracing::info!(
                 "from {prev_len} -> generated {next_len} -> compacted {compacted_len} -> sampled {sampled_len}"
             );
-            if print_progress {
+            if let Some(progress) = print_progress {
                 eprintln!(
-                    "local placer: from {prev_len} -> generated {next_len} -> compacted {compacted_len} -> sampled {sampled_len}"
+                    "{}: from {prev_len} -> generated {next_len} -> compacted {compacted_len} -> sampled {sampled_len}",
+                    progress.label()
                 );
             }
         }
 
         tracing::info!("generate complete");
-        if print_progress {
+        if let Some(progress) = print_progress {
             eprintln!(
-                "local placer: generate complete ({} candidates)",
+                "{}: generate complete ({} candidates)",
+                progress.label(),
                 queue.len()
             );
         }
@@ -321,13 +350,14 @@ impl LocalPlacer {
         step: usize,
         queue: PlacerQueue,
         input_constraints: Option<&LocalPlacerInputConstraints>,
-        print_progress: bool,
+        print_progress: Option<LocalPlacerProgress<'_>>,
     ) -> StepResult {
         let node = self.graph.find_node_by_id(self.visit_orders[step]).unwrap();
         tracing::info!("[{}/{}] {node}", step + 1, self.visit_orders.len());
-        if print_progress {
+        if let Some(progress) = print_progress {
             eprintln!(
-                "local placer: [{}/{}] {node}",
+                "{}: [{}/{}] {node}",
+                progress.label(),
                 step + 1,
                 self.visit_orders.len()
             );
@@ -861,6 +891,29 @@ fn local_density(world: &World3D, position: Position) -> usize {
 
 fn print_local_placer_progress_enabled() -> bool {
     std::env::var_os("PRINT_LOCAL_PLACER_PROGRESS").is_some()
+}
+
+#[derive(Clone, Copy)]
+struct LocalPlacerProgress<'a> {
+    label: &'a str,
+}
+
+impl LocalPlacerProgress<'_> {
+    fn label(self) -> String {
+        if self.label.is_empty() {
+            "local placer".to_owned()
+        } else {
+            format!("local placer {}", self.label)
+        }
+    }
+}
+
+fn local_placer_progress_label(progress_label: Option<&str>) -> Option<LocalPlacerProgress<'_>> {
+    progress_label
+        .map(|label| LocalPlacerProgress { label })
+        .or_else(|| {
+            print_local_placer_progress_enabled().then_some(LocalPlacerProgress { label: "" })
+        })
 }
 
 struct StepResult {

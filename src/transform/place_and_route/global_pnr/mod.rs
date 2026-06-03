@@ -2,6 +2,7 @@ pub mod assembly;
 pub mod candidate;
 pub mod ir;
 pub mod placer;
+pub mod progress;
 pub mod router;
 
 use eyre::ContextCompat;
@@ -10,20 +11,33 @@ use crate::graph::module::{GraphModule, GraphModuleContext};
 use crate::output::PlacedWorld;
 use crate::transform::place_and_route::global_pnr::assembly::assemble_world;
 use crate::transform::place_and_route::global_pnr::candidate::{
-    generate_graph_module_candidates, UnitCandidateConfig,
+    generate_graph_module_candidates_with_progress_label, UnitCandidateConfig,
 };
+use crate::transform::place_and_route::global_pnr::ir::LayoutCandidate;
 use crate::transform::place_and_route::global_pnr::placer::{
-    place_candidates_on_shelves, GlobalPlacementConfig,
+    place_candidates_on_shelves, GlobalPlacementConfig, PlacedModule,
 };
+use crate::transform::place_and_route::global_pnr::progress::GlobalPnrProgress;
 use crate::transform::place_and_route::global_pnr::router::{
-    collect_module_output_endpoints, route_module_variables,
+    collect_module_output_endpoints, route_module_variables, RoutedNet,
 };
 use crate::world::World3D;
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct GlobalPnrConfig {
     pub candidate: UnitCandidateConfig,
     pub placement: GlobalPlacementConfig,
+    pub show_progress: bool,
+}
+
+impl Default for GlobalPnrConfig {
+    fn default() -> Self {
+        Self {
+            candidate: UnitCandidateConfig::default(),
+            placement: GlobalPlacementConfig::default(),
+            show_progress: true,
+        }
+    }
 }
 
 pub fn place_and_route_module(
@@ -39,39 +53,110 @@ pub fn place_and_route_module_with_outputs(
     module: &GraphModule,
     config: &GlobalPnrConfig,
 ) -> eyre::Result<PlacedWorld> {
+    let progress = GlobalPnrProgress::new(config.show_progress, module.name.clone());
     if module.graph.is_some() {
-        let candidates = generate_graph_module_candidates(module, &config.candidate)?;
-        let candidate = candidates
-            .into_iter()
-            .next()
-            .context("graph-backed module produced no layout candidates")?;
-        let placed = place_candidates_on_shelves(&[candidate.clone()], &config.placement);
-        let world = assemble_world(&[candidate], &placed, &[])?;
-        return Ok(PlacedWorld {
-            world,
-            inputs: Vec::new(),
-            outputs: Vec::new(),
-        });
+        return place_graph_backed_module(module, config, &progress);
     }
 
+    progress.stage(1, 5, "generate child layout candidates");
+    let candidates = generate_child_candidates(context, module, config, &progress)?;
+    progress.stage(2, 5, "place child candidates");
+    let placed = place_child_candidates(module, &candidates, config);
+    print_candidate_summary(&candidates, &placed);
+    progress.stage(3, 5, "route module ports and variables");
+    let routed_nets = route_placed_module(module, &candidates, &placed, &progress)?;
+    progress.stage(4, 5, "assemble world and collect outputs");
+    let placed_world = assemble_placed_world(module, &candidates, &placed, &routed_nets)?;
+    progress.stage(5, 5, "complete");
+    progress.detail(format!(
+        "outputs={} routes={}",
+        placed_world.outputs.len(),
+        routed_nets.len()
+    ));
+    Ok(placed_world)
+}
+
+fn place_graph_backed_module(
+    module: &GraphModule,
+    config: &GlobalPnrConfig,
+    progress: &GlobalPnrProgress,
+) -> eyre::Result<PlacedWorld> {
+    progress.stage(1, 4, "generate leaf layout candidates");
+    let candidates = generate_graph_module_candidates_with_progress_label(
+        module,
+        &config.candidate,
+        config.show_progress.then_some(module.name.as_str()),
+    )?;
+    let candidate = candidates
+        .into_iter()
+        .next()
+        .context("graph-backed module produced no layout candidates")?;
+    progress.detail(format!(
+        "selected candidate for `{}`",
+        candidate.module_name
+    ));
+
+    progress.stage(2, 4, "place leaf candidate");
+    let placed = place_candidates_on_shelves(&[candidate.clone()], &config.placement);
+
+    progress.stage(3, 4, "assemble leaf world");
+    let world = assemble_world(&[candidate], &placed, &[])?;
+
+    progress.stage(4, 4, "complete");
+    Ok(PlacedWorld {
+        world,
+        inputs: Vec::new(),
+        outputs: Vec::new(),
+    })
+}
+
+fn generate_child_candidates(
+    context: &GraphModuleContext,
+    module: &GraphModule,
+    config: &GlobalPnrConfig,
+    progress: &GlobalPnrProgress,
+) -> eyre::Result<Vec<LayoutCandidate>> {
     let mut candidates = Vec::new();
-    for instance in &module.instances {
+    for (index, instance) in module.instances.iter().enumerate() {
+        progress.item(
+            index + 1,
+            module.instances.len(),
+            format!("generate `{instance}` candidate"),
+        );
         let child = &context[instance.as_str()];
-        let mut child_candidates = generate_graph_module_candidates(child, &config.candidate)?;
+        let mut child_candidates = generate_graph_module_candidates_with_progress_label(
+            child,
+            &config.candidate,
+            config.show_progress.then_some(instance.as_str()),
+        )?;
+        progress.detail(format!(
+            "`{instance}` produced {} candidate(s)",
+            child_candidates.len()
+        ));
         let candidate = child_candidates
             .drain(..)
             .next()
             .with_context(|| format!("module instance `{instance}` produced no candidates"))?;
         candidates.push(candidate);
     }
+    Ok(candidates)
+}
 
-    let placed = align_variable_targets_on_y(
+fn place_child_candidates(
+    module: &GraphModule,
+    candidates: &[LayoutCandidate],
+    config: &GlobalPnrConfig,
+) -> Vec<PlacedModule> {
+    align_variable_targets_on_y(
         module,
-        &candidates,
-        place_candidates_on_shelves(&candidates, &config.placement),
-    );
+        candidates,
+        place_candidates_on_shelves(candidates, &config.placement),
+    )
+}
+
+fn print_candidate_summary(candidates: &[LayoutCandidate], placed: &[PlacedModule]) {
     if std::env::var_os("PRINT_GLOBAL_PNR").is_some() {
-        for (candidate, placed_module) in candidates.iter().zip(&placed) {
+        for (candidate, placed_module) in candidates.iter().zip(placed) {
             eprintln!(
                 "candidate {} origin {:?} bbox {:?}",
                 candidate.module_name, placed_module.origin, candidate.bbox
@@ -89,9 +174,25 @@ pub fn place_and_route_module_with_outputs(
             }
         }
     }
-    let routed_nets = route_module_variables(module, &candidates, &placed)?;
+}
+
+fn route_placed_module(
+    module: &GraphModule,
+    candidates: &[LayoutCandidate],
+    placed: &[PlacedModule],
+    progress: &GlobalPnrProgress,
+) -> eyre::Result<Vec<RoutedNet>> {
+    route_module_variables(module, candidates, placed, progress)
+}
+
+fn assemble_placed_world(
+    module: &GraphModule,
+    candidates: &[LayoutCandidate],
+    placed: &[PlacedModule],
+    routed_nets: &[RoutedNet],
+) -> eyre::Result<PlacedWorld> {
     let outputs = collect_module_output_endpoints(module, &candidates, &placed);
-    let world = assemble_world(&candidates, &placed, &routed_nets)?;
+    let world = assemble_world(candidates, placed, routed_nets)?;
     Ok(PlacedWorld {
         world,
         inputs: Vec::new(),
@@ -211,6 +312,7 @@ mod tests {
                 ..Default::default()
             },
             placement: GlobalPlacementConfig::default(),
+            ..Default::default()
         };
 
         let world = place_and_route_module(&context, &module, &config)?;
@@ -241,6 +343,7 @@ mod tests {
                 ..Default::default()
             },
             placement: GlobalPlacementConfig::default(),
+            ..Default::default()
         };
 
         let placed = place_and_route_module_with_outputs(&context, &module, &config)?;
@@ -271,6 +374,7 @@ mod tests {
                 spacing: 4,
                 shelf_width: 64,
             },
+            ..Default::default()
         };
 
         let placed = place_and_route_module_with_outputs(&context, &module, &config)?;
