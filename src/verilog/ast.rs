@@ -4,6 +4,7 @@ pub struct VerilogModule {
     pub ports: Vec<String>,
     pub declarations: Vec<Declaration>,
     pub assignments: Vec<Assignment>,
+    pub always_blocks: Vec<AlwaysBlock>,
     pub instances: Vec<Instance>,
 }
 
@@ -20,10 +21,11 @@ pub struct Range {
     pub lsb: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PortDirection {
     Input,
     Output,
+    OutputReg,
     Wire,
 }
 
@@ -38,6 +40,29 @@ pub struct Instance {
     pub module_name: String,
     pub instance_name: String,
     pub connections: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlwaysBlock {
+    pub sensitivity: AlwaysSensitivity,
+    pub body: AlwaysStmt,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlwaysSensitivity {
+    Any,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlwaysStmt {
+    If {
+        condition: String,
+        then_branch: Box<AlwaysStmt>,
+    },
+    NonBlockingAssign {
+        output: String,
+        data: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

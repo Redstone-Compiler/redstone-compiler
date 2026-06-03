@@ -173,11 +173,10 @@ mod tests {
     use crate::graph::logic::LogicGraph;
     use crate::graph::module::{
         GraphModule, GraphModuleContext, GraphModuleDesign, GraphModulePort, GraphModulePortTarget,
-        GraphModulePortType, GraphModuleVariable,
+        GraphModulePortType,
     };
-    use crate::graph::{Graph, GraphNode, GraphNodeKind};
+    use crate::graph::GraphNodeKind;
     use crate::nbt::{NBTRoot, ToNBT};
-    use crate::sequential::{SequentialPrimitive, SequentialType};
     use crate::transform::place_and_route::global_pnr::candidate::d_latch_child_candidate_config;
     use crate::transform::place_and_route::local_placer::{
         InputPlacementStrategy, LocalPlacerConfig, NotRouteStrategy, PlacementSamplingPolicy,
@@ -185,6 +184,8 @@ mod tests {
     };
     use crate::transform::place_and_route::sampling::SamplingPolicy;
     use crate::transform::place_and_route::utils::world_to_logic_with_outputs;
+    use crate::verilog::design::lower_design_modules;
+    use crate::verilog::parser::parse_modules;
     use crate::world::block::BlockKind;
     use crate::world::position::{DimSize, Position};
     use crate::world::simulator::Simulator;
@@ -273,11 +274,34 @@ mod tests {
     #[ignore = "search-heavy sequential global pnr smoke test"]
     fn d_flip_flop_module_generates_world_from_child_layout_candidates() -> eyre::Result<()> {
         init_tracing_from_env();
-        let mut context = GraphModuleContext::default();
-        context.append(not_clk_module());
-        context.append(d_latch_module("master"));
-        context.append(d_latch_module("slave"));
-        let design = GraphModuleDesign::with_top_module(context, d_flip_flop_module());
+        let design = lower_design_modules(&parse_modules(
+            r#"
+            module not_clk(clk, clk_n);
+              input clk;
+              output clk_n;
+              assign clk_n = ~clk;
+            endmodule
+
+            module d_latch(d, en, q);
+              input d, en;
+              output reg q;
+              always @(*) begin
+                if (en) begin
+                  q <= d;
+                end
+              end
+            endmodule
+
+            module d_flip_flop(d, clk, q);
+              input d, clk;
+              output q;
+              wire clk_n, master_q;
+              not_clk inv(.clk(clk), .clk_n(clk_n));
+              d_latch master(.d(d), .en(clk_n), .q(master_q));
+              d_latch slave(.d(master_q), .en(clk), .q(q));
+            endmodule
+            "#,
+        )?)?;
         let config = GlobalPnrConfig {
             candidate: d_latch_child_candidate_config(sequential_local_config()),
             placement: GlobalPlacementConfig {
@@ -376,109 +400,9 @@ mod tests {
         }
     }
 
-    fn d_flip_flop_module() -> GraphModule {
-        GraphModule {
-            name: "d_flip_flop".to_owned(),
-            graph: None,
-            instances: vec![
-                "not_clk".to_owned(),
-                "master".to_owned(),
-                "slave".to_owned(),
-            ],
-            vars: vec![
-                GraphModuleVariable {
-                    var_type: GraphModulePortType::InputNet,
-                    source: ("not_clk".to_owned(), "clk_n".to_owned()),
-                    target: ("master".to_owned(), "en".to_owned()),
-                },
-                GraphModuleVariable {
-                    var_type: GraphModulePortType::InputNet,
-                    source: ("master".to_owned(), "q".to_owned()),
-                    target: ("slave".to_owned(), "d".to_owned()),
-                },
-            ],
-            ports: vec![
-                GraphModulePort {
-                    name: "d".to_owned(),
-                    port_type: GraphModulePortType::InputNet,
-                    target: GraphModulePortTarget::Module("master".to_owned(), "d".to_owned()),
-                },
-                GraphModulePort {
-                    name: "clk".to_owned(),
-                    port_type: GraphModulePortType::InputNet,
-                    target: GraphModulePortTarget::Wire(vec![
-                        ("not_clk".to_owned(), "clk".to_owned()),
-                        ("slave".to_owned(), "en".to_owned()),
-                    ]),
-                },
-                GraphModulePort {
-                    name: "q".to_owned(),
-                    port_type: GraphModulePortType::OutputNet,
-                    target: GraphModulePortTarget::Module("slave".to_owned(), "q".to_owned()),
-                },
-            ],
-        }
-    }
-
     fn not_clk_module() -> GraphModule {
-        let mut graph = Graph::from_nodes(vec![
-            GraphNode {
-                kind: GraphNodeKind::Input("clk".to_owned()),
-                ..Default::default()
-            },
-            GraphNode {
-                kind: GraphNodeKind::Logic(crate::logic::Logic {
-                    logic_type: crate::logic::LogicType::Not,
-                }),
-                inputs: vec![0],
-                ..Default::default()
-            },
-            GraphNode {
-                kind: GraphNodeKind::Output("clk_n".to_owned()),
-                inputs: vec![1],
-                ..Default::default()
-            },
-        ]);
-        graph.build_outputs();
-        graph.build_producers();
-        graph.build_consumers();
-        graph.verify().unwrap();
-        let mut module: GraphModule = graph.into();
+        let mut module: GraphModule = LogicGraph::from_stmt("~clk", "clk_n").unwrap().graph.into();
         module.name = "not_clk".to_owned();
-        module
-    }
-
-    fn d_latch_module(name: &str) -> GraphModule {
-        let mut graph = Graph::from_nodes(vec![
-            GraphNode {
-                kind: GraphNodeKind::Input("d".to_owned()),
-                ..Default::default()
-            },
-            GraphNode {
-                kind: GraphNodeKind::Input("en".to_owned()),
-                ..Default::default()
-            },
-            GraphNode {
-                kind: GraphNodeKind::Sequential(SequentialPrimitive::new(
-                    SequentialType::DLatch,
-                    vec!["d".to_owned(), "en".to_owned()],
-                    vec!["q".to_owned()],
-                )),
-                inputs: vec![0, 1],
-                ..Default::default()
-            },
-            GraphNode {
-                kind: GraphNodeKind::Output("q".to_owned()),
-                inputs: vec![2],
-                ..Default::default()
-            },
-        ]);
-        graph.build_outputs();
-        graph.build_producers();
-        graph.build_consumers();
-        graph.verify().unwrap();
-        let mut module: GraphModule = graph.into();
-        module.name = name.to_owned();
         module
     }
 }
