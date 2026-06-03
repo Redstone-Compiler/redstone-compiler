@@ -393,31 +393,35 @@ traceCycleInput.addEventListener('input', () => {
 
 tracePrevButton.addEventListener('click', () => {
   cancelTraceAnimation();
-  traceCycleInput.value = String(Math.max(0, Number(traceCycleInput.value) - 1));
+  const axisCycles = getTraceAxisCycles();
+  traceCycleInput.value = String(Math.max(0, Math.min(axisCycles.length - 1, Number(traceCycleInput.value) - 1)));
   void renderTraceCycle(Number(traceCycleInput.value));
 });
 
 traceNextButton.addEventListener('click', () => {
   cancelTraceAnimation();
-  traceCycleInput.value = String(Math.min(traceCycles.length - 1, Number(traceCycleInput.value) + 1));
+  const axisCycles = getTraceAxisCycles();
+  traceCycleInput.value = String(Math.min(axisCycles.length - 1, Number(traceCycleInput.value) + 1));
   void renderTraceCycle(Number(traceCycleInput.value));
 });
 
 traceShowActualCyclesInput.addEventListener('change', () => {
   cancelTraceAnimation();
+  const cycle = selectedTraceCycle();
   traceShowActualCycles = traceShowActualCyclesInput.checked;
-  renderWaveform(Number(traceCycleInput.value));
-  void renderTraceCycle(Number(traceCycleInput.value));
+  const selectedIndex = updateTraceCycleControls(findTraceAxisIndexForCycle(cycle));
+  void renderTraceCycle(selectedIndex);
 });
 
 waveformCanvas.addEventListener('click', event => {
-  if (traceCycles.length === 0) return;
+  const axisCycles = getTraceAxisCycles();
+  if (axisCycles.length === 0) return;
 
   cancelTraceAnimation();
   const rect = waveformCanvas.getBoundingClientRect();
   const x = event.clientX - rect.left;
   const y = event.clientY - rect.top + waveformScroll.scrollTop;
-  const cycleIndex = Math.max(0, Math.min(traceCycles.length - 1, Math.floor(x / WAVEFORM_CYCLE_WIDTH)));
+  const cycleIndex = Math.max(0, Math.min(axisCycles.length - 1, Math.floor(x / WAVEFORM_CYCLE_WIDTH)));
   const signalIndex = Math.floor((y - WAVEFORM_HEADER_HEIGHT) / WAVEFORM_ROW_HEIGHT);
   const visibleSignals = getVisibleWaveformSignals();
   if (visibleSignals[signalIndex]) {
@@ -1638,6 +1642,45 @@ function toTraceDisplayCycle(cycle: number): number {
   return Math.max(1, cycle - traceCycleDisplayOffset);
 }
 
+function getTraceAxisCycles(): number[] {
+  if (!traceShowActualCycles || traceCycles.length === 0) return traceCycles;
+
+  const latestCycle = traceCycles[traceCycles.length - 1];
+  return Array.from({ length: latestCycle }, (_, index) => index + 1);
+}
+
+function findTraceAxisIndexForCycle(cycle: number | undefined, axisCycles = getTraceAxisCycles()): number {
+  if (cycle === undefined || axisCycles.length === 0) return -1;
+
+  if (traceShowActualCycles && cycle >= 1 && cycle <= axisCycles[axisCycles.length - 1]) {
+    return cycle - 1;
+  }
+
+  const exactIndex = axisCycles.indexOf(cycle);
+  if (exactIndex >= 0) return exactIndex;
+
+  const nextIndex = axisCycles.findIndex(axisCycle => axisCycle >= cycle);
+  return nextIndex >= 0 ? nextIndex : axisCycles.length - 1;
+}
+
+function selectedTraceCycle(): number | undefined {
+  const axisCycles = getTraceAxisCycles();
+  return axisCycles[Number(traceCycleInput.value)];
+}
+
+function updateTraceCycleControls(selectedIndex: number): number {
+  const axisCycles = getTraceAxisCycles();
+  const disabled = axisCycles.length === 0;
+  const safeIndex = disabled ? -1 : Math.max(0, Math.min(axisCycles.length - 1, selectedIndex));
+  traceCycleInput.max = String(Math.max(0, axisCycles.length - 1));
+  traceCycleInput.value = String(Math.max(0, safeIndex));
+  traceCycleInput.disabled = disabled;
+  tracePrevButton.disabled = disabled;
+  traceNextButton.disabled = disabled;
+  updateTraceCycleModeControl();
+  return safeIndex;
+}
+
 function updateTraceCycleModeControl(): void {
   traceShowActualCyclesInput.checked = traceShowActualCycles;
   traceShowActualCyclesInput.disabled = traceCycles.length === 0;
@@ -1680,21 +1723,18 @@ function renderTrace(
       ? 'No events'
       : `${trace.length} events / ${waveform.signals.length} signals`;
   updateTraceExpandAvailability(trace.length > 0 || waveform.signals.length > 0);
-  traceCycleInput.max = String(Math.max(0, traceCycles.length - 1));
-  const selectedIndex = options.animateTo === 'last' ? 0 : options.select === 'last' ? traceCycles.length - 1 : 0;
-  traceCycleInput.value = String(Math.max(0, selectedIndex));
-  traceCycleInput.disabled = traceCycles.length === 0;
-  tracePrevButton.disabled = traceCycles.length === 0;
-  traceNextButton.disabled = traceCycles.length === 0;
-  updateTraceCycleModeControl();
+  const axisCycles = getTraceAxisCycles();
+  const selectedIndex = updateTraceCycleControls(
+    options.animateTo === 'last' ? 0 : options.select === 'last' ? axisCycles.length - 1 : 0,
+  );
   updateWaveformFilterControl();
   renderWaveformLabels();
-  void renderTraceCycle(traceCycles.length === 0 ? -1 : selectedIndex);
+  void renderTraceCycle(selectedIndex);
   if (options.open || trace.length > 0) {
     tracePanel.open = true;
   }
   if (options.animateTo === 'last') {
-    startTraceAnimation(traceCycles.length - 1);
+    startTraceAnimation(axisCycles.length - 1);
   }
 }
 
@@ -1727,7 +1767,8 @@ function startTraceAnimation(targetIndex: number): void {
 }
 
 async function renderTraceCycle(index: number): Promise<void> {
-  if (index < 0 || traceCycles.length === 0) {
+  const axisCycles = getTraceAxisCycles();
+  if (index < 0 || axisCycles.length === 0) {
     traceCycleLabel.textContent = 'cycle -';
     traceOutput.textContent = 'Run a simulation to inspect events.';
     renderWaveform(-1);
@@ -1736,8 +1777,8 @@ async function renderTraceCycle(index: number): Promise<void> {
     return;
   }
 
-  const safeIndex = Math.max(0, Math.min(traceCycles.length - 1, index));
-  const cycle = traceCycles[safeIndex];
+  const safeIndex = Math.max(0, Math.min(axisCycles.length - 1, index));
+  const cycle = axisCycles[safeIndex];
   const entries = currentTrace.filter(entry => entry.cycle === cycle);
   const selectedSignalPositions: Array<[number, number, number]> = selectedWaveformSignal
     ? [rustPosToRenderPos(selectedWaveformSignal.position)]
@@ -1824,8 +1865,9 @@ function focusWaveformSignal(signal: WaveformSignal): void {
 }
 
 function renderWaveform(selectedTraceIndex: number): void {
+  const axisCycles = getTraceAxisCycles();
   const visibleSignals = getVisibleWaveformSignals();
-  const width = Math.max(1, traceCycles.length * WAVEFORM_CYCLE_WIDTH);
+  const width = Math.max(1, axisCycles.length * WAVEFORM_CYCLE_WIDTH);
   const height = Math.max(WAVEFORM_HEADER_HEIGHT + WAVEFORM_ROW_HEIGHT, WAVEFORM_HEADER_HEIGHT + visibleSignals.length * WAVEFORM_ROW_HEIGHT);
   const pixelRatio = window.devicePixelRatio || 1;
   waveformCanvas.style.width = `${width}px`;
@@ -1840,8 +1882,8 @@ function renderWaveform(selectedTraceIndex: number): void {
   context.fillStyle = '#12161a';
   context.fillRect(0, 0, width, height);
 
-  drawWaveformHeader(context, width);
-  if (currentWaveform.signals.length === 0 || traceCycles.length === 0) {
+  drawWaveformHeader(context, width, axisCycles);
+  if (currentWaveform.signals.length === 0 || axisCycles.length === 0) {
     context.fillStyle = '#7f8992';
     context.font = '12px "Cascadia Mono", Consolas, monospace';
     context.fillText('No waveform data', 10, WAVEFORM_HEADER_HEIGHT + 16);
@@ -1857,10 +1899,10 @@ function renderWaveform(selectedTraceIndex: number): void {
 
   const waveformCycleIndexByCycle = new Map(currentWaveform.cycles.map((cycle, index) => [cycle, index]));
   visibleSignals.forEach((signal, signalIndex) => {
-    drawWaveformRow(context, signal, signalIndex, waveformCycleIndexByCycle);
+    drawWaveformRow(context, signal, signalIndex, waveformCycleIndexByCycle, axisCycles);
   });
 
-  if (selectedTraceIndex >= 0 && selectedTraceIndex < traceCycles.length) {
+  if (selectedTraceIndex >= 0 && selectedTraceIndex < axisCycles.length) {
     const x = selectedTraceIndex * WAVEFORM_CYCLE_WIDTH;
     context.fillStyle = 'rgb(211 50 50 / 18%)';
     context.fillRect(x, 0, WAVEFORM_CYCLE_WIDTH, height);
@@ -1873,14 +1915,14 @@ function renderWaveform(selectedTraceIndex: number): void {
   }
 }
 
-function drawWaveformHeader(context: CanvasRenderingContext2D, width: number): void {
+function drawWaveformHeader(context: CanvasRenderingContext2D, width: number, axisCycles: number[]): void {
   context.fillStyle = '#161b20';
   context.fillRect(0, 0, width, WAVEFORM_HEADER_HEIGHT);
   context.fillStyle = '#9ea9b3';
   context.font = '10px "Cascadia Mono", Consolas, monospace';
   context.textBaseline = 'middle';
 
-  traceCycles.forEach((cycle, index) => {
+  axisCycles.forEach((cycle, index) => {
     const x = index * WAVEFORM_CYCLE_WIDTH;
     context.fillText(String(toTraceDisplayCycle(cycle)), x + 4, WAVEFORM_HEADER_HEIGHT / 2);
     context.strokeStyle = 'rgb(154 164 173 / 14%)';
@@ -1896,27 +1938,53 @@ function drawWaveformRow(
   signal: WaveformSignal,
   signalIndex: number,
   waveformCycleIndexByCycle: Map<number, number>,
+  axisCycles: number[],
 ): void {
   const y = WAVEFORM_HEADER_HEIGHT + signalIndex * WAVEFORM_ROW_HEIGHT;
   context.fillStyle = signalIndex % 2 === 0 ? '#101419' : '#151a20';
-  context.fillRect(0, y, traceCycles.length * WAVEFORM_CYCLE_WIDTH, WAVEFORM_ROW_HEIGHT);
+  context.fillRect(0, y, axisCycles.length * WAVEFORM_CYCLE_WIDTH, WAVEFORM_ROW_HEIGHT);
 
   if (selectedWaveformSignal && sameWaveformSignal(signal, selectedWaveformSignal)) {
     context.fillStyle = 'rgb(211 50 50 / 15%)';
-    context.fillRect(0, y, traceCycles.length * WAVEFORM_CYCLE_WIDTH, WAVEFORM_ROW_HEIGHT);
+    context.fillRect(0, y, axisCycles.length * WAVEFORM_CYCLE_WIDTH, WAVEFORM_ROW_HEIGHT);
   }
 
   context.strokeStyle = 'rgb(154 164 173 / 12%)';
   context.beginPath();
   context.moveTo(0, y + WAVEFORM_ROW_HEIGHT + 0.5);
-  context.lineTo(traceCycles.length * WAVEFORM_CYCLE_WIDTH, y + WAVEFORM_ROW_HEIGHT + 0.5);
+  context.lineTo(axisCycles.length * WAVEFORM_CYCLE_WIDTH, y + WAVEFORM_ROW_HEIGHT + 0.5);
   context.stroke();
 
   if (signal.max_value <= 1) {
-    drawDigitalSignal(context, signal, y, waveformCycleIndexByCycle);
+    drawDigitalSignal(context, signal, y, waveformCycleIndexByCycle, axisCycles);
   } else {
-    drawStrengthSignal(context, signal, y, waveformCycleIndexByCycle);
+    drawStrengthSignal(context, signal, y, waveformCycleIndexByCycle, axisCycles);
   }
+}
+
+function waveformValueAtCycle(
+  signal: WaveformSignal,
+  cycle: number,
+  waveformCycleIndexByCycle: Map<number, number>,
+): number {
+  const exactIndex = waveformCycleIndexByCycle.get(cycle);
+  if (exactIndex !== undefined) return signal.values[exactIndex] ?? 0;
+  if (!traceShowActualCycles || currentWaveform.cycles.length === 0) return 0;
+
+  let low = 0;
+  let high = currentWaveform.cycles.length - 1;
+  let nearestIndex = 0;
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    if (currentWaveform.cycles[mid] <= cycle) {
+      nearestIndex = mid;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+
+  return signal.values[nearestIndex] ?? 0;
 }
 
 function drawDigitalSignal(
@@ -1924,16 +1992,16 @@ function drawDigitalSignal(
   signal: WaveformSignal,
   y: number,
   waveformCycleIndexByCycle: Map<number, number>,
+  axisCycles: number[],
 ): void {
   context.strokeStyle = '#f45d5d';
   context.lineWidth = 2;
   context.beginPath();
 
   let previousY: number | undefined;
-  traceCycles.forEach((cycle, index) => {
+  axisCycles.forEach((cycle, index) => {
     const x = index * WAVEFORM_CYCLE_WIDTH;
-    const waveformIndex = waveformCycleIndexByCycle.get(cycle);
-    const value = waveformIndex === undefined ? 0 : signal.values[waveformIndex] ?? 0;
+    const value = waveformValueAtCycle(signal, cycle, waveformCycleIndexByCycle);
     const signalY = y + (value > 0 ? 7 : WAVEFORM_ROW_HEIGHT - 7);
 
     if (previousY === undefined) {
@@ -1955,13 +2023,13 @@ function drawStrengthSignal(
   signal: WaveformSignal,
   y: number,
   waveformCycleIndexByCycle: Map<number, number>,
+  axisCycles: number[],
 ): void {
   context.textBaseline = 'middle';
   context.font = '10px "Cascadia Mono", Consolas, monospace';
 
-  traceCycles.forEach((cycle, index) => {
-    const waveformIndex = waveformCycleIndexByCycle.get(cycle);
-    const value = waveformIndex === undefined ? 0 : signal.values[waveformIndex] ?? 0;
+  axisCycles.forEach((cycle, index) => {
+    const value = waveformValueAtCycle(signal, cycle, waveformCycleIndexByCycle);
     const normalized = Math.max(0, Math.min(1, value / Math.max(1, signal.max_value)));
     const x = index * WAVEFORM_CYCLE_WIDTH;
     const fillHeight = Math.max(2, Math.round((WAVEFORM_ROW_HEIGHT - 7) * normalized));
