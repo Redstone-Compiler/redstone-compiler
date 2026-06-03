@@ -142,6 +142,10 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
               <button id="trace-prev" type="button" aria-label="Previous cycle">Prev</button>
               <input id="trace-cycle" type="range" min="0" max="0" value="0" />
               <button id="trace-next" type="button" aria-label="Next cycle">Next</button>
+              <label class="trace-cycle-mode" title="Show actual simulator cycle numbers">
+                <input id="trace-show-actual-cycles" type="checkbox" />
+                <span>Actual cycles</span>
+              </label>
               <span id="trace-cycle-label">cycle -</span>
             </div>
             <div id="waveform-viewer" class="waveform-viewer">
@@ -264,6 +268,7 @@ const traceCycleInput = document.querySelector<HTMLInputElement>('#trace-cycle')
 const traceCycleLabel = document.querySelector<HTMLElement>('#trace-cycle-label')!;
 const tracePrevButton = document.querySelector<HTMLButtonElement>('#trace-prev')!;
 const traceNextButton = document.querySelector<HTMLButtonElement>('#trace-next')!;
+const traceShowActualCyclesInput = document.querySelector<HTMLInputElement>('#trace-show-actual-cycles')!;
 const waveformLabels = document.querySelector<HTMLElement>('#waveform-labels')!;
 const waveformScroll = document.querySelector<HTMLElement>('#waveform-scroll')!;
 const waveformCanvas = document.querySelector<HTMLCanvasElement>('#waveform-canvas')!;
@@ -324,6 +329,7 @@ let currentRoot: unknown;
 let currentTrace: TraceEntry[] = [];
 let traceCycles: number[] = [];
 let traceCycleDisplayOffset = 0;
+let traceShowActualCycles = false;
 let currentSnapshots: SnapshotInfo[] = [];
 let currentWaveform: Waveform = emptyWaveform;
 let selectedWaveformSignal: WaveformSignal | undefined;
@@ -394,6 +400,13 @@ tracePrevButton.addEventListener('click', () => {
 traceNextButton.addEventListener('click', () => {
   cancelTraceAnimation();
   traceCycleInput.value = String(Math.min(traceCycles.length - 1, Number(traceCycleInput.value) + 1));
+  void renderTraceCycle(Number(traceCycleInput.value));
+});
+
+traceShowActualCyclesInput.addEventListener('change', () => {
+  cancelTraceAnimation();
+  traceShowActualCycles = traceShowActualCyclesInput.checked;
+  renderWaveform(Number(traceCycleInput.value));
   void renderTraceCycle(Number(traceCycleInput.value));
 });
 
@@ -1620,7 +1633,14 @@ function getVisibleWaveformSignals(): WaveformSignal[] {
 }
 
 function toTraceDisplayCycle(cycle: number): number {
+  if (traceShowActualCycles) return cycle;
+
   return Math.max(1, cycle - traceCycleDisplayOffset);
+}
+
+function updateTraceCycleModeControl(): void {
+  traceShowActualCyclesInput.checked = traceShowActualCycles;
+  traceShowActualCyclesInput.disabled = traceCycles.length === 0;
 }
 
 function updateWaveformFilterControl(): void {
@@ -1666,6 +1686,7 @@ function renderTrace(
   traceCycleInput.disabled = traceCycles.length === 0;
   tracePrevButton.disabled = traceCycles.length === 0;
   traceNextButton.disabled = traceCycles.length === 0;
+  updateTraceCycleModeControl();
   updateWaveformFilterControl();
   renderWaveformLabels();
   void renderTraceCycle(traceCycles.length === 0 ? -1 : selectedIndex);

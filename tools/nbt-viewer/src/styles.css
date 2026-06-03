@@ -354,7 +354,7 @@ input {
 
 .trace-controls {
   display: grid;
-  grid-template-columns: auto minmax(120px, 1fr) auto auto;
+  grid-template-columns: auto minmax(120px, 1fr) auto auto auto;
   align-items: center;
   gap: 8px;
   padding: 8px 10px;
@@ -381,6 +381,28 @@ input {
 #trace-cycle {
   width: 100%;
   accent-color: #d33232;
+}
+
+.trace-cycle-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #cbd4db;
+  cursor: pointer;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.trace-cycle-mode input {
+  width: 13px;
+  height: 13px;
+  margin: 0;
+  accent-color: #d33232;
+}
+
+.trace-cycle-mode:has(input:disabled) {
+  cursor: default;
+  opacity: 0.45;
 }
 
 #trace-cycle-label {
