@@ -328,6 +328,10 @@ let currentNbtBytes: Uint8Array | undefined;
 let currentRoot: unknown;
 let currentTrace: TraceEntry[] = [];
 let traceCycles: number[] = [];
+let historyTrace: TraceEntry[] = [];
+let historySnapshots: SnapshotInfo[] = [];
+let historyWaveform: Waveform = emptyWaveform;
+let historyTraceCycles: number[] = [];
 let traceCycleDisplayOffset = 0;
 let traceShowActualCycles = false;
 let currentSnapshots: SnapshotInfo[] = [];
@@ -409,6 +413,9 @@ traceShowActualCyclesInput.addEventListener('change', () => {
   cancelTraceAnimation();
   const cycle = selectedTraceCycle();
   traceShowActualCycles = traceShowActualCyclesInput.checked;
+  pruneSelectedWaveformSignal();
+  updateWaveformFilterControl();
+  renderWaveformLabels();
   const selectedIndex = updateTraceCycleControls(findTraceAxisIndexForCycle(cycle));
   void renderTraceCycle(selectedIndex);
 });
@@ -437,8 +444,10 @@ waveformScroll.addEventListener('scroll', () => {
 
 waveformChangedOnlyInput.addEventListener('change', () => {
   waveformChangedOnly = waveformChangedOnlyInput.checked;
+  const selectedIndex = Number(traceCycleInput.value);
   renderWaveformLabels();
-  renderWaveform(Number(traceCycleInput.value));
+  renderWaveform(selectedIndex);
+  scrollWaveformToTraceIndex(selectedIndex);
 });
 
 traceExpandButton.addEventListener('click', event => {
@@ -622,7 +631,9 @@ function setTraceExpanded(expanded: boolean): void {
   traceExpandButton.textContent = expanded ? 'Collapse' : 'Expand';
   traceExpandButton.setAttribute('aria-label', expanded ? 'Collapse trace' : 'Expand trace');
   traceExpandButton.title = expanded ? 'Collapse trace' : 'Expand trace';
-  renderWaveform(Number(traceCycleInput.value));
+  const selectedIndex = Number(traceCycleInput.value);
+  renderWaveform(selectedIndex);
+  scrollWaveformToTraceIndex(selectedIndex);
 }
 
 function updateTraceExpandAvailability(hasTraceContent: boolean): void {
@@ -1258,6 +1269,11 @@ async function applySimulatedRoot(
   renderSwitches(structure);
   renderTrace(activeSimulation.trace(), activeSimulation.snapshots(), activeSimulation.waveform(), baseRoot, {
     animateTo: 'last',
+    history: {
+      trace: activeSimulation.historyTrace(),
+      snapshots: activeSimulation.historySnapshots(),
+      waveform: activeSimulation.historyWaveform(),
+    },
   });
 }
 
@@ -1623,6 +1639,29 @@ function sameWaveformSignal(a: WaveformSignal, b: WaveformSignal): boolean {
   return samePos(a.position, b.position) && a.kind === b.kind && a.property === b.property;
 }
 
+function collectTraceCycles(trace: TraceEntry[], waveform: Waveform): number[] {
+  return Array.from(new Set([...trace.map(entry => entry.cycle), ...waveform.cycles])).sort((a, b) => a - b);
+}
+
+function getActiveTrace(): TraceEntry[] {
+  return traceShowActualCycles ? historyTrace : currentTrace;
+}
+
+function getActiveSnapshots(): SnapshotInfo[] {
+  return traceShowActualCycles ? historySnapshots : currentSnapshots;
+}
+
+function getActiveWaveform(): Waveform {
+  return traceShowActualCycles ? historyWaveform : currentWaveform;
+}
+
+function pruneSelectedWaveformSignal(): void {
+  const activeWaveform = getActiveWaveform();
+  if (selectedWaveformSignal && !activeWaveform.signals.some(signal => sameWaveformSignal(signal, selectedWaveformSignal!))) {
+    selectedWaveformSignal = undefined;
+  }
+}
+
 function signalHasWaveformChange(signal: WaveformSignal): boolean {
   if (signal.values.length <= 1) return false;
 
@@ -1631,9 +1670,10 @@ function signalHasWaveformChange(signal: WaveformSignal): boolean {
 }
 
 function getVisibleWaveformSignals(): WaveformSignal[] {
-  if (!waveformChangedOnly) return currentWaveform.signals;
+  const activeWaveform = getActiveWaveform();
+  if (!waveformChangedOnly) return activeWaveform.signals;
 
-  return currentWaveform.signals.filter(signalHasWaveformChange);
+  return activeWaveform.signals.filter(signalHasWaveformChange);
 }
 
 function toTraceDisplayCycle(cycle: number): number {
@@ -1643,9 +1683,10 @@ function toTraceDisplayCycle(cycle: number): number {
 }
 
 function getTraceAxisCycles(): number[] {
-  if (!traceShowActualCycles || traceCycles.length === 0) return traceCycles;
+  if (!traceShowActualCycles) return traceCycles;
+  if (historyTraceCycles.length === 0) return [];
 
-  const latestCycle = traceCycles[traceCycles.length - 1];
+  const latestCycle = historyTraceCycles[historyTraceCycles.length - 1];
   return Array.from({ length: latestCycle }, (_, index) => index + 1);
 }
 
@@ -1683,18 +1724,46 @@ function updateTraceCycleControls(selectedIndex: number): number {
 
 function updateTraceCycleModeControl(): void {
   traceShowActualCyclesInput.checked = traceShowActualCycles;
-  traceShowActualCyclesInput.disabled = traceCycles.length === 0;
+  traceShowActualCyclesInput.disabled = traceCycles.length === 0 && historyTraceCycles.length === 0;
 }
 
 function updateWaveformFilterControl(): void {
+  const activeWaveform = getActiveWaveform();
   waveformChangedOnlyInput.checked = waveformChangedOnly;
-  waveformChangedOnlyInput.disabled = currentWaveform.signals.length === 0;
+  waveformChangedOnlyInput.disabled = activeWaveform.signals.length === 0;
+}
+
+function getCurrentWindowStartCycle(): number | undefined {
+  return traceCycles[0];
+}
+
+function getCurrentWindowEndCycle(): number | undefined {
+  return traceCycles[traceCycles.length - 1];
+}
+
+function getTraceAnimationStartIndex(axisCycles: number[]): number {
+  if (axisCycles.length === 0) return -1;
+  const startCycle = traceShowActualCycles ? getCurrentWindowStartCycle() : axisCycles[0];
+  return findTraceAxisIndexForCycle(startCycle ?? axisCycles[0], axisCycles);
+}
+
+function getTraceAnimationTargetIndex(axisCycles: number[]): number {
+  if (axisCycles.length === 0) return -1;
+  const targetCycle = traceShowActualCycles ? getCurrentWindowEndCycle() : axisCycles[axisCycles.length - 1];
+  return findTraceAxisIndexForCycle(targetCycle ?? axisCycles[axisCycles.length - 1], axisCycles);
 }
 
 function renderSimulationError(error: unknown): void {
   if (error instanceof NbtSimulationError) {
     inspector.textContent = error.message;
-    renderTrace(error.trace, error.snapshots, error.waveform, currentRoot, { open: true });
+    renderTrace(error.trace, error.snapshots, error.waveform, currentRoot, {
+      open: true,
+      history: {
+        trace: error.historyTrace,
+        snapshots: error.historySnapshots,
+        waveform: error.historyWaveform,
+      },
+    });
     return;
   }
 
@@ -1706,26 +1775,41 @@ function renderTrace(
   snapshots: SnapshotInfo[],
   waveform: Waveform,
   baseRoot: unknown,
-  options: { animateTo?: 'last'; open?: boolean; select?: 'first' | 'last' } = {},
+  options: {
+    animateTo?: 'last';
+    history?: {
+      trace: TraceEntry[];
+      snapshots: SnapshotInfo[];
+      waveform: Waveform;
+    };
+    open?: boolean;
+    select?: 'first' | 'last';
+  } = {},
 ): void {
   cancelTraceAnimation();
   currentTrace = trace;
   currentSnapshots = snapshots;
   currentWaveform = waveform;
-  if (selectedWaveformSignal && !waveform.signals.some(signal => sameWaveformSignal(signal, selectedWaveformSignal!))) {
-    selectedWaveformSignal = undefined;
-  }
+  historyTrace = options.history?.trace ?? trace;
+  historySnapshots = options.history?.snapshots ?? snapshots;
+  historyWaveform = options.history?.waveform ?? waveform;
+  pruneSelectedWaveformSignal();
   traceBaseRoot = baseRoot;
-  traceCycles = Array.from(new Set([...trace.map(entry => entry.cycle), ...waveform.cycles])).sort((a, b) => a - b);
+  traceCycles = collectTraceCycles(trace, waveform);
+  historyTraceCycles = collectTraceCycles(historyTrace, historyWaveform);
   traceCycleDisplayOffset = traceCycles.length === 0 ? 0 : Math.max(0, traceCycles[0] - 1);
   traceCount.textContent =
     trace.length === 0 && waveform.signals.length === 0
       ? 'No events'
       : `${trace.length} events / ${waveform.signals.length} signals`;
-  updateTraceExpandAvailability(trace.length > 0 || waveform.signals.length > 0);
+  updateTraceExpandAvailability(trace.length > 0 || waveform.signals.length > 0 || historyTrace.length > 0 || historyWaveform.signals.length > 0);
   const axisCycles = getTraceAxisCycles();
   const selectedIndex = updateTraceCycleControls(
-    options.animateTo === 'last' ? 0 : options.select === 'last' ? axisCycles.length - 1 : 0,
+    options.animateTo === 'last'
+      ? getTraceAnimationStartIndex(axisCycles)
+      : options.select === 'last'
+        ? axisCycles.length - 1
+        : 0,
   );
   updateWaveformFilterControl();
   renderWaveformLabels();
@@ -1734,7 +1818,7 @@ function renderTrace(
     tracePanel.open = true;
   }
   if (options.animateTo === 'last') {
-    startTraceAnimation(axisCycles.length - 1);
+    startTraceAnimation(getTraceAnimationTargetIndex(axisCycles));
   }
 }
 
@@ -1747,7 +1831,7 @@ function cancelTraceAnimation(): void {
 }
 
 function startTraceAnimation(targetIndex: number): void {
-  if (targetIndex <= 0) return;
+  if (targetIndex <= Number(traceCycleInput.value)) return;
 
   const token = traceAnimationToken + 1;
   traceAnimationToken = token;
@@ -1779,16 +1863,19 @@ async function renderTraceCycle(index: number): Promise<void> {
 
   const safeIndex = Math.max(0, Math.min(axisCycles.length - 1, index));
   const cycle = axisCycles[safeIndex];
-  const entries = currentTrace.filter(entry => entry.cycle === cycle);
+  const activeTrace = getActiveTrace();
+  const activeSnapshots = getActiveSnapshots();
+  const entries = activeTrace.filter(entry => entry.cycle === cycle);
   const selectedSignalPositions: Array<[number, number, number]> = selectedWaveformSignal
     ? [rustPosToRenderPos(selectedWaveformSignal.position)]
     : [];
   const positions = uniquePositions([...entries.map(entry => rustPosToRenderPos(entry.target_position)), ...selectedSignalPositions]);
-  const snapshot = currentSnapshots.find(snapshot => snapshot.cycle === cycle);
+  const snapshot = activeSnapshots.find(snapshot => snapshot.cycle === cycle);
   traceCycleInput.value = String(safeIndex);
   traceCycleLabel.textContent = `cycle ${toTraceDisplayCycle(cycle)} / ${entries.length} events`;
   traceOutput.textContent = formatTrace(entries);
   renderWaveform(safeIndex);
+  scrollWaveformToTraceIndex(safeIndex);
   await renderTraceSnapshot(snapshot, positions);
 }
 
@@ -1796,8 +1883,10 @@ async function renderTraceSnapshot(
   snapshot: SnapshotInfo | undefined,
   highlights: Array<[number, number, number]>,
 ): Promise<void> {
-  if (snapshot && traceBaseRoot) {
-    const structure = toStructureModel(mergeSimulatedState(traceBaseRoot, snapshot.root));
+  if (snapshot) {
+    const previewBaseRoot = traceShowActualCycles ? currentRoot : traceBaseRoot;
+    const previewRoot = previewBaseRoot ? mergeSimulatedState(previewBaseRoot, snapshot.root) : snapshot.root;
+    const structure = toStructureModel(previewRoot);
     if (structure) {
       isTracePreviewActive = true;
       await viewer.setStructure(structure, { preserveSelection: true, preserveView: true });
@@ -1808,15 +1897,16 @@ async function renderTraceSnapshot(
 }
 
 function renderWaveformLabels(): void {
+  const activeWaveform = getActiveWaveform();
   const visibleSignals = getVisibleWaveformSignals();
   waveformLabels.replaceChildren();
   waveformLabels.style.width = `${WAVEFORM_LABEL_WIDTH}px`;
   waveformLabels.style.minWidth = `${WAVEFORM_LABEL_WIDTH}px`;
 
-  if (currentWaveform.signals.length === 0 || visibleSignals.length === 0) {
+  if (activeWaveform.signals.length === 0 || visibleSignals.length === 0) {
     const empty = document.createElement('div');
     empty.className = 'waveform-empty';
-    empty.textContent = currentWaveform.signals.length === 0 ? 'No waveform' : 'No changed signals';
+    empty.textContent = activeWaveform.signals.length === 0 ? 'No waveform' : 'No changed signals';
     waveformLabels.append(empty);
     return;
   }
@@ -1865,6 +1955,7 @@ function focusWaveformSignal(signal: WaveformSignal): void {
 }
 
 function renderWaveform(selectedTraceIndex: number): void {
+  const activeWaveform = getActiveWaveform();
   const axisCycles = getTraceAxisCycles();
   const visibleSignals = getVisibleWaveformSignals();
   const width = Math.max(1, axisCycles.length * WAVEFORM_CYCLE_WIDTH);
@@ -1883,7 +1974,7 @@ function renderWaveform(selectedTraceIndex: number): void {
   context.fillRect(0, 0, width, height);
 
   drawWaveformHeader(context, width, axisCycles);
-  if (currentWaveform.signals.length === 0 || axisCycles.length === 0) {
+  if (activeWaveform.signals.length === 0 || axisCycles.length === 0) {
     context.fillStyle = '#7f8992';
     context.font = '12px "Cascadia Mono", Consolas, monospace';
     context.fillText('No waveform data', 10, WAVEFORM_HEADER_HEIGHT + 16);
@@ -1897,9 +1988,9 @@ function renderWaveform(selectedTraceIndex: number): void {
     return;
   }
 
-  const waveformCycleIndexByCycle = new Map(currentWaveform.cycles.map((cycle, index) => [cycle, index]));
+  const waveformCycleIndexByCycle = new Map(activeWaveform.cycles.map((cycle, index) => [cycle, index]));
   visibleSignals.forEach((signal, signalIndex) => {
-    drawWaveformRow(context, signal, signalIndex, waveformCycleIndexByCycle, axisCycles);
+    drawWaveformRow(context, signal, signalIndex, activeWaveform, waveformCycleIndexByCycle, axisCycles);
   });
 
   if (selectedTraceIndex >= 0 && selectedTraceIndex < axisCycles.length) {
@@ -1912,6 +2003,22 @@ function renderWaveform(selectedTraceIndex: number): void {
     context.moveTo(x + 0.5, 0);
     context.lineTo(x + 0.5, height);
     context.stroke();
+  }
+}
+
+function scrollWaveformToTraceIndex(selectedTraceIndex: number): void {
+  if (selectedTraceIndex < 0 || waveformScroll.clientWidth <= 0) return;
+
+  const cycleLeft = selectedTraceIndex * WAVEFORM_CYCLE_WIDTH;
+  const cycleRight = cycleLeft + WAVEFORM_CYCLE_WIDTH;
+  const padding = WAVEFORM_CYCLE_WIDTH * 2;
+  const visibleLeft = waveformScroll.scrollLeft;
+  const visibleRight = visibleLeft + waveformScroll.clientWidth;
+
+  if (cycleLeft < visibleLeft + padding) {
+    waveformScroll.scrollLeft = Math.max(0, cycleLeft - padding);
+  } else if (cycleRight > visibleRight - padding) {
+    waveformScroll.scrollLeft = Math.max(0, cycleRight - waveformScroll.clientWidth + padding);
   }
 }
 
@@ -1937,6 +2044,7 @@ function drawWaveformRow(
   context: CanvasRenderingContext2D,
   signal: WaveformSignal,
   signalIndex: number,
+  waveform: Waveform,
   waveformCycleIndexByCycle: Map<number, number>,
   axisCycles: number[],
 ): void {
@@ -1956,27 +2064,28 @@ function drawWaveformRow(
   context.stroke();
 
   if (signal.max_value <= 1) {
-    drawDigitalSignal(context, signal, y, waveformCycleIndexByCycle, axisCycles);
+    drawDigitalSignal(context, signal, y, waveform, waveformCycleIndexByCycle, axisCycles);
   } else {
-    drawStrengthSignal(context, signal, y, waveformCycleIndexByCycle, axisCycles);
+    drawStrengthSignal(context, signal, y, waveform, waveformCycleIndexByCycle, axisCycles);
   }
 }
 
 function waveformValueAtCycle(
   signal: WaveformSignal,
   cycle: number,
+  waveform: Waveform,
   waveformCycleIndexByCycle: Map<number, number>,
 ): number {
   const exactIndex = waveformCycleIndexByCycle.get(cycle);
   if (exactIndex !== undefined) return signal.values[exactIndex] ?? 0;
-  if (!traceShowActualCycles || currentWaveform.cycles.length === 0) return 0;
+  if (!traceShowActualCycles || waveform.cycles.length === 0) return 0;
 
   let low = 0;
-  let high = currentWaveform.cycles.length - 1;
+  let high = waveform.cycles.length - 1;
   let nearestIndex = 0;
   while (low <= high) {
     const mid = Math.floor((low + high) / 2);
-    if (currentWaveform.cycles[mid] <= cycle) {
+    if (waveform.cycles[mid] <= cycle) {
       nearestIndex = mid;
       low = mid + 1;
     } else {
@@ -1991,6 +2100,7 @@ function drawDigitalSignal(
   context: CanvasRenderingContext2D,
   signal: WaveformSignal,
   y: number,
+  waveform: Waveform,
   waveformCycleIndexByCycle: Map<number, number>,
   axisCycles: number[],
 ): void {
@@ -2001,7 +2111,7 @@ function drawDigitalSignal(
   let previousY: number | undefined;
   axisCycles.forEach((cycle, index) => {
     const x = index * WAVEFORM_CYCLE_WIDTH;
-    const value = waveformValueAtCycle(signal, cycle, waveformCycleIndexByCycle);
+    const value = waveformValueAtCycle(signal, cycle, waveform, waveformCycleIndexByCycle);
     const signalY = y + (value > 0 ? 7 : WAVEFORM_ROW_HEIGHT - 7);
 
     if (previousY === undefined) {
@@ -2022,6 +2132,7 @@ function drawStrengthSignal(
   context: CanvasRenderingContext2D,
   signal: WaveformSignal,
   y: number,
+  waveform: Waveform,
   waveformCycleIndexByCycle: Map<number, number>,
   axisCycles: number[],
 ): void {
@@ -2029,7 +2140,7 @@ function drawStrengthSignal(
   context.font = '10px "Cascadia Mono", Consolas, monospace';
 
   axisCycles.forEach((cycle, index) => {
-    const value = waveformValueAtCycle(signal, cycle, waveformCycleIndexByCycle);
+    const value = waveformValueAtCycle(signal, cycle, waveform, waveformCycleIndexByCycle);
     const normalized = Math.max(0, Math.min(1, value / Math.max(1, signal.max_value)));
     const x = index * WAVEFORM_CYCLE_WIDTH;
     const fillHeight = Math.max(2, Math.round((WAVEFORM_ROW_HEIGHT - 7) * normalized));

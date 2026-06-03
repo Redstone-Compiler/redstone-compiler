@@ -12,6 +12,9 @@ type WasmModule = {
 };
 
 type WasmSimulator = {
+  history_snapshots(): SnapshotInfo[];
+  history_trace(): TraceEntry[];
+  history_waveform(): Waveform;
   switches(): SwitchInfo[];
   snapshots(): SnapshotInfo[];
   structure(): unknown;
@@ -87,6 +90,9 @@ export class NbtSimulationError extends Error {
     readonly trace: TraceEntry[],
     readonly snapshots: SnapshotInfo[],
     readonly waveform: Waveform,
+    readonly historyTrace: TraceEntry[] = trace,
+    readonly historySnapshots: SnapshotInfo[] = snapshots,
+    readonly historyWaveform: Waveform = waveform,
   ) {
     super(message);
     this.name = 'NbtSimulationError';
@@ -174,6 +180,18 @@ export class NbtSimulation {
     return this.sim.waveform();
   }
 
+  historyTrace(): TraceEntry[] {
+    return this.sim.history_trace();
+  }
+
+  historySnapshots(): SnapshotInfo[] {
+    return this.sim.history_snapshots();
+  }
+
+  historyWaveform(): Waveform {
+    return this.sim.history_waveform();
+  }
+
   getSwitch(block: StructureBlock): SwitchInfo | undefined {
     if (block.palette.name !== 'minecraft:lever') return undefined;
 
@@ -196,7 +214,15 @@ export class NbtSimulation {
     try {
       return this.sim.toggle_switch(x, y, z, isOn);
     } catch (error) {
-      throw new NbtSimulationError(getErrorMessage(error), this.trace(), this.snapshots(), this.waveform());
+      throw new NbtSimulationError(
+        getErrorMessage(error),
+        this.trace(),
+        this.snapshots(),
+        this.waveform(),
+        this.historyTrace(),
+        this.historySnapshots(),
+        this.historyWaveform(),
+      );
     }
   }
 }
