@@ -115,7 +115,83 @@ fn synthesized_design(module: &VerilogModule) -> eyre::Result<Option<GraphModule
             data,
             clock,
         } => register_design(&rtl, *output, data, *clock).map(Some),
-        SynthCell::DLatch { .. } | SynthCell::Dff { .. } => Ok(None),
+        SynthCell::Dff {
+            output,
+            data,
+            clock,
+        } => dff_design(&rtl, *output, data, *clock).map(Some),
+        SynthCell::DLatch { .. } => Ok(None),
+    }
+}
+
+fn dff_design(
+    rtl: &RtlModule,
+    output: RtlSignalRef,
+    data: &RtlExpr,
+    clock: RtlSignalRef,
+) -> eyre::Result<GraphModuleDesign> {
+    let output_name = rtl.signal_name(output)?;
+    let clock_name = rtl.signal_name(clock)?;
+    let next_expr = dff_next_expr(rtl, output, data)?;
+    let clock_inverter_name = format!("{output_name}_clk_inv");
+    let next_name = format!("{output_name}_next");
+    let master_name = format!("{output_name}_master");
+    let slave_name = format!("{output_name}_slave");
+
+    let mut context = GraphModuleContext::default();
+    context.append(not_clock_module(&clock_inverter_name)?);
+    context.append(combinational_output_module(&next_name, &next_expr, "d")?);
+    context.append(d_latch_graph_module(&master_name, "d", "en", "q"));
+    context.append(d_latch_graph_module(&slave_name, "d", "en", "q"));
+
+    Ok(GraphModuleDesign::with_top_module(
+        context,
+        GraphModule {
+            name: rtl.name.clone(),
+            graph: None,
+            instances: vec![
+                clock_inverter_name.clone(),
+                next_name.clone(),
+                master_name.clone(),
+                slave_name.clone(),
+            ],
+            vars: vec![
+                module_var((&next_name, "d"), (&master_name, "d")),
+                module_var((&master_name, "q"), (&slave_name, "d")),
+                module_var((&clock_inverter_name, "clk_n"), (&master_name, "en")),
+                module_var((&clock_inverter_name, "clk"), (&slave_name, "en")),
+                module_var((&slave_name, "q"), (&next_name, output_name)),
+            ],
+            ports: vec![
+                GraphModulePort {
+                    name: clock_name.to_owned(),
+                    port_type: GraphModulePortType::InputNet,
+                    target: GraphModulePortTarget::Module(clock_inverter_name, "clk".to_owned()),
+                },
+                GraphModulePort {
+                    name: output_name.to_owned(),
+                    port_type: GraphModulePortType::OutputNet,
+                    target: GraphModulePortTarget::Module(slave_name, "q".to_owned()),
+                },
+            ],
+        },
+    ))
+}
+
+fn dff_next_expr(rtl: &RtlModule, output: RtlSignalRef, data: &RtlExpr) -> eyre::Result<String> {
+    let output_name = rtl.signal_name(output)?;
+    if is_increment_by_one(output, data) {
+        return Ok(format!("~{output_name}"));
+    }
+    match data {
+        RtlExpr::Signal(signal) => Ok(rtl.signal_name(*signal)?.to_owned()),
+        RtlExpr::Not(expr) => {
+            let RtlExpr::Signal(signal) = expr.as_ref() else {
+                eyre::bail!("only signal negation DFF data is supported for GraphModule lowering");
+            };
+            Ok(format!("~{}", rtl.signal_name(*signal)?))
+        }
+        _ => eyre::bail!("unsupported DFF data expression for GraphModule lowering"),
     }
 }
 
@@ -133,8 +209,11 @@ fn register_design(
     let mut context = GraphModuleContext::default();
     let mut instances = Vec::new();
     let mut vars = Vec::new();
-    let mut clock_targets = Vec::new();
     let mut ports = Vec::new();
+    let clock_inverter_name = format!("{output_name}_clk_inv");
+
+    context.append(not_clock_module(&clock_inverter_name)?);
+    instances.push(clock_inverter_name.clone());
 
     for carry_bit in 2..width {
         let carry_name = carry_module_name(output_name, carry_bit);
@@ -153,7 +232,6 @@ fn register_design(
     for bit in 0..width {
         let bit_name = bit_signal_name(output_name, bit);
         let next_name = format!("{bit_name}_next");
-        let inv_name = format!("{bit_name}_clk_inv");
         let master_name = format!("{bit_name}_master");
         let slave_name = format!("{bit_name}_slave");
 
@@ -162,23 +240,21 @@ fn register_design(
             &next_bit_expr(output_name, bit),
             "d",
         )?);
-        context.append(not_clock_module(&inv_name)?);
         context.append(d_latch_graph_module(&master_name, "d", "en", "q"));
         context.append(d_latch_graph_module(&slave_name, "d", "en", "q"));
 
-        instances.extend([
-            next_name.clone(),
-            inv_name.clone(),
-            master_name.clone(),
-            slave_name.clone(),
-        ]);
+        instances.extend([next_name.clone(), master_name.clone(), slave_name.clone()]);
 
-        clock_targets.push((inv_name.clone(), "clk".to_owned()));
-        clock_targets.push((slave_name.clone(), "en".to_owned()));
-
-        vars.push(module_var((&inv_name, "clk_n"), (&master_name, "en")));
-        vars.push(module_var((&master_name, "q"), (&slave_name, "d")));
         vars.push(module_var((&next_name, "d"), (&master_name, "d")));
+        vars.push(module_var((&master_name, "q"), (&slave_name, "d")));
+        vars.push(module_var(
+            (&clock_inverter_name, "clk_n"),
+            (&master_name, "en"),
+        ));
+        vars.push(module_var(
+            (&clock_inverter_name, "clk"),
+            (&slave_name, "en"),
+        ));
 
         for input in next_bit_inputs(bit) {
             connect_increment_input(&mut vars, output_name, input, &next_name);
@@ -196,7 +272,7 @@ fn register_design(
         GraphModulePort {
             name: clock_name.to_owned(),
             port_type: GraphModulePortType::InputNet,
-            target: GraphModulePortTarget::Wire(clock_targets),
+            target: GraphModulePortTarget::Module(clock_inverter_name, "clk".to_owned()),
         },
     );
 
@@ -213,20 +289,24 @@ fn register_design(
 }
 
 fn ensure_register_increment_expr(output: RtlSignalRef, data: &RtlExpr) -> eyre::Result<()> {
+    if !is_increment_by_one(output, data) {
+        eyre::bail!("only `reg <= reg + 1` is supported for GraphModule lowering");
+    }
+
+    Ok(())
+}
+
+fn is_increment_by_one(output: RtlSignalRef, data: &RtlExpr) -> bool {
     let RtlExpr::Add(left, right) = data else {
-        eyre::bail!("only register increment expressions are supported for GraphModule lowering");
+        return false;
     };
 
     let signal = match (left.as_ref(), right.as_ref()) {
         (RtlExpr::Signal(signal), RtlExpr::Const { value: 1, .. })
         | (RtlExpr::Const { value: 1, .. }, RtlExpr::Signal(signal)) => *signal,
-        _ => eyre::bail!("only `reg <= reg + 1` is supported for GraphModule lowering"),
+        _ => return false,
     };
-    if signal != output {
-        eyre::bail!("register increment source must match its output signal");
-    }
-
-    Ok(())
+    signal == output
 }
 
 fn next_bit_expr(signal: &str, bit: usize) -> String {
@@ -561,10 +641,11 @@ mod tests {
         let top = design.top_module();
 
         assert_eq!(top.name, "counter");
-        assert_eq!(top.instances.len(), 18);
+        assert_eq!(top.instances.len(), 15);
         assert!(matches!(
             &top.port_by_name("clk")?.target,
-            GraphModulePortTarget::Wire(targets) if targets.len() == 8
+            GraphModulePortTarget::Module(module, port)
+                if module == "q_clk_inv" && port == "clk"
         ));
         for bit in 0..4 {
             assert!(matches!(
@@ -573,6 +654,42 @@ mod tests {
                     if module == &format!("q_{bit}_slave") && port == "q"
             ));
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn lowers_scalar_increment_to_dff_design() -> eyre::Result<()> {
+        let modules = parse_modules(
+            r#"
+            module counter(clk, q);
+              input clk;
+              output reg q;
+              always @(posedge clk) begin
+                q <= q + 1;
+              end
+            endmodule
+            "#,
+        )?;
+
+        let design = lower_design_modules(&modules)?;
+        let top = design.top_module();
+
+        assert_eq!(top.name, "counter");
+        assert_eq!(
+            top.instances,
+            vec!["q_clk_inv", "q_next", "q_master", "q_slave"]
+        );
+        assert!(matches!(
+            &top.port_by_name("clk")?.target,
+            GraphModulePortTarget::Module(module, port)
+                if module == "q_clk_inv" && port == "clk"
+        ));
+        assert!(matches!(
+            &top.port_by_name("q")?.target,
+            GraphModulePortTarget::Module(module, port)
+                if module == "q_slave" && port == "q"
+        ));
 
         Ok(())
     }

@@ -21,6 +21,8 @@ use crate::world::World3D;
 const GLOBAL_ROUTE_PADDING: usize = 8;
 const GLOBAL_ROUTE_MAX_STEPS: usize = 128;
 const MAX_REDSTONE_STRENGTH: usize = 15;
+const FANOUT_ROUTE_SOURCE_LIMIT: usize = 8;
+const FANOUT_ROUTE_TERMINAL_LIMIT: usize = 24;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ResolvedPortTarget {
@@ -66,7 +68,7 @@ pub fn route_module_variables(
             continue;
         }
 
-        let source = external_switch_position(&route_world, top_input_index)
+        let source = external_switch_position(&route_world, top_input_index, &sinks)
             .with_context(|| format!("failed to place top-level input switch `{}`", port.name))?;
         top_input_index += 1;
         let switch = input_switch_block();
@@ -90,19 +92,27 @@ pub fn route_module_variables(
                     sinks.len()
                 ),
             );
-            let (route, next_world) = route_to_target_from_network(&route_world, &route_sources, sink)
-                .map_err(|failure| {
-                    eyre::eyre!(
-                        "failed to route top-level input {} -> {:?}: {failure:?}",
-                        port.name,
-                        sink.position
-                    )
-                })?;
-            for position in route_terminal_positions(&next_world, &route.blocks) {
+            let (route, next_world) =
+                route_to_target_from_network(&route_world, &route_sources, sink).map_err(
+                    |failure| {
+                        eyre::eyre!(
+                            "failed to route top-level input {} -> {:?}: {failure:?}",
+                            port.name,
+                            sink.position
+                        )
+                    },
+                )?;
+            for position in route_terminal_positions(&next_world, &route.blocks, sink.position) {
                 if route_source_set.insert(position) {
                     route_sources.push(position);
                 }
             }
+            prune_route_sources(
+                &mut route_sources,
+                &mut route_source_set,
+                &sinks,
+                sink_index + 1,
+            );
             route_world = next_world;
             routes.push(route);
         }
@@ -180,6 +190,11 @@ fn route_source_to_target_position(
     {
         return route_isolated_output_to_target_position(world, logical_source, sink);
     }
+    if source_port.direction == PhysicalPortDirection::Input {
+        let mut sources = redstone_network_positions(world, &[logical_source]);
+        sources.push(route_source);
+        return route_to_target_from_network(world, &sources, sink);
+    }
 
     route_to_target_position(world, route_source, sink)
 }
@@ -205,7 +220,7 @@ fn route_to_target_from_network(
     sources.sort_by_key(|source| source.manhattan_distance(&sink.position));
     let fallback_source = sources.first().copied().unwrap_or(sink.position);
 
-    for source in sources {
+    for source in sources.into_iter().take(FANOUT_ROUTE_SOURCE_LIMIT) {
         if !world.size.bound_on(source) || !is_route_terminal(world, source) {
             continue;
         }
@@ -220,12 +235,50 @@ fn route_to_target_from_network(
     })
 }
 
-fn route_terminal_positions(world: &World3D, blocks: &[(Position, Block)]) -> Vec<Position> {
-    blocks
+fn route_terminal_positions(
+    world: &World3D,
+    blocks: &[(Position, Block)],
+    sink: Position,
+) -> Vec<Position> {
+    let mut positions = blocks
         .iter()
         .map(|(position, _)| *position)
         .filter(|position| world.size.bound_on(*position) && is_route_terminal(world, *position))
-        .collect()
+        .collect::<Vec<_>>();
+    positions.sort_by_key(|position| {
+        (
+            position.manhattan_distance(&sink),
+            std::cmp::Reverse(position.0),
+            position.1,
+            position.2,
+        )
+    });
+    positions.truncate(FANOUT_ROUTE_TERMINAL_LIMIT);
+    positions
+}
+
+fn prune_route_sources(
+    route_sources: &mut Vec<Position>,
+    route_source_set: &mut HashSet<Position>,
+    sinks: &[ResolvedPortTarget],
+    next_sink_index: usize,
+) {
+    if route_sources.len() <= FANOUT_ROUTE_TERMINAL_LIMIT {
+        return;
+    }
+
+    route_sources.sort_by_key(|source| {
+        sinks
+            .iter()
+            .skip(next_sink_index)
+            .map(|sink| source.manhattan_distance(&sink.position))
+            .min()
+            .unwrap_or(0)
+    });
+    route_sources.truncate(FANOUT_ROUTE_TERMINAL_LIMIT);
+
+    route_source_set.clear();
+    route_source_set.extend(route_sources.iter().copied());
 }
 
 fn route_isolated_output_to_target_position(
@@ -402,7 +455,19 @@ fn resolve_port_target_positions(
     }
 }
 
-fn external_switch_position(world: &World3D, index: usize) -> Option<Position> {
+fn external_switch_position(
+    world: &World3D,
+    index: usize,
+    sinks: &[ResolvedPortTarget],
+) -> Option<Position> {
+    for sink in sinks {
+        for position in external_switch_candidates_near_sink(sink.position) {
+            if world.size.bound_on(position) && world[position].kind.is_air() {
+                return Some(position);
+            }
+        }
+    }
+
     let max_x = world
         .iter_block()
         .into_iter()
@@ -411,6 +476,23 @@ fn external_switch_position(world: &World3D, index: usize) -> Option<Position> {
         .unwrap_or(0);
     let position = Position(max_x + 2, index * 3 + 1, 1);
     (world.size.bound_on(position) && world[position].kind.is_air()).then_some(position)
+}
+
+fn external_switch_candidates_near_sink(sink: Position) -> Vec<Position> {
+    let mut candidates = Vec::new();
+    for distance in 2..=6 {
+        candidates.extend([
+            Position(sink.0 + distance, sink.1, sink.2),
+            Position(sink.0, sink.1 + distance, sink.2),
+        ]);
+        if let Some(x) = sink.0.checked_sub(distance) {
+            candidates.push(Position(x, sink.1, sink.2));
+        }
+        if let Some(y) = sink.1.checked_sub(distance) {
+            candidates.push(Position(sink.0, y, sink.2));
+        }
+    }
+    candidates
 }
 
 fn input_switch_block() -> Block {
@@ -855,9 +937,18 @@ fn route_point_to_point_with_initial_queue(
 
         let terminal_node = PlacedNode::new(state.terminal, state.world[state.terminal]);
         let allowed_shorts = goal.allowed_short_positions();
-        let bounds = state
+        let mut bounds = state
             .pending_bounds
             .unwrap_or_else(|| route_bounds_for_mode(mode, &state.world, &terminal_node));
+        bounds.sort_by_key(|bound| {
+            let position = bound.position();
+            (
+                position.manhattan_distance(&sink),
+                position.0,
+                position.1,
+                position.2,
+            )
+        });
         for bound in bounds {
             if !bound.is_bound_on(&state.world) || goal.rejects_bound_position(bound.position()) {
                 continue;
