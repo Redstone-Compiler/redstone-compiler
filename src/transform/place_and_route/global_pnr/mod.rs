@@ -397,6 +397,7 @@ mod tests {
             placement: GlobalPlacementConfig {
                 spacing: 4,
                 shelf_width: 64,
+                max_attempts: 64,
                 ..Default::default()
             },
             ..Default::default()
@@ -417,6 +418,7 @@ mod tests {
         placed
             .metadata()
             .save("test/counter-global-smoke.outputs.json")?;
+        assert_positive_edge_toggle_behavior(&placed)?;
         Ok(())
     }
 
@@ -470,6 +472,46 @@ mod tests {
         assert!(block_power(sim.world(), output));
         sim.change_state_with_limits(vec![(clock, true)], 256, 50_000)?;
         assert!(!block_power(sim.world(), output));
+        Ok(())
+    }
+
+    fn assert_positive_edge_toggle_behavior(placed: &PlacedWorld) -> eyre::Result<()> {
+        let mut switches = placed
+            .world
+            .iter_block()
+            .into_iter()
+            .filter_map(|(position, block)| block.kind.is_switch().then_some(position))
+            .collect::<Vec<_>>();
+        switches.sort();
+        eyre::ensure!(switches.len() == 1, "expected one clock switch");
+        let clock = switches[0];
+        let output = placed.outputs[0].position();
+        let world = World::from(&placed.world);
+        let mut sim =
+            Simulator::from_preserving_torch_states_with_limits_and_trace(&world, 256, 50_000, 0)
+                .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
+
+        let initial = block_power(sim.world(), output);
+        sim.change_state_with_limits(vec![(clock, true)], 256, 50_000)?;
+        let first_rise = block_power(sim.world(), output);
+        eyre::ensure!(
+            first_rise != initial,
+            "counter output should toggle on rising edge: initial={initial}, first_rise={first_rise}"
+        );
+
+        sim.change_state_with_limits(vec![(clock, false)], 256, 50_000)?;
+        let first_fall = block_power(sim.world(), output);
+        eyre::ensure!(
+            first_fall == first_rise,
+            "counter output should hold on falling edge: first_rise={first_rise}, first_fall={first_fall}"
+        );
+
+        sim.change_state_with_limits(vec![(clock, true)], 256, 50_000)?;
+        let second_rise = block_power(sim.world(), output);
+        eyre::ensure!(
+            second_rise == initial,
+            "counter output should toggle back on the next rising edge: initial={initial}, first_rise={first_rise}, first_fall={first_fall}, second_rise={second_rise}"
+        );
         Ok(())
     }
 

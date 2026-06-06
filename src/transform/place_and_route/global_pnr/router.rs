@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashSet, VecDeque};
+use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 
 use eyre::ContextCompat;
 
@@ -72,13 +72,83 @@ pub fn route_module_variables(
 ) -> eyre::Result<Vec<RoutedNet>> {
     let mut route_world = placed_candidate_world(candidates, placed_modules)?;
     let mut routes = Vec::new();
-    let mut top_input_index = 0;
     let top_inputs = module
         .ports
         .iter()
         .filter(|port| port.port_type.is_input())
         .collect::<Vec<_>>();
 
+    let mut vars = module.vars.iter().collect::<Vec<_>>();
+    vars.sort_by_key(|var| route_variable_priority(var));
+    for (var_index, var) in vars.iter().enumerate() {
+        let (source_port, source_candidate, source_placed) =
+            resolve_port(candidates, placed_modules, &var.source.0, &var.source.1).with_context(
+                || {
+                    format!(
+                        "source port {}.{} is not placed",
+                        var.source.0, var.source.1
+                    )
+                },
+            )?;
+        let source = translate_port_route_position(source_port, source_candidate, source_placed);
+        let logical_source =
+            translate_candidate_position(source_port.position, source_candidate, source_placed);
+        let sinks = resolve_port_targets(candidates, placed_modules, &var.target.0, &var.target.1);
+        if sinks.is_empty() {
+            return Err(eyre::eyre!(
+                "target port {}.{} is not placed",
+                var.target.0,
+                var.target.1
+            ));
+        }
+        for (sink_index, sink) in sinks.iter().copied().enumerate() {
+            progress.item(
+                var_index + 1,
+                vars.len(),
+                format!(
+                    "route net `{}.{}` -> `{}.{}` sink {}/{}",
+                    var.source.0,
+                    var.source.1,
+                    var.target.0,
+                    var.target.1,
+                    sink_index + 1,
+                    sinks.len()
+                ),
+            );
+            let (route, next_world) = route_source_to_target_position(
+                &route_world,
+                source_port,
+                logical_source,
+                source,
+                sink,
+                config.strategy,
+            )
+            .map_err(|failure| {
+                eyre::eyre!(
+                    "failed to route {}.{} -> {}.{} at {:?}: {failure:?}",
+                    var.source.0,
+                    var.source.1,
+                    var.target.0,
+                    var.target.1,
+                    sink.position
+                )
+            })?;
+            progress.detail(format!(
+                "routed `{}.{}` -> `{}.{}` from {:?} to {:?} with {} block(s)",
+                var.source.0,
+                var.source.1,
+                var.target.0,
+                var.target.1,
+                route.source,
+                route.sink,
+                route.blocks.len()
+            ));
+            route_world = next_world;
+            routes.push(route);
+        }
+    }
+
+    let mut top_input_index = 0;
     for (port_index, port) in top_inputs.iter().enumerate() {
         let mut sinks = resolve_port_target_positions(candidates, placed_modules, &port.target);
         if sinks.is_empty() {
@@ -140,65 +210,22 @@ pub fn route_module_variables(
         }
     }
 
-    for (var_index, var) in module.vars.iter().enumerate() {
-        let (source_port, source_candidate, source_placed) =
-            resolve_port(candidates, placed_modules, &var.source.0, &var.source.1).with_context(
-                || {
-                    format!(
-                        "source port {}.{} is not placed",
-                        var.source.0, var.source.1
-                    )
-                },
-            )?;
-        let source = translate_port_route_position(source_port, source_candidate, source_placed);
-        let logical_source =
-            translate_candidate_position(source_port.position, source_candidate, source_placed);
-        let sinks = resolve_port_targets(candidates, placed_modules, &var.target.0, &var.target.1);
-        if sinks.is_empty() {
-            return Err(eyre::eyre!(
-                "target port {}.{} is not placed",
-                var.target.0,
-                var.target.1
-            ));
-        }
-        for (sink_index, sink) in sinks.iter().copied().enumerate() {
-            progress.item(
-                var_index + 1,
-                module.vars.len(),
-                format!(
-                    "route net `{}.{}` -> `{}.{}` sink {}/{}",
-                    var.source.0,
-                    var.source.1,
-                    var.target.0,
-                    var.target.1,
-                    sink_index + 1,
-                    sinks.len()
-                ),
-            );
-            let (route, next_world) = route_source_to_target_position(
-                &route_world,
-                source_port,
-                logical_source,
-                source,
-                sink,
-                config.strategy,
-            )
-            .map_err(|failure| {
-                eyre::eyre!(
-                    "failed to route {}.{} -> {}.{} at {:?}: {failure:?}",
-                    var.source.0,
-                    var.source.1,
-                    var.target.0,
-                    var.target.1,
-                    sink.position
-                )
-            })?;
-            route_world = next_world;
-            routes.push(route);
-        }
-    }
-
     Ok(routes)
+}
+
+fn route_variable_priority(
+    var: &crate::graph::module::GraphModuleVariable,
+) -> (usize, usize, &str, &str, &str, &str) {
+    let target_port_priority = if var.target.1 == "en" { 0 } else { 1 };
+    let source_port_priority = if var.source.1.ends_with("_n") { 0 } else { 1 };
+    (
+        target_port_priority,
+        source_port_priority,
+        var.source.0.as_str(),
+        var.source.1.as_str(),
+        var.target.0.as_str(),
+        var.target.1.as_str(),
+    )
 }
 
 fn route_source_to_target_position(
@@ -342,23 +369,56 @@ fn route_to_redstone_input_through_repeater(
     sink: Position,
     strategy: GlobalRoutingStrategy,
 ) -> Result<(RoutedNet, World3D), RouteFailure> {
-    for (adapter_world, driver_position) in redstone_input_repeater_adapters(world, sink) {
-        let Ok((_, routed_world)) =
-            route_point_to_point_with_strategy(&adapter_world, source, driver_position, strategy)
-        else {
-            continue;
-        };
-        return Ok((
-            RoutedNet {
+    for target in redstone_input_drive_targets(world, source, sink) {
+        for (adapter_world, driver_position) in redstone_input_repeater_adapters(world, target) {
+            if target != sink
+                && !detailed_router::target_powers_position(&adapter_world, target, sink)
+            {
+                continue;
+            }
+            let Ok((_, routed_world)) = route_point_to_point_with_strategy(
+                &adapter_world,
                 source,
-                sink,
-                blocks: added_route_blocks(world, &routed_world),
-            },
-            routed_world,
-        ));
+                driver_position,
+                strategy,
+            ) else {
+                continue;
+            };
+            return Ok((
+                RoutedNet {
+                    source,
+                    sink,
+                    blocks: added_route_blocks(world, &routed_world),
+                },
+                routed_world,
+            ));
+        }
     }
 
     Err(RouteFailure::Unreachable { source, sink })
+}
+
+fn redstone_input_drive_targets(
+    world: &World3D,
+    source: Position,
+    sink: Position,
+) -> Vec<Position> {
+    let seeds = [sink];
+    let mut targets = redstone_network_positions(world, &seeds)
+        .into_iter()
+        .filter(|position| {
+            *position == sink || detailed_router::target_powers_position(world, *position, sink)
+        })
+        .collect::<Vec<_>>();
+    targets.sort_by_key(|position| {
+        (
+            position.manhattan_distance(&source),
+            position.0,
+            position.1,
+            position.2,
+        )
+    });
+    targets
 }
 
 fn redstone_input_repeater_adapters(world: &World3D, sink: Position) -> Vec<(World3D, Position)> {
@@ -782,12 +842,12 @@ fn route_isolated_output_to_point(
         return Ok((route, routed_world));
     }
 
-    for tap in routeable_output_taps(world, source, sink) {
+    for (tap, signal_strength) in routeable_output_taps(world, source, sink) {
         let initial = RouteSearchState {
             world: world.clone(),
             terminal: tap,
             route: vec![tap],
-            signal_strength: MAX_REDSTONE_STRENGTH,
+            signal_strength,
             pending_bounds: None,
         };
         let Ok((_, routed_world)) =
@@ -808,7 +868,11 @@ fn route_isolated_output_to_point(
     Err(RouteFailure::Unreachable { source, sink })
 }
 
-fn routeable_output_taps(world: &World3D, source: Position, sink: Position) -> Vec<Position> {
+fn routeable_output_taps(
+    world: &World3D,
+    source: Position,
+    sink: Position,
+) -> Vec<(Position, usize)> {
     let direct_taps = world
         .iter_block()
         .into_iter()
@@ -818,17 +882,65 @@ fn routeable_output_taps(world: &World3D, source: Position, sink: Position) -> V
         })
         .map(|(position, _)| position)
         .collect::<Vec<_>>();
-    let mut taps = redstone_network_positions(world, &direct_taps);
-    taps.sort_by_key(|position| {
+
+    let mut taps = powered_redstone_network_taps(world, &direct_taps);
+    taps.sort_by_key(|(position, strength)| {
         (
             position.manhattan_distance(&sink),
-            std::cmp::Reverse(position.manhattan_distance(&source)),
+            std::cmp::Reverse(*strength),
+            position.manhattan_distance(&source),
             position.0,
             position.1,
             position.2,
         )
     });
     taps
+}
+
+fn powered_redstone_network_taps(world: &World3D, seeds: &[Position]) -> Vec<(Position, usize)> {
+    let redstones = world
+        .iter_block()
+        .into_iter()
+        .filter_map(|(position, block)| block.kind.is_redstone().then_some(position))
+        .collect::<Vec<_>>();
+    let mut strengths = HashMap::<Position, usize>::new();
+    let mut queue = VecDeque::new();
+    for &seed in seeds {
+        if strengths
+            .insert(seed, MAX_REDSTONE_STRENGTH)
+            .is_none_or(|old| old < MAX_REDSTONE_STRENGTH)
+        {
+            queue.push_back(seed);
+        }
+    }
+
+    while let Some(position) = queue.pop_front() {
+        let Some(&strength) = strengths.get(&position) else {
+            continue;
+        };
+        if strength <= 1 {
+            continue;
+        }
+
+        for &next in &redstones {
+            if position == next {
+                continue;
+            }
+            if !detailed_router::target_powers_position(world, position, next)
+                && !detailed_router::target_powers_position(world, next, position)
+            {
+                continue;
+            }
+
+            let next_strength = strength - 1;
+            if strengths.get(&next).is_none_or(|old| *old < next_strength) {
+                strengths.insert(next, next_strength);
+                queue.push_back(next);
+            }
+        }
+    }
+
+    strengths.into_iter().collect()
 }
 
 fn redstone_network_positions(world: &World3D, seeds: &[Position]) -> Vec<Position> {

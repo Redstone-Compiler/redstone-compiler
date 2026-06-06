@@ -1,3 +1,6 @@
+use std::cmp::Reverse;
+use std::collections::{HashSet, VecDeque};
+
 use eyre::ContextCompat;
 
 use crate::graph::logic::LogicGraph;
@@ -89,7 +92,7 @@ fn switchless_candidate_layout(
     let mut ports = Vec::new();
     // Sequential child layout? ?대? feedback/state signal???몃? route? 吏곸젒 ?욎씠硫?    // back-power??latch state ?ㅼ뿼???앷만 ???덉쑝誘濡?port ?곌껐??蹂댁닔?곸쑝濡?寃⑸━?쒕떎.
     let needs_output_isolation = module_contains_sequential(module);
-    let needs_input_isolation = module_contains_sequential(module);
+    let preserve_switch_position_inputs = module_contains_sequential(module);
     for port in &module.ports {
         match (&port.port_type, &port.target) {
             (GraphModulePortType::InputNet, GraphModulePortTarget::Node(input_name)) => {
@@ -103,8 +106,11 @@ fn switchless_candidate_layout(
                             .and_then(|positions| positions.into_iter().next())
                     });
                 if let Some(input_position) = position {
-                    let Some(position) = expose_switchless_input_port(&mut world, input_position)
-                    else {
+                    let Some(position) = expose_switchless_input_port(
+                        &mut world,
+                        input_position,
+                        preserve_switch_position_inputs,
+                    ) else {
                         continue;
                     };
                     ports.push(PhysicalPort {
@@ -112,7 +118,7 @@ fn switchless_candidate_layout(
                         direction: PhysicalPortDirection::Input,
                         position,
                         route_position: None,
-                        isolate_input: needs_input_isolation && world[position].kind.is_redstone(),
+                        isolate_input: world[position].kind.is_redstone(),
                     });
                 }
             }
@@ -134,7 +140,11 @@ fn switchless_candidate_layout(
         }
     }
     for input in inputs {
-        let _ = expose_switchless_input_port(&mut world, input.position());
+        let _ = expose_switchless_input_port(
+            &mut world,
+            input.position(),
+            preserve_switch_position_inputs,
+        );
     }
     remove_local_input_switches(&mut world);
     ports.sort_by(|a, b| a.name.cmp(&b.name));
@@ -192,7 +202,11 @@ fn expose_routeable_output_port(world: &World3D, output_position: Position) -> P
 // switch媛 cobble??耳쒕뒗 援ъ“硫?cobble??port濡? redstone fanout??耳쒕뒗 援ъ“硫?switch ?먮━瑜?redstone port濡?諛붽씔??
 // TODO(low-level): replace this inference with explicit input-port placement metadata
 // from LocalPlacer, so this code does not need to guess from switch wiring.
-fn expose_switchless_input_port(world: &mut World3D, input_position: Position) -> Option<Position> {
+fn expose_switchless_input_port(
+    world: &mut World3D,
+    input_position: Position,
+    preserve_switch_position_input: bool,
+) -> Option<Position> {
     if !world.size.bound_on(input_position) {
         return None;
     }
@@ -208,10 +222,15 @@ fn expose_switchless_input_port(world: &mut World3D, input_position: Position) -
         return Some(target);
     }
 
-    if switch_powers_redstone(world, input_position) {
+    if preserve_switch_position_input && switch_powers_redstone(world, input_position) {
         ensure_redstone_support(world, input_position)?;
         world[input_position] = PlacedNode::new_redstone(input_position).block;
         return Some(input_position);
+    }
+
+    if let Some(port_position) = switch_powered_redstone_port(world, input_position) {
+        world[input_position] = Block::default();
+        return Some(port_position);
     }
 
     let port_position = expose_routeable_output_port(world, input_position);
@@ -241,6 +260,76 @@ fn ensure_redstone_support(world: &mut World3D, position: Position) -> Option<()
     }
     world[support_position] = PlacedNode::new_cobble(support_position).block;
     Some(())
+}
+
+fn switch_powered_redstone_port(world: &World3D, input_position: Position) -> Option<Position> {
+    let direct = world
+        .iter_block()
+        .into_iter()
+        .filter_map(|(position, block)| {
+            (block.kind.is_redstone()
+                && detailed_router::target_powers_position(world, input_position, position))
+            .then_some(position)
+        })
+        .collect::<Vec<_>>();
+    if direct.is_empty() {
+        return None;
+    }
+
+    redstone_network_positions(world, &direct)
+        .into_iter()
+        .max_by_key(|position| {
+            (
+                downstream_consumer_count(world, *position),
+                Reverse(input_position.manhattan_distance(position)),
+                Reverse(position.0),
+                Reverse(position.1),
+                Reverse(position.2),
+            )
+        })
+}
+
+fn redstone_network_positions(world: &World3D, seeds: &[Position]) -> Vec<Position> {
+    let redstones = world
+        .iter_block()
+        .into_iter()
+        .filter_map(|(position, block)| block.kind.is_redstone().then_some(position))
+        .collect::<Vec<_>>();
+    let mut visited = HashSet::new();
+    let mut queue = VecDeque::new();
+    for &seed in seeds {
+        if visited.insert(seed) {
+            queue.push_back(seed);
+        }
+    }
+
+    while let Some(position) = queue.pop_front() {
+        for &next in &redstones {
+            if visited.contains(&next) {
+                continue;
+            }
+            if detailed_router::target_powers_position(world, position, next)
+                || detailed_router::target_powers_position(world, next, position)
+            {
+                visited.insert(next);
+                queue.push_back(next);
+            }
+        }
+    }
+
+    visited.into_iter().collect()
+}
+
+fn downstream_consumer_count(world: &World3D, source: Position) -> usize {
+    world
+        .iter_block()
+        .into_iter()
+        .filter(|(position, block)| {
+            *position != source
+                && !block.kind.is_redstone()
+                && detailed_router::target_powers_position(world, source, *position)
+        })
+        .count()
 }
 
 pub fn d_latch_child_candidate_config(local_config: LocalPlacerConfig) -> UnitCandidateConfig {
