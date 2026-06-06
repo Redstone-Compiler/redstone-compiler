@@ -169,7 +169,7 @@ input {
 }
 
 .switches-list {
-  max-height: calc(min(38vh, 320px) - 79px);
+  max-height: calc(min(38vh, 320px) - 115px);
   overflow: auto;
   padding: 6px;
   border-top: 1px solid rgb(154 164 173 / 18%);
@@ -200,6 +200,48 @@ input {
 
 .switches-actions button:hover {
   background: rgb(255 255 255 / 12%);
+}
+
+.trace-simulation-toggle {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  padding: 5px 7px;
+  border: 1px solid rgb(154 164 173 / 24%);
+  border-radius: 4px;
+  background: rgb(255 255 255 / 6%);
+  color: #dce3e7;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.trace-simulation-toggle:hover {
+  background: rgb(255 255 255 / 11%);
+}
+
+.trace-simulation-toggle.active {
+  border-color: rgb(211 50 50 / 48%);
+  background: rgb(211 50 50 / 15%);
+}
+
+.trace-simulation-toggle input {
+  width: 13px;
+  height: 13px;
+  margin: 0;
+  accent-color: #d33232;
+}
+
+.trace-simulation-toggle strong {
+  color: #9ea9b3;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.trace-simulation-toggle.active strong {
+  color: #ffd0d0;
 }
 
 .switches-actions.hidden {
@@ -1006,7 +1048,7 @@ input {
   }
 
   .switches-list {
-    max-height: calc(28vh - 79px);
+    max-height: calc(28vh - 115px);
   }
 
   .switches-actions.hidden + .switches-list {

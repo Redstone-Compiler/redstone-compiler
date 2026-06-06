@@ -113,6 +113,11 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
           <div id="switches-actions" class="switches-actions hidden">
             <button id="switches-all-on" type="button">All On</button>
             <button id="switches-all-off" type="button">All Off</button>
+            <label id="trace-simulation-toggle" class="trace-simulation-toggle active" title="Collect trace and waveform data while switches simulate">
+              <input id="trace-simulation-enabled" type="checkbox" checked />
+              <span>Trace</span>
+              <strong id="trace-simulation-state">On</strong>
+            </label>
           </div>
           <div id="switches-list" class="switches-list empty">Open an NBT file to control switches.</div>
         </details>
@@ -280,6 +285,9 @@ const switchesAllOnButton = document.querySelector<HTMLButtonElement>('#switches
 const switchesAllOffButton = document.querySelector<HTMLButtonElement>('#switches-all-off')!;
 const switchesList = document.querySelector<HTMLElement>('#switches-list')!;
 const switchesCount = document.querySelector<HTMLElement>('#switches-count')!;
+const traceSimulationToggle = document.querySelector<HTMLLabelElement>('#trace-simulation-toggle')!;
+const traceSimulationEnabledInput = document.querySelector<HTMLInputElement>('#trace-simulation-enabled')!;
+const traceSimulationState = document.querySelector<HTMLElement>('#trace-simulation-state')!;
 const openGraphsButton = document.querySelector<HTMLButtonElement>('#open-graphs')!;
 const closeGraphsButton = document.querySelector<HTMLButtonElement>('#close-graphs')!;
 const graphDialog = document.querySelector<HTMLDialogElement>('#graph-dialog')!;
@@ -335,6 +343,7 @@ let historyWaveform: Waveform = emptyWaveform;
 let historyTraceCycles: number[] = [];
 let traceCycleDisplayOffset = 0;
 let traceShowActualCycles = false;
+let traceSimulationEnabled = true;
 let currentSnapshots: SnapshotInfo[] = [];
 let currentWaveform: Waveform = emptyWaveform;
 let selectedWaveformSignal: WaveformSignal | undefined;
@@ -389,6 +398,12 @@ switchesAllOnButton.addEventListener('click', () => {
 
 switchesAllOffButton.addEventListener('click', () => {
   void setAllSwitches(false).catch(error => {
+    renderSimulationError(error);
+  });
+});
+
+traceSimulationEnabledInput.addEventListener('change', () => {
+  void setTraceSimulationEnabled(traceSimulationEnabledInput.checked).catch(error => {
     renderSimulationError(error);
   });
 });
@@ -1237,14 +1252,14 @@ async function toggleSelectedSwitch(): Promise<void> {
 async function toggleSwitchBlock(block: StructureBlock): Promise<void> {
   if (!currentNbtBytes) return;
 
-  simulation ??= await NbtSimulation.create(currentNbtBytes);
+  const activeSimulation = await ensureSimulation();
 
   const selectedPos = block.pos;
   const baseRoot = currentRoot;
-  const nextRoot = simulation.toggleSwitch(block);
+  const nextRoot = activeSimulation.toggleSwitch(block);
   if (!nextRoot) return;
 
-  await applySimulatedRoot(simulation, nextRoot, baseRoot, selectedPos);
+  await applySimulatedRoot(activeSimulation, nextRoot, baseRoot, selectedPos);
 }
 
 async function setAllSwitches(isOn: boolean): Promise<void> {
@@ -1254,19 +1269,40 @@ async function setAllSwitches(isOn: boolean): Promise<void> {
   const switches = structure?.blocks.filter(block => block.palette.name === 'minecraft:lever') ?? [];
   if (switches.length === 0) return;
 
-  simulation ??= await NbtSimulation.create(currentNbtBytes);
+  const activeSimulation = await ensureSimulation();
 
   const selectedPos = selectedBlock?.pos;
   const baseRoot = currentRoot;
   let nextRoot: unknown | undefined;
 
   for (const block of switches) {
-    nextRoot = simulation.setSwitch(block, isOn) ?? nextRoot;
+    nextRoot = activeSimulation.setSwitch(block, isOn) ?? nextRoot;
   }
 
   if (!nextRoot) return;
 
-  await applySimulatedRoot(simulation, nextRoot, baseRoot, selectedPos);
+  await applySimulatedRoot(activeSimulation, nextRoot, baseRoot, selectedPos);
+}
+
+async function ensureSimulation(): Promise<NbtSimulation> {
+  if (!currentNbtBytes) throw new Error('Open an NBT file before simulating switches.');
+
+  simulation ??= await NbtSimulation.create(currentNbtBytes, traceSimulationEnabled);
+  simulation.setTraceEnabled(traceSimulationEnabled);
+  return simulation;
+}
+
+async function setTraceSimulationEnabled(enabled: boolean): Promise<void> {
+  traceSimulationEnabled = enabled;
+  traceSimulationEnabledInput.checked = enabled;
+  traceSimulationToggle.classList.toggle('active', enabled);
+  traceSimulationState.textContent = enabled ? 'On' : 'Off';
+  simulation?.setTraceEnabled(enabled);
+
+  selectedWaveformSignal = undefined;
+  renderTrace([], [], emptyWaveform, undefined);
+  await restoreCurrentStructurePreview();
+  viewer.setTraceHighlights([]);
 }
 
 async function applySimulatedRoot(
@@ -1284,14 +1320,18 @@ async function applySimulatedRoot(
   viewer.setSelectedBlock(nextSelectedBlock);
   renderSelection(nextSelectedBlock);
   renderSwitches(structure);
-  renderTrace(activeSimulation.trace(), activeSimulation.snapshots(), activeSimulation.waveform(), baseRoot, {
-    animateTo: 'last',
-    history: {
-      trace: activeSimulation.historyTrace(),
-      snapshots: activeSimulation.historySnapshots(),
-      waveform: activeSimulation.historyWaveform(),
-    },
-  });
+  if (traceSimulationEnabled) {
+    renderTrace(activeSimulation.trace(), activeSimulation.snapshots(), activeSimulation.waveform(), baseRoot, {
+      animateTo: 'last',
+      history: {
+        trace: activeSimulation.historyTrace(),
+        snapshots: activeSimulation.historySnapshots(),
+        waveform: activeSimulation.historyWaveform(),
+      },
+    });
+  } else {
+    renderTrace([], [], emptyWaveform, undefined);
+  }
 }
 
 dropZone.addEventListener('dragover', event => {
@@ -1751,13 +1791,13 @@ function updateTraceCycleControls(selectedIndex: number): number {
 
 function updateTraceCycleModeControl(): void {
   traceShowActualCyclesInput.checked = traceShowActualCycles;
-  traceShowActualCyclesInput.disabled = traceCycles.length === 0 && historyTraceCycles.length === 0;
+  traceShowActualCyclesInput.disabled = !traceSimulationEnabled || (traceCycles.length === 0 && historyTraceCycles.length === 0);
 }
 
 function updateWaveformFilterControl(): void {
   const activeWaveform = getActiveWaveform();
   waveformChangedOnlyInput.checked = waveformChangedOnly;
-  waveformChangedOnlyInput.disabled = activeWaveform.signals.length === 0;
+  waveformChangedOnlyInput.disabled = !traceSimulationEnabled || activeWaveform.signals.length === 0;
 }
 
 function getCurrentWindowStartCycle(): number | undefined {
@@ -1826,10 +1866,15 @@ function renderTrace(
   historyTraceCycles = collectTraceCycles(historyTrace, historyWaveform);
   traceCycleDisplayOffset = traceCycles.length === 0 ? 0 : Math.max(0, traceCycles[0] - 1);
   traceCount.textContent =
-    trace.length === 0 && waveform.signals.length === 0
+    !traceSimulationEnabled
+      ? 'Trace off'
+      : trace.length === 0 && waveform.signals.length === 0
       ? 'No events'
       : `${trace.length} events / ${waveform.signals.length} signals`;
-  updateTraceExpandAvailability(trace.length > 0 || waveform.signals.length > 0 || historyTrace.length > 0 || historyWaveform.signals.length > 0);
+  updateTraceExpandAvailability(
+    traceSimulationEnabled &&
+      (trace.length > 0 || waveform.signals.length > 0 || historyTrace.length > 0 || historyWaveform.signals.length > 0),
+  );
   const axisCycles = getTraceAxisCycles();
   const selectedIndex = updateTraceCycleControls(
     options.animateTo === 'last'
@@ -1841,10 +1886,10 @@ function renderTrace(
   updateWaveformFilterControl();
   renderWaveformLabels();
   void renderTraceCycle(selectedIndex);
-  if (options.open || trace.length > 0) {
+  if (traceSimulationEnabled && (options.open || trace.length > 0)) {
     tracePanel.open = true;
   }
-  if (options.animateTo === 'last') {
+  if (traceSimulationEnabled && options.animateTo === 'last') {
     startTraceAnimation(getTraceAnimationTargetIndex(axisCycles));
   }
 }
@@ -1881,7 +1926,7 @@ async function renderTraceCycle(index: number): Promise<void> {
   const axisCycles = getTraceAxisCycles();
   if (index < 0 || axisCycles.length === 0) {
     traceCycleLabel.textContent = 'cycle -';
-    traceOutput.textContent = 'Run a simulation to inspect events.';
+    traceOutput.textContent = traceSimulationEnabled ? 'Run a simulation to inspect events.' : 'Trace simulation is off.';
     renderWaveform(-1);
     viewer.setTraceHighlights([]);
     await restoreCurrentStructurePreview();

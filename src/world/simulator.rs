@@ -554,6 +554,13 @@ impl Simulator {
         self.snapshots.clear();
     }
 
+    pub fn set_trace_limit(&mut self, trace_limit: usize) {
+        self.trace_limit = trace_limit;
+        if trace_limit == 0 {
+            self.clear_trace();
+        }
+    }
+
     pub fn run(&mut self) -> eyre::Result<usize> {
         self.run_inner(SimulationLimits::cycles(None))
     }
@@ -2225,6 +2232,44 @@ mod test {
         assert_eq!(waveform.signals[2].values, vec![0, 1]);
         assert_eq!(waveform.signals[3].position, [3, 0, 0]);
         assert_eq!(waveform.signals[3].values, vec![1, 0]);
+    }
+
+    #[test]
+    fn unittest_simulator_can_reenable_trace_after_running_without_trace() -> eyre::Result<()> {
+        let default_redstone = Block {
+            kind: BlockKind::Redstone {
+                on_count: 0,
+                state: 0,
+                strength: 0,
+            },
+            direction: Direction::None,
+        };
+        let world = World {
+            size: DimSize(3, 1, 1),
+            blocks: vec![
+                (
+                    Position(0, 0, 0),
+                    Block {
+                        kind: BlockKind::Switch { is_on: false },
+                        direction: Direction::Top,
+                    },
+                ),
+                (Position(1, 0, 0), default_redstone),
+            ],
+        };
+        let mut sim = Simulator::from_with_limits_and_trace(&world, 16, 100, 0)
+            .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
+
+        sim.change_state_with_limits(vec![(Position(0, 0, 0), true)], 16, 100)?;
+        assert!(sim.trace().is_empty());
+        assert!(sim.snapshots().is_empty());
+
+        sim.set_trace_limit(50_000);
+        sim.change_state_with_limits(vec![(Position(0, 0, 0), false)], 16, 100)?;
+
+        assert!(!sim.trace().is_empty());
+        assert!(!sim.snapshots().is_empty());
+        Ok(())
     }
 
     fn assert_matches_fresh_recompute(
