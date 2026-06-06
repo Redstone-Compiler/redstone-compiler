@@ -1,4 +1,5 @@
-use std::collections::{HashSet, VecDeque};
+use std::cmp::Ordering;
+use std::collections::{BinaryHeap, HashSet, VecDeque};
 
 use eyre::ContextCompat;
 
@@ -20,9 +21,29 @@ use crate::world::World3D;
 
 const GLOBAL_ROUTE_PADDING: usize = 8;
 const GLOBAL_ROUTE_MAX_STEPS: usize = 128;
+const GLOBAL_ROUTE_ASTAR_MAX_EXPANSIONS: usize = 2_000;
 const MAX_REDSTONE_STRENGTH: usize = 15;
 const FANOUT_ROUTE_SOURCE_LIMIT: usize = 8;
 const FANOUT_ROUTE_TERMINAL_LIMIT: usize = 24;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GlobalRoutingStrategy {
+    BreadthFirst,
+    AStar,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GlobalRoutingConfig {
+    pub strategy: GlobalRoutingStrategy,
+}
+
+impl Default for GlobalRoutingConfig {
+    fn default() -> Self {
+        Self {
+            strategy: GlobalRoutingStrategy::BreadthFirst,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ResolvedPortTarget {
@@ -46,6 +67,7 @@ pub fn route_module_variables(
     module: &GraphModule,
     candidates: &[LayoutCandidate],
     placed_modules: &[PlacedModule],
+    config: &GlobalRoutingConfig,
     progress: &GlobalPnrProgress,
 ) -> eyre::Result<Vec<RoutedNet>> {
     let mut route_world = placed_candidate_world(candidates, placed_modules)?;
@@ -93,15 +115,14 @@ pub fn route_module_variables(
                 ),
             );
             let (route, next_world) =
-                route_to_target_from_network(&route_world, &route_sources, sink).map_err(
-                    |failure| {
-                        eyre::eyre!(
-                            "failed to route top-level input {} -> {:?}: {failure:?}",
-                            port.name,
-                            sink.position
-                        )
-                    },
-                )?;
+                route_to_target_from_network(&route_world, &route_sources, sink, config.strategy)
+                    .map_err(|failure| {
+                    eyre::eyre!(
+                        "failed to route top-level input {} -> {:?}: {failure:?}",
+                        port.name,
+                        sink.position
+                    )
+                })?;
             for position in route_terminal_positions(&next_world, &route.blocks, sink.position) {
                 if route_source_set.insert(position) {
                     route_sources.push(position);
@@ -159,6 +180,7 @@ pub fn route_module_variables(
                 logical_source,
                 source,
                 sink,
+                config.strategy,
             )
             .map_err(|failure| {
                 eyre::eyre!(
@@ -184,37 +206,40 @@ fn route_source_to_target_position(
     logical_source: Position,
     route_source: Position,
     sink: ResolvedPortTarget,
+    strategy: GlobalRoutingStrategy,
 ) -> Result<(RoutedNet, World3D), RouteFailure> {
     if source_port.direction == PhysicalPortDirection::Output
         && source_port.route_position.is_none()
     {
-        return route_isolated_output_to_target_position(world, logical_source, sink);
+        return route_isolated_output_to_target_position(world, logical_source, sink, strategy);
     }
     if source_port.direction == PhysicalPortDirection::Input {
         let mut sources = redstone_network_positions(world, &[logical_source]);
         sources.push(route_source);
-        return route_to_target_from_network(world, &sources, sink);
+        return route_to_target_from_network(world, &sources, sink, strategy);
     }
 
-    route_to_target_position(world, route_source, sink)
+    route_to_target_position(world, route_source, sink, strategy)
 }
 
 fn route_to_target_position(
     world: &World3D,
     source: Position,
     sink: ResolvedPortTarget,
+    strategy: GlobalRoutingStrategy,
 ) -> Result<(RoutedNet, World3D), RouteFailure> {
     if sink.isolate_input {
-        return route_to_redstone_input_through_repeater(world, source, sink.position);
+        return route_to_redstone_input_through_repeater(world, source, sink.position, strategy);
     }
 
-    route_point_to_point(world, source, sink.position)
+    route_point_to_point_with_strategy(world, source, sink.position, strategy)
 }
 
 fn route_to_target_from_network(
     world: &World3D,
     sources: &[Position],
     sink: ResolvedPortTarget,
+    strategy: GlobalRoutingStrategy,
 ) -> Result<(RoutedNet, World3D), RouteFailure> {
     let mut sources = sources.to_vec();
     sources.sort_by_key(|source| source.manhattan_distance(&sink.position));
@@ -224,7 +249,7 @@ fn route_to_target_from_network(
         if !world.size.bound_on(source) || !is_route_terminal(world, source) {
             continue;
         }
-        if let Ok(route) = route_to_target_position(world, source, sink) {
+        if let Ok(route) = route_to_target_position(world, source, sink, strategy) {
             return Ok(route);
         }
     }
@@ -285,13 +310,14 @@ fn route_isolated_output_to_target_position(
     world: &World3D,
     source: Position,
     sink: ResolvedPortTarget,
+    strategy: GlobalRoutingStrategy,
 ) -> Result<(RoutedNet, World3D), RouteFailure> {
     if sink.isolate_input {
         for (adapter_world, driver_position) in
             redstone_input_repeater_adapters(world, sink.position)
         {
             let Ok((_, routed_world)) =
-                route_isolated_output_to_point(&adapter_world, source, driver_position)
+                route_isolated_output_to_point(&adapter_world, source, driver_position, strategy)
             else {
                 continue;
             };
@@ -306,16 +332,18 @@ fn route_isolated_output_to_target_position(
         }
     }
 
-    route_isolated_output_to_point(world, source, sink.position)
+    route_isolated_output_to_point(world, source, sink.position, strategy)
 }
 
 fn route_to_redstone_input_through_repeater(
     world: &World3D,
     source: Position,
     sink: Position,
+    strategy: GlobalRoutingStrategy,
 ) -> Result<(RoutedNet, World3D), RouteFailure> {
     for (adapter_world, driver_position) in redstone_input_repeater_adapters(world, sink) {
-        let Ok((_, routed_world)) = route_point_to_point(&adapter_world, source, driver_position)
+        let Ok((_, routed_world)) =
+            route_point_to_point_with_strategy(&adapter_world, source, driver_position, strategy)
         else {
             continue;
         };
@@ -657,22 +685,46 @@ pub fn route_point_to_point(
     source: Position,
     sink: Position,
 ) -> Result<(RoutedNet, World3D), RouteFailure> {
+    route_point_to_point_with_strategy(world, source, sink, GlobalRoutingStrategy::BreadthFirst)
+}
+
+pub fn route_point_to_point_with_strategy(
+    world: &World3D,
+    source: Position,
+    sink: Position,
+    strategy: GlobalRoutingStrategy,
+) -> Result<(RoutedNet, World3D), RouteFailure> {
     let goal = RouteGoal::for_sink(world, sink);
-    route_point_to_point_with_bounds(world, source, sink, goal, BoundSearchMode::Propagation)
-        .or_else(|_| {
-            route_point_to_point_with_bounds(world, source, sink, goal, BoundSearchMode::Nearby)
-        })
+    route_point_to_point_with_bounds(
+        world,
+        source,
+        sink,
+        goal,
+        BoundSearchMode::Propagation,
+        strategy,
+    )
+    .or_else(|_| {
+        route_point_to_point_with_bounds(
+            world,
+            source,
+            sink,
+            goal,
+            BoundSearchMode::Nearby,
+            strategy,
+        )
+    })
 }
 
 fn route_isolated_output_to_point(
     world: &World3D,
     source: Position,
     sink: Position,
+    strategy: GlobalRoutingStrategy,
 ) -> Result<(RoutedNet, World3D), RouteFailure> {
     let initial_states = isolated_output_initial_states(world, source, sink);
     for initial in initial_states {
         let Ok((route, routed_world)) =
-            route_point_to_point_from_initial_state(world, source, sink, initial)
+            route_point_to_point_from_initial_state(world, source, sink, initial, strategy)
         else {
             continue;
         };
@@ -688,7 +740,7 @@ fn route_isolated_output_to_point(
             pending_bounds: None,
         };
         let Ok((_, routed_world)) =
-            route_point_to_point_from_initial_state(world, source, sink, initial)
+            route_point_to_point_from_initial_state(world, source, sink, initial, strategy)
         else {
             continue;
         };
@@ -838,8 +890,9 @@ fn route_point_to_point_with_bounds(
     sink: Position,
     goal: RouteGoal,
     mode: BoundSearchMode,
+    strategy: GlobalRoutingStrategy,
 ) -> Result<(RoutedNet, World3D), RouteFailure> {
-    route_point_to_point_with_bounds_and_min_z(world, source, sink, goal, mode, None)
+    route_point_to_point_with_bounds_and_min_z(world, source, sink, goal, mode, None, strategy)
 }
 
 fn route_point_to_point_with_bounds_and_min_z(
@@ -849,6 +902,7 @@ fn route_point_to_point_with_bounds_and_min_z(
     goal: RouteGoal,
     mode: BoundSearchMode,
     min_z: Option<usize>,
+    strategy: GlobalRoutingStrategy,
 ) -> Result<(RoutedNet, World3D), RouteFailure> {
     let initial_strength = initial_signal_strength(world, source);
     route_point_to_point_with_initial_queue(
@@ -858,13 +912,14 @@ fn route_point_to_point_with_bounds_and_min_z(
         goal,
         mode,
         min_z,
-        VecDeque::from([RouteSearchState {
+        vec![RouteSearchState {
             world: world.clone(),
             terminal: source,
             route: vec![source],
             signal_strength: initial_strength,
             pending_bounds: None,
-        }]),
+        }],
+        strategy,
     )
 }
 
@@ -873,6 +928,7 @@ fn route_point_to_point_from_initial_state(
     source: Position,
     sink: Position,
     initial_state: RouteSearchState,
+    strategy: GlobalRoutingStrategy,
 ) -> Result<(RoutedNet, World3D), RouteFailure> {
     let goal = RouteGoal::for_sink(world, sink);
     route_point_to_point_with_initial_queue(
@@ -882,7 +938,8 @@ fn route_point_to_point_from_initial_state(
         goal,
         BoundSearchMode::Propagation,
         None,
-        VecDeque::from([initial_state.clone()]),
+        vec![initial_state.clone()],
+        strategy,
     )
     .or_else(|_| {
         route_point_to_point_with_initial_queue(
@@ -892,7 +949,8 @@ fn route_point_to_point_from_initial_state(
             goal,
             BoundSearchMode::Nearby,
             None,
-            VecDeque::from([initial_state]),
+            vec![initial_state],
+            strategy,
         )
     })
 }
@@ -904,18 +962,22 @@ fn route_point_to_point_with_initial_queue(
     goal: RouteGoal,
     mode: BoundSearchMode,
     min_z: Option<usize>,
-    mut queue: VecDeque<RouteSearchState>,
+    initial_states: Vec<RouteSearchState>,
+    strategy: GlobalRoutingStrategy,
 ) -> Result<(RoutedNet, World3D), RouteFailure> {
-    let initial_visited = queue.iter().map(|state| {
-        (
-            state.terminal,
-            state.route.len().saturating_sub(1),
-            state.signal_strength,
-        )
-    });
+    let initial_visited = initial_states
+        .iter()
+        .map(|state| route_visited_key(strategy, state));
     let mut visited = initial_visited.collect::<HashSet<_>>();
+    let mut queue = RouteSearchQueue::new(strategy, sink, initial_states);
+    let mut expansions = 0usize;
 
-    while let Some(state) = queue.pop_front() {
+    while let Some(state) = queue.pop() {
+        expansions += 1;
+        if route_expansion_limit(strategy).is_some_and(|limit| expansions > limit) {
+            break;
+        }
+
         if !is_route_terminal(&state.world, state.terminal) {
             continue;
         }
@@ -971,12 +1033,12 @@ fn route_point_to_point_with_initial_queue(
                         let next_strength = state.signal_strength - 1;
                         if visited.insert((
                             redstone_node.position,
-                            state.route.len(),
+                            route_visited_depth(strategy, state.route.len()),
                             next_strength,
                         )) {
                             let mut next_route = state.route.clone();
                             next_route.push(redstone_node.position);
-                            queue.push_back(RouteSearchState {
+                            queue.push(RouteSearchState {
                                 world: next_world,
                                 terminal: redstone_node.position,
                                 route: next_route,
@@ -1005,12 +1067,12 @@ fn route_point_to_point_with_initial_queue(
                         PlaceRepeaterResult::Placed(next_world, repeater_node) => {
                             if visited.insert((
                                 repeater_node.position,
-                                state.route.len(),
+                                route_visited_depth(strategy, state.route.len()),
                                 MAX_REDSTONE_STRENGTH,
                             )) {
                                 let mut next_route = state.route.clone();
                                 next_route.push(repeater_node.position);
-                                queue.push_back(RouteSearchState {
+                                queue.push(RouteSearchState {
                                     world: next_world,
                                     terminal: repeater_node.position,
                                     route: next_route,
@@ -1029,6 +1091,13 @@ fn route_point_to_point_with_initial_queue(
     Err(RouteFailure::Unreachable { source, sink })
 }
 
+fn route_expansion_limit(strategy: GlobalRoutingStrategy) -> Option<usize> {
+    match strategy {
+        GlobalRoutingStrategy::BreadthFirst => None,
+        GlobalRoutingStrategy::AStar => Some(GLOBAL_ROUTE_ASTAR_MAX_EXPANSIONS),
+    }
+}
+
 #[derive(Clone)]
 struct RouteSearchState {
     world: World3D,
@@ -1036,6 +1105,135 @@ struct RouteSearchState {
     route: Vec<Position>,
     signal_strength: usize,
     pending_bounds: Option<Vec<PlaceBound>>,
+}
+
+fn route_visited_key(
+    strategy: GlobalRoutingStrategy,
+    state: &RouteSearchState,
+) -> (Position, usize, usize) {
+    (
+        state.terminal,
+        route_visited_depth(strategy, state.route.len().saturating_sub(1)),
+        state.signal_strength,
+    )
+}
+
+fn route_visited_depth(strategy: GlobalRoutingStrategy, route_depth: usize) -> usize {
+    match strategy {
+        GlobalRoutingStrategy::BreadthFirst => route_depth,
+        GlobalRoutingStrategy::AStar => 0,
+    }
+}
+
+enum RouteSearchQueue {
+    BreadthFirst(VecDeque<RouteSearchState>),
+    AStar {
+        heap: BinaryHeap<AStarQueueEntry>,
+        next_sequence: usize,
+        sink: Position,
+    },
+}
+
+impl RouteSearchQueue {
+    fn new(
+        strategy: GlobalRoutingStrategy,
+        sink: Position,
+        initial_states: Vec<RouteSearchState>,
+    ) -> Self {
+        match strategy {
+            GlobalRoutingStrategy::BreadthFirst => Self::BreadthFirst(initial_states.into()),
+            GlobalRoutingStrategy::AStar => {
+                let mut queue = Self::AStar {
+                    heap: BinaryHeap::new(),
+                    next_sequence: 0,
+                    sink,
+                };
+                for state in initial_states {
+                    queue.push(state);
+                }
+                queue
+            }
+        }
+    }
+
+    fn pop(&mut self) -> Option<RouteSearchState> {
+        match self {
+            Self::BreadthFirst(queue) => queue.pop_front(),
+            Self::AStar { heap, .. } => heap.pop().map(|entry| entry.state),
+        }
+    }
+
+    fn push(&mut self, state: RouteSearchState) {
+        match self {
+            Self::BreadthFirst(queue) => queue.push_back(state),
+            Self::AStar {
+                heap,
+                next_sequence,
+                sink,
+            } => {
+                heap.push(AStarQueueEntry::new(state, *sink, *next_sequence));
+                *next_sequence += 1;
+            }
+        }
+    }
+}
+
+struct AStarQueueEntry {
+    priority: AStarPriority,
+    state: RouteSearchState,
+}
+
+impl AStarQueueEntry {
+    fn new(state: RouteSearchState, sink: Position, sequence: usize) -> Self {
+        Self {
+            priority: AStarPriority::new(&state, sink, sequence),
+            state,
+        }
+    }
+}
+
+impl Ord for AStarQueueEntry {
+    fn cmp(&self, other: &Self) -> Ordering {
+        other.priority.cmp(&self.priority)
+    }
+}
+
+impl PartialOrd for AStarQueueEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for AStarQueueEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.priority == other.priority
+    }
+}
+
+impl Eq for AStarQueueEntry {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct AStarPriority {
+    estimated_total_cost: usize,
+    route_len: usize,
+    manhattan_to_sink: usize,
+    low_strength_penalty: usize,
+    sequence: usize,
+}
+
+impl AStarPriority {
+    fn new(state: &RouteSearchState, sink: Position, sequence: usize) -> Self {
+        let route_len = state.route.len().saturating_sub(1);
+        let manhattan_to_sink = state.terminal.manhattan_distance(&sink);
+        let low_strength_penalty = usize::from(state.signal_strength <= 2) * 4;
+        Self {
+            estimated_total_cost: route_len + manhattan_to_sink + low_strength_penalty,
+            route_len,
+            manhattan_to_sink,
+            low_strength_penalty,
+            sequence,
+        }
+    }
 }
 
 fn initial_signal_strength(world: &World3D, source: Position) -> usize {
@@ -1345,6 +1543,58 @@ mod tests {
     }
 
     #[test]
+    fn route_point_to_point_astar_handles_long_unpowered_redstone_route() {
+        let source = Position(0, 1, 1);
+        let sink = Position(44, 1, 1);
+        let world = route_test_world_with_size(source, sink, DimSize(48, 4, 3));
+        let (route, _) =
+            route_point_to_point_with_strategy(&world, source, sink, GlobalRoutingStrategy::AStar)
+                .unwrap();
+
+        assert!(
+            route
+                .blocks
+                .iter()
+                .filter(|(_, block)| block.kind.is_repeater())
+                .count()
+                >= 2
+        );
+    }
+
+    #[test]
+    fn route_point_to_point_astar_handles_counter_carry_like_coordinates() {
+        let source = Position(26, 10, 3);
+        let sink = Position(70, 4, 3);
+        let world = route_test_world_with_size(source, sink, DimSize(76, 16, 6));
+        let (route, _) =
+            route_point_to_point_with_strategy(&world, source, sink, GlobalRoutingStrategy::AStar)
+                .unwrap();
+
+        assert!(route
+            .blocks
+            .iter()
+            .any(|(_, block)| block.kind.is_repeater()));
+    }
+
+    #[test]
+    fn route_to_redstone_input_handles_counter_fanout_like_coordinates() {
+        let source = Position(25, 10, 3);
+        let sink = Position(41, 8, 3);
+        let world = route_test_world_with_size(source, sink, DimSize(48, 16, 6));
+
+        route_to_target_position(
+            &world,
+            source,
+            ResolvedPortTarget {
+                position: sink,
+                isolate_input: true,
+            },
+            GlobalRoutingStrategy::AStar,
+        )
+        .unwrap();
+    }
+
+    #[test]
     fn route_point_to_point_long_route_powers_sink_through_repeater() -> eyre::Result<()> {
         let source = Position(0, 1, 1);
         let sink = Position(22, 1, 1);
@@ -1376,6 +1626,7 @@ mod tests {
                 position: sink,
                 isolate_input: true,
             },
+            GlobalRoutingStrategy::BreadthFirst,
         )
         .unwrap();
 
@@ -1464,7 +1715,13 @@ mod tests {
         );
 
         let progress = silent_progress();
-        let routes = route_module_variables(&module, &candidates, &placed, &progress)?;
+        let routes = route_module_variables(
+            &module,
+            &candidates,
+            &placed,
+            &GlobalRoutingConfig::default(),
+            &progress,
+        )?;
 
         assert_eq!(routes.len(), 1);
         assert!(!routes[0].blocks.is_empty());
@@ -1490,9 +1747,30 @@ mod tests {
         let placed = place_candidates_on_shelves(&candidates, &GlobalPlacementConfig::default());
 
         let progress = silent_progress();
-        let routes = route_module_variables(&module, &candidates, &placed, &progress)?;
+        let routes = route_module_variables(
+            &module,
+            &candidates,
+            &placed,
+            &GlobalRoutingConfig::default(),
+            &progress,
+        )?;
 
         assert!(routes.is_empty());
         Ok(())
+    }
+
+    #[test]
+    fn route_point_to_point_supports_astar_strategy() {
+        let source = Position(0, 1, 1);
+        let sink = Position(22, 1, 1);
+        let world = route_test_world_with_size(source, sink, DimSize(26, 4, 3));
+        let (route, _) =
+            route_point_to_point_with_strategy(&world, source, sink, GlobalRoutingStrategy::AStar)
+                .unwrap();
+
+        assert!(route
+            .blocks
+            .iter()
+            .any(|(_, block)| block.kind.is_repeater()));
     }
 }

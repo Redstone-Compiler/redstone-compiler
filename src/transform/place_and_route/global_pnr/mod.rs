@@ -19,7 +19,7 @@ use crate::transform::place_and_route::global_pnr::placer::{
 };
 use crate::transform::place_and_route::global_pnr::progress::GlobalPnrProgress;
 use crate::transform::place_and_route::global_pnr::router::{
-    collect_module_output_endpoints, route_module_variables,
+    collect_module_output_endpoints, route_module_variables, GlobalRoutingConfig,
 };
 use crate::world::World3D;
 
@@ -27,6 +27,7 @@ use crate::world::World3D;
 pub struct GlobalPnrConfig {
     pub candidate: UnitCandidateConfig,
     pub placement: GlobalPlacementConfig,
+    pub routing: GlobalRoutingConfig,
     pub show_progress: bool,
 }
 
@@ -35,6 +36,7 @@ impl Default for GlobalPnrConfig {
         Self {
             candidate: UnitCandidateConfig::default(),
             placement: GlobalPlacementConfig::default(),
+            routing: GlobalRoutingConfig::default(),
             show_progress: true,
         }
     }
@@ -79,7 +81,8 @@ pub fn place_and_route_module_with_outputs(
     let placed = place_candidates_on_shelves(&candidates, &config.placement);
 
     progress.stage(3, 5, "route module ports and variables");
-    let routed_nets = route_module_variables(module, &candidates, &placed, &progress)?;
+    let routed_nets =
+        route_module_variables(module, &candidates, &placed, &config.routing, &progress)?;
 
     progress.stage(4, 5, "assemble world and collect outputs");
     let outputs = collect_module_output_endpoints(module, &candidates, &placed);
