@@ -15,11 +15,11 @@ use crate::transform::place_and_route::global_pnr::candidate::{
 };
 use crate::transform::place_and_route::global_pnr::ir::LayoutCandidate;
 use crate::transform::place_and_route::global_pnr::placer::{
-    place_candidates_on_shelves, GlobalPlacementConfig,
+    place_candidates_on_shelves, placement_candidates, GlobalPlacementConfig, PlacedModule,
 };
 use crate::transform::place_and_route::global_pnr::progress::GlobalPnrProgress;
 use crate::transform::place_and_route::global_pnr::router::{
-    collect_module_output_endpoints, route_module_variables, GlobalRoutingConfig,
+    collect_module_output_endpoints, route_module_variables, GlobalRoutingConfig, RoutedNet,
 };
 use crate::world::World3D;
 
@@ -78,11 +78,20 @@ pub fn place_and_route_module_with_outputs(
     let candidates = generate_child_candidates(context, module, config, &progress)?;
 
     progress.stage(2, 5, "place child candidates");
-    let placed = place_candidates_on_shelves(&candidates, &config.placement);
+    let placement_attempts = placement_candidates(module, &candidates, &config.placement);
+    progress.detail(format!(
+        "generated {} placement attempt(s)",
+        placement_attempts.len()
+    ));
 
     progress.stage(3, 5, "route module ports and variables");
-    let routed_nets =
-        route_module_variables(module, &candidates, &placed, &config.routing, &progress)?;
+    let (placed, routed_nets) = route_first_successful_placement(
+        module,
+        &candidates,
+        placement_attempts,
+        config,
+        &progress,
+    )?;
 
     progress.stage(4, 5, "assemble world and collect outputs");
     let outputs = collect_module_output_endpoints(module, &candidates, &placed);
@@ -101,6 +110,40 @@ pub fn place_and_route_module_with_outputs(
     ));
 
     Ok(placed_world)
+}
+
+fn route_first_successful_placement(
+    module: &GraphModule,
+    candidates: &[LayoutCandidate],
+    placement_attempts: Vec<Vec<PlacedModule>>,
+    config: &GlobalPnrConfig,
+    progress: &GlobalPnrProgress,
+) -> eyre::Result<(Vec<PlacedModule>, Vec<RoutedNet>)> {
+    let mut last_error = None;
+    let total_attempts = placement_attempts.len();
+
+    for (attempt_index, placed) in placement_attempts.into_iter().enumerate() {
+        progress.item(attempt_index + 1, total_attempts, "route placement attempt");
+        match route_module_variables(module, candidates, &placed, &config.routing, progress) {
+            Ok(routed_nets) => {
+                progress.detail(format!(
+                    "selected placement attempt {} with {} route(s)",
+                    attempt_index + 1,
+                    routed_nets.len()
+                ));
+                return Ok((placed, routed_nets));
+            }
+            Err(error) => {
+                progress.detail(format!(
+                    "placement attempt {} failed: {error}",
+                    attempt_index + 1
+                ));
+                last_error = Some(error);
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| eyre::eyre!("no global placement attempts generated")))
 }
 
 fn place_graph_backed_module(
@@ -310,6 +353,7 @@ mod tests {
             placement: GlobalPlacementConfig {
                 spacing: 2,
                 shelf_width: 24,
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -353,6 +397,7 @@ mod tests {
             placement: GlobalPlacementConfig {
                 spacing: 4,
                 shelf_width: 64,
+                ..Default::default()
             },
             ..Default::default()
         };

@@ -40,7 +40,7 @@ pub struct GlobalRoutingConfig {
 impl Default for GlobalRoutingConfig {
     fn default() -> Self {
         Self {
-            strategy: GlobalRoutingStrategy::BreadthFirst,
+            strategy: GlobalRoutingStrategy::AStar,
         }
     }
 }
@@ -80,7 +80,7 @@ pub fn route_module_variables(
         .collect::<Vec<_>>();
 
     for (port_index, port) in top_inputs.iter().enumerate() {
-        let sinks = resolve_port_target_positions(candidates, placed_modules, &port.target);
+        let mut sinks = resolve_port_target_positions(candidates, placed_modules, &port.target);
         if sinks.is_empty() {
             progress.item(
                 port_index + 1,
@@ -93,6 +93,7 @@ pub fn route_module_variables(
         let source = external_switch_position(&route_world, top_input_index, &sinks)
             .with_context(|| format!("failed to place top-level input switch `{}`", port.name))?;
         top_input_index += 1;
+        sinks.sort_by_key(|sink| std::cmp::Reverse(source.manhattan_distance(&sink.position)));
         let switch = input_switch_block();
         route_world[source] = switch;
         routes.push(RoutedNet {
@@ -488,11 +489,9 @@ fn external_switch_position(
     index: usize,
     sinks: &[ResolvedPortTarget],
 ) -> Option<Position> {
-    for sink in sinks {
-        for position in external_switch_candidates_near_sink(sink.position) {
-            if world.size.bound_on(position) && world[position].kind.is_air() {
-                return Some(position);
-            }
+    for position in external_switch_candidates_for_sinks(sinks) {
+        if world.size.bound_on(position) && world[position].kind.is_air() {
+            return Some(position);
         }
     }
 
@@ -506,9 +505,61 @@ fn external_switch_position(
     (world.size.bound_on(position) && world[position].kind.is_air()).then_some(position)
 }
 
+fn external_switch_candidates_for_sinks(sinks: &[ResolvedPortTarget]) -> Vec<Position> {
+    let mut candidates = sinks
+        .iter()
+        .flat_map(|sink| external_switch_candidates_near_sink(sink.position))
+        .collect::<Vec<_>>();
+
+    if let Some(center) = sink_center_position(sinks) {
+        candidates.extend(external_switch_candidates_near_sink(center));
+    }
+
+    candidates.sort_by_key(|position| {
+        let max_distance = sinks
+            .iter()
+            .map(|sink| position.manhattan_distance(&sink.position))
+            .max()
+            .unwrap_or(0);
+        let total_distance = sinks
+            .iter()
+            .map(|sink| position.manhattan_distance(&sink.position))
+            .sum::<usize>();
+        let edge_penalty = usize::from(position.0 < 2 || position.1 < 2) * 16;
+        (
+            max_distance + edge_penalty,
+            total_distance + edge_penalty,
+            std::cmp::Reverse(position.0),
+            std::cmp::Reverse(position.1),
+            position.2,
+        )
+    });
+    candidates.dedup();
+    candidates
+}
+
+fn sink_center_position(sinks: &[ResolvedPortTarget]) -> Option<Position> {
+    let first = sinks.first()?;
+    let mut min = first.position;
+    let mut max = first.position;
+    for sink in sinks {
+        min.0 = min.0.min(sink.position.0);
+        min.1 = min.1.min(sink.position.1);
+        min.2 = min.2.min(sink.position.2);
+        max.0 = max.0.max(sink.position.0);
+        max.1 = max.1.max(sink.position.1);
+        max.2 = max.2.max(sink.position.2);
+    }
+    Some(Position(
+        (min.0 + max.0) / 2,
+        (min.1 + max.1) / 2,
+        (min.2 + max.2) / 2,
+    ))
+}
+
 fn external_switch_candidates_near_sink(sink: Position) -> Vec<Position> {
     let mut candidates = Vec::new();
-    for distance in 2..=6 {
+    for distance in 4..=8 {
         candidates.extend([
             Position(sink.0 + distance, sink.1, sink.2),
             Position(sink.0, sink.1 + distance, sink.2),
@@ -1711,6 +1762,7 @@ mod tests {
             &GlobalPlacementConfig {
                 spacing: 3,
                 shelf_width: 16,
+                ..Default::default()
             },
         );
 
