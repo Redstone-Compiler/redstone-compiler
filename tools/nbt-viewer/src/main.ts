@@ -115,7 +115,10 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
             <button id="switches-all-off" type="button">All Off</button>
             <label id="trace-simulation-toggle" class="trace-simulation-toggle active" title="Collect trace and waveform data while switches simulate">
               <input id="trace-simulation-enabled" type="checkbox" checked />
-              <span>Trace</span>
+              <span class="trace-simulation-label">Trace</span>
+              <span class="trace-simulation-track" aria-hidden="true">
+                <span class="trace-simulation-knob"></span>
+              </span>
               <strong id="trace-simulation-state">On</strong>
             </label>
           </div>
