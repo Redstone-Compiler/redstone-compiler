@@ -210,11 +210,6 @@ fn register_design(
     let mut instances = Vec::new();
     let mut vars = Vec::new();
     let mut ports = Vec::new();
-    let clock_inverter_name = format!("{output_name}_clk_inv");
-
-    context.append(not_clock_module(&clock_inverter_name)?);
-    instances.push(clock_inverter_name.clone());
-
     for carry_bit in 2..width {
         let carry_name = carry_module_name(output_name, carry_bit);
         context.append(combinational_output_module(
@@ -231,19 +226,22 @@ fn register_design(
 
     for bit in 0..width {
         let bit_name = bit_signal_name(output_name, bit);
+        let clock_inverter_name = format!("{bit_name}_clk_inv");
         let next_name = format!("{bit_name}_next");
         let master_name = format!("{bit_name}_master");
         let slave_name = format!("{bit_name}_slave");
 
-        context.append(combinational_output_module(
-            &next_name,
-            &next_bit_expr(output_name, bit),
-            "d",
-        )?);
+        context.append(not_clock_module(&clock_inverter_name)?);
+        context.append(next_bit_module(&next_name, output_name, bit)?);
         context.append(d_latch_graph_module(&master_name, "d", "en", "q"));
         context.append(d_latch_graph_module(&slave_name, "d", "en", "q"));
 
-        instances.extend([next_name.clone(), master_name.clone(), slave_name.clone()]);
+        instances.extend([
+            clock_inverter_name.clone(),
+            next_name.clone(),
+            master_name.clone(),
+            slave_name.clone(),
+        ]);
 
         vars.push(module_var((&next_name, "d"), (&master_name, "d")));
         vars.push(module_var((&master_name, "q"), (&slave_name, "d")));
@@ -272,7 +270,7 @@ fn register_design(
         GraphModulePort {
             name: clock_name.to_owned(),
             port_type: GraphModulePortType::InputNet,
-            target: GraphModulePortTarget::Module(clock_inverter_name, "clk".to_owned()),
+            target: target_from_clock_inputs(output_name, width),
         },
     );
 
@@ -286,6 +284,18 @@ fn register_design(
             ports,
         },
     ))
+}
+
+fn target_from_clock_inputs(signal: &str, width: usize) -> GraphModulePortTarget {
+    let targets = (0..width)
+        .map(|bit| {
+            (
+                format!("{}_clk_inv", bit_signal_name(signal, bit)),
+                "clk".to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    target_from_endpoints(Some(&targets))
 }
 
 fn ensure_register_increment_expr(output: RtlSignalRef, data: &RtlExpr) -> eyre::Result<()> {
@@ -309,16 +319,18 @@ fn is_increment_by_one(output: RtlSignalRef, data: &RtlExpr) -> bool {
     signal == output
 }
 
-fn next_bit_expr(signal: &str, bit: usize) -> String {
+fn next_bit_module(name: &str, signal: &str, bit: usize) -> eyre::Result<GraphModule> {
     let bit_name = bit_signal_name(signal, bit);
     if bit == 0 {
-        return format!("~{bit_name}");
-    }
-    if bit == 1 {
-        return format!("{bit_name}^{}", bit_signal_name(signal, 0));
+        return combinational_output_module(name, &format!("~{bit_name}"), "d");
     }
 
-    format!("{bit_name}^{}", carry_signal_name(bit))
+    let rhs = if bit == 1 {
+        bit_signal_name(signal, 0)
+    } else {
+        carry_signal_name(bit)
+    };
+    buffered_xor_output_module(name, &bit_name, &rhs, "d")
 }
 
 fn next_bit_inputs(bit: usize) -> Vec<IncrementInput> {
@@ -394,6 +406,28 @@ fn connect_increment_input(
 
 fn combinational_output_module(name: &str, expr: &str, output: &str) -> eyre::Result<GraphModule> {
     let mut module: GraphModule = LogicGraph::from_stmt(expr, output)?.graph.into();
+    module.name = name.to_owned();
+    Ok(module)
+}
+
+fn buffered_xor_output_module(
+    name: &str,
+    left: &str,
+    right: &str,
+    output: &str,
+) -> eyre::Result<GraphModule> {
+    let product = format!("{output}_and");
+    let mut graph = LogicGraph::from_stmt(&format!("{left}&{right}"), &product)?;
+    graph.graph.merge(
+        LogicGraph::from_stmt(
+            &format!("(~({product}|~{left}))|(~({product}|~{right}))"),
+            output,
+        )?
+        .graph,
+    );
+    graph.graph.remove_output(&product);
+
+    let mut module: GraphModule = graph.graph.into();
     module.name = name.to_owned();
     Ok(module)
 }
@@ -641,11 +675,16 @@ mod tests {
         let top = design.top_module();
 
         assert_eq!(top.name, "counter");
-        assert_eq!(top.instances.len(), 15);
+        assert_eq!(top.instances.len(), 18);
         assert!(matches!(
             &top.port_by_name("clk")?.target,
-            GraphModulePortTarget::Module(module, port)
-                if module == "q_clk_inv" && port == "clk"
+            GraphModulePortTarget::Wire(targets)
+                if targets == &vec![
+                    ("q_0_clk_inv".to_owned(), "clk".to_owned()),
+                    ("q_1_clk_inv".to_owned(), "clk".to_owned()),
+                    ("q_2_clk_inv".to_owned(), "clk".to_owned()),
+                    ("q_3_clk_inv".to_owned(), "clk".to_owned()),
+                ]
         ));
         for bit in 0..4 {
             assert!(matches!(

@@ -158,6 +158,19 @@ fn main() -> eyre::Result<()> {
             print_target_sequence(&world, Position(parts[0], parts[1], parts[2]))?;
         }
 
+        if let Ok(target) = std::env::var("PRINT_INCOMING_TO") {
+            let parts = target
+                .split(',')
+                .map(str::trim)
+                .map(str::parse::<usize>)
+                .collect::<Result<Vec<_>, _>>()?;
+            eyre::ensure!(
+                parts.len() == 3,
+                "PRINT_INCOMING_TO must be x,y,z, got `{target}`"
+            );
+            print_incoming_to(&world, &world_graph, Position(parts[0], parts[1], parts[2]));
+        }
+
         if std::env::var_os("PRINT_DFF_ACTIVITY").is_some() {
             print_dff_activity(&world, metadata_output_position(&path, "q")?)?;
         }
@@ -412,6 +425,38 @@ fn print_edges_near(
     }
 }
 
+fn print_incoming_to(
+    world: &redstone_compiler::world::World,
+    world_graph: &redstone_compiler::graph::world::WorldGraph,
+    target: Position,
+) {
+    let target_ids = world_graph
+        .positions
+        .iter()
+        .filter_map(|(id, position)| (*position == target).then_some(*id))
+        .collect::<HashSet<_>>();
+    println!("  incoming to {target:?}");
+    for node in &world_graph.graph.nodes {
+        if node
+            .outputs
+            .iter()
+            .any(|output| target_ids.contains(output))
+        {
+            let position = world_graph.positions.get(&node.id).copied();
+            println!(
+                "    {:?}: {:?} -> {:?}",
+                position,
+                position.and_then(|position| {
+                    world.blocks.iter().find_map(|(block_position, block)| {
+                        (*block_position == position).then_some(block.kind)
+                    })
+                }),
+                node.outputs
+            );
+        }
+    }
+}
+
 fn print_target_states(
     world: &redstone_compiler::world::World,
     target: Position,
@@ -450,6 +495,25 @@ fn print_target_sequence(
         .iter()
         .filter_map(|(pos, block)| matches!(block.kind, BlockKind::Switch { .. }).then_some(*pos))
         .collect::<Vec<_>>();
+    if switches.len() == 1 {
+        let clk = switches[0];
+        let mut sim =
+            Simulator::from_preserving_torch_states_with_limits_and_trace(world, 256, 50_000, 0)
+                .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
+        println!("  target sequence for {:?}, clk={:?}", target, clk);
+        println!("    init  {:?}", sim.world()[target].kind);
+        for (name, value) in [
+            ("clk=1", true),
+            ("clk=0", false),
+            ("clk=1", true),
+            ("clk=0", false),
+            ("clk=1", true),
+        ] {
+            sim.change_state_with_limits(vec![(clk, value)], 256, 50_000)?;
+            println!("    {name:<5} {:?}", sim.world()[target].kind);
+        }
+        return Ok(());
+    }
     eyre::ensure!(switches.len() >= 2, "expected at least d and clk switches");
     let d = switches[0];
     let clk = switches[1];

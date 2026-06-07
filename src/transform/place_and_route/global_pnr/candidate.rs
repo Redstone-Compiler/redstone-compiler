@@ -5,6 +5,7 @@ use eyre::ContextCompat;
 
 use crate::graph::logic::LogicGraph;
 use crate::graph::module::{GraphModule, GraphModulePortTarget, GraphModulePortType};
+use crate::graph::GraphNodeKind;
 use crate::transform::place_and_route::detailed_router;
 use crate::transform::place_and_route::global_pnr::ir::{
     LayoutCandidate, PhysicalPort, PhysicalPortDirection,
@@ -13,9 +14,10 @@ use crate::transform::place_and_route::local_placer::{
     LocalPlacer, LocalPlacerConfig, LocalPlacerInputConstraints,
 };
 use crate::transform::place_and_route::placed_node::PlacedNode;
-use crate::world::block::Block;
+use crate::world::block::{Block, BlockKind};
 use crate::world::position::{DimSize, Position};
-use crate::world::World3D;
+use crate::world::simulator::Simulator;
+use crate::world::{World, World3D};
 
 #[derive(Clone)]
 pub struct UnitCandidateConfig {
@@ -53,7 +55,7 @@ pub fn generate_graph_module_candidates_with_progress_label(
         .clone()
         .context("only graph-backed GraphModule can generate unit layout candidates")?;
     let graph = LogicGraph { graph }.prepare_place()?;
-    let placer = LocalPlacer::new(graph, config.local_config)?;
+    let placer = LocalPlacer::new(graph.clone(), config.local_config)?;
 
     let placed = placer.generate_with_outputs_and_input_constraints_progress(
         config.dim,
@@ -62,26 +64,127 @@ pub fn generate_graph_module_candidates_with_progress_label(
         progress_label,
     );
 
-    placed
-        .into_iter()
-        .take(config.max_candidates)
-        .map(|placed| {
-            let (world, ports) = switchless_candidate_layout(
-                module,
-                &config.input_constraints,
-                placed.world,
-                &placed.inputs,
-                &placed.outputs,
-            );
-            LayoutCandidate::from_world(module.name.clone(), world, ports)
+    let validate_truth_table = graph_is_combinational(module);
+    let mut candidates = Vec::new();
+    for placed in placed {
+        if candidates.len() >= config.max_candidates {
+            break;
+        }
+        if validate_truth_table && !candidate_matches_truth_table(&graph, &placed)? {
+            continue;
+        }
+        let (world, ports) = switchless_candidate_layout(
+            module,
+            &config.input_constraints,
+            placed.world,
+            &placed.inputs,
+            &placed.outputs,
+        );
+        if !candidate_ports_cover_module_ports(module, &ports) {
+            continue;
+        }
+        candidates.push(LayoutCandidate::from_world(
+            module.name.clone(),
+            world,
+            ports,
+        )?);
+    }
+    Ok(candidates)
+}
+
+fn candidate_ports_cover_module_ports(module: &GraphModule, ports: &[PhysicalPort]) -> bool {
+    module
+        .ports
+        .iter()
+        .all(|module_port| ports.iter().any(|port| port.name == module_port.name))
+}
+
+fn graph_is_combinational(module: &GraphModule) -> bool {
+    module.graph.as_ref().is_some_and(|graph| {
+        graph
+            .nodes
+            .iter()
+            .all(|node| !matches!(node.kind, GraphNodeKind::Sequential(_)))
+    })
+}
+
+fn candidate_matches_truth_table(
+    expected: &LogicGraph,
+    placed: &crate::output::PlacedWorld,
+) -> eyre::Result<bool> {
+    let expected = expected.truth_table()?;
+    let inputs = expected
+        .input_names
+        .iter()
+        .map(|name| {
+            placed
+                .inputs
+                .iter()
+                .find(|input| input.name == *name)
+                .map(|input| input.position())
+                .with_context(|| format!("missing input endpoint `{name}`"))
         })
-        .collect()
+        .collect::<eyre::Result<Vec<_>>>()?;
+    let outputs = expected
+        .output_tables
+        .keys()
+        .map(|name| {
+            placed
+                .outputs
+                .iter()
+                .find(|output| output.name == *name)
+                .map(|output| (name.as_str(), output.position()))
+                .with_context(|| format!("missing output endpoint `{name}`"))
+        })
+        .collect::<eyre::Result<Vec<_>>>()?;
+    let world = World::from(&placed.world);
+
+    for mask in 0..(1usize << inputs.len()) {
+        let mut sim = Simulator::from_with_limits_and_trace(&world, 256, 50_000, 0)
+            .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
+        sim.change_state_with_limits(
+            inputs
+                .iter()
+                .enumerate()
+                .map(|(index, position)| (*position, (mask & (1 << index)) != 0))
+                .collect(),
+            256,
+            50_000,
+        )?;
+
+        for (output_name, output_position) in &outputs {
+            let Some(expected_output) = expected.output_tables.get(*output_name) else {
+                return Ok(false);
+            };
+            if block_is_powered(sim.world()[*output_position].kind) != expected_output[mask] {
+                return Ok(false);
+            }
+        }
+    }
+
+    Ok(true)
 }
 
 // Local placer媛 留뚮뱺 ?낅┰ ?ㅽ뻾??switch/output layout??global PnR??child layout?쇰줈 諛붽씔??
 // ?낅젰 switch???쒓굅?댁꽌 ?몃? route媛 臾쇰┫ port濡??몄텧?섍퀬, 異쒕젰 ?꾩튂??module port metadata濡?蹂댁〈?쒕떎.
 // TODO(high-level): make LocalPlacer produce either standalone layouts with switches
 // or child-module layouts with PhysicalPort metadata, instead of rewriting switches here.
+fn block_is_powered(kind: BlockKind) -> bool {
+    match kind {
+        BlockKind::Cobble {
+            on_count,
+            on_base_count,
+        } => on_count > 0 || on_base_count > 0,
+        BlockKind::Switch { is_on } => is_on,
+        BlockKind::Redstone { strength, .. } => strength > 0,
+        BlockKind::Torch { is_on } => is_on,
+        BlockKind::Repeater { is_on, .. } => is_on,
+        BlockKind::RedstoneBlock => true,
+        BlockKind::Piston { is_on, .. } => is_on,
+        BlockKind::Air => false,
+    }
+}
+
 fn switchless_candidate_layout(
     module: &GraphModule,
     input_constraints: &LocalPlacerInputConstraints,
@@ -92,7 +195,11 @@ fn switchless_candidate_layout(
     let mut ports = Vec::new();
     // Sequential child layout? ?대? feedback/state signal???몃? route? 吏곸젒 ?욎씠硫?    // back-power??latch state ?ㅼ뿼???앷만 ???덉쑝誘濡?port ?곌껐??蹂댁닔?곸쑝濡?寃⑸━?쒕떎.
     let needs_output_isolation = module_contains_sequential(module);
-    let preserve_switch_position_inputs = module_contains_sequential(module);
+    let needs_input_isolation = module_contains_sequential(module);
+    let contains_sequential = module_contains_sequential(module);
+    let use_direct_input_ports = module_input_port_count(module) > 1;
+    let preserve_switch_position_inputs =
+        module_contains_sequential(module) || use_direct_input_ports;
     for port in &module.ports {
         match (&port.port_type, &port.target) {
             (GraphModulePortType::InputNet, GraphModulePortTarget::Node(input_name)) => {
@@ -110,6 +217,7 @@ fn switchless_candidate_layout(
                         &mut world,
                         input_position,
                         preserve_switch_position_inputs,
+                        use_direct_input_ports,
                     ) else {
                         continue;
                     };
@@ -118,21 +226,24 @@ fn switchless_candidate_layout(
                         direction: PhysicalPortDirection::Input,
                         position,
                         route_position: None,
-                        isolate_input: world[position].kind.is_redstone(),
+                        isolate_input: needs_input_isolation || world[position].kind.is_redstone(),
+                        isolate_output: false,
+                        module_contains_sequential: contains_sequential,
                     });
                 }
             }
             (GraphModulePortType::OutputNet, GraphModulePortTarget::Node(output_name)) => {
                 if let Some(output) = outputs.iter().find(|output| output.name == *output_name) {
                     let position = output.position();
-                    let route_position = (!needs_output_isolation)
-                        .then(|| expose_routeable_output_port(&world, position));
+                    let route_position = Some(expose_routeable_output_port(&world, position));
                     ports.push(PhysicalPort {
                         name: port.name.clone(),
                         direction: PhysicalPortDirection::Output,
                         position,
                         route_position,
                         isolate_input: false,
+                        isolate_output: needs_output_isolation,
+                        module_contains_sequential: contains_sequential,
                     });
                 }
             }
@@ -144,6 +255,7 @@ fn switchless_candidate_layout(
             &mut world,
             input.position(),
             preserve_switch_position_inputs,
+            use_direct_input_ports,
         );
     }
     remove_local_input_switches(&mut world);
@@ -159,6 +271,14 @@ fn module_contains_sequential(module: &GraphModule) -> bool {
             .iter()
             .any(|node| matches!(node.kind, crate::graph::GraphNodeKind::Sequential(_)))
     })
+}
+
+fn module_input_port_count(module: &GraphModule) -> usize {
+    module
+        .ports
+        .iter()
+        .filter(|port| port.port_type.is_input())
+        .count()
 }
 
 fn remove_local_input_switches(world: &mut World3D) {
@@ -206,6 +326,7 @@ fn expose_switchless_input_port(
     world: &mut World3D,
     input_position: Position,
     preserve_switch_position_input: bool,
+    use_direct_input_port: bool,
 ) -> Option<Position> {
     if !world.size.bound_on(input_position) {
         return None;
@@ -228,7 +349,9 @@ fn expose_switchless_input_port(
         return Some(input_position);
     }
 
-    if let Some(port_position) = switch_powered_redstone_port(world, input_position) {
+    if let Some(port_position) =
+        switch_powered_redstone_port(world, input_position, use_direct_input_port)
+    {
         world[input_position] = Block::default();
         return Some(port_position);
     }
@@ -262,7 +385,11 @@ fn ensure_redstone_support(world: &mut World3D, position: Position) -> Option<()
     Some(())
 }
 
-fn switch_powered_redstone_port(world: &World3D, input_position: Position) -> Option<Position> {
+fn switch_powered_redstone_port(
+    world: &World3D,
+    input_position: Position,
+    direct_only: bool,
+) -> Option<Position> {
     let direct = world
         .iter_block()
         .into_iter()
@@ -276,17 +403,21 @@ fn switch_powered_redstone_port(world: &World3D, input_position: Position) -> Op
         return None;
     }
 
-    redstone_network_positions(world, &direct)
-        .into_iter()
-        .max_by_key(|position| {
-            (
-                downstream_consumer_count(world, *position),
-                Reverse(input_position.manhattan_distance(position)),
-                Reverse(position.0),
-                Reverse(position.1),
-                Reverse(position.2),
-            )
-        })
+    let candidates = if direct_only {
+        direct
+    } else {
+        redstone_network_positions(world, &direct)
+    };
+
+    candidates.into_iter().max_by_key(|position| {
+        (
+            downstream_consumer_count(world, *position),
+            Reverse(input_position.manhattan_distance(position)),
+            Reverse(position.0),
+            Reverse(position.1),
+            Reverse(position.2),
+        )
+    })
 }
 
 fn redstone_network_positions(world: &World3D, seeds: &[Position]) -> Vec<Position> {

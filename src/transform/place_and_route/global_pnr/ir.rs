@@ -19,6 +19,8 @@ pub struct PhysicalPort {
     pub position: Position,
     pub route_position: Option<Position>,
     pub isolate_input: bool,
+    pub isolate_output: bool,
+    pub module_contains_sequential: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
