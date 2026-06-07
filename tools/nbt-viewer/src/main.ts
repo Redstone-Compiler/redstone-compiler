@@ -1536,7 +1536,6 @@ async function loadExamples(): Promise<void> {
   } catch (error) {
     filesList.classList.add('empty');
     filesCount.textContent = 'No examples';
-    filesPanel.open = true;
     filesList.textContent = error instanceof Error ? error.message : String(error);
   }
 }
@@ -1545,7 +1544,6 @@ function renderExampleBrowser(examples: ExampleFile[]): void {
   filesList.replaceChildren();
   filesList.classList.toggle('empty', examples.length === 0);
   filesCount.textContent = examples.length === 0 ? 'No NBT files' : `${examples.length} files`;
-  filesPanel.open = true;
 
   if (examples.length === 0) {
     filesList.textContent = 'No supported NBT files found.';
