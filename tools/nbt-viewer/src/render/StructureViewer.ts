@@ -12,6 +12,8 @@ type SetStructureOptions = {
 };
 
 const ROTATION_DRAG_SCALE = 300;
+const KEYBOARD_MOVE_SPEED = 0.0008;
+const PAN_MOVE_SPEED = 0.001;
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
@@ -341,7 +343,7 @@ export class StructureViewer {
     if (vec3.squaredLength(direction) === 0) return;
 
     vec3.normalize(direction, direction);
-    vec3.scale(direction, direction, delta * Math.max(0.01, this.cDist * 0.0016));
+    vec3.scale(direction, direction, delta * Math.max(0.01, this.cDist * KEYBOARD_MOVE_SPEED));
     this.moveCamera(direction);
   }
 
@@ -369,7 +371,7 @@ export class StructureViewer {
     const direction = vec3.fromValues(dx, -dy, 0);
     if (vec3.squaredLength(direction) === 0) return;
 
-    vec3.scale(direction, direction, Math.max(0.01, this.cDist * 0.002));
+    vec3.scale(direction, direction, Math.max(0.01, this.cDist * PAN_MOVE_SPEED));
     this.rotateCameraVector(direction);
     vec3.negate(direction, direction);
     this.moveCamera(direction);

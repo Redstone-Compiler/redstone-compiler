@@ -181,7 +181,7 @@ input {
 
 .switches-actions {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr 1fr auto;
   gap: 6px;
   padding: 6px;
   border-top: 1px solid rgb(154 164 173 / 18%);
@@ -200,6 +200,95 @@ input {
 
 .switches-actions button:hover {
   background: rgb(255 255 255 / 12%);
+}
+
+.trace-simulation-toggle {
+  position: relative;
+  display: inline-grid;
+  grid-template-columns: auto auto;
+  align-items: center;
+  gap: 6px;
+  min-width: 76px;
+  min-height: 28px;
+  padding: 3px 7px;
+  border: 1px solid rgb(154 164 173 / 24%);
+  border-radius: 4px;
+  background: rgb(255 255 255 / 6%);
+  color: #dce3e7;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.trace-simulation-toggle:hover {
+  background: rgb(255 255 255 / 11%);
+}
+
+.trace-simulation-toggle:focus-within {
+  outline: 1px solid rgb(255 135 135 / 62%);
+  outline-offset: 1px;
+}
+
+.trace-simulation-toggle.active {
+  border-color: rgb(211 50 50 / 48%);
+  background: rgb(211 50 50 / 15%);
+}
+
+.trace-simulation-toggle input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.trace-simulation-label {
+  color: #dce3e7;
+  line-height: 1;
+}
+
+.trace-simulation-track {
+  position: relative;
+  width: 24px;
+  height: 14px;
+  border: 1px solid rgb(154 164 173 / 32%);
+  border-radius: 999px;
+  background: rgb(0 0 0 / 22%);
+}
+
+.trace-simulation-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #9ea9b3;
+  transition:
+    left 120ms ease,
+    background 120ms ease;
+}
+
+.trace-simulation-toggle.active .trace-simulation-track {
+  border-color: rgb(255 135 135 / 44%);
+  background: rgb(211 50 50 / 32%);
+}
+
+.trace-simulation-toggle.active .trace-simulation-knob {
+  left: 12px;
+  background: #ffd0d0;
+}
+
+.trace-simulation-toggle strong {
+  display: none;
+  color: #9ea9b3;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.trace-simulation-toggle.active strong {
+  color: #ffd0d0;
 }
 
 .switches-actions.hidden {

@@ -64,6 +64,43 @@ pub struct NbtSimulator {
 }
 
 impl NbtSimulator {
+    fn new_with_trace_limit(nbt_bytes: &[u8], trace_limit: usize) -> Result<NbtSimulator, JsValue> {
+        let nbt = NBTRoot::from_nbt_bytes(nbt_bytes).map_err(to_js_error)?;
+        let world = nbt.to_world();
+        let sim = Simulator::from_preserving_torch_states_with_limits_and_trace(
+            &world,
+            MAX_SIMULATION_CYCLES,
+            MAX_SIMULATION_EVENTS,
+            trace_limit,
+        )
+        .map_err(to_js_error)?;
+        let last_trace = sim.trace().to_vec();
+        let last_snapshots = snapshots_to_info(sim.snapshots());
+        let last_waveform = sim.waveform();
+        let history_trace = sim.trace().to_vec();
+        let history_snapshots = snapshots_to_info(sim.snapshots());
+        let history_waveform = sim.waveform();
+
+        Ok(Self {
+            sim,
+            last_trace,
+            last_snapshots,
+            last_waveform,
+            history_trace,
+            history_snapshots,
+            history_waveform,
+        })
+    }
+
+    fn clear_trace_views(&mut self) {
+        self.last_trace.clear();
+        self.last_snapshots.clear();
+        self.last_waveform = empty_waveform();
+        self.history_trace.clear();
+        self.history_snapshots.clear();
+        self.history_waveform = empty_waveform();
+    }
+
     fn refresh_trace_views_from_cycle(&mut self, start_cycle: usize) {
         let trace = self.sim.trace();
         let snapshots = self.sim.snapshots();
@@ -90,31 +127,14 @@ impl NbtSimulator {
 impl NbtSimulator {
     #[wasm_bindgen(constructor)]
     pub fn new(nbt_bytes: &[u8]) -> Result<NbtSimulator, JsValue> {
-        let nbt = NBTRoot::from_nbt_bytes(nbt_bytes).map_err(to_js_error)?;
-        let world = nbt.to_world();
-        let sim = Simulator::from_preserving_torch_states_with_limits_and_trace(
-            &world,
-            MAX_SIMULATION_CYCLES,
-            MAX_SIMULATION_EVENTS,
-            TRACE_LIMIT,
-        )
-        .map_err(to_js_error)?;
-        let last_trace = sim.trace().to_vec();
-        let last_snapshots = snapshots_to_info(sim.snapshots());
-        let last_waveform = sim.waveform();
-        let history_trace = sim.trace().to_vec();
-        let history_snapshots = snapshots_to_info(sim.snapshots());
-        let history_waveform = sim.waveform();
+        Self::new_with_trace_limit(nbt_bytes, TRACE_LIMIT)
+    }
 
-        Ok(Self {
-            sim,
-            last_trace,
-            last_snapshots,
-            last_waveform,
-            history_trace,
-            history_snapshots,
-            history_waveform,
-        })
+    pub fn with_trace(nbt_bytes: &[u8], trace_enabled: bool) -> Result<NbtSimulator, JsValue> {
+        Self::new_with_trace_limit(
+            nbt_bytes,
+            if trace_enabled { TRACE_LIMIT } else { 0 },
+        )
     }
 
     pub fn trace_init(nbt_bytes: &[u8]) -> Result<JsValue, JsValue> {
@@ -269,6 +289,12 @@ impl NbtSimulator {
         self.structure()
     }
 
+    pub fn set_trace_enabled(&mut self, enabled: bool) {
+        self.sim
+            .set_trace_limit(if enabled { TRACE_LIMIT } else { 0 });
+        self.clear_trace_views();
+    }
+
     pub fn trace(&self) -> Result<JsValue, JsValue> {
         serde_wasm_bindgen::to_value(&self.last_trace).map_err(to_js_error)
     }
@@ -309,6 +335,13 @@ impl NbtSimulator {
 
 fn to_js_error(error: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&error.to_string())
+}
+
+fn empty_waveform() -> SimulationWaveform {
+    SimulationWaveform {
+        cycles: Vec::new(),
+        signals: Vec::new(),
+    }
 }
 
 fn graph_dot_info(nbt_bytes: &[u8], metadata: Option<&OutputMetadata>) -> Result<JsValue, JsValue> {

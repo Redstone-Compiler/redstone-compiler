@@ -8,6 +8,7 @@ type WasmModule = {
     graph_dot_with_outputs(nbtBytes: Uint8Array, metadataJson: string): RawGraphDotInfo;
     selected_graph_dot(nbtBytes: Uint8Array, folded: boolean, nodeIds: number[]): RawGraphDotInfo;
     selected_nbt(nbtBytes: Uint8Array, folded: boolean, nodeIds: number[]): unknown;
+    with_trace(nbtBytes: Uint8Array, traceEnabled: boolean): WasmSimulator;
     trace_init(nbtBytes: Uint8Array): TraceReport;
   };
 };
@@ -18,6 +19,7 @@ type WasmSimulator = {
   history_waveform(): Waveform;
   switches(): SwitchInfo[];
   snapshots(): SnapshotInfo[];
+  set_trace_enabled(enabled: boolean): void;
   structure(): unknown;
   trace(): TraceEntry[];
   toggle_switch(x: number, y: number, z: number, isOn: boolean): unknown;
@@ -128,7 +130,10 @@ function samePos(a: [number, number, number], b: [number, number, number]): bool
 }
 
 export class NbtSimulation {
-  private constructor(private readonly sim: WasmSimulator) {}
+  private constructor(
+    private readonly sim: WasmSimulator,
+    private traceEnabled: boolean,
+  ) {}
 
   static async graphDot(nbtBytes: Uint8Array, metadataJson?: string): Promise<GraphDotInfo> {
     const wasm = await loadWasmModule();
@@ -155,16 +160,22 @@ export class NbtSimulation {
     return wasm.NbtSimulator.selected_nbt(nbtBytes, folded, nodeIds);
   }
 
-  static async create(nbtBytes: Uint8Array): Promise<NbtSimulation> {
+  static async create(nbtBytes: Uint8Array, traceEnabled = true): Promise<NbtSimulation> {
     const wasm = await loadWasmModule();
     await wasm.default(resolveAssetPath(wasmBinaryPath));
 
     try {
-      return new NbtSimulation(new wasm.NbtSimulator(nbtBytes));
+      return new NbtSimulation(wasm.NbtSimulator.with_trace(nbtBytes, traceEnabled), traceEnabled);
     } catch (error) {
       const report = wasm.NbtSimulator.trace_init(nbtBytes);
       throw new NbtSimulationError(report.error ?? getErrorMessage(error), report.trace, report.snapshots, report.waveform);
     }
+  }
+
+  setTraceEnabled(enabled: boolean): void {
+    if (this.traceEnabled === enabled) return;
+    this.traceEnabled = enabled;
+    this.sim.set_trace_enabled(enabled);
   }
 
   structure(): unknown {
