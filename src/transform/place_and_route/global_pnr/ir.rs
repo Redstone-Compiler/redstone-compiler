@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use eyre::ContextCompat;
 
 use crate::transform::place_and_route::estimate::{bounding_box, BoundingBox};
+use crate::world::block::Block;
 use crate::world::position::Position;
 use crate::world::World3D;
 
@@ -18,9 +19,18 @@ pub struct PhysicalPort {
     pub direction: PhysicalPortDirection,
     pub position: Position,
     pub route_position: Option<Position>,
+    pub isolated_route_position: Option<Position>,
+    pub isolated_route_blocks: Vec<(Position, Block)>,
+    pub isolated_route_options: Vec<PhysicalPortRouteAdapter>,
     pub isolate_input: bool,
     pub isolate_output: bool,
     pub module_contains_sequential: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PhysicalPortRouteAdapter {
+    pub position: Position,
+    pub blocks: Vec<(Position, Block)>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

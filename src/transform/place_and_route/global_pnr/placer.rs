@@ -128,10 +128,18 @@ fn place_register_bit_slices(
         };
         let slice = slices.entry(bit).or_default();
         match role {
-            RegisterBitRole::Clock => slice.clock = Some(index),
-            RegisterBitRole::Next => slice.next = Some(index),
-            RegisterBitRole::Master => slice.master = Some(index),
-            RegisterBitRole::Slave => slice.slave = Some(index),
+            RegisterBitRole::Clock => {
+                slice.clock = choose_register_bit_candidate(candidates, slice.clock, index, role)
+            }
+            RegisterBitRole::Next => {
+                slice.next = choose_register_bit_candidate(candidates, slice.next, index, role)
+            }
+            RegisterBitRole::Master => {
+                slice.master = choose_register_bit_candidate(candidates, slice.master, index, role)
+            }
+            RegisterBitRole::Slave => {
+                slice.slave = choose_register_bit_candidate(candidates, slice.slave, index, role)
+            }
         }
     }
 
@@ -153,7 +161,7 @@ fn place_register_bit_slices(
     let cursor_y = GLOBAL_PLACEMENT_MARGIN;
 
     for (_, slice) in bits {
-        for candidate_index in [slice.next?, slice.clock?, slice.master?, slice.slave?] {
+        for candidate_index in [slice.master?, slice.slave?, slice.next?, slice.clock?] {
             push_placed_candidate(&mut placed, candidates, candidate_index, cursor_x, cursor_y);
             cursor_x += candidates[candidate_index].bbox.width() + config.spacing;
         }
@@ -174,10 +182,18 @@ fn place_register_bit_grid(
         };
         let slice = slices.entry(bit).or_default();
         match role {
-            RegisterBitRole::Clock => slice.clock = Some(index),
-            RegisterBitRole::Next => slice.next = Some(index),
-            RegisterBitRole::Master => slice.master = Some(index),
-            RegisterBitRole::Slave => slice.slave = Some(index),
+            RegisterBitRole::Clock => {
+                slice.clock = choose_register_bit_candidate(candidates, slice.clock, index, role)
+            }
+            RegisterBitRole::Next => {
+                slice.next = choose_register_bit_candidate(candidates, slice.next, index, role)
+            }
+            RegisterBitRole::Master => {
+                slice.master = choose_register_bit_candidate(candidates, slice.master, index, role)
+            }
+            RegisterBitRole::Slave => {
+                slice.slave = choose_register_bit_candidate(candidates, slice.slave, index, role)
+            }
         }
     }
 
@@ -194,49 +210,60 @@ fn place_register_bit_grid(
         return None;
     }
 
-    let next_width = bits
-        .iter()
-        .map(|(_, slice)| candidates[slice.next.unwrap()].bbox.width())
-        .max()
-        .unwrap_or(0);
     let master_width = bits
         .iter()
         .map(|(_, slice)| candidates[slice.master.unwrap()].bbox.width())
         .max()
         .unwrap_or(0);
-    let next_x = GLOBAL_PLACEMENT_MARGIN;
-    let master_x = next_x + next_width + config.spacing;
-    let clock_x = master_x + master_width + config.spacing;
-    let clock_width = bits
+    let slave_width = bits
         .iter()
-        .map(|(_, slice)| candidates[slice.clock.unwrap()].bbox.width())
+        .map(|(_, slice)| candidates[slice.slave.unwrap()].bbox.width())
         .max()
         .unwrap_or(0);
-    let slave_x = clock_x + clock_width + config.spacing;
+    let master_x = GLOBAL_PLACEMENT_MARGIN;
+    let slave_x = master_x + master_width + config.spacing;
+    let next_x = slave_x + slave_width + config.spacing;
 
     let mut placed = Vec::new();
     let mut cursor_y = GLOBAL_PLACEMENT_MARGIN;
-    for (_, slice) in bits {
+    for (bit, slice) in bits {
         let clock = slice.clock?;
         let next = slice.next?;
         let master = slice.master?;
         let slave = slice.slave?;
 
-        let next_y = cursor_y;
-        let next_d_y = translated_port_y(candidates, next, next_y, "d", true)?;
-        let master_y = align_port_y(candidates, master, "d", false, next_d_y)?;
+        let master_y = cursor_y;
+        let master_q_y = translated_port_y(candidates, master, master_y, "q", true)?;
+        let slave_y = align_port_y(candidates, slave, "d", false, master_q_y)?;
+        let slave_q_y = translated_port_y(candidates, slave, slave_y, "q", true)?;
+        let next_feedback_port = format!("q_{bit}");
+        let next_y = align_port_y(candidates, next, &next_feedback_port, true, slave_q_y)?;
 
-        let master_en_y = translated_port_y(candidates, master, master_y, "en", false)?;
-        let clock_y = align_port_y(candidates, clock, "clk_n", true, master_en_y)?;
-
-        let clock_input_y = translated_port_y(candidates, clock, clock_y, "clk", false)?;
-        let slave_y = align_port_y(candidates, slave, "en", false, clock_input_y)?;
+        let data_row = [
+            (master, master_x, master_y),
+            (slave, slave_x, slave_y),
+            (next, next_x, next_y),
+        ];
+        let data_bottom = data_row
+            .iter()
+            .map(|(index, _, y)| y + candidates[*index].bbox.depth())
+            .max()
+            .unwrap_or(cursor_y);
+        let clock_y = data_bottom + config.spacing;
+        let master_en_x = translated_port_x(candidates, master, master_x, "en", false)?;
+        let clock_x = align_port_x(
+            candidates,
+            clock,
+            "clk_n",
+            true,
+            master_en_x.saturating_sub(config.spacing),
+        )?;
 
         let row = [
-            (next, next_x, next_y),
             (master, master_x, master_y),
-            (clock, clock_x, clock_y),
             (slave, slave_x, slave_y),
+            (next, next_x, next_y),
+            (clock, clock_x, clock_y),
         ];
         let Some(row_shift) = row
             .iter()
@@ -253,9 +280,9 @@ fn place_register_bit_grid(
 
         let row_bottom = [
             (next, next_y + row_shift),
+            (slave, slave_y + row_shift),
             (master, master_y + row_shift),
             (clock, clock_y + row_shift),
-            (slave, slave_y + row_shift),
         ]
         .into_iter()
         .map(|(index, y)| y + candidates[index].bbox.depth())
@@ -289,6 +316,30 @@ fn align_port_y(
     let candidate = &candidates[candidate_index];
     let position = candidate_port_position(candidate, port_name, use_route_position)?;
     Some(target_y + candidate.bbox.min.1 - position.1)
+}
+
+fn translated_port_x(
+    candidates: &[LayoutCandidate],
+    candidate_index: usize,
+    origin_x: usize,
+    port_name: &str,
+    use_route_position: bool,
+) -> Option<usize> {
+    let candidate = &candidates[candidate_index];
+    let position = candidate_port_position(candidate, port_name, use_route_position)?;
+    Some(origin_x + position.0 - candidate.bbox.min.0)
+}
+
+fn align_port_x(
+    candidates: &[LayoutCandidate],
+    candidate_index: usize,
+    port_name: &str,
+    use_route_position: bool,
+    target_x: usize,
+) -> Option<usize> {
+    let candidate = &candidates[candidate_index];
+    let position = candidate_port_position(candidate, port_name, use_route_position)?;
+    Some((target_x + candidate.bbox.min.0).saturating_sub(position.0))
 }
 
 fn candidate_port_position(
@@ -334,6 +385,38 @@ enum RegisterBitRole {
     Next,
     Master,
     Slave,
+}
+
+fn choose_register_bit_candidate(
+    candidates: &[LayoutCandidate],
+    current: Option<usize>,
+    candidate_index: usize,
+    role: RegisterBitRole,
+) -> Option<usize> {
+    let Some(current) = current else {
+        return Some(candidate_index);
+    };
+
+    (register_bit_candidate_score(&candidates[candidate_index], role)
+        > register_bit_candidate_score(&candidates[current], role))
+    .then_some(candidate_index)
+    .or(Some(current))
+}
+
+fn register_bit_candidate_score(candidate: &LayoutCandidate, role: RegisterBitRole) -> usize {
+    let preferred_ports: &[&str] = match role {
+        RegisterBitRole::Clock => &["clk", "clk_n"],
+        RegisterBitRole::Next => &["d"],
+        RegisterBitRole::Master => &["d", "en", "q"],
+        RegisterBitRole::Slave => &["d", "en", "q"],
+    };
+
+    candidate
+        .ports
+        .iter()
+        .filter(|port| preferred_ports.contains(&port.name.as_str()))
+        .map(|port| port.route_position.unwrap_or(port.position).2 + port.position.2)
+        .sum()
 }
 
 fn register_bit_module_role(name: &str) -> Option<(usize, RegisterBitRole)> {
