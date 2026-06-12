@@ -497,8 +497,8 @@ mod tests {
                 ..d_latch_child_candidate_config(sequential_local_config())
             },
             placement: GlobalPlacementConfig {
-                spacing: 8,
-                shelf_width: 96,
+                spacing: 4,
+                shelf_width: 64,
                 max_attempts: 64,
                 ..Default::default()
             },

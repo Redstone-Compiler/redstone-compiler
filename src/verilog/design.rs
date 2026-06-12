@@ -159,16 +159,14 @@ fn dff_design(
                 module_var((&next_name, "d"), (&master_name, "d")),
                 module_var((&master_name, "q"), (&slave_name, "d")),
                 module_var((&clock_inverter_name, "clk_n"), (&master_name, "en")),
+                module_var((&clock_inverter_name, "clk"), (&slave_name, "en")),
                 module_var((&slave_name, "q"), (&next_name, output_name)),
             ],
             ports: vec![
                 GraphModulePort {
                     name: clock_name.to_owned(),
                     port_type: GraphModulePortType::InputNet,
-                    target: target_from_endpoints(Some(&vec![
-                        (clock_inverter_name, "clk".to_owned()),
-                        (slave_name.clone(), "en".to_owned()),
-                    ])),
+                    target: GraphModulePortTarget::Module(clock_inverter_name, "clk".to_owned()),
                 },
                 GraphModulePort {
                     name: output_name.to_owned(),
@@ -251,6 +249,10 @@ fn register_design(
             (&clock_inverter_name, "clk_n"),
             (&master_name, "en"),
         ));
+        vars.push(module_var(
+            (&clock_inverter_name, "clk"),
+            (&slave_name, "en"),
+        ));
 
         for input in next_bit_inputs(bit) {
             connect_increment_input(&mut vars, output_name, input, &next_name);
@@ -286,12 +288,11 @@ fn register_design(
 
 fn target_from_clock_inputs(signal: &str, width: usize) -> GraphModulePortTarget {
     let targets = (0..width)
-        .flat_map(|bit| {
-            let bit_name = bit_signal_name(signal, bit);
-            [
-                (format!("{bit_name}_clk_inv"), "clk".to_owned()),
-                (format!("{bit_name}_slave"), "en".to_owned()),
-            ]
+        .map(|bit| {
+            (
+                format!("{}_clk_inv", bit_signal_name(signal, bit)),
+                "clk".to_owned(),
+            )
         })
         .collect::<Vec<_>>();
     target_from_endpoints(Some(&targets))
@@ -680,13 +681,9 @@ mod tests {
             GraphModulePortTarget::Wire(targets)
                 if targets == &vec![
                     ("q_0_clk_inv".to_owned(), "clk".to_owned()),
-                    ("q_0_slave".to_owned(), "en".to_owned()),
                     ("q_1_clk_inv".to_owned(), "clk".to_owned()),
-                    ("q_1_slave".to_owned(), "en".to_owned()),
                     ("q_2_clk_inv".to_owned(), "clk".to_owned()),
-                    ("q_2_slave".to_owned(), "en".to_owned()),
                     ("q_3_clk_inv".to_owned(), "clk".to_owned()),
-                    ("q_3_slave".to_owned(), "en".to_owned()),
                 ]
         ));
         for bit in 0..4 {
@@ -724,11 +721,8 @@ mod tests {
         );
         assert!(matches!(
             &top.port_by_name("clk")?.target,
-            GraphModulePortTarget::Wire(targets)
-                if targets == &vec![
-                    ("q_clk_inv".to_owned(), "clk".to_owned()),
-                    ("q_slave".to_owned(), "en".to_owned()),
-                ]
+            GraphModulePortTarget::Module(module, port)
+                if module == "q_clk_inv" && port == "clk"
         ));
         assert!(matches!(
             &top.port_by_name("q")?.target,

@@ -6,16 +6,15 @@ use eyre::ContextCompat;
 use crate::graph::logic::LogicGraph;
 use crate::graph::module::{GraphModule, GraphModulePortTarget, GraphModulePortType};
 use crate::graph::GraphNodeKind;
-use crate::output::OutputEndpoint;
 use crate::transform::place_and_route::detailed_router;
 use crate::transform::place_and_route::global_pnr::ir::{
-    LayoutCandidate, PhysicalPort, PhysicalPortDirection, PhysicalPortRouteAdapter,
+    LayoutCandidate, PhysicalPort, PhysicalPortDirection,
 };
 use crate::transform::place_and_route::local_placer::{
     LocalPlacer, LocalPlacerConfig, LocalPlacerInputConstraints,
 };
 use crate::transform::place_and_route::placed_node::PlacedNode;
-use crate::world::block::{Block, BlockKind, Direction};
+use crate::world::block::{Block, BlockKind};
 use crate::world::position::{DimSize, Position};
 use crate::world::simulator::Simulator;
 use crate::world::{World, World3D};
@@ -27,8 +26,6 @@ pub struct UnitCandidateConfig {
     pub input_constraints: LocalPlacerInputConstraints,
     pub max_candidates: usize,
 }
-
-const CHILD_LAYOUT_PORT_PADDING: usize = 2;
 
 impl Default for UnitCandidateConfig {
     fn default() -> Self {
@@ -76,18 +73,12 @@ pub fn generate_graph_module_candidates_with_progress_label(
         if validate_truth_table && !candidate_matches_truth_table(&graph, &placed)? {
             continue;
         }
-        let (world, inputs, outputs) = padded_child_layout(
-            placed.world,
-            &placed.inputs,
-            &placed.outputs,
-            CHILD_LAYOUT_PORT_PADDING,
-        );
         let (world, ports) = switchless_candidate_layout(
             module,
             &config.input_constraints,
-            world,
-            &inputs,
-            &outputs,
+            placed.world,
+            &placed.inputs,
+            &placed.outputs,
         );
         if !candidate_ports_cover_module_ports(module, &ports) {
             continue;
@@ -106,52 +97,6 @@ fn candidate_ports_cover_module_ports(module: &GraphModule, ports: &[PhysicalPor
         .ports
         .iter()
         .all(|module_port| ports.iter().any(|port| port.name == module_port.name))
-}
-
-fn padded_child_layout(
-    world: World3D,
-    inputs: &[OutputEndpoint],
-    outputs: &[OutputEndpoint],
-    padding: usize,
-) -> (World3D, Vec<OutputEndpoint>, Vec<OutputEndpoint>) {
-    if padding == 0 {
-        return (world, inputs.to_vec(), outputs.to_vec());
-    }
-
-    let mut padded = World3D::new(DimSize(
-        world.size.0 + padding * 2,
-        world.size.1 + padding * 2,
-        world.size.2,
-    ));
-    for (position, block) in world.iter_block() {
-        padded[shift_position_xy(position, padding)] = block;
-    }
-    padded.initialize_redstone_states();
-
-    let inputs = inputs
-        .iter()
-        .map(|input| {
-            OutputEndpoint::new(
-                input.name.clone(),
-                shift_position_xy(input.position(), padding),
-            )
-        })
-        .collect();
-    let outputs = outputs
-        .iter()
-        .map(|output| {
-            OutputEndpoint::new(
-                output.name.clone(),
-                shift_position_xy(output.position(), padding),
-            )
-        })
-        .collect();
-
-    (padded, inputs, outputs)
-}
-
-fn shift_position_xy(position: Position, offset: usize) -> Position {
-    Position(position.0 + offset, position.1 + offset, position.2)
 }
 
 fn graph_is_combinational(module: &GraphModule) -> bool {
@@ -281,9 +226,6 @@ fn switchless_candidate_layout(
                         direction: PhysicalPortDirection::Input,
                         position,
                         route_position: None,
-                        isolated_route_position: None,
-                        isolated_route_blocks: Vec::new(),
-                        isolated_route_options: Vec::new(),
                         isolate_input: needs_input_isolation || world[position].kind.is_redstone(),
                         isolate_output: false,
                         module_contains_sequential: contains_sequential,
@@ -294,23 +236,11 @@ fn switchless_candidate_layout(
                 if let Some(output) = outputs.iter().find(|output| output.name == *output_name) {
                     let position = output.position();
                     let route_position = Some(expose_routeable_output_port(&world, position));
-                    let isolated_route_options = if needs_output_isolation {
-                        isolated_output_port_adapters(&world, position)
-                    } else {
-                        Vec::new()
-                    };
-                    let (isolated_route_position, isolated_route_blocks) = isolated_route_options
-                        .first()
-                        .map(|adapter| (Some(adapter.position), adapter.blocks.clone()))
-                        .unwrap_or((None, Vec::new()));
                     ports.push(PhysicalPort {
                         name: port.name.clone(),
                         direction: PhysicalPortDirection::Output,
                         position,
                         route_position,
-                        isolated_route_position,
-                        isolated_route_blocks,
-                        isolated_route_options,
                         isolate_input: false,
                         isolate_output: needs_output_isolation,
                         module_contains_sequential: contains_sequential,
@@ -433,104 +363,6 @@ fn expose_switchless_input_port(
     })
 }
 
-fn isolated_output_port_adapters(
-    world: &World3D,
-    output_position: Position,
-) -> Vec<PhysicalPortRouteAdapter> {
-    let taps = routeable_output_redstone_taps(world, output_position);
-    let mut candidates = Vec::new();
-    for tap in taps {
-        for repeater_position in tap.cardinal() {
-            let direction = tap.diff(repeater_position).inverse();
-            if let Some(candidate) =
-                isolated_output_adapter_world(world, tap, repeater_position, direction)
-            {
-                candidates.push(candidate);
-            }
-        }
-    }
-
-    candidates
-        .into_iter()
-        .map(
-            |(adapter_world, repeater_position)| PhysicalPortRouteAdapter {
-                position: repeater_position,
-                blocks: added_blocks(world, &adapter_world),
-            },
-        )
-        .collect()
-}
-
-fn added_blocks(before: &World3D, after: &World3D) -> Vec<(Position, Block)> {
-    after
-        .iter_block()
-        .into_iter()
-        .filter(|(position, block)| !block.kind.is_air() && before[*position] != *block)
-        .collect()
-}
-
-fn routeable_output_redstone_taps(world: &World3D, output_position: Position) -> Vec<Position> {
-    let direct = if world[output_position].kind.is_redstone() {
-        vec![output_position]
-    } else {
-        world
-            .iter_block()
-            .into_iter()
-            .filter_map(|(position, block)| {
-                (block.kind.is_redstone()
-                    && detailed_router::target_powers_position(world, output_position, position))
-                .then_some(position)
-            })
-            .collect::<Vec<_>>()
-    };
-
-    let mut taps = redstone_network_positions(world, &direct);
-    taps.sort_by_key(|position| {
-        (
-            output_position.manhattan_distance(position),
-            position.0,
-            position.1,
-            position.2,
-        )
-    });
-    taps
-}
-
-fn isolated_output_adapter_world(
-    world: &World3D,
-    tap: Position,
-    repeater_position: Position,
-    direction: Direction,
-) -> Option<(World3D, Position)> {
-    if !world.size.bound_on(repeater_position) || !world[repeater_position].kind.is_air() {
-        return None;
-    }
-
-    let mut adapter_world = world.clone();
-    let support_position = repeater_position.down()?;
-    place_support_cobble_if_needed(&mut adapter_world, support_position)?;
-
-    let repeater = PlacedNode::new_repeater(repeater_position, direction);
-    detailed_router::place_node(&mut adapter_world, repeater);
-    if !detailed_router::target_powers_position(&adapter_world, tap, repeater_position) {
-        return None;
-    }
-
-    Some((adapter_world, repeater_position))
-}
-
-fn place_support_cobble_if_needed(world: &mut World3D, position: Position) -> Option<()> {
-    if world[position].kind.is_cobble() {
-        return Some(());
-    }
-    if !world[position].kind.is_air() {
-        return None;
-    }
-
-    world[position] = PlacedNode::new_cobble(position).block;
-    Some(())
-}
-
 fn switch_powers_redstone(world: &World3D, input_position: Position) -> bool {
     world.iter_block().into_iter().any(|(position, block)| {
         block.kind.is_redstone()
@@ -639,93 +471,5 @@ pub fn d_latch_child_candidate_config(local_config: LocalPlacerConfig) -> UnitCa
             .with_input_positions("d", [Position(0, 2, 1)])
             .with_input_positions("en", [Position(0, 6, 1)]),
         max_candidates: 1,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::transform::place_and_route::local_placer::{
-        InputPlacementStrategy, NotRouteStrategy, PlacementSamplingPolicy, TorchPlacementStrategy,
-    };
-    use crate::transform::place_and_route::sampling::SamplingPolicy;
-    use crate::verilog::synth::d_latch_graph_module;
-
-    fn redstone_block() -> Block {
-        Block {
-            kind: BlockKind::Redstone {
-                on_count: 0,
-                state: 0,
-                strength: 0,
-            },
-            direction: Direction::None,
-        }
-    }
-
-    fn sequential_local_config() -> LocalPlacerConfig {
-        LocalPlacerConfig {
-            random_seed: 42,
-            greedy_input_generation: true,
-            input_placement_strategy: InputPlacementStrategy::Boundary,
-            input_candidate_limit: None,
-            step_sampling_policy: SamplingPolicy::Random(256),
-            placement_sampling_policy: PlacementSamplingPolicy::StepPolicy,
-            leak_sampling: false,
-            route_torch_directly: true,
-            materialize_outputs: false,
-            torch_placement_strategy: TorchPlacementStrategy::DirectOnly,
-            not_route_strategy: NotRouteStrategy::DirectAndRedstone,
-            max_not_route_step: 4,
-            not_route_step_sampling_policy: SamplingPolicy::Random(256),
-            max_route_step: 4,
-            route_step_sampling_policy: SamplingPolicy::Random(256),
-        }
-    }
-
-    #[test]
-    fn expose_isolated_output_port_adds_repeater_diode_inside_candidate() {
-        let mut world = World3D::new(DimSize(5, 3, 3));
-        let tap = Position(1, 1, 1);
-        world[tap.down().unwrap()] = PlacedNode::new_cobble(tap.down().unwrap()).block;
-        world[tap] = redstone_block();
-        world.initialize_redstone_states();
-
-        let adapter = isolated_output_port_adapters(&world, tap)
-            .into_iter()
-            .next()
-            .unwrap();
-
-        assert!(adapter
-            .blocks
-            .iter()
-            .any(|(position, block)| *position == adapter.position && block.kind.is_repeater()));
-    }
-
-    #[test]
-    fn d_latch_candidate_keeps_direct_q_tap_and_exposes_isolated_repeater_port() -> eyre::Result<()>
-    {
-        let module = d_latch_graph_module("d_latch", "d", "en", "q");
-        let candidates = generate_graph_module_candidates(
-            &module,
-            &d_latch_child_candidate_config(sequential_local_config()),
-        )?;
-
-        let q = candidates[0]
-            .ports
-            .iter()
-            .find(|port| port.name == "q")
-            .unwrap();
-        let route_position = q.route_position.unwrap();
-        let isolated_route_position = q.isolated_route_position.unwrap();
-
-        assert!(q.isolate_output);
-        assert!(candidates[0].world[route_position].kind.is_redstone());
-        assert!(q
-            .isolated_route_blocks
-            .iter()
-            .any(|(position, block)| *position == isolated_route_position
-                && block.kind.is_repeater()));
-        assert!(!q.isolated_route_options.is_empty());
-        Ok(())
     }
 }
