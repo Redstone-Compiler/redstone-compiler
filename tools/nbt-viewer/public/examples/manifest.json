@@ -18,10 +18,29 @@
     "size": 292
   },
   {
+    "name": "counter-global-placement-bbox.nbt",
+    "file": "counter-global-placement-bbox.nbt",
+    "path": "examples/counter-global-placement-bbox.nbt",
+    "size": 1282
+  },
+  {
+    "name": "counter-global-smoke.nbt",
+    "file": "counter-global-smoke.nbt",
+    "path": "examples/counter-global-smoke.nbt",
+    "size": 3642,
+    "outputsPath": "examples/counter-global-smoke.outputs.json"
+  },
+  {
+    "name": "d-flip-flop-global-placement-bbox.nbt",
+    "file": "d-flip-flop-global-placement-bbox.nbt",
+    "path": "examples/d-flip-flop-global-placement-bbox.nbt",
+    "size": 577
+  },
+  {
     "name": "d-flip-flop-global-smoke.nbt",
     "file": "d-flip-flop-global-smoke.nbt",
     "path": "examples/d-flip-flop-global-smoke.nbt",
-    "size": 1542,
+    "size": 1479,
     "outputsPath": "examples/d-flip-flop-global-smoke.outputs.json"
   },
   {

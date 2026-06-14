@@ -24,6 +24,13 @@ pub fn world_to_logic_with_outputs(
     world: &World,
     metadata: &OutputMetadata,
 ) -> eyre::Result<LogicGraph> {
+    normalize_logic_graph(world_to_logic_with_outputs_unoptimized(world, metadata)?)
+}
+
+pub fn world_to_logic_with_outputs_unoptimized(
+    world: &World,
+    metadata: &OutputMetadata,
+) -> eyre::Result<LogicGraph> {
     let raw_world_graph = WorldGraph::from(world);
     let raw_position_to_node = raw_world_graph
         .positions
@@ -68,7 +75,7 @@ pub fn world_to_logic_with_outputs(
         })
         .collect::<eyre::Result<Vec<_>>>()?;
 
-    normalize_logic_graph(logic_graph.attach_outputs(outputs)?)
+    logic_graph.attach_outputs(outputs)
 }
 
 fn is_source_tag(tag: &str, source_id: GraphNodeId) -> bool {
@@ -201,7 +208,9 @@ fn component_external_edges(
 
 #[cfg(test)]
 mod tests {
-    use super::is_source_tag;
+    use super::{is_source_tag, world_to_logic_with_outputs_unoptimized};
+    use crate::nbt::NBTRoot;
+    use crate::output::OutputMetadata;
 
     #[test]
     fn source_tag_match_accepts_plain_and_annotated_source_tags() {
@@ -212,6 +221,25 @@ mod tests {
         ));
         assert!(!is_source_tag("From #123", 12));
         assert!(!is_source_tag("From #12-ish", 12));
+    }
+
+    #[test]
+    fn counter_global_smoke_outputs_attach_to_unoptimized_logic_graph() -> eyre::Result<()> {
+        let nbt = NBTRoot::load("test/counter-global-smoke.nbt")?;
+        let metadata = OutputMetadata::load("test/counter-global-smoke.outputs.json")?;
+        let logic = world_to_logic_with_outputs_unoptimized(&nbt.to_world(), &metadata)?;
+
+        assert_eq!(logic.named_outputs().len(), 2);
+        assert!(
+            logic
+                .graph
+                .nodes
+                .iter()
+                .any(|node| matches!(node.kind, crate::graph::GraphNodeKind::Sequential(_))),
+            "counter output metadata should attach to a graph with folded sequential latch primitives"
+        );
+
+        Ok(())
     }
 }
 

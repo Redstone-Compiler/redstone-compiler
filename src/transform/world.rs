@@ -143,24 +143,54 @@ impl WorldGraphTransformer {
     // into logic. The downstream logic extraction walks nodes in topological order,
     // so a cyclic torch/redstone latch core must become one sequential node first.
     pub fn fold_rs_latch_feedback_components(&mut self) {
-        for component in self.graph.graph.strongly_connected_components() {
-            let component_set = component.iter().copied().collect::<HashSet<_>>();
-            if !is_rs_latch_feedback_component(&self.graph, &component, &component_set) {
-                continue;
-            }
+        loop {
+            let mut folded = false;
+            for component in self.graph.graph.strongly_connected_components() {
+                let component_set = component.iter().copied().collect::<HashSet<_>>();
+                let (fold_nodes, require_outputs, tag) =
+                    if is_rs_latch_feedback_component(&self.graph, &component, &component_set) {
+                        (
+                            component_set,
+                            false,
+                            format!("Folded RS latch feedback SCC {component:?}"),
+                        )
+                    } else if let Some(core) = find_embedded_rs_latch_feedback_core(
+                        &self.graph,
+                        &component,
+                        &component_set,
+                    ) {
+                        let mut folded_nodes = core.iter().copied().collect_vec();
+                        folded_nodes.sort_unstable();
+                        (
+                            core,
+                            true,
+                            format!("Folded RS latch feedback core {folded_nodes:?}"),
+                        )
+                    } else {
+                        continue;
+                    };
 
-            let inputs = self.graph.graph.external_edges(&component_set, true);
-            if inputs.len() != 2 {
-                continue;
+                let inputs = self.graph.graph.external_edges(&fold_nodes, true);
+                if inputs.len() != 2 {
+                    continue;
+                }
+                let outputs = self.graph.graph.external_edges(&fold_nodes, false);
+                if require_outputs && outputs.is_empty() {
+                    continue;
+                }
+                self.graph.replace_nodes_with(
+                    &fold_nodes,
+                    GraphNodeKind::Sequential(SequentialPrimitive::rs_latch()),
+                    inputs,
+                    outputs,
+                    tag,
+                );
+                folded = true;
+                break;
             }
-            let outputs = self.graph.graph.external_edges(&component_set, false);
-            self.graph.replace_nodes_with(
-                &component_set,
-                GraphNodeKind::Sequential(SequentialPrimitive::rs_latch()),
-                inputs,
-                outputs,
-                format!("Folded RS latch feedback SCC {component:?}"),
-            );
+            if !folded {
+                break;
+            }
         }
     }
 
@@ -223,7 +253,7 @@ fn is_rs_latch_feedback_component(
             return false;
         };
         match &node.kind {
-            GraphNodeKind::Block(block) if matches!(block.kind, BlockKind::Torch { .. }) => {
+            GraphNodeKind::Block(block) if block.kind.is_torch() => {
                 torch_count += 1;
                 if !node.inputs.iter().any(|id| component_set.contains(id))
                     || !node.outputs.iter().any(|id| component_set.contains(id))
@@ -231,7 +261,7 @@ fn is_rs_latch_feedback_component(
                     return false;
                 }
             }
-            GraphNodeKind::Block(block) if matches!(block.kind, BlockKind::Redstone { .. }) => {
+            GraphNodeKind::Block(block) if block.kind.is_redstone() => {
                 redstone_count += 1;
             }
             _ => return false,
@@ -239,6 +269,76 @@ fn is_rs_latch_feedback_component(
     }
 
     torch_count == 2 && redstone_count == 2
+}
+
+fn find_embedded_rs_latch_feedback_core(
+    graph: &WorldGraph,
+    component: &[GraphNodeId],
+    component_set: &HashSet<GraphNodeId>,
+) -> Option<HashSet<GraphNodeId>> {
+    let torches = component
+        .iter()
+        .copied()
+        .filter(|node_id| {
+            graph.graph.find_node_by_id(*node_id).is_some_and(
+                |node| matches!(&node.kind, GraphNodeKind::Block(block) if block.kind.is_torch()),
+            )
+        })
+        .sorted()
+        .collect_vec();
+
+    for (index, left) in torches.iter().enumerate() {
+        for right in torches.iter().skip(index + 1) {
+            let Some(left_redstone) =
+                feedback_redstone_between_torches(graph, *left, *right, component_set)
+            else {
+                continue;
+            };
+            let Some(right_redstone) =
+                feedback_redstone_between_torches(graph, *right, *left, component_set)
+            else {
+                continue;
+            };
+            if left_redstone == right_redstone {
+                continue;
+            }
+
+            return Some(HashSet::from([
+                *left,
+                *right,
+                left_redstone,
+                right_redstone,
+            ]));
+        }
+    }
+
+    None
+}
+
+fn feedback_redstone_between_torches(
+    graph: &WorldGraph,
+    torch_id: GraphNodeId,
+    target_torch_id: GraphNodeId,
+    component_set: &HashSet<GraphNodeId>,
+) -> Option<GraphNodeId> {
+    let torch = graph.graph.find_node_by_id(torch_id)?;
+    torch
+        .outputs
+        .iter()
+        .copied()
+        .filter(|node_id| component_set.contains(node_id))
+        .filter(|node_id| {
+            graph
+                .graph
+                .find_node_by_id(*node_id)
+                .is_some_and(|node| matches!(&node.kind, GraphNodeKind::Block(block) if block.kind.is_redstone()))
+        })
+        .find(|node_id| {
+            graph
+                .graph
+                .find_node_by_id(*node_id)
+                .is_some_and(|node| node.outputs.contains(&target_torch_id))
+        })
 }
 
 #[cfg(test)]
@@ -272,6 +372,31 @@ mod tests {
         if std::env::var_os("PRINT_WORLD_GRAPHS").is_some() {
             println!("{}", transform.finish().to_graphviz());
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn fold_rs_latch_feedback_components_finds_latch_cores_inside_counter_sccs() -> eyre::Result<()>
+    {
+        let nbt = NBTRoot::load("test/counter-global-smoke.nbt")?;
+        let g = WorldGraphBuilder::new(&nbt.to_world()).build();
+        let mut transform = WorldGraphTransformer::new(g);
+
+        transform.fold_redstone();
+        transform.fold_rs_latch_feedback_components();
+        let folded = transform.finish();
+
+        let sequential_nodes = folded
+            .graph
+            .nodes
+            .iter()
+            .filter(|node| matches!(node.kind, crate::graph::GraphNodeKind::Sequential(_)))
+            .count();
+        assert!(
+            sequential_nodes >= 2,
+            "expected counter SCCs to expose embedded RS latch cores, got {sequential_nodes}"
+        );
 
         Ok(())
     }

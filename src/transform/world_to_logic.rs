@@ -81,7 +81,6 @@ impl WorldToLogicTransformer {
     }
 
     fn transform_inner(&mut self) -> eyre::Result<LogicGraph> {
-        let mut new_in_id = HashMap::new();
         let mut graph = Graph::from_nodes_with_ids(
             self.graph
                 .graph
@@ -93,15 +92,19 @@ impl WorldToLogicTransformer {
 
         let mut input_count = 0;
 
-        for id in self.graph.graph.topological_order() {
+        let mut source_replacements = HashMap::new();
+        let node_ids = self
+            .graph
+            .graph
+            .nodes
+            .iter()
+            .map(|node| node.id)
+            .collect::<Vec<_>>();
+
+        for id in node_ids {
             let node = self.graph.graph.find_node_by_id(id).unwrap().clone_node();
 
-            let inputs = node
-                .inputs
-                .iter()
-                .map(|id| new_in_id.get(id).unwrap_or(id))
-                .copied()
-                .collect();
+            let inputs = node.inputs.clone();
             let tag = transformed_tag(id, &node.tag);
 
             let new_node = match node.kind {
@@ -150,7 +153,7 @@ impl WorldToLogicTransformer {
                                 tag: tag.clone(),
                             });
 
-                            new_in_id.insert(id, not_node_id);
+                            source_replacements.insert(id, not_node_id);
 
                             GraphNode {
                                 kind: GraphNodeKind::Logic(Logic {
@@ -168,6 +171,20 @@ impl WorldToLogicTransformer {
             };
 
             *graph.find_node_by_id_mut(id).unwrap() = new_node;
+        }
+
+        for mut node in graph.nodes.iter_mut() {
+            if source_replacements
+                .values()
+                .any(|replacement| *replacement == node.id)
+            {
+                continue;
+            }
+            for input in &mut node.inputs {
+                if let Some(replacement_id) = source_replacements.get(input) {
+                    *input = *replacement_id;
+                }
+            }
         }
 
         graph.build_outputs();
@@ -284,6 +301,24 @@ mod tests {
                 .iter()
                 .any(|node| matches!(node.kind, crate::graph::GraphNodeKind::Sequential(_))),
             "expected D latch NBT to contain a sequential logic node"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn counter_global_smoke_nbt_extracts_logic_graph_for_visualization() -> eyre::Result<()> {
+        let nbt = NBTRoot::load("test/counter-global-smoke.nbt")?;
+        let graph = WorldGraphBuilder::new(&nbt.to_world()).build();
+        let logic = WorldToLogicTransformer::new(graph, true)?.transform()?;
+
+        assert!(
+            logic
+                .graph
+                .nodes
+                .iter()
+                .any(|node| matches!(node.kind, crate::graph::GraphNodeKind::Sequential(_))),
+            "counter logic graph should expose folded sequential latch primitives"
         );
 
         Ok(())
