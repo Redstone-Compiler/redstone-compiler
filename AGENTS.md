@@ -2,6 +2,8 @@
 
 ## Documentation
 
+- Verilog RTL interface design notes: `docs/verilog_rtl_interface_design.md`
+
 When asked to create or preserve project documentation, add an appropriate file under `docs/` and link it from this file when it is useful for future agents.
 
 ## Git

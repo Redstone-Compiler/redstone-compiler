@@ -12,13 +12,45 @@ pub enum PhysicalPortDirection {
     Output,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PortConnection {
+    Direct,
+    InputDiode,
+    OutputDiode,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PhysicalPort {
     pub name: String,
     pub direction: PhysicalPortDirection,
     pub position: Position,
     pub route_position: Option<Position>,
-    pub isolate_input: bool,
+    pub access_points: Vec<Position>,
+    pub connection: PortConnection,
+}
+
+impl PhysicalPort {
+    pub fn routing_access_positions(&self) -> Vec<Position> {
+        if self.access_points.is_empty() {
+            return vec![self.route_position.unwrap_or(self.position)];
+        }
+        self.access_points.clone()
+    }
+
+    pub fn primary_route_position(&self) -> Position {
+        self.routing_access_positions()
+            .into_iter()
+            .next()
+            .unwrap_or(self.position)
+    }
+
+    pub fn requires_input_diode(&self) -> bool {
+        self.connection == PortConnection::InputDiode
+    }
+
+    pub fn requires_output_diode(&self) -> bool {
+        self.connection == PortConnection::OutputDiode
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -64,5 +96,46 @@ impl LayoutCandidate {
             blocked_cells: HashSet::new(),
             cost,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_port(connection: PortConnection, access_points: Vec<Position>) -> PhysicalPort {
+        PhysicalPort {
+            name: "p".to_owned(),
+            direction: PhysicalPortDirection::Input,
+            position: Position(1, 2, 3),
+            route_position: Some(Position(4, 5, 6)),
+            access_points,
+            connection,
+        }
+    }
+
+    #[test]
+    fn physical_port_prefers_explicit_access_points() {
+        let port = test_port(PortConnection::Direct, vec![Position(7, 8, 9)]);
+
+        assert_eq!(port.routing_access_positions(), vec![Position(7, 8, 9)]);
+    }
+
+    #[test]
+    fn physical_port_falls_back_to_route_position_as_access_point() {
+        let port = test_port(PortConnection::Direct, Vec::new());
+
+        assert_eq!(port.routing_access_positions(), vec![Position(4, 5, 6)]);
+    }
+
+    #[test]
+    fn physical_port_connection_describes_diode_requirement() {
+        let input = test_port(PortConnection::InputDiode, Vec::new());
+        let output = test_port(PortConnection::OutputDiode, Vec::new());
+
+        assert!(input.requires_input_diode());
+        assert!(!input.requires_output_diode());
+        assert!(!output.requires_input_diode());
+        assert!(output.requires_output_diode());
     }
 }

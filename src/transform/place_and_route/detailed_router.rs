@@ -195,10 +195,15 @@ pub fn target_powers_position(world: &World3D, target: Position, position: Posit
         .into_iter()
         .filter(|bound| bound.is_bound_on(world))
         .any(|bound| {
-            bound.position() == position
-                || bound
-                    .propagate_to(world)
-                    .into_iter()
-                    .any(|(_, propagated)| propagated == position)
+            let propagates_to_position = bound
+                .propagate_to(world)
+                .into_iter()
+                .any(|(_, propagated)| propagated == position);
+
+            if world[position].kind.is_repeater() {
+                return propagates_to_position;
+            }
+
+            bound.position() == position || propagates_to_position
         })
 }

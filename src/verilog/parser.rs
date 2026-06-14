@@ -115,9 +115,19 @@ impl Parser {
     fn parse_always_sensitivity(&mut self) -> eyre::Result<AlwaysSensitivity> {
         self.expect(Token::At)?;
         self.expect(Token::LParen)?;
-        self.expect(Token::Star)?;
-        self.expect(Token::RParen)?;
-        Ok(AlwaysSensitivity::Any)
+        if self.consume(&Token::Star) {
+            self.expect(Token::RParen)?;
+            return Ok(AlwaysSensitivity::Any);
+        }
+
+        if self.consume(&Token::Posedge) {
+            let clock = self.parse_signal_name()?;
+            self.expect(Token::RParen)?;
+            return Ok(AlwaysSensitivity::Posedge(clock));
+        }
+
+        let got = self.peek().cloned();
+        eyre::bail!("unsupported always sensitivity: {got:?}")
     }
 
     fn parse_always_stmt(&mut self) -> eyre::Result<AlwaysStmt> {
@@ -156,7 +166,7 @@ impl Parser {
     fn parse_nonblocking_assignment_stmt(&mut self) -> eyre::Result<AlwaysStmt> {
         let output = self.parse_signal_name()?;
         self.expect(Token::Le)?;
-        let data = self.parse_signal_name()?;
+        let data = self.parse_expr()?;
         self.expect(Token::Semi)?;
         Ok(AlwaysStmt::NonBlockingAssign { output, data })
     }
@@ -227,11 +237,24 @@ impl Parser {
     }
 
     fn parse_and(&mut self) -> eyre::Result<Expr> {
-        let mut expr = self.parse_unary()?;
+        let mut expr = self.parse_add()?;
         while self.consume(&Token::And) {
-            let rhs = self.parse_unary()?;
+            let rhs = self.parse_add()?;
             expr = Expr::Binary {
                 op: BinaryOp::And,
+                left: Box::new(expr),
+                right: Box::new(rhs),
+            };
+        }
+        Ok(expr)
+    }
+
+    fn parse_add(&mut self) -> eyre::Result<Expr> {
+        let mut expr = self.parse_unary()?;
+        while self.consume(&Token::Plus) {
+            let rhs = self.parse_unary()?;
+            expr = Expr::Binary {
+                op: BinaryOp::Add,
                 left: Box::new(expr),
                 right: Box::new(rhs),
             };
@@ -253,6 +276,7 @@ impl Parser {
                 let name = self.finish_signal_name(name)?;
                 Ok(Expr::Ident(name))
             }
+            Some(Token::Number(value)) => Ok(Expr::Number(value)),
             Some(Token::LParen) => {
                 let expr = self.parse_expr()?;
                 self.expect(Token::RParen)?;
@@ -436,7 +460,7 @@ mod tests {
                 condition: "en".to_owned(),
                 then_branch: Box::new(AlwaysStmt::NonBlockingAssign {
                     output: "q".to_owned(),
-                    data: "d".to_owned()
+                    data: Expr::Ident("d".to_owned())
                 })
             }
         );

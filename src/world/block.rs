@@ -159,6 +159,24 @@ impl BlockKind {
         matches!(self, BlockKind::Switch { .. })
     }
 
+    pub fn is_powered(&self) -> bool {
+        match self {
+            BlockKind::Cobble {
+                on_count,
+                on_base_count,
+            } => *on_count > 0 || *on_base_count > 0,
+            BlockKind::Switch { is_on } => *is_on,
+            BlockKind::Redstone {
+                on_count, strength, ..
+            } => *strength > 0 || *on_count > 0,
+            BlockKind::Torch { is_on } => *is_on,
+            BlockKind::Repeater { is_on, .. } => *is_on,
+            BlockKind::RedstoneBlock => true,
+            BlockKind::Piston { is_on, .. } => *is_on,
+            BlockKind::Air => false,
+        }
+    }
+
     pub fn get_redstone_strength(&self) -> eyre::Result<usize> {
         let BlockKind::Redstone { strength, .. } = self else {
             eyre::bail!("unreachable");
@@ -296,5 +314,33 @@ impl From<Block> for World {
             size: DimSize(1, 1, 1),
             blocks: vec![(Position(1, 1, 1), value)],
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn block_kind_is_powered_reports_stored_power_state() {
+        assert!(BlockKind::Switch { is_on: true }.is_powered());
+        assert!(BlockKind::Redstone {
+            on_count: 0,
+            state: 0,
+            strength: 1,
+        }
+        .is_powered());
+        assert!(BlockKind::Redstone {
+            on_count: 1,
+            state: 0,
+            strength: 0,
+        }
+        .is_powered());
+        assert!(BlockKind::Cobble {
+            on_count: 0,
+            on_base_count: 1,
+        }
+        .is_powered());
+        assert!(!BlockKind::Air.is_powered());
     }
 }

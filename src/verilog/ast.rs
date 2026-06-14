@@ -48,9 +48,10 @@ pub struct AlwaysBlock {
     pub body: AlwaysStmt,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AlwaysSensitivity {
     Any,
+    Posedge(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,13 +62,14 @@ pub enum AlwaysStmt {
     },
     NonBlockingAssign {
         output: String,
-        data: String,
+        data: Expr,
     },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expr {
     Ident(String),
+    Number(usize),
     Not(Box<Expr>),
     Binary {
         op: BinaryOp,
@@ -78,6 +80,7 @@ pub enum Expr {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryOp {
+    Add,
     And,
     Xor,
     Or,
@@ -87,9 +90,11 @@ impl Expr {
     pub fn to_logic_stmt(&self) -> String {
         match self {
             Expr::Ident(name) => name.clone(),
+            Expr::Number(value) => value.to_string(),
             Expr::Not(expr) => format!("~({})", expr.to_logic_stmt()),
             Expr::Binary { op, left, right } => {
                 let op = match op {
+                    BinaryOp::Add => "+",
                     BinaryOp::And => "&",
                     BinaryOp::Xor => "^",
                     BinaryOp::Or => "|",

@@ -3,7 +3,7 @@ use std::fmt;
 use crate::transform::place_and_route::global_pnr::ir::LayoutCandidate;
 use crate::transform::place_and_route::global_pnr::placer::PlacedModule;
 use crate::transform::place_and_route::global_pnr::router::RoutedNet;
-use crate::world::block::Block;
+use crate::world::block::{Block, BlockKind};
 use crate::world::position::{DimSize, Position};
 use crate::world::World3D;
 
@@ -33,7 +33,7 @@ pub fn assemble_world(
     placed_modules: &[PlacedModule],
     routed_nets: &[RoutedNet],
 ) -> Result<World3D, AssemblyError> {
-    let mut blocks = Vec::<(Position, Block)>::new();
+    let mut candidate_blocks = Vec::<(Position, Block)>::new();
 
     for placed in placed_modules {
         let candidate =
@@ -43,28 +43,67 @@ pub fn assemble_world(
                     candidate_index: placed.candidate_index,
                 })?;
         for (position, block) in candidate.world.iter_block() {
-            blocks.push((
+            candidate_blocks.push((
                 translate_candidate_position(position, candidate, placed),
                 block,
             ));
         }
     }
 
+    let mut blocks = candidate_blocks.clone();
     for route in routed_nets {
         blocks.extend(route.blocks.iter().copied());
     }
 
     let size = world_size_for_blocks(&blocks);
     let mut world = World3D::new(size);
-    for (position, block) in blocks {
+    for (position, block) in candidate_blocks {
         if !world[position].kind.is_air() {
             return Err(AssemblyError::Collision { position });
         }
         world[position] = block;
     }
+
+    for route in routed_nets {
+        for (position, block) in &route.blocks {
+            world[*position] = *block;
+        }
+    }
+
+    reset_dynamic_power_states(&mut world);
     world.initialize_redstone_states();
 
     Ok(world)
+}
+
+pub(crate) fn reset_dynamic_power_states(world: &mut World3D) {
+    for position in world.iter_pos() {
+        world[position].kind = match world[position].kind {
+            BlockKind::Cobble { .. } => BlockKind::Cobble {
+                on_count: 0,
+                on_base_count: 0,
+            },
+            BlockKind::Redstone { state, .. } => BlockKind::Redstone {
+                on_count: 0,
+                state,
+                strength: 0,
+            },
+            BlockKind::Repeater {
+                is_locked,
+                delay,
+                lock_input1,
+                lock_input2,
+                ..
+            } => BlockKind::Repeater {
+                is_on: false,
+                is_locked,
+                delay,
+                lock_input1,
+                lock_input2,
+            },
+            kind => kind,
+        };
+    }
 }
 
 fn translate_candidate_position(

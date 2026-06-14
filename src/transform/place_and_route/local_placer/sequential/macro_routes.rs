@@ -4,6 +4,8 @@ use itertools::{iproduct, Itertools};
 
 use super::*;
 
+// TODO: Deprecate this hardcoded sequential macro fallback once RS latch and D latch
+// gate-level searched placement is reliable enough without prebuilt macro candidates.
 pub(in super::super) fn generate_sequential_macro_routes(
     config: &LocalPlacerConfig,
     node: GraphNodeRef<'_>,

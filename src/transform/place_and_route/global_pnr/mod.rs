@@ -4,30 +4,44 @@ pub mod ir;
 pub mod placer;
 pub mod progress;
 pub mod router;
+pub mod visualize;
 
 use eyre::ContextCompat;
 
 use crate::graph::module::{GraphModule, GraphModuleContext, GraphModuleDesign};
-use crate::output::PlacedWorld;
+use crate::graph::GraphNodeKind;
+use crate::nbt::ToNBT;
+use crate::output::{OutputEndpoint, PlacedWorld};
 use crate::transform::place_and_route::global_pnr::assembly::assemble_world;
 use crate::transform::place_and_route::global_pnr::candidate::{
     generate_graph_module_candidates_with_progress_label, UnitCandidateConfig,
 };
-use crate::transform::place_and_route::global_pnr::ir::LayoutCandidate;
+use crate::transform::place_and_route::global_pnr::ir::{LayoutCandidate, PhysicalPortDirection};
 use crate::transform::place_and_route::global_pnr::placer::{
-    place_candidates_on_shelves, GlobalPlacementConfig,
+    place_candidates_on_shelves, placement_candidates, GlobalPlacementConfig, PlacedModule,
 };
 use crate::transform::place_and_route::global_pnr::progress::GlobalPnrProgress;
 use crate::transform::place_and_route::global_pnr::router::{
-    collect_module_output_endpoints, route_module_variables,
+    collect_module_input_endpoints, collect_module_output_endpoints, first_invalid_active_route,
+    route_module_variables, GlobalRoutingConfig, RoutedNet,
 };
+use crate::transform::place_and_route::global_pnr::visualize::placement_bbox_wireframe_world;
+use crate::transform::place_and_route::local_placer::{LocalPlacerConfig, NotRouteStrategy};
+use crate::transform::place_and_route::sampling::SamplingPolicy;
 use crate::world::World3D;
 
 #[derive(Clone)]
 pub struct GlobalPnrConfig {
     pub candidate: UnitCandidateConfig,
     pub placement: GlobalPlacementConfig,
+    pub routing: GlobalRoutingConfig,
     pub show_progress: bool,
+    pub verifier: Option<fn(&PlacedWorld) -> eyre::Result<()>>,
+}
+
+pub struct GlobalPnrResult {
+    pub placed_world: PlacedWorld,
+    pub placement_bbox_world: World3D,
 }
 
 impl Default for GlobalPnrConfig {
@@ -35,7 +49,9 @@ impl Default for GlobalPnrConfig {
         Self {
             candidate: UnitCandidateConfig::default(),
             placement: GlobalPlacementConfig::default(),
+            routing: GlobalRoutingConfig::default(),
             show_progress: true,
+            verifier: None,
         }
     }
 }
@@ -59,7 +75,9 @@ pub fn place_and_route_design_with_outputs(
     design: &GraphModuleDesign,
     config: &GlobalPnrConfig,
 ) -> eyre::Result<PlacedWorld> {
-    place_and_route_module_with_outputs(&design.context, design.top_module(), config)
+    let GlobalPnrResult { placed_world, .. } =
+        place_and_route_design_with_visualization(design, config)?;
+    Ok(placed_world)
 }
 
 pub fn place_and_route_module_with_outputs(
@@ -67,6 +85,23 @@ pub fn place_and_route_module_with_outputs(
     module: &GraphModule,
     config: &GlobalPnrConfig,
 ) -> eyre::Result<PlacedWorld> {
+    let GlobalPnrResult { placed_world, .. } =
+        place_and_route_module_with_visualization(context, module, config)?;
+    Ok(placed_world)
+}
+
+pub fn place_and_route_design_with_visualization(
+    design: &GraphModuleDesign,
+    config: &GlobalPnrConfig,
+) -> eyre::Result<GlobalPnrResult> {
+    place_and_route_module_with_visualization(&design.context, design.top_module(), config)
+}
+
+pub fn place_and_route_module_with_visualization(
+    context: &GraphModuleContext,
+    module: &GraphModule,
+    config: &GlobalPnrConfig,
+) -> eyre::Result<GlobalPnrResult> {
     let progress = GlobalPnrProgress::new(config.show_progress, module.name.clone());
     if module.graph.is_some() {
         return place_graph_backed_module(module, config, &progress);
@@ -76,19 +111,31 @@ pub fn place_and_route_module_with_outputs(
     let candidates = generate_child_candidates(context, module, config, &progress)?;
 
     progress.stage(2, 5, "place child candidates");
-    let placed = place_candidates_on_shelves(&candidates, &config.placement);
+    let placement_attempts = placement_candidates(module, &candidates, &config.placement);
+    progress.detail(format!(
+        "generated {} placement attempt(s)",
+        placement_attempts.len()
+    ));
 
     progress.stage(3, 5, "route module ports and variables");
-    let routed_nets = route_module_variables(module, &candidates, &placed, &progress)?;
+    let (placed, routed_nets) = route_first_successful_placement(
+        module,
+        &candidates,
+        placement_attempts,
+        config,
+        &progress,
+    )?;
 
     progress.stage(4, 5, "assemble world and collect outputs");
+    let inputs = collect_module_input_endpoints(module, &routed_nets);
     let outputs = collect_module_output_endpoints(module, &candidates, &placed);
     let world = assemble_world(&candidates, &placed, &routed_nets)?;
     let placed_world = PlacedWorld {
         world,
-        inputs: Vec::new(),
+        inputs,
         outputs,
     };
+    let placement_bbox_world = placement_bbox_wireframe_world(&placed);
 
     progress.stage(5, 5, "complete");
     progress.detail(format!(
@@ -97,14 +144,157 @@ pub fn place_and_route_module_with_outputs(
         routed_nets.len()
     ));
 
-    Ok(placed_world)
+    Ok(GlobalPnrResult {
+        placed_world,
+        placement_bbox_world,
+    })
+}
+
+fn route_first_successful_placement(
+    module: &GraphModule,
+    candidates: &[LayoutCandidate],
+    placement_attempts: Vec<Vec<PlacedModule>>,
+    config: &GlobalPnrConfig,
+    progress: &GlobalPnrProgress,
+) -> eyre::Result<(Vec<PlacedModule>, Vec<RoutedNet>)> {
+    let mut last_error = None;
+    let total_attempts = placement_attempts.len();
+
+    for (attempt_index, placed) in placement_attempts.into_iter().enumerate() {
+        progress.item(attempt_index + 1, total_attempts, "route placement attempt");
+        match route_module_variables(module, candidates, &placed, &config.routing, progress) {
+            Ok(routed_nets) => {
+                match placed_world_from_routing(module, candidates, &placed, &routed_nets) {
+                    Ok(world) => {
+                        if let Some(route) = first_invalid_active_route(&world.world, &routed_nets)
+                        {
+                            let error = eyre::eyre!(
+                                "assembled route from {:?} to {:?} does not satisfy its powered-position contract",
+                                route.source,
+                                route.sink
+                            );
+                            progress.detail(format!(
+                                "placement attempt {} failed: {error}",
+                                attempt_index + 1
+                            ));
+                            last_error = Some(error);
+                            continue;
+                        }
+                        if let Some(verifier) = config.verifier {
+                            if let Err(error) = verifier(&world) {
+                                save_failed_verifier_world(
+                                    module,
+                                    attempt_index + 1,
+                                    &world,
+                                    &routed_nets,
+                                );
+                                progress.detail(format!(
+                                    "placement attempt {} failed verifier: {error}",
+                                    attempt_index + 1
+                                ));
+                                last_error = Some(error);
+                                continue;
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        let error = eyre::eyre!(error);
+                        progress.detail(format!(
+                            "placement attempt {} failed: {error}",
+                            attempt_index + 1
+                        ));
+                        last_error = Some(error);
+                        continue;
+                    }
+                }
+                progress.detail(format!(
+                    "selected placement attempt {} with {} route(s)",
+                    attempt_index + 1,
+                    routed_nets.len()
+                ));
+                return Ok((placed, routed_nets));
+            }
+            Err(error) => {
+                save_failed_route_base_world(module, attempt_index + 1, candidates, &placed);
+                progress.detail(format!(
+                    "placement attempt {} failed: {error}",
+                    attempt_index + 1
+                ));
+                last_error = Some(error);
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| eyre::eyre!("no global placement attempts generated")))
+}
+
+fn placed_world_from_routing(
+    module: &GraphModule,
+    candidates: &[LayoutCandidate],
+    placed: &[PlacedModule],
+    routed_nets: &[RoutedNet],
+) -> eyre::Result<PlacedWorld> {
+    Ok(PlacedWorld {
+        world: assemble_world(candidates, placed, routed_nets)?,
+        inputs: collect_module_input_endpoints(module, routed_nets),
+        outputs: collect_module_output_endpoints(module, candidates, placed),
+    })
+}
+
+fn save_failed_verifier_world(
+    module: &GraphModule,
+    attempt: usize,
+    world: &PlacedWorld,
+    routed_nets: &[RoutedNet],
+) {
+    if std::env::var_os("SAVE_FAILED_GLOBAL_PNR").is_none() {
+        return;
+    }
+
+    let path = format!("test/{}-failed-attempt-{attempt}.nbt", module.name);
+    world.world.to_nbt().save(path);
+    let metadata_path = format!("test/{}-failed-attempt-{attempt}.outputs.json", module.name);
+    let _ = world.metadata().save(metadata_path);
+    let routes_path = format!("test/{}-failed-attempt-{attempt}.routes.txt", module.name);
+    let routes = routed_nets
+        .iter()
+        .map(|route| {
+            format!(
+                "source={:?} sink={:?} required={:?} path={:?}\n",
+                route.source, route.sink, route.required_powered_positions, route.path
+            )
+        })
+        .collect::<String>();
+    let _ = std::fs::write(routes_path, routes);
+}
+
+fn save_failed_route_base_world(
+    module: &GraphModule,
+    attempt: usize,
+    candidates: &[LayoutCandidate],
+    placed: &[PlacedModule],
+) {
+    if std::env::var_os("SAVE_FAILED_GLOBAL_PNR").is_none() {
+        return;
+    }
+
+    let Ok(world) = placed_world_from_routing(module, candidates, placed, &[]) else {
+        return;
+    };
+    let path = format!("test/{}-route-failed-attempt-{attempt}.nbt", module.name);
+    world.world.to_nbt().save(path);
+    let metadata_path = format!(
+        "test/{}-route-failed-attempt-{attempt}.outputs.json",
+        module.name
+    );
+    let _ = world.metadata().save(metadata_path);
 }
 
 fn place_graph_backed_module(
     module: &GraphModule,
     config: &GlobalPnrConfig,
     progress: &GlobalPnrProgress,
-) -> eyre::Result<PlacedWorld> {
+) -> eyre::Result<GlobalPnrResult> {
     progress.stage(1, 4, "generate leaf layout candidates");
     let candidates = generate_graph_module_candidates_with_progress_label(
         module,
@@ -122,15 +312,25 @@ fn place_graph_backed_module(
 
     progress.stage(2, 4, "place leaf candidate");
     let placed = place_candidates_on_shelves(&[candidate.clone()], &config.placement);
+    let inputs = candidate
+        .ports
+        .iter()
+        .filter(|port| port.direction == PhysicalPortDirection::Input)
+        .map(|port| OutputEndpoint::new(port.name.clone(), port.position))
+        .collect();
 
     progress.stage(3, 4, "assemble leaf world");
     let world = assemble_world(&[candidate], &placed, &[])?;
+    let placement_bbox_world = placement_bbox_wireframe_world(&placed);
 
     progress.stage(4, 4, "complete");
-    Ok(PlacedWorld {
-        world,
-        inputs: Vec::new(),
-        outputs: Vec::new(),
+    Ok(GlobalPnrResult {
+        placed_world: PlacedWorld {
+            world,
+            inputs,
+            outputs: Vec::new(),
+        },
+        placement_bbox_world,
     })
 }
 
@@ -149,22 +349,69 @@ fn generate_child_candidates(
             format!("generate `{instance}` candidate"),
         );
         let child = &context[instance.as_str()];
+        let child_config = candidate_config_for_child(child, &config.candidate);
         let mut child_candidates = generate_graph_module_candidates_with_progress_label(
             child,
-            &config.candidate,
+            &child_config,
             config.show_progress.then_some(instance.as_str()),
         )?;
         progress.detail(format!(
             "`{instance}` produced {} candidate(s)",
             child_candidates.len()
         ));
-        let candidate = child_candidates
-            .drain(..)
-            .next()
-            .with_context(|| format!("module instance `{instance}` produced no candidates"))?;
+        let candidate = if graph_module_input_port_count(child) > 1 {
+            child_candidates
+                .drain(..)
+                .min_by_key(child_candidate_selection_cost)
+        } else {
+            child_candidates.drain(..).next()
+        }
+        .with_context(|| format!("module instance `{instance}` produced no candidates"))?;
         candidates.push(candidate);
     }
     Ok(candidates)
+}
+
+fn candidate_config_for_child(
+    child: &GraphModule,
+    base_config: &UnitCandidateConfig,
+) -> UnitCandidateConfig {
+    let mut config = base_config.clone();
+    if graph_module_input_port_count(child) > 1 && graph_module_is_combinational(child) {
+        config.local_config = multi_input_combinational_local_config(config.local_config);
+    }
+    config
+}
+
+fn graph_module_is_combinational(module: &GraphModule) -> bool {
+    module.graph.as_ref().is_some_and(|graph| {
+        graph
+            .nodes
+            .iter()
+            .all(|node| !matches!(node.kind, GraphNodeKind::Sequential(_)))
+    })
+}
+
+fn multi_input_combinational_local_config(mut config: LocalPlacerConfig) -> LocalPlacerConfig {
+    config.leak_sampling = false;
+    config.not_route_strategy = NotRouteStrategy::DirectAndRedstone;
+    config.max_not_route_step = config.max_not_route_step.max(4);
+    config.not_route_step_sampling_policy = SamplingPolicy::Random(512);
+    config.max_route_step = config.max_route_step.max(4);
+    config.route_step_sampling_policy = SamplingPolicy::Random(512);
+    config
+}
+
+fn graph_module_input_port_count(module: &GraphModule) -> usize {
+    module
+        .ports
+        .iter()
+        .filter(|port| port.port_type.is_input())
+        .count()
+}
+
+fn child_candidate_selection_cost(candidate: &LayoutCandidate) -> (usize, usize) {
+    (candidate.cost.bbox_volume, candidate.cost.block_count)
 }
 
 #[cfg(test)]
@@ -189,7 +436,7 @@ mod tests {
     use crate::world::block::BlockKind;
     use crate::world::position::{DimSize, Position};
     use crate::world::simulator::Simulator;
-    use crate::world::World;
+    use crate::world::{World, World3D};
 
     fn sequential_local_config() -> LocalPlacerConfig {
         LocalPlacerConfig {
@@ -263,10 +510,7 @@ mod tests {
         assert_eq!(placed.outputs.len(), 1);
         assert_eq!(placed.outputs[0].name, "q");
         let output_position = placed.outputs[0].position();
-        assert_ne!(
-            placed.world[output_position].kind,
-            crate::world::block::BlockKind::Air
-        );
+        assert_ne!(placed.world[output_position].kind, BlockKind::Air);
         Ok(())
     }
 
@@ -307,17 +551,25 @@ mod tests {
             placement: GlobalPlacementConfig {
                 spacing: 4,
                 shelf_width: 64,
+                max_attempts: 64,
+                ..Default::default()
             },
+            verifier: Some(assert_positive_edge_dff_behavior),
             ..Default::default()
         };
 
-        let placed = place_and_route_design_with_outputs(&design, &config)?;
+        let result = place_and_route_design_with_visualization(&design, &config)?;
+        let placed = result.placed_world;
 
         assert!(!placed.world.iter_block().is_empty());
         assert_eq!(placed.outputs.len(), 1);
         assert_eq!(placed.outputs[0].name, "q");
         let nbt: NBTRoot = placed.world.to_nbt();
         nbt.save("test/d-flip-flop-global-smoke.nbt");
+        result
+            .placement_bbox_world
+            .to_nbt()
+            .save("test/d-flip-flop-global-placement-bbox.nbt");
         placed
             .metadata()
             .save("test/d-flip-flop-global-smoke.outputs.json")?;
@@ -327,6 +579,60 @@ mod tests {
             .iter()
             .any(|node| matches!(&node.kind, GraphNodeKind::Output(name) if name == "q")));
         assert_positive_edge_dff_behavior(&placed)?;
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "search-heavy sequential global pnr smoke test"]
+    fn counter_module_generates_world_from_child_layout_candidates() -> eyre::Result<()> {
+        init_tracing_from_env();
+        let design = lower_design_modules(&parse_modules(
+            r#"
+            module counter(clk, q);
+              input clk;
+              output reg [1:0] q;
+              always @(posedge clk) begin
+                q <= q + 1;
+              end
+            endmodule
+            "#,
+        )?)?;
+        let config = GlobalPnrConfig {
+            candidate: UnitCandidateConfig {
+                max_candidates: 4,
+                ..d_latch_child_candidate_config(sequential_local_config())
+            },
+            placement: GlobalPlacementConfig {
+                spacing: 4,
+                shelf_width: 64,
+                max_attempts: 64,
+                ..Default::default()
+            },
+            verifier: Some(assert_two_bit_counter_behavior),
+            ..Default::default()
+        };
+
+        let result = place_and_route_design_with_visualization(&design, &config)?;
+        let placed = result.placed_world;
+
+        assert!(!placed.world.iter_block().is_empty());
+        let mut output_names = placed
+            .outputs
+            .iter()
+            .map(|output| output.name.as_str())
+            .collect::<Vec<_>>();
+        output_names.sort();
+        assert_eq!(output_names, vec!["q_0", "q_1"]);
+        let nbt: NBTRoot = placed.world.to_nbt();
+        nbt.save("test/counter-global-smoke.nbt");
+        result
+            .placement_bbox_world
+            .to_nbt()
+            .save("test/counter-global-placement-bbox.nbt");
+        placed
+            .metadata()
+            .save("test/counter-global-smoke.outputs.json")?;
+        assert_two_bit_counter_behavior(&placed)?;
         Ok(())
     }
 
@@ -353,16 +659,8 @@ mod tests {
     }
 
     fn assert_positive_edge_dff_behavior(placed: &PlacedWorld) -> eyre::Result<()> {
-        let mut switches = placed
-            .world
-            .iter_block()
-            .into_iter()
-            .filter_map(|(position, block)| block.kind.is_switch().then_some(position))
-            .collect::<Vec<_>>();
-        switches.sort();
-        eyre::ensure!(switches.len() >= 2, "expected d and clk switches");
-        let data = switches[0];
-        let clock = switches[1];
+        let data = input_endpoint_position(placed, "d")?;
+        let clock = input_endpoint_position(placed, "clk")?;
         let output = placed.outputs[0].position();
         let world = World::from(&placed.world);
         let mut sim =
@@ -383,7 +681,63 @@ mod tests {
         Ok(())
     }
 
-    fn block_power(world: &crate::world::World3D, position: Position) -> bool {
+    fn assert_two_bit_counter_behavior(placed: &PlacedWorld) -> eyre::Result<()> {
+        let clock = input_endpoint_position(placed, "clk")?;
+        let output_q0 = placed
+            .outputs
+            .iter()
+            .find(|output| output.name == "q_0")
+            .context("missing q_0 output")?
+            .position();
+        let output_q1 = placed
+            .outputs
+            .iter()
+            .find(|output| output.name == "q_1")
+            .context("missing q_1 output")?
+            .position();
+        let world = World::from(&placed.world);
+        let mut sim =
+            Simulator::from_preserving_torch_states_with_limits_and_trace(&world, 256, 50_000, 0)
+                .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
+
+        let initial = counter_output_value(sim.world(), output_q0, output_q1);
+        sim.change_state_with_limits(vec![(clock, true)], 256, 50_000)?;
+        let first_rise = counter_output_value(sim.world(), output_q0, output_q1);
+        eyre::ensure!(
+            first_rise == 1,
+            "counter output should become 1 on first rising edge: initial={initial}, first_rise={first_rise}"
+        );
+
+        sim.change_state_with_limits(vec![(clock, false)], 256, 50_000)?;
+        let first_fall = counter_output_value(sim.world(), output_q0, output_q1);
+        eyre::ensure!(
+            first_fall == first_rise,
+            "counter output should hold on falling edge: first_rise={first_rise}, first_fall={first_fall}"
+        );
+
+        sim.change_state_with_limits(vec![(clock, true)], 256, 50_000)?;
+        let second_rise = counter_output_value(sim.world(), output_q0, output_q1);
+        eyre::ensure!(
+            second_rise == 2,
+            "counter output should become 2 on second rising edge: initial={initial}, first_rise={first_rise}, first_fall={first_fall}, second_rise={second_rise}"
+        );
+        Ok(())
+    }
+
+    fn counter_output_value(world: &World3D, q0: Position, q1: Position) -> usize {
+        usize::from(block_power(world, q0)) | (usize::from(block_power(world, q1)) << 1)
+    }
+
+    fn input_endpoint_position(placed: &PlacedWorld, name: &str) -> eyre::Result<Position> {
+        placed
+            .inputs
+            .iter()
+            .find(|input| input.name == name)
+            .map(|input| input.position())
+            .with_context(|| format!("missing input endpoint `{name}`"))
+    }
+
+    fn block_power(world: &World3D, position: Position) -> bool {
         match world[position].kind {
             BlockKind::Redstone {
                 strength, on_count, ..

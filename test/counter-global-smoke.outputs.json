@@ -1,0 +1,21 @@
+{
+  "format": "redstone-compiler.outputs.v1",
+  "outputs": [
+    {
+      "name": "q_0",
+      "position": [
+        33,
+        16,
+        5
+      ]
+    },
+    {
+      "name": "q_1",
+      "position": [
+        75,
+        16,
+        5
+      ]
+    }
+  ]
+}

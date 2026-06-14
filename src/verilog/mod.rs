@@ -3,6 +3,8 @@ pub mod design;
 pub mod lexer;
 pub mod lower;
 pub mod parser;
+pub mod rtl;
+pub mod synth;
 
 use std::fs;
 use std::path::Path;
