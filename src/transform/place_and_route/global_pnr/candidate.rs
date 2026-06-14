@@ -7,6 +7,7 @@ use crate::graph::logic::LogicGraph;
 use crate::graph::module::{GraphModule, GraphModulePortTarget, GraphModulePortType};
 use crate::graph::GraphNodeKind;
 use crate::transform::place_and_route::detailed_router;
+use crate::transform::place_and_route::global_pnr::block_kind_is_powered;
 use crate::transform::place_and_route::global_pnr::ir::{
     LayoutCandidate, PhysicalPort, PhysicalPortDirection, PortConnection,
 };
@@ -14,7 +15,7 @@ use crate::transform::place_and_route::local_placer::{
     LocalPlacer, LocalPlacerConfig, LocalPlacerInputConstraints,
 };
 use crate::transform::place_and_route::placed_node::PlacedNode;
-use crate::world::block::{Block, BlockKind};
+use crate::world::block::Block;
 use crate::world::position::{DimSize, Position};
 use crate::world::simulator::Simulator;
 use crate::world::{World, World3D};
@@ -156,7 +157,7 @@ fn candidate_matches_truth_table(
             let Some(expected_output) = expected.output_tables.get(*output_name) else {
                 return Ok(false);
             };
-            if block_is_powered(sim.world()[*output_position].kind) != expected_output[mask] {
+            if block_kind_is_powered(sim.world()[*output_position].kind) != expected_output[mask] {
                 return Ok(false);
             }
         }
@@ -170,22 +171,6 @@ fn candidate_matches_truth_table(
 // module port metadata로 다시 노출한다.
 // TODO(high-level): make LocalPlacer produce either standalone layouts with switches
 // or child-module layouts with PhysicalPort metadata, instead of rewriting switches here.
-fn block_is_powered(kind: BlockKind) -> bool {
-    match kind {
-        BlockKind::Cobble {
-            on_count,
-            on_base_count,
-        } => on_count > 0 || on_base_count > 0,
-        BlockKind::Switch { is_on } => is_on,
-        BlockKind::Redstone { strength, .. } => strength > 0,
-        BlockKind::Torch { is_on } => is_on,
-        BlockKind::Repeater { is_on, .. } => is_on,
-        BlockKind::RedstoneBlock => true,
-        BlockKind::Piston { is_on, .. } => is_on,
-        BlockKind::Air => false,
-    }
-}
-
 fn switchless_candidate_layout(
     module: &GraphModule,
     input_constraints: &LocalPlacerInputConstraints,
@@ -501,6 +486,7 @@ pub fn d_latch_child_candidate_config(local_config: LocalPlacerConfig) -> UnitCa
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::world::block::BlockKind;
     use crate::world::block::Direction;
 
     #[test]

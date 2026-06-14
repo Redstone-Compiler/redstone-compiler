@@ -434,12 +434,12 @@ fn input_port_initial_power_count(candidate: &LayoutCandidate) -> usize {
         })
         .filter(|port| {
             candidate.world.size.bound_on(port.position)
-                && block_is_powered(candidate.world[port.position].kind)
+                && block_kind_is_powered(candidate.world[port.position].kind)
         })
         .count()
 }
 
-fn block_is_powered(kind: BlockKind) -> bool {
+pub(crate) fn block_kind_is_powered(kind: BlockKind) -> bool {
     match kind {
         BlockKind::Cobble {
             on_count,
@@ -519,6 +519,21 @@ mod tests {
 
         assert!(!world.iter_block().is_empty());
         Ok(())
+    }
+
+    #[test]
+    fn block_kind_is_powered_reports_static_and_dynamic_power_sources() {
+        assert!(super::block_kind_is_powered(BlockKind::Switch { is_on: true }));
+        assert!(super::block_kind_is_powered(BlockKind::Redstone {
+            on_count: 0,
+            state: 0,
+            strength: 1,
+        }));
+        assert!(super::block_kind_is_powered(BlockKind::Cobble {
+            on_count: 0,
+            on_base_count: 1,
+        }));
+        assert!(!super::block_kind_is_powered(BlockKind::Air));
     }
 
     #[test]

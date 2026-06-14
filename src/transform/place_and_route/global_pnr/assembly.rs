@@ -3,7 +3,7 @@ use std::fmt;
 use crate::transform::place_and_route::global_pnr::ir::LayoutCandidate;
 use crate::transform::place_and_route::global_pnr::placer::PlacedModule;
 use crate::transform::place_and_route::global_pnr::router::RoutedNet;
-use crate::world::block::Block;
+use crate::world::block::{Block, BlockKind};
 use crate::world::position::{DimSize, Position};
 use crate::world::World3D;
 
@@ -79,26 +79,22 @@ pub fn assemble_world(
 pub(crate) fn reset_dynamic_power_states(world: &mut World3D) {
     for position in world.iter_pos() {
         world[position].kind = match world[position].kind {
-            crate::world::block::BlockKind::Cobble { .. } => {
-                crate::world::block::BlockKind::Cobble {
-                    on_count: 0,
-                    on_base_count: 0,
-                }
-            }
-            crate::world::block::BlockKind::Redstone { state, .. } => {
-                crate::world::block::BlockKind::Redstone {
-                    on_count: 0,
-                    state,
-                    strength: 0,
-                }
-            }
-            crate::world::block::BlockKind::Repeater {
+            BlockKind::Cobble { .. } => BlockKind::Cobble {
+                on_count: 0,
+                on_base_count: 0,
+            },
+            BlockKind::Redstone { state, .. } => BlockKind::Redstone {
+                on_count: 0,
+                state,
+                strength: 0,
+            },
+            BlockKind::Repeater {
                 is_locked,
                 delay,
                 lock_input1,
                 lock_input2,
                 ..
-            } => crate::world::block::BlockKind::Repeater {
+            } => BlockKind::Repeater {
                 is_on: false,
                 is_locked,
                 delay,
