@@ -76,7 +76,7 @@ pub fn assemble_world(
     Ok(world)
 }
 
-fn reset_dynamic_power_states(world: &mut World3D) {
+pub(crate) fn reset_dynamic_power_states(world: &mut World3D) {
     for position in world.iter_pos() {
         world[position].kind = match world[position].kind {
             crate::world::block::BlockKind::Cobble { .. } => {

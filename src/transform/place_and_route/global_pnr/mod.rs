@@ -9,6 +9,7 @@ use eyre::ContextCompat;
 
 use crate::graph::module::{GraphModule, GraphModuleContext, GraphModuleDesign};
 use crate::graph::GraphNodeKind;
+use crate::nbt::ToNBT;
 use crate::output::PlacedWorld;
 use crate::transform::place_and_route::global_pnr::assembly::assemble_world;
 use crate::transform::place_and_route::global_pnr::candidate::{
@@ -20,8 +21,8 @@ use crate::transform::place_and_route::global_pnr::placer::{
 };
 use crate::transform::place_and_route::global_pnr::progress::GlobalPnrProgress;
 use crate::transform::place_and_route::global_pnr::router::{
-    collect_module_input_endpoints, collect_module_output_endpoints, route_module_variables,
-    GlobalRoutingConfig, RoutedNet,
+    collect_module_input_endpoints, collect_module_output_endpoints, first_invalid_active_route,
+    route_module_variables, GlobalRoutingConfig, RoutedNet,
 };
 use crate::transform::place_and_route::local_placer::{LocalPlacerConfig, NotRouteStrategy};
 use crate::transform::place_and_route::sampling::SamplingPolicy;
@@ -34,6 +35,7 @@ pub struct GlobalPnrConfig {
     pub placement: GlobalPlacementConfig,
     pub routing: GlobalRoutingConfig,
     pub show_progress: bool,
+    pub verifier: Option<fn(&PlacedWorld) -> eyre::Result<()>>,
 }
 
 impl Default for GlobalPnrConfig {
@@ -43,6 +45,7 @@ impl Default for GlobalPnrConfig {
             placement: GlobalPlacementConfig::default(),
             routing: GlobalRoutingConfig::default(),
             show_progress: true,
+            verifier: None,
         }
     }
 }
@@ -132,6 +135,49 @@ fn route_first_successful_placement(
         progress.item(attempt_index + 1, total_attempts, "route placement attempt");
         match route_module_variables(module, candidates, &placed, &config.routing, progress) {
             Ok(routed_nets) => {
+                match placed_world_from_routing(module, candidates, &placed, &routed_nets) {
+                    Ok(world) => {
+                        if let Some(route) = first_invalid_active_route(&world.world, &routed_nets)
+                        {
+                            let error = eyre::eyre!(
+                                "assembled route from {:?} to {:?} does not satisfy its powered-position contract",
+                                route.source,
+                                route.sink
+                            );
+                            progress.detail(format!(
+                                "placement attempt {} failed: {error}",
+                                attempt_index + 1
+                            ));
+                            last_error = Some(error);
+                            continue;
+                        }
+                        if let Some(verifier) = config.verifier {
+                            if let Err(error) = verifier(&world) {
+                                save_failed_verifier_world(
+                                    module,
+                                    attempt_index + 1,
+                                    &world,
+                                    &routed_nets,
+                                );
+                                progress.detail(format!(
+                                    "placement attempt {} failed verifier: {error}",
+                                    attempt_index + 1
+                                ));
+                                last_error = Some(error);
+                                continue;
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        let error = eyre::eyre!(error);
+                        progress.detail(format!(
+                            "placement attempt {} failed: {error}",
+                            attempt_index + 1
+                        ));
+                        last_error = Some(error);
+                        continue;
+                    }
+                }
                 progress.detail(format!(
                     "selected placement attempt {} with {} route(s)",
                     attempt_index + 1,
@@ -140,6 +186,7 @@ fn route_first_successful_placement(
                 return Ok((placed, routed_nets));
             }
             Err(error) => {
+                save_failed_route_base_world(module, attempt_index + 1, candidates, &placed);
                 progress.detail(format!(
                     "placement attempt {} failed: {error}",
                     attempt_index + 1
@@ -150,6 +197,68 @@ fn route_first_successful_placement(
     }
 
     Err(last_error.unwrap_or_else(|| eyre::eyre!("no global placement attempts generated")))
+}
+
+fn placed_world_from_routing(
+    module: &GraphModule,
+    candidates: &[LayoutCandidate],
+    placed: &[PlacedModule],
+    routed_nets: &[RoutedNet],
+) -> eyre::Result<PlacedWorld> {
+    Ok(PlacedWorld {
+        world: assemble_world(candidates, placed, routed_nets)?,
+        inputs: collect_module_input_endpoints(module, routed_nets),
+        outputs: collect_module_output_endpoints(module, candidates, placed),
+    })
+}
+
+fn save_failed_verifier_world(
+    module: &GraphModule,
+    attempt: usize,
+    world: &PlacedWorld,
+    routed_nets: &[RoutedNet],
+) {
+    if std::env::var_os("SAVE_FAILED_GLOBAL_PNR").is_none() {
+        return;
+    }
+
+    let path = format!("test/{}-failed-attempt-{attempt}.nbt", module.name);
+    world.world.to_nbt().save(path);
+    let metadata_path = format!("test/{}-failed-attempt-{attempt}.outputs.json", module.name);
+    let _ = world.metadata().save(metadata_path);
+    let routes_path = format!("test/{}-failed-attempt-{attempt}.routes.txt", module.name);
+    let routes = routed_nets
+        .iter()
+        .map(|route| {
+            format!(
+                "source={:?} sink={:?} required={:?} path={:?}\n",
+                route.source, route.sink, route.required_powered_positions, route.path
+            )
+        })
+        .collect::<String>();
+    let _ = std::fs::write(routes_path, routes);
+}
+
+fn save_failed_route_base_world(
+    module: &GraphModule,
+    attempt: usize,
+    candidates: &[LayoutCandidate],
+    placed: &[PlacedModule],
+) {
+    if std::env::var_os("SAVE_FAILED_GLOBAL_PNR").is_none() {
+        return;
+    }
+
+    let Ok(world) = placed_world_from_routing(module, candidates, placed, &[]) else {
+        return;
+    };
+    let path = format!("test/{}-route-failed-attempt-{attempt}.nbt", module.name);
+    world.world.to_nbt().save(path);
+    let metadata_path = format!(
+        "test/{}-route-failed-attempt-{attempt}.outputs.json",
+        module.name
+    );
+    let _ = world.metadata().save(metadata_path);
 }
 
 fn place_graph_backed_module(
@@ -450,10 +559,12 @@ mod tests {
         let config = GlobalPnrConfig {
             candidate: d_latch_child_candidate_config(sequential_local_config()),
             placement: GlobalPlacementConfig {
-                spacing: 2,
-                shelf_width: 24,
+                spacing: 4,
+                shelf_width: 64,
+                max_attempts: 64,
                 ..Default::default()
             },
+            verifier: Some(assert_positive_edge_dff_behavior),
             ..Default::default()
         };
 
@@ -502,6 +613,7 @@ mod tests {
                 max_attempts: 64,
                 ..Default::default()
             },
+            verifier: Some(assert_two_bit_counter_behavior),
             ..Default::default()
         };
 

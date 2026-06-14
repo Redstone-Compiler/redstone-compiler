@@ -59,7 +59,16 @@ pub fn placement_candidates(
     if is_register_bit_module_set(candidates) {
         for spacing in placement_spacing_options(config.spacing) {
             let config = GlobalPlacementConfig { spacing, ..*config };
+            if let Some(placed) = place_register_bit_carry_chain(candidates, &config) {
+                push_unique_placement(&mut placements, placed);
+            }
+            if let Some(placed) = place_register_bit_carry_aligned_slices(candidates, &config) {
+                push_unique_placement(&mut placements, placed);
+            }
             if let Some(placed) = place_register_bit_grid(candidates, &config) {
+                push_unique_placement(&mut placements, placed);
+            }
+            if let Some(placed) = place_register_bit_triangles(candidates, &config) {
                 push_unique_placement(&mut placements, placed);
             }
             if let Some(placed) = place_register_bit_slices(candidates, &config) {
@@ -114,6 +123,139 @@ fn is_register_bit_module_set(candidates: &[LayoutCandidate]) -> bool {
         && candidates
             .iter()
             .all(|candidate| register_bit_module_role(&candidate.module_name).is_some())
+}
+
+fn place_register_bit_carry_chain(
+    candidates: &[LayoutCandidate],
+    config: &GlobalPlacementConfig,
+) -> Option<Vec<PlacedModule>> {
+    let mut slices = register_bit_slices(candidates)?;
+    if slices.is_empty() {
+        return None;
+    }
+
+    let mut placed = Vec::new();
+    let mut cursor_x = GLOBAL_PLACEMENT_MARGIN;
+    let base_y = GLOBAL_PLACEMENT_MARGIN;
+    let mut previous_slave_q_y = None;
+
+    for (bit, slice) in slices.drain(..) {
+        let clock = slice.clock?;
+        let next = slice.next?;
+        let master = slice.master?;
+        let slave = slice.slave?;
+
+        let next_x = cursor_x;
+        let clock_x = next_x + candidates[next].bbox.width() + config.spacing;
+        let master_x = clock_x + candidates[clock].bbox.width() + config.spacing;
+        let slave_x = master_x + candidates[master].bbox.width() + config.spacing;
+
+        let master_y = base_y;
+        let master_en_y = translated_port_y(candidates, master, master_y, "en", false)?;
+        let clock_y = align_port_y(candidates, clock, "clk_n", true, master_en_y)?;
+
+        let master_q_y = translated_port_y(candidates, master, master_y, "q", true)?;
+        let slave_y = align_port_y(candidates, slave, "d", false, master_q_y)?;
+        let slave_q_y = translated_port_y(candidates, slave, slave_y, "q", true)?;
+
+        let carry_input = if bit == 0 {
+            format!("q_{bit}")
+        } else {
+            format!("q_{}", bit - 1)
+        };
+        let next_target_y = previous_slave_q_y.unwrap_or(slave_q_y);
+        let next_y = align_port_y(candidates, next, &carry_input, true, next_target_y)?;
+
+        let row = [
+            (next, next_x, next_y),
+            (clock, clock_x, clock_y),
+            (master, master_x, master_y),
+            (slave, slave_x, slave_y),
+        ];
+        let row_top = row
+            .iter()
+            .map(|(index, _, y)| y.saturating_sub(candidates[*index].bbox.min.1))
+            .min()?;
+        let row_shift = GLOBAL_PLACEMENT_MARGIN.saturating_sub(row_top);
+
+        for (candidate_index, x, y) in row {
+            push_placed_candidate(&mut placed, candidates, candidate_index, x, y + row_shift);
+        }
+
+        previous_slave_q_y = Some(slave_q_y + row_shift);
+        cursor_x = slave_x + candidates[slave].bbox.width() + config.spacing;
+    }
+
+    Some(placed)
+}
+
+fn place_register_bit_carry_aligned_slices(
+    candidates: &[LayoutCandidate],
+    config: &GlobalPlacementConfig,
+) -> Option<Vec<PlacedModule>> {
+    let mut slices = register_bit_slices(candidates)?;
+    if slices.is_empty() {
+        return None;
+    }
+
+    let mut placed = Vec::new();
+    let mut cursor_x = GLOBAL_PLACEMENT_MARGIN;
+    let base_y = GLOBAL_PLACEMENT_MARGIN;
+    let mut previous_slave_q_y = None;
+
+    for (bit, slice) in slices.drain(..) {
+        let clock = slice.clock?;
+        let next = slice.next?;
+        let master = slice.master?;
+        let slave = slice.slave?;
+
+        let next_x = cursor_x;
+        let clock_x = next_x + candidates[next].bbox.width() + config.spacing;
+        let master_x = clock_x + candidates[clock].bbox.width() + config.spacing;
+        let slave_x = master_x + candidates[master].bbox.width() + config.spacing;
+
+        let carry_input = if bit == 0 {
+            format!("q_{bit}")
+        } else {
+            format!("q_{}", bit - 1)
+        };
+        let next_y = if let Some(previous_slave_q_y) = previous_slave_q_y {
+            align_port_y(candidates, next, &carry_input, true, previous_slave_q_y)?
+        } else {
+            base_y
+        };
+
+        let next_d_y = translated_port_y(candidates, next, next_y, "d", true)?;
+        let master_y = align_port_y(candidates, master, "d", false, next_d_y)?;
+
+        let master_en_y = translated_port_y(candidates, master, master_y, "en", false)?;
+        let clock_y = align_port_y(candidates, clock, "clk_n", true, master_en_y)?;
+
+        let master_q_y = translated_port_y(candidates, master, master_y, "q", true)?;
+        let slave_y = align_port_y(candidates, slave, "d", false, master_q_y)?;
+        let slave_q_y = translated_port_y(candidates, slave, slave_y, "q", true)?;
+
+        let row = [
+            (next, next_x, next_y),
+            (clock, clock_x, clock_y),
+            (master, master_x, master_y),
+            (slave, slave_x, slave_y),
+        ];
+        let row_top = row
+            .iter()
+            .map(|(index, _, y)| y.saturating_sub(candidates[*index].bbox.min.1))
+            .min()?;
+        let row_shift = GLOBAL_PLACEMENT_MARGIN.saturating_sub(row_top);
+
+        for (candidate_index, x, y) in row {
+            push_placed_candidate(&mut placed, candidates, candidate_index, x, y + row_shift);
+        }
+
+        previous_slave_q_y = Some(slave_q_y + row_shift);
+        cursor_x = slave_x + candidates[slave].bbox.width() + config.spacing;
+    }
+
+    Some(placed)
 }
 
 fn place_register_bit_slices(
@@ -206,13 +348,8 @@ fn place_register_bit_grid(
         .unwrap_or(0);
     let next_x = GLOBAL_PLACEMENT_MARGIN;
     let master_x = next_x + next_width + config.spacing;
-    let clock_x = master_x + master_width + config.spacing;
-    let clock_width = bits
-        .iter()
-        .map(|(_, slice)| candidates[slice.clock.unwrap()].bbox.width())
-        .max()
-        .unwrap_or(0);
-    let slave_x = clock_x + clock_width + config.spacing;
+    let slave_x = master_x + master_width + config.spacing;
+    let clock_x = master_x;
 
     let mut placed = Vec::new();
     let mut cursor_y = GLOBAL_PLACEMENT_MARGIN;
@@ -226,17 +363,16 @@ fn place_register_bit_grid(
         let next_d_y = translated_port_y(candidates, next, next_y, "d", true)?;
         let master_y = align_port_y(candidates, master, "d", false, next_d_y)?;
 
-        let master_en_y = translated_port_y(candidates, master, master_y, "en", false)?;
-        let clock_y = align_port_y(candidates, clock, "clk_n", true, master_en_y)?;
+        let master_q_y = translated_port_y(candidates, master, master_y, "q", true)?;
+        let slave_y = align_port_y(candidates, slave, "d", false, master_q_y)?;
 
-        let clock_input_y = translated_port_y(candidates, clock, clock_y, "clk", false)?;
-        let slave_y = align_port_y(candidates, slave, "en", false, clock_input_y)?;
+        let clock_y = master_y + candidates[master].bbox.depth() + config.spacing;
 
         let row = [
             (next, next_x, next_y),
             (master, master_x, master_y),
-            (clock, clock_x, clock_y),
             (slave, slave_x, slave_y),
+            (clock, clock_x, clock_y),
         ];
         let Some(row_shift) = row
             .iter()
@@ -256,6 +392,100 @@ fn place_register_bit_grid(
             (master, master_y + row_shift),
             (clock, clock_y + row_shift),
             (slave, slave_y + row_shift),
+        ]
+        .into_iter()
+        .map(|(index, y)| y + candidates[index].bbox.depth())
+        .max()
+        .unwrap_or(cursor_y);
+        cursor_y = row_bottom + config.spacing;
+    }
+
+    Some(placed)
+}
+
+fn place_register_bit_triangles(
+    candidates: &[LayoutCandidate],
+    config: &GlobalPlacementConfig,
+) -> Option<Vec<PlacedModule>> {
+    let mut slices = HashMap::<usize, RegisterBitSlice>::new();
+
+    for (index, candidate) in candidates.iter().enumerate() {
+        let Some((bit, role)) = register_bit_module_role(&candidate.module_name) else {
+            return None;
+        };
+        let slice = slices.entry(bit).or_default();
+        match role {
+            RegisterBitRole::Clock => slice.clock = Some(index),
+            RegisterBitRole::Next => slice.next = Some(index),
+            RegisterBitRole::Master => slice.master = Some(index),
+            RegisterBitRole::Slave => slice.slave = Some(index),
+        }
+    }
+
+    let mut bits = slices.into_iter().collect::<Vec<_>>();
+    bits.sort_by_key(|(bit, _)| *bit);
+    if bits.is_empty()
+        || bits.iter().any(|(_, slice)| {
+            slice.clock.is_none()
+                || slice.next.is_none()
+                || slice.master.is_none()
+                || slice.slave.is_none()
+        })
+    {
+        return None;
+    }
+
+    let master_width = bits
+        .iter()
+        .map(|(_, slice)| candidates[slice.master.unwrap()].bbox.width())
+        .max()
+        .unwrap_or(0);
+    let master_x = GLOBAL_PLACEMENT_MARGIN;
+    let slave_x = master_x + master_width + config.spacing;
+    let clock_x = master_x;
+
+    let mut placed = Vec::new();
+    let mut cursor_y = GLOBAL_PLACEMENT_MARGIN;
+    for (_, slice) in bits {
+        let clock = slice.clock?;
+        let next = slice.next?;
+        let master = slice.master?;
+        let slave = slice.slave?;
+
+        let bit_width = slave_x + candidates[slave].bbox.width() - master_x;
+        let next_x = master_x + bit_width.saturating_sub(candidates[next].bbox.width()) / 2;
+        let next_y = cursor_y;
+        let master_y = next_y + candidates[next].bbox.depth() + config.spacing;
+
+        let master_q_y = translated_port_y(candidates, master, master_y, "q", true)?;
+        let slave_y = align_port_y(candidates, slave, "d", false, master_q_y)?;
+
+        let clock_y = master_y + candidates[master].bbox.depth() + config.spacing;
+
+        let row = [
+            (next, next_x, next_y),
+            (master, master_x, master_y),
+            (slave, slave_x, slave_y),
+            (clock, clock_x, clock_y),
+        ];
+        let Some(row_top) = row
+            .iter()
+            .map(|(index, _, y)| y.saturating_sub(candidates[*index].bbox.min.1))
+            .min()
+        else {
+            return None;
+        };
+        let row_shift = cursor_y.saturating_sub(row_top);
+
+        for (candidate_index, x, y) in row {
+            push_placed_candidate(&mut placed, candidates, candidate_index, x, y + row_shift);
+        }
+
+        let row_bottom = [
+            (next, next_y + row_shift),
+            (master, master_y + row_shift),
+            (slave, slave_y + row_shift),
+            (clock, clock_y + row_shift),
         ]
         .into_iter()
         .map(|(index, y)| y + candidates[index].bbox.depth())
@@ -298,7 +528,7 @@ fn candidate_port_position(
 ) -> Option<Position> {
     let port = candidate.ports.iter().find(|port| port.name == port_name)?;
     Some(if use_route_position {
-        port.route_position.unwrap_or(port.position)
+        port.primary_route_position()
     } else {
         port.position
     })
@@ -334,6 +564,35 @@ enum RegisterBitRole {
     Next,
     Master,
     Slave,
+}
+
+fn register_bit_slices(candidates: &[LayoutCandidate]) -> Option<Vec<(usize, RegisterBitSlice)>> {
+    let mut slices = HashMap::<usize, RegisterBitSlice>::new();
+
+    for (index, candidate) in candidates.iter().enumerate() {
+        let Some((bit, role)) = register_bit_module_role(&candidate.module_name) else {
+            return None;
+        };
+        let slice = slices.entry(bit).or_default();
+        match role {
+            RegisterBitRole::Clock => slice.clock = Some(index),
+            RegisterBitRole::Next => slice.next = Some(index),
+            RegisterBitRole::Master => slice.master = Some(index),
+            RegisterBitRole::Slave => slice.slave = Some(index),
+        }
+    }
+
+    let mut slices = slices.into_iter().collect::<Vec<_>>();
+    slices.sort_by_key(|(bit, _)| *bit);
+    if slices.iter().any(|(_, slice)| {
+        slice.clock.is_none()
+            || slice.next.is_none()
+            || slice.master.is_none()
+            || slice.slave.is_none()
+    }) {
+        return None;
+    }
+    Some(slices)
 }
 
 fn register_bit_module_role(name: &str) -> Option<(usize, RegisterBitRole)> {
@@ -626,13 +885,20 @@ fn placement_cost(
         else {
             continue;
         };
-        let source_position = translate_candidate_position(
-            source_port.route_position.unwrap_or(source_port.position),
-            source_candidate,
-            source,
+        let source_positions = source_port
+            .routing_access_positions()
+            .into_iter()
+            .map(|position| translate_candidate_position(position, source_candidate, source));
+        let target_position = translate_candidate_position(
+            target_port.primary_route_position(),
+            target_candidate,
+            target,
         );
-        let target_position =
-            translate_candidate_position(target_port.position, target_candidate, target);
+        let Some(source_position) =
+            source_positions.min_by_key(|position| position.manhattan_distance(&target_position))
+        else {
+            continue;
+        };
         cost += source_position.manhattan_distance(&target_position) * 8;
         cost += source_position.2.abs_diff(target_position.2) * 16;
     }
@@ -667,4 +933,125 @@ fn translate_candidate_position(
         placed.origin.1 + position.1 - candidate.bbox.min.1,
         placed.origin.2 + position.2 - candidate.bbox.min.2,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transform::place_and_route::global_pnr::ir::{
+        LayoutCandidateCost, PhysicalPort, PhysicalPortDirection, PortConnection,
+    };
+    use crate::world::position::DimSize;
+    use crate::world::World3D;
+
+    fn test_candidate(module_name: &str, ports: &[(&str, Position)]) -> LayoutCandidate {
+        LayoutCandidate {
+            module_name: module_name.to_owned(),
+            world: World3D::new(DimSize(1, 1, 1)),
+            bbox: BoundingBox {
+                min: Position(0, 0, 0),
+                max: Position(5, 12, 2),
+            },
+            ports: ports
+                .iter()
+                .map(|(name, position)| PhysicalPort {
+                    name: (*name).to_owned(),
+                    direction: PhysicalPortDirection::Output,
+                    position: *position,
+                    route_position: Some(*position),
+                    access_points: vec![*position],
+                    connection: PortConnection::Direct,
+                })
+                .collect(),
+            occupied_cells: HashSet::new(),
+            blocked_cells: HashSet::new(),
+            cost: LayoutCandidateCost::default(),
+        }
+    }
+
+    fn placed_by_name<'a>(placed: &'a [PlacedModule], name: &str) -> &'a PlacedModule {
+        placed
+            .iter()
+            .find(|placed| placed.module_name == name)
+            .expect("placed module")
+    }
+
+    fn placed_port_y(
+        candidates: &[LayoutCandidate],
+        placed: &[PlacedModule],
+        module_name: &str,
+        port_name: &str,
+    ) -> usize {
+        let placed_module = placed_by_name(placed, module_name);
+        translated_port_y(
+            candidates,
+            placed_module.candidate_index,
+            placed_module.origin.1,
+            port_name,
+            true,
+        )
+        .expect("port y")
+    }
+
+    #[test]
+    fn carry_aligned_slices_align_next_data_and_cross_bit_carry_ports() {
+        let candidates = vec![
+            test_candidate("q_0_clk_inv", &[("clk_n", Position(1, 3, 1))]),
+            test_candidate(
+                "q_0_next",
+                &[("q_0", Position(0, 2, 1)), ("d", Position(5, 6, 1))],
+            ),
+            test_candidate(
+                "q_0_master",
+                &[
+                    ("d", Position(0, 6, 1)),
+                    ("en", Position(0, 3, 1)),
+                    ("q", Position(5, 8, 1)),
+                ],
+            ),
+            test_candidate(
+                "q_0_slave",
+                &[("d", Position(0, 8, 1)), ("q", Position(5, 10, 1))],
+            ),
+            test_candidate("q_1_clk_inv", &[("clk_n", Position(1, 3, 1))]),
+            test_candidate(
+                "q_1_next",
+                &[
+                    ("q_0", Position(0, 4, 1)),
+                    ("q_1", Position(0, 2, 1)),
+                    ("d", Position(5, 7, 1)),
+                ],
+            ),
+            test_candidate(
+                "q_1_master",
+                &[
+                    ("d", Position(0, 7, 1)),
+                    ("en", Position(0, 3, 1)),
+                    ("q", Position(5, 8, 1)),
+                ],
+            ),
+            test_candidate(
+                "q_1_slave",
+                &[("d", Position(0, 8, 1)), ("q", Position(5, 10, 1))],
+            ),
+        ];
+
+        let placed = place_register_bit_carry_aligned_slices(
+            &candidates,
+            &GlobalPlacementConfig {
+                spacing: 4,
+                ..Default::default()
+            },
+        )
+        .expect("placement");
+
+        assert_eq!(
+            placed_port_y(&candidates, &placed, "q_1_next", "q_0"),
+            placed_port_y(&candidates, &placed, "q_0_slave", "q")
+        );
+        assert_eq!(
+            placed_port_y(&candidates, &placed, "q_1_next", "d"),
+            placed_port_y(&candidates, &placed, "q_1_master", "d")
+        );
+    }
 }

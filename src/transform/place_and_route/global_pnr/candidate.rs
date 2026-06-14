@@ -8,7 +8,7 @@ use crate::graph::module::{GraphModule, GraphModulePortTarget, GraphModulePortTy
 use crate::graph::GraphNodeKind;
 use crate::transform::place_and_route::detailed_router;
 use crate::transform::place_and_route::global_pnr::ir::{
-    LayoutCandidate, PhysicalPort, PhysicalPortDirection,
+    LayoutCandidate, PhysicalPort, PhysicalPortDirection, PortConnection,
 };
 use crate::transform::place_and_route::local_placer::{
     LocalPlacer, LocalPlacerConfig, LocalPlacerInputConstraints,
@@ -165,8 +165,9 @@ fn candidate_matches_truth_table(
     Ok(true)
 }
 
-// Local placer媛 留뚮뱺 ?낅┰ ?ㅽ뻾??switch/output layout??global PnR??child layout?쇰줈 諛붽씔??
-// ?낅젰 switch???쒓굅?댁꽌 ?몃? route媛 臾쇰┫ port濡??몄텧?섍퀬, 異쒕젰 ?꾩튂??module port metadata濡?蹂댁〈?쒕떎.
+// LocalPlacer는 아직 standalone 회로를 기준으로 switch/output layout을 만든다.
+// Global PnR child layout에서는 switch를 제거하고 외부 route가 물릴 수 있는
+// module port metadata로 다시 노출한다.
 // TODO(high-level): make LocalPlacer produce either standalone layouts with switches
 // or child-module layouts with PhysicalPort metadata, instead of rewriting switches here.
 fn block_is_powered(kind: BlockKind) -> bool {
@@ -193,13 +194,13 @@ fn switchless_candidate_layout(
     outputs: &[crate::output::OutputEndpoint],
 ) -> (World3D, Vec<PhysicalPort>) {
     let mut ports = Vec::new();
-    // Sequential child layout? ?대? feedback/state signal???몃? route? 吏곸젒 ?욎씠硫?    // back-power??latch state ?ㅼ뿼???앷만 ???덉쑝誘濡?port ?곌껐??蹂댁닔?곸쑝濡?寃⑸━?쒕떎.
-    let needs_output_isolation = module_contains_sequential(module);
-    let needs_input_isolation = module_contains_sequential(module);
+    // Sequential child layout은 내부 feedback/state signal이 외부 route와 직접
+    // 합쳐지면 back-power 때문에 latch 상태가 깨질 수 있어서 diode 연결을 요구한다.
     let contains_sequential = module_contains_sequential(module);
-    let use_direct_input_ports = module_input_port_count(module) > 1;
-    let preserve_switch_position_inputs =
-        module_contains_sequential(module) || use_direct_input_ports;
+    let needs_output_isolation = contains_sequential;
+    let needs_input_isolation = contains_sequential;
+    let use_direct_input_ports = !contains_sequential && module_input_port_count(module) > 1;
+    let preserve_switch_position_inputs = contains_sequential || use_direct_input_ports;
     for port in &module.ports {
         match (&port.port_type, &port.target) {
             (GraphModulePortType::InputNet, GraphModulePortTarget::Node(input_name)) => {
@@ -226,24 +227,31 @@ fn switchless_candidate_layout(
                         direction: PhysicalPortDirection::Input,
                         position,
                         route_position: None,
-                        isolate_input: needs_input_isolation || world[position].kind.is_redstone(),
-                        isolate_output: false,
-                        module_contains_sequential: contains_sequential,
+                        access_points: vec![position],
+                        connection: if needs_input_isolation || world[position].kind.is_redstone() {
+                            PortConnection::InputDiode
+                        } else {
+                            PortConnection::Direct
+                        },
                     });
                 }
             }
             (GraphModulePortType::OutputNet, GraphModulePortTarget::Node(output_name)) => {
                 if let Some(output) = outputs.iter().find(|output| output.name == *output_name) {
                     let position = output.position();
-                    let route_position = Some(expose_routeable_output_port(&world, position));
+                    let access_points = expose_routeable_output_ports(&world, position);
+                    let route_position = access_points[0];
                     ports.push(PhysicalPort {
                         name: port.name.clone(),
                         direction: PhysicalPortDirection::Output,
                         position,
-                        route_position,
-                        isolate_input: false,
-                        isolate_output: needs_output_isolation,
-                        module_contains_sequential: contains_sequential,
+                        route_position: Some(route_position),
+                        access_points,
+                        connection: if needs_output_isolation {
+                            PortConnection::OutputDiode
+                        } else {
+                            PortConnection::Direct
+                        },
                     });
                 }
             }
@@ -289,17 +297,18 @@ fn remove_local_input_switches(world: &mut World3D) {
     }
 }
 
-// Torch/switch/repeater 異쒕젰 ?먯껜蹂대떎, 洹?異쒕젰???ㅼ젣濡??꾩썝??怨듦툒?섎뒗 redstone tap???덉쑝硫?// 洹?tap???몃? route ?쒖옉?먯쑝濡??몄텧?쒕떎. 議고빀?뚮줈 異쒕젰? ?대젃寃?湲곗〈 異쒕젰留앹뿉 route瑜?遺숈씤??
-fn expose_routeable_output_port(world: &World3D, output_position: Position) -> Position {
+// Torch/switch/repeater 같은 출력 블록은 바로 route하기 어려울 수 있으므로,
+// 해당 출력이 실제로 power하는 redstone tap들을 route access point로 노출한다.
+fn expose_routeable_output_ports(world: &World3D, output_position: Position) -> Vec<Position> {
     if !world.size.bound_on(output_position)
         || (!world[output_position].kind.is_torch()
             && !world[output_position].kind.is_switch()
             && !world[output_position].kind.is_repeater())
     {
-        return output_position;
+        return vec![output_position];
     }
 
-    world
+    let mut access_points = world
         .iter_block()
         .into_iter()
         .filter(|(position, block)| {
@@ -307,19 +316,28 @@ fn expose_routeable_output_port(world: &World3D, output_position: Position) -> P
                 && detailed_router::target_powers_position(world, output_position, *position)
         })
         .map(|(position, _)| position)
-        .min_by_key(|position| {
-            (
-                output_position.manhattan_distance(position),
-                position.0,
-                position.1,
-                position.2,
-            )
-        })
-        .unwrap_or(output_position)
+        .collect::<Vec<_>>();
+    access_points.sort_by_key(|position| {
+        (
+            output_position.manhattan_distance(position),
+            position.0,
+            position.1,
+            position.2,
+        )
+    });
+    access_points.dedup();
+    if access_points.is_empty() {
+        access_points.push(output_position);
+    }
+    access_points
 }
 
-// Local placer ?낅젰? 蹂댄넻 switch濡?留뚮뱾?댁졇 ?덉쑝誘濡?global PnR child layout?먯꽌??switch瑜??쒓굅?쒕떎.
-// switch媛 cobble??耳쒕뒗 援ъ“硫?cobble??port濡? redstone fanout??耳쒕뒗 援ъ“硫?switch ?먮━瑜?redstone port濡?諛붽씔??
+fn expose_routeable_output_port(world: &World3D, output_position: Position) -> Position {
+    expose_routeable_output_ports(world, output_position)[0]
+}
+
+// LocalPlacer 입력은 보통 switch로 시작하므로 global PnR child layout에서는
+// switch를 제거하고, switch가 물리던 cobble 또는 redstone fanout을 input port로 노출한다.
 // TODO(low-level): replace this inference with explicit input-port placement metadata
 // from LocalPlacer, so this code does not need to guess from switch wiring.
 fn expose_switchless_input_port(
@@ -339,6 +357,12 @@ fn expose_switchless_input_port(
     if let Some(target) = switch_target
         .filter(|position| world.size.bound_on(*position) && world[*position].kind.is_cobble())
     {
+        if use_direct_input_port {
+            if let Some(port_position) = switch_powered_redstone_port(world, input_position, true) {
+                world[input_position] = Block::default();
+                return Some(port_position);
+            }
+        }
         world[input_position] = Block::default();
         return Some(target);
     }
@@ -471,5 +495,34 @@ pub fn d_latch_child_candidate_config(local_config: LocalPlacerConfig) -> UnitCa
             .with_input_positions("d", [Position(0, 2, 1)])
             .with_input_positions("en", [Position(0, 6, 1)]),
         max_candidates: 1,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::world::block::Direction;
+
+    #[test]
+    fn switchless_direct_input_exposes_powered_redstone_instead_of_support_cobble() {
+        let switch = Position(1, 1, 1);
+        let support = Position(1, 1, 0);
+        let input_cobble = Position(2, 1, 1);
+        let input_redstone = Position(2, 1, 2);
+        let mut world = World3D::new(DimSize(4, 3, 4));
+        world[support] = PlacedNode::new_cobble(support).block;
+        world[switch] = Block {
+            kind: BlockKind::Switch { is_on: false },
+            direction: Direction::East,
+        };
+        world[input_cobble] = PlacedNode::new_cobble(input_cobble).block;
+        world[input_redstone] = PlacedNode::new_redstone(input_redstone).block;
+        world.initialize_redstone_states();
+
+        let port =
+            expose_switchless_input_port(&mut world, switch, false, true).expect("input port");
+
+        assert_eq!(port, input_redstone);
+        assert!(world[switch].kind.is_air());
     }
 }
