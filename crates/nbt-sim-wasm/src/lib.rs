@@ -6,7 +6,7 @@ use redstone_compiler::graph::{GraphNodeId, GraphNodeKind};
 use redstone_compiler::nbt::{NBTRoot, ToNBT};
 use redstone_compiler::output::OutputMetadata;
 use redstone_compiler::transform::place_and_route::place_bound::{PlaceBound, PropagateType};
-use redstone_compiler::transform::place_and_route::utils::world_to_logic_with_outputs;
+use redstone_compiler::transform::place_and_route::utils::world_to_logic_with_outputs_unoptimized;
 use redstone_compiler::transform::world_to_logic::WorldToLogicTransformer;
 use redstone_compiler::world::block::{Block, BlockKind, Direction};
 use redstone_compiler::world::position::{DimSize, Position};
@@ -131,10 +131,7 @@ impl NbtSimulator {
     }
 
     pub fn with_trace(nbt_bytes: &[u8], trace_enabled: bool) -> Result<NbtSimulator, JsValue> {
-        Self::new_with_trace_limit(
-            nbt_bytes,
-            if trace_enabled { TRACE_LIMIT } else { 0 },
-        )
+        Self::new_with_trace_limit(nbt_bytes, if trace_enabled { TRACE_LIMIT } else { 0 })
     }
 
     pub fn trace_init(nbt_bytes: &[u8]) -> Result<JsValue, JsValue> {
@@ -353,7 +350,7 @@ fn graph_dot_info(nbt_bytes: &[u8], metadata: Option<&OutputMetadata>) -> Result
     let folded_world_dot = transformer.world_graph().to_graphviz();
     let folded_world_dot_without_tags = transformer.world_graph().to_graphviz_without_tags();
     let logic_graph = if let Some(metadata) = metadata {
-        world_to_logic_with_outputs(&world, metadata).map_err(to_js_error)?
+        world_to_logic_with_outputs_unoptimized(&world, metadata).map_err(to_js_error)?
     } else {
         transformer.transform().map_err(to_js_error)?
     };

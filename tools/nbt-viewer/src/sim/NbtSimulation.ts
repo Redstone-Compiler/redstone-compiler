@@ -109,11 +109,14 @@ export const emptyWaveform: Waveform = {
 
 const wasmModulePath = 'wasm/nbt-sim/nbt_sim_wasm.js';
 const wasmBinaryPath = 'wasm/nbt-sim/nbt_sim_wasm_bg.wasm';
+const wasmAssetVersion = import.meta.env.DEV ? String(Date.now()) : '';
 
 let wasmModulePromise: Promise<WasmModule> | undefined;
 
 function resolveAssetPath(path: string): string {
-  return new URL(`${import.meta.env.BASE_URL}${path}`, window.location.origin).href;
+  const url = new URL(`${import.meta.env.BASE_URL}${path}`, window.location.origin);
+  if (wasmAssetVersion) url.searchParams.set('v', wasmAssetVersion);
+  return url.href;
 }
 
 function loadWasmModule(): Promise<WasmModule> {
