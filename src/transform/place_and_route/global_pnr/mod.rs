@@ -11,12 +11,14 @@ use eyre::ContextCompat;
 use crate::graph::module::{GraphModule, GraphModuleContext, GraphModuleDesign};
 use crate::graph::GraphNodeKind;
 use crate::nbt::ToNBT;
-use crate::output::PlacedWorld;
+use crate::output::{OutputEndpoint, PlacedWorld};
 use crate::transform::place_and_route::global_pnr::assembly::assemble_world;
 use crate::transform::place_and_route::global_pnr::candidate::{
     generate_graph_module_candidates_with_progress_label, UnitCandidateConfig,
 };
-use crate::transform::place_and_route::global_pnr::ir::LayoutCandidate;
+use crate::transform::place_and_route::global_pnr::ir::{
+    LayoutCandidate, PhysicalPortDirection,
+};
 use crate::transform::place_and_route::global_pnr::placer::{
     place_candidates_on_shelves, placement_candidates, GlobalPlacementConfig, PlacedModule,
 };
@@ -28,7 +30,6 @@ use crate::transform::place_and_route::global_pnr::router::{
 use crate::transform::place_and_route::global_pnr::visualize::placement_bbox_wireframe_world;
 use crate::transform::place_and_route::local_placer::{LocalPlacerConfig, NotRouteStrategy};
 use crate::transform::place_and_route::sampling::SamplingPolicy;
-use crate::world::block::BlockKind;
 use crate::world::World3D;
 
 #[derive(Clone)]
@@ -316,11 +317,8 @@ fn place_graph_backed_module(
     let inputs = candidate
         .ports
         .iter()
-        .filter(|port| {
-            port.direction
-                == crate::transform::place_and_route::global_pnr::ir::PhysicalPortDirection::Input
-        })
-        .map(|port| crate::output::OutputEndpoint::new(port.name.clone(), port.position))
+        .filter(|port| port.direction == PhysicalPortDirection::Input)
+        .map(|port| OutputEndpoint::new(port.name.clone(), port.position))
         .collect();
 
     progress.stage(3, 4, "assemble leaf world");
@@ -414,45 +412,8 @@ fn graph_module_input_port_count(module: &GraphModule) -> usize {
         .count()
 }
 
-fn child_candidate_selection_cost(candidate: &LayoutCandidate) -> (usize, usize, usize) {
-    (
-        input_port_initial_power_count(candidate),
-        candidate.cost.bbox_volume,
-        candidate.cost.block_count,
-    )
-}
-
-fn input_port_initial_power_count(candidate: &LayoutCandidate) -> usize {
-    candidate
-        .ports
-        .iter()
-        .filter(|port| {
-            matches!(
-                port.direction,
-                crate::transform::place_and_route::global_pnr::ir::PhysicalPortDirection::Input
-            )
-        })
-        .filter(|port| {
-            candidate.world.size.bound_on(port.position)
-                && block_kind_is_powered(candidate.world[port.position].kind)
-        })
-        .count()
-}
-
-pub(crate) fn block_kind_is_powered(kind: BlockKind) -> bool {
-    match kind {
-        BlockKind::Cobble {
-            on_count,
-            on_base_count,
-        } => on_count > 0 || on_base_count > 0,
-        BlockKind::Switch { is_on } => is_on,
-        BlockKind::Redstone { strength, .. } => strength > 0,
-        BlockKind::Torch { is_on } => is_on,
-        BlockKind::Repeater { is_on, .. } => is_on,
-        BlockKind::RedstoneBlock => true,
-        BlockKind::Piston { is_on, .. } => is_on,
-        BlockKind::Air => false,
-    }
+fn child_candidate_selection_cost(candidate: &LayoutCandidate) -> (usize, usize) {
+    (candidate.cost.bbox_volume, candidate.cost.block_count)
 }
 
 #[cfg(test)]
@@ -477,7 +438,7 @@ mod tests {
     use crate::world::block::BlockKind;
     use crate::world::position::{DimSize, Position};
     use crate::world::simulator::Simulator;
-    use crate::world::World;
+    use crate::world::{World, World3D};
 
     fn sequential_local_config() -> LocalPlacerConfig {
         LocalPlacerConfig {
@@ -522,21 +483,6 @@ mod tests {
     }
 
     #[test]
-    fn block_kind_is_powered_reports_static_and_dynamic_power_sources() {
-        assert!(super::block_kind_is_powered(BlockKind::Switch { is_on: true }));
-        assert!(super::block_kind_is_powered(BlockKind::Redstone {
-            on_count: 0,
-            state: 0,
-            strength: 1,
-        }));
-        assert!(super::block_kind_is_powered(BlockKind::Cobble {
-            on_count: 0,
-            on_base_count: 1,
-        }));
-        assert!(!super::block_kind_is_powered(BlockKind::Air));
-    }
-
-    #[test]
     fn module_outputs_point_to_placed_child_ports_without_extra_routes() -> eyre::Result<()> {
         let mut context = GraphModuleContext::default();
         context.append(not_clk_module());
@@ -568,7 +514,7 @@ mod tests {
         let output_position = placed.outputs[0].position();
         assert_ne!(
             placed.world[output_position].kind,
-            crate::world::block::BlockKind::Air
+            BlockKind::Air
         );
         Ok(())
     }
@@ -783,7 +729,7 @@ mod tests {
         Ok(())
     }
 
-    fn counter_output_value(world: &crate::world::World3D, q0: Position, q1: Position) -> usize {
+    fn counter_output_value(world: &World3D, q0: Position, q1: Position) -> usize {
         usize::from(block_power(world, q0)) | (usize::from(block_power(world, q1)) << 1)
     }
 
@@ -796,7 +742,7 @@ mod tests {
             .with_context(|| format!("missing input endpoint `{name}`"))
     }
 
-    fn block_power(world: &crate::world::World3D, position: Position) -> bool {
+    fn block_power(world: &World3D, position: Position) -> bool {
         match world[position].kind {
             BlockKind::Redstone {
                 strength, on_count, ..

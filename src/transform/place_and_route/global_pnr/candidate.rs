@@ -6,8 +6,8 @@ use eyre::ContextCompat;
 use crate::graph::logic::LogicGraph;
 use crate::graph::module::{GraphModule, GraphModulePortTarget, GraphModulePortType};
 use crate::graph::GraphNodeKind;
+use crate::output::{OutputEndpoint, PlacedWorld};
 use crate::transform::place_and_route::detailed_router;
-use crate::transform::place_and_route::global_pnr::block_kind_is_powered;
 use crate::transform::place_and_route::global_pnr::ir::{
     LayoutCandidate, PhysicalPort, PhysicalPortDirection, PortConnection,
 };
@@ -111,7 +111,7 @@ fn graph_is_combinational(module: &GraphModule) -> bool {
 
 fn candidate_matches_truth_table(
     expected: &LogicGraph,
-    placed: &crate::output::PlacedWorld,
+    placed: &PlacedWorld,
 ) -> eyre::Result<bool> {
     let expected = expected.truth_table()?;
     let inputs = expected
@@ -157,7 +157,7 @@ fn candidate_matches_truth_table(
             let Some(expected_output) = expected.output_tables.get(*output_name) else {
                 return Ok(false);
             };
-            if block_kind_is_powered(sim.world()[*output_position].kind) != expected_output[mask] {
+            if sim.world()[*output_position].kind.is_powered() != expected_output[mask] {
                 return Ok(false);
             }
         }
@@ -175,8 +175,8 @@ fn switchless_candidate_layout(
     module: &GraphModule,
     input_constraints: &LocalPlacerInputConstraints,
     mut world: World3D,
-    inputs: &[crate::output::OutputEndpoint],
-    outputs: &[crate::output::OutputEndpoint],
+    inputs: &[OutputEndpoint],
+    outputs: &[OutputEndpoint],
 ) -> (World3D, Vec<PhysicalPort>) {
     let mut ports = Vec::new();
     // Sequential child layout은 내부 feedback/state signal이 외부 route와 직접
@@ -262,7 +262,7 @@ fn module_contains_sequential(module: &GraphModule) -> bool {
         graph
             .nodes
             .iter()
-            .any(|node| matches!(node.kind, crate::graph::GraphNodeKind::Sequential(_)))
+            .any(|node| matches!(node.kind, GraphNodeKind::Sequential(_)))
     })
 }
 

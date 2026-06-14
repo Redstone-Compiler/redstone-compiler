@@ -769,24 +769,11 @@ fn can_validate_active_route_source(world: &World3D, position: Position) -> bool
 }
 
 fn block_is_powered(world: &World3D, position: Position) -> bool {
-    match world[position].kind {
-        BlockKind::Redstone {
-            strength, on_count, ..
-        } => strength > 0 || on_count > 0,
-        BlockKind::Torch { is_on }
-        | BlockKind::Repeater { is_on, .. }
-        | BlockKind::Switch { is_on } => is_on,
-        BlockKind::Cobble {
-            on_count,
-            on_base_count,
-        } => on_count > 0 || on_base_count > 0,
-        BlockKind::RedstoneBlock => true,
-        BlockKind::Air | BlockKind::Piston { .. } => false,
-    }
+    world[position].kind.is_powered()
 }
 
 fn route_variable_priority(
-    var: &crate::graph::module::GraphModuleVariable,
+    var: &GraphModuleVariable,
 ) -> (usize, usize, usize, &str, &str, &str, &str) {
     let is_clock_route =
         var.source.1.contains("clk") || var.target.1.contains("clk") || var.target.1 == "en";
@@ -821,14 +808,14 @@ fn route_variable_priority(
     )
 }
 
-fn is_master_to_slave_data_route(var: &crate::graph::module::GraphModuleVariable) -> bool {
+fn is_master_to_slave_data_route(var: &GraphModuleVariable) -> bool {
     var.source.0.ends_with("_master")
         && var.source.1 == "q"
         && var.target.0.ends_with("_slave")
         && var.target.1 == "d"
 }
 
-fn is_next_to_master_data_route(var: &crate::graph::module::GraphModuleVariable) -> bool {
+fn is_next_to_master_data_route(var: &GraphModuleVariable) -> bool {
     var.source.0.ends_with("_next")
         && var.source.1 == "d"
         && var.target.0.ends_with("_master")
@@ -836,7 +823,7 @@ fn is_next_to_master_data_route(var: &crate::graph::module::GraphModuleVariable)
 }
 
 fn is_clock_inverter_to_master_enable_route(
-    var: &crate::graph::module::GraphModuleVariable,
+    var: &GraphModuleVariable,
 ) -> bool {
     var.source.0.ends_with("_clk_inv")
         && var.source.1.ends_with("_n")
@@ -844,7 +831,7 @@ fn is_clock_inverter_to_master_enable_route(
         && var.target.1 == "en"
 }
 
-fn is_cross_bit_next_input_route(var: &crate::graph::module::GraphModuleVariable) -> bool {
+fn is_cross_bit_next_input_route(var: &GraphModuleVariable) -> bool {
     let Some(source_bit) = register_module_bit(&var.source.0, "_slave") else {
         return false;
     };
@@ -1896,7 +1883,7 @@ fn resolve_port<'a>(
     module_name: &str,
     port_name: &str,
 ) -> Option<(
-    &'a crate::transform::place_and_route::global_pnr::ir::PhysicalPort,
+    &'a PhysicalPort,
     &'a LayoutCandidate,
     &'a PlacedModule,
 )> {
@@ -2987,10 +2974,7 @@ fn is_route_terminal(world: &World3D, position: Position) -> bool {
         || world[position].kind.is_switch()
         || world[position].kind.is_torch()
         || world[position].kind.is_repeater()
-        || matches!(
-            world[position].kind,
-            crate::world::block::BlockKind::RedstoneBlock
-        )
+        || matches!(world[position].kind, BlockKind::RedstoneBlock)
 }
 
 #[derive(Clone, Copy)]
