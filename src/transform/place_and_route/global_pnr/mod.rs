@@ -4,6 +4,7 @@ pub mod ir;
 pub mod placer;
 pub mod progress;
 pub mod router;
+pub mod visualize;
 
 use eyre::ContextCompat;
 
@@ -24,6 +25,7 @@ use crate::transform::place_and_route::global_pnr::router::{
     collect_module_input_endpoints, collect_module_output_endpoints, first_invalid_active_route,
     route_module_variables, GlobalRoutingConfig, RoutedNet,
 };
+use crate::transform::place_and_route::global_pnr::visualize::placement_bbox_wireframe_world;
 use crate::transform::place_and_route::local_placer::{LocalPlacerConfig, NotRouteStrategy};
 use crate::transform::place_and_route::sampling::SamplingPolicy;
 use crate::world::block::BlockKind;
@@ -36,6 +38,11 @@ pub struct GlobalPnrConfig {
     pub routing: GlobalRoutingConfig,
     pub show_progress: bool,
     pub verifier: Option<fn(&PlacedWorld) -> eyre::Result<()>>,
+}
+
+pub struct GlobalPnrResult {
+    pub placed_world: PlacedWorld,
+    pub placement_bbox_world: World3D,
 }
 
 impl Default for GlobalPnrConfig {
@@ -69,7 +76,9 @@ pub fn place_and_route_design_with_outputs(
     design: &GraphModuleDesign,
     config: &GlobalPnrConfig,
 ) -> eyre::Result<PlacedWorld> {
-    place_and_route_module_with_outputs(&design.context, design.top_module(), config)
+    let GlobalPnrResult { placed_world, .. } =
+        place_and_route_design_with_visualization(design, config)?;
+    Ok(placed_world)
 }
 
 pub fn place_and_route_module_with_outputs(
@@ -77,6 +86,23 @@ pub fn place_and_route_module_with_outputs(
     module: &GraphModule,
     config: &GlobalPnrConfig,
 ) -> eyre::Result<PlacedWorld> {
+    let GlobalPnrResult { placed_world, .. } =
+        place_and_route_module_with_visualization(context, module, config)?;
+    Ok(placed_world)
+}
+
+pub fn place_and_route_design_with_visualization(
+    design: &GraphModuleDesign,
+    config: &GlobalPnrConfig,
+) -> eyre::Result<GlobalPnrResult> {
+    place_and_route_module_with_visualization(&design.context, design.top_module(), config)
+}
+
+pub fn place_and_route_module_with_visualization(
+    context: &GraphModuleContext,
+    module: &GraphModule,
+    config: &GlobalPnrConfig,
+) -> eyre::Result<GlobalPnrResult> {
     let progress = GlobalPnrProgress::new(config.show_progress, module.name.clone());
     if module.graph.is_some() {
         return place_graph_backed_module(module, config, &progress);
@@ -110,6 +136,7 @@ pub fn place_and_route_module_with_outputs(
         inputs,
         outputs,
     };
+    let placement_bbox_world = placement_bbox_wireframe_world(&placed);
 
     progress.stage(5, 5, "complete");
     progress.detail(format!(
@@ -118,7 +145,10 @@ pub fn place_and_route_module_with_outputs(
         routed_nets.len()
     ));
 
-    Ok(placed_world)
+    Ok(GlobalPnrResult {
+        placed_world,
+        placement_bbox_world,
+    })
 }
 
 fn route_first_successful_placement(
@@ -265,7 +295,7 @@ fn place_graph_backed_module(
     module: &GraphModule,
     config: &GlobalPnrConfig,
     progress: &GlobalPnrProgress,
-) -> eyre::Result<PlacedWorld> {
+) -> eyre::Result<GlobalPnrResult> {
     progress.stage(1, 4, "generate leaf layout candidates");
     let candidates = generate_graph_module_candidates_with_progress_label(
         module,
@@ -295,12 +325,16 @@ fn place_graph_backed_module(
 
     progress.stage(3, 4, "assemble leaf world");
     let world = assemble_world(&[candidate], &placed, &[])?;
+    let placement_bbox_world = placement_bbox_wireframe_world(&placed);
 
     progress.stage(4, 4, "complete");
-    Ok(PlacedWorld {
-        world,
-        inputs,
-        outputs: Vec::new(),
+    Ok(GlobalPnrResult {
+        placed_world: PlacedWorld {
+            world,
+            inputs,
+            outputs: Vec::new(),
+        },
+        placement_bbox_world,
     })
 }
 
@@ -568,13 +602,18 @@ mod tests {
             ..Default::default()
         };
 
-        let placed = place_and_route_design_with_outputs(&design, &config)?;
+        let result = place_and_route_design_with_visualization(&design, &config)?;
+        let placed = result.placed_world;
 
         assert!(!placed.world.iter_block().is_empty());
         assert_eq!(placed.outputs.len(), 1);
         assert_eq!(placed.outputs[0].name, "q");
         let nbt: NBTRoot = placed.world.to_nbt();
         nbt.save("test/d-flip-flop-global-smoke.nbt");
+        result
+            .placement_bbox_world
+            .to_nbt()
+            .save("test/d-flip-flop-global-placement-bbox.nbt");
         placed
             .metadata()
             .save("test/d-flip-flop-global-smoke.outputs.json")?;
@@ -617,7 +656,8 @@ mod tests {
             ..Default::default()
         };
 
-        let placed = place_and_route_design_with_outputs(&design, &config)?;
+        let result = place_and_route_design_with_visualization(&design, &config)?;
+        let placed = result.placed_world;
 
         assert!(!placed.world.iter_block().is_empty());
         let mut output_names = placed
@@ -629,6 +669,10 @@ mod tests {
         assert_eq!(output_names, vec!["q_0", "q_1"]);
         let nbt: NBTRoot = placed.world.to_nbt();
         nbt.save("test/counter-global-smoke.nbt");
+        result
+            .placement_bbox_world
+            .to_nbt()
+            .save("test/counter-global-placement-bbox.nbt");
         placed
             .metadata()
             .save("test/counter-global-smoke.outputs.json")?;
