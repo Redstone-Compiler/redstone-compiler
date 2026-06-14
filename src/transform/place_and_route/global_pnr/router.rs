@@ -822,9 +822,7 @@ fn is_next_to_master_data_route(var: &GraphModuleVariable) -> bool {
         && var.target.1 == "d"
 }
 
-fn is_clock_inverter_to_master_enable_route(
-    var: &GraphModuleVariable,
-) -> bool {
+fn is_clock_inverter_to_master_enable_route(var: &GraphModuleVariable) -> bool {
     var.source.0.ends_with("_clk_inv")
         && var.source.1.ends_with("_n")
         && var.target.0.ends_with("_master")
@@ -1882,11 +1880,7 @@ fn resolve_port<'a>(
     placed_modules: &'a [PlacedModule],
     module_name: &str,
     port_name: &str,
-) -> Option<(
-    &'a PhysicalPort,
-    &'a LayoutCandidate,
-    &'a PlacedModule,
-)> {
+) -> Option<(&'a PhysicalPort, &'a LayoutCandidate, &'a PlacedModule)> {
     let placed = placed_modules
         .iter()
         .find(|placed| placed.module_name == module_name)?;
@@ -2447,7 +2441,8 @@ fn output_adapter_allowed_contacts(
     additional_allowed_contacts: &[Position],
     local_allowed_contacts: &[Position],
 ) -> Vec<Position> {
-    let mut contacts = adapter_allowed_contacts(additional_allowed_contacts, local_allowed_contacts);
+    let mut contacts =
+        adapter_allowed_contacts(additional_allowed_contacts, local_allowed_contacts);
     contacts.extend(source_signal_positions(world, source));
     contacts.sort();
     contacts.dedup();
@@ -3984,7 +3979,9 @@ mod tests {
             target: ("q_0_next".to_owned(), "q_0".to_owned()),
         };
 
-        assert!(route_variable_priority(&master_to_slave) < route_variable_priority(&self_feedback));
+        assert!(
+            route_variable_priority(&master_to_slave) < route_variable_priority(&self_feedback)
+        );
     }
 
     #[test]
@@ -4000,7 +3997,9 @@ mod tests {
             target: ("q_0_next".to_owned(), "q_0".to_owned()),
         };
 
-        assert!(route_variable_priority(&clock_to_master) < route_variable_priority(&self_feedback));
+        assert!(
+            route_variable_priority(&clock_to_master) < route_variable_priority(&self_feedback)
+        );
     }
 
     #[test]

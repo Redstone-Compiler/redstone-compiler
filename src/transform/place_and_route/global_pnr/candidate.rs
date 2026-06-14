@@ -486,8 +486,7 @@ pub fn d_latch_child_candidate_config(local_config: LocalPlacerConfig) -> UnitCa
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::world::block::BlockKind;
-    use crate::world::block::Direction;
+    use crate::world::block::{BlockKind, Direction};
 
     #[test]
     fn switchless_direct_input_exposes_powered_redstone_instead_of_support_cobble() {

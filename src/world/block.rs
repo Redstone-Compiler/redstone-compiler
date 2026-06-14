@@ -167,9 +167,7 @@ impl BlockKind {
             } => *on_count > 0 || *on_base_count > 0,
             BlockKind::Switch { is_on } => *is_on,
             BlockKind::Redstone {
-                on_count,
-                strength,
-                ..
+                on_count, strength, ..
             } => *strength > 0 || *on_count > 0,
             BlockKind::Torch { is_on } => *is_on,
             BlockKind::Repeater { is_on, .. } => *is_on,

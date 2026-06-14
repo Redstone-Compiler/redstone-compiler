@@ -16,9 +16,7 @@ use crate::transform::place_and_route::global_pnr::assembly::assemble_world;
 use crate::transform::place_and_route::global_pnr::candidate::{
     generate_graph_module_candidates_with_progress_label, UnitCandidateConfig,
 };
-use crate::transform::place_and_route::global_pnr::ir::{
-    LayoutCandidate, PhysicalPortDirection,
-};
+use crate::transform::place_and_route::global_pnr::ir::{LayoutCandidate, PhysicalPortDirection};
 use crate::transform::place_and_route::global_pnr::placer::{
     place_candidates_on_shelves, placement_candidates, GlobalPlacementConfig, PlacedModule,
 };
@@ -512,10 +510,7 @@ mod tests {
         assert_eq!(placed.outputs.len(), 1);
         assert_eq!(placed.outputs[0].name, "q");
         let output_position = placed.outputs[0].position();
-        assert_ne!(
-            placed.world[output_position].kind,
-            BlockKind::Air
-        );
+        assert_ne!(placed.world[output_position].kind, BlockKind::Air);
         Ok(())
     }
 
