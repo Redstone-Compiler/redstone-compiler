@@ -389,6 +389,10 @@ fn graph_dot_info(nbt_bytes: &[u8], metadata: Option<&OutputMetadata>) -> Result
 }
 
 fn simplified_logic_graph(logic_graph: LogicGraph) -> eyre::Result<LogicGraph> {
+    if logic_graph.graph.has_cycle() {
+        return Ok(logic_graph);
+    }
+
     let mut transformer = LogicGraphTransformer::new(logic_graph);
     transformer.remove_double_neg_expression();
     transformer.optimize_cse()?;
@@ -398,6 +402,10 @@ fn simplified_logic_graph(logic_graph: LogicGraph) -> eyre::Result<LogicGraph> {
 }
 
 fn high_level_logic_graph(logic_graph: LogicGraph) -> eyre::Result<LogicGraph> {
+    if logic_graph.graph.has_cycle() {
+        return Ok(logic_graph);
+    }
+
     let mut transformer = LogicGraphTransformer::new(simplified_logic_graph(logic_graph)?);
     transformer.compose_high_level_gates()?;
     transformer.optimize_cse()?;
@@ -593,4 +601,56 @@ fn source_node_ids_from_tag(tag: &str) -> Vec<GraphNodeId> {
         .split(',')
         .filter_map(|value| value.trim().parse().ok())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use redstone_compiler::graph::{Graph, GraphNode};
+    use redstone_compiler::logic::{Logic, LogicType};
+
+    use super::*;
+
+    fn cyclic_logic_graph() -> LogicGraph {
+        let mut graph = Graph::from_nodes(vec![
+            GraphNode {
+                kind: GraphNodeKind::Logic(Logic {
+                    logic_type: LogicType::Or,
+                }),
+                inputs: vec![1],
+                outputs: vec![1],
+                ..Default::default()
+            },
+            GraphNode {
+                kind: GraphNodeKind::Logic(Logic {
+                    logic_type: LogicType::Or,
+                }),
+                inputs: vec![0],
+                outputs: vec![0],
+                ..Default::default()
+            },
+        ]);
+        graph.build_inputs();
+        graph.build_outputs();
+        LogicGraph { graph }
+    }
+
+    #[test]
+    fn simplified_logic_graph_skips_cyclic_graphs() -> eyre::Result<()> {
+        let graph = cyclic_logic_graph();
+
+        let simplified = simplified_logic_graph(graph)?;
+
+        assert!(simplified.graph.has_cycle());
+        Ok(())
+    }
+
+    #[test]
+    fn high_level_logic_graph_skips_cyclic_graphs() -> eyre::Result<()> {
+        let graph = cyclic_logic_graph();
+
+        let high_level = high_level_logic_graph(graph)?;
+
+        assert!(high_level.graph.has_cycle());
+        Ok(())
+    }
 }
