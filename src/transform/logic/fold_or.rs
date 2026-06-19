@@ -30,9 +30,10 @@ impl LogicGraphTransformer {
 
             let mut folded_inputs = Vec::new();
             let mut removable_or_nodes = HashSet::new();
+            let mut can_fold = true;
 
             for input in node.inputs.clone() {
-                Self::collect_folded_or_inputs(
+                can_fold &= Self::collect_folded_or_inputs(
                     &self.graph.graph,
                     input,
                     node_id,
@@ -40,6 +41,9 @@ impl LogicGraphTransformer {
                     &mut removable_or_nodes,
                     &mut HashSet::new(),
                 )?;
+            }
+            if !can_fold {
+                continue;
             }
 
             folded_inputs.sort_unstable();
@@ -112,9 +116,9 @@ impl LogicGraphTransformer {
         folded_inputs: &mut Vec<GraphNodeId>,
         removals: &mut HashSet<GraphNodeId>,
         path: &mut HashSet<GraphNodeId>,
-    ) -> eyre::Result<()> {
+    ) -> eyre::Result<bool> {
         if !path.insert(input_id) {
-            eyre::bail!("cannot fold OR chain through cyclic node {input_id}");
+            return Ok(false);
         }
 
         let Some(node) = graph.find_node_by_id(input_id) else {
@@ -124,7 +128,7 @@ impl LogicGraphTransformer {
         if !matches!(&node.kind, GraphNodeKind::Logic(logic) if logic.logic_type == LogicType::Or) {
             folded_inputs.push(input_id);
             path.remove(&input_id);
-            return Ok(());
+            return Ok(true);
         }
 
         let can_remove_current = node.outputs.iter().all(|output| *output == consumer_id);
@@ -133,17 +137,20 @@ impl LogicGraphTransformer {
         }
 
         for nested_input in &node.inputs {
-            Self::collect_folded_or_inputs(
+            if !Self::collect_folded_or_inputs(
                 graph,
                 *nested_input,
                 input_id,
                 folded_inputs,
                 removals,
                 path,
-            )?;
+            )? {
+                path.remove(&input_id);
+                return Ok(false);
+            }
         }
 
         path.remove(&input_id);
-        Ok(())
+        Ok(true)
     }
 }

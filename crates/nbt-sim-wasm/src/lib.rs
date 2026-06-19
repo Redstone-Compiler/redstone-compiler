@@ -389,27 +389,23 @@ fn graph_dot_info(nbt_bytes: &[u8], metadata: Option<&OutputMetadata>) -> Result
 }
 
 fn simplified_logic_graph(logic_graph: LogicGraph) -> eyre::Result<LogicGraph> {
-    if logic_graph.graph.has_cycle() {
-        return Ok(logic_graph);
-    }
-
     let mut transformer = LogicGraphTransformer::new(logic_graph);
     transformer.remove_double_neg_expression();
-    transformer.optimize_cse()?;
+    optimize_cse_if_acyclic(&mut transformer)?;
     transformer.fold_or_chains()?;
-    transformer.optimize_cse()?;
+    optimize_cse_if_acyclic(&mut transformer)?;
     Ok(transformer.finish())
 }
 
 fn high_level_logic_graph(logic_graph: LogicGraph) -> eyre::Result<LogicGraph> {
-    if logic_graph.graph.has_cycle() {
-        return Ok(logic_graph);
-    }
-
     let mut transformer = LogicGraphTransformer::new(simplified_logic_graph(logic_graph)?);
     transformer.compose_high_level_gates()?;
-    transformer.optimize_cse()?;
+    optimize_cse_if_acyclic(&mut transformer)?;
     Ok(transformer.finish())
+}
+
+fn optimize_cse_if_acyclic(transformer: &mut LogicGraphTransformer) -> eyre::Result<()> {
+    transformer.optimize_cse_if_acyclic()
 }
 
 fn snapshots_to_info(snapshots: &[SimulationSnapshot]) -> Vec<SnapshotInfo> {
@@ -635,22 +631,86 @@ mod tests {
     }
 
     #[test]
-    fn simplified_logic_graph_skips_cyclic_graphs() -> eyre::Result<()> {
-        let graph = cyclic_logic_graph();
+    fn simplified_logic_graph_folds_acyclic_or_chains_inside_cyclic_graphs() -> eyre::Result<()> {
+        let mut graph = Graph::from_nodes(vec![
+            GraphNode {
+                kind: GraphNodeKind::Input("a".to_owned()),
+                outputs: vec![2],
+                ..Default::default()
+            },
+            GraphNode {
+                kind: GraphNodeKind::Input("b".to_owned()),
+                outputs: vec![2],
+                ..Default::default()
+            },
+            GraphNode {
+                kind: GraphNodeKind::Logic(Logic {
+                    logic_type: LogicType::Or,
+                }),
+                inputs: vec![0, 1],
+                outputs: vec![4],
+                ..Default::default()
+            },
+            GraphNode {
+                kind: GraphNodeKind::Input("c".to_owned()),
+                outputs: vec![4],
+                ..Default::default()
+            },
+            GraphNode {
+                kind: GraphNodeKind::Logic(Logic {
+                    logic_type: LogicType::Or,
+                }),
+                inputs: vec![2, 3],
+                outputs: vec![5],
+                ..Default::default()
+            },
+            GraphNode {
+                kind: GraphNodeKind::Output("out".to_owned()),
+                inputs: vec![4],
+                ..Default::default()
+            },
+            GraphNode {
+                kind: GraphNodeKind::Logic(Logic {
+                    logic_type: LogicType::Or,
+                }),
+                inputs: vec![7],
+                outputs: vec![7],
+                ..Default::default()
+            },
+            GraphNode {
+                kind: GraphNodeKind::Logic(Logic {
+                    logic_type: LogicType::Or,
+                }),
+                inputs: vec![6],
+                outputs: vec![6],
+                ..Default::default()
+            },
+        ]);
+        graph.build_inputs();
+        graph.build_outputs();
 
-        let simplified = simplified_logic_graph(graph)?;
+        let simplified = simplified_logic_graph(LogicGraph { graph })?;
 
         assert!(simplified.graph.has_cycle());
+        assert!(simplified.graph.find_node_by_id(2).is_none());
+        assert!(simplified.graph.nodes.iter().all(|node| {
+            !matches!(&node.kind, GraphNodeKind::Logic(logic) if logic.logic_type == LogicType::Or)
+                || node.inputs.len() <= 2
+        }));
         Ok(())
     }
 
     #[test]
-    fn high_level_logic_graph_skips_cyclic_graphs() -> eyre::Result<()> {
-        let graph = cyclic_logic_graph();
+    fn high_level_logic_graph_composes_acyclic_gates_inside_cyclic_graphs() -> eyre::Result<()> {
+        let mut graph = LogicGraph::from_stmt("a&b", "out")?.prepare_place()?;
+        graph.graph.merge(cyclic_logic_graph().graph);
 
         let high_level = high_level_logic_graph(graph)?;
 
         assert!(high_level.graph.has_cycle());
+        assert!(high_level.graph.nodes.iter().any(|node| {
+            matches!(&node.kind, GraphNodeKind::Logic(logic) if logic.logic_type == LogicType::And)
+        }));
         Ok(())
     }
 }

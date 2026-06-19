@@ -211,4 +211,11 @@ impl LogicGraphTransformer {
 
         Ok(())
     }
+
+    pub fn optimize_cse_if_acyclic(&mut self) -> eyre::Result<()> {
+        if self.graph.graph.has_cycle() {
+            return Ok(());
+        }
+        self.optimize_cse()
+    }
 }

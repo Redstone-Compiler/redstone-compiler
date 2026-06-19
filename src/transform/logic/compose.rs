@@ -42,7 +42,7 @@ impl LogicGraphTransformer {
     pub fn compose_high_level_gates(&mut self) -> eyre::Result<()> {
         self.compose_gate_pattern(("(~(x|~y))|(~(y|~x))", LogicType::Xor, "composed-xor"))?;
         self.compose_gate_pattern(("~(~x|~y)", LogicType::And, "composed-and"))?;
-        self.optimize_cse()?;
+        self.optimize_cse_if_acyclic()?;
 
         for pattern in [
             ("(~x&y)|(x&~y)", LogicType::Xor, "composed-xor"),
