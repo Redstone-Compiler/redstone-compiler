@@ -1,10 +1,12 @@
 use std::collections::HashSet;
 
 use redstone_compiler::graph::graphviz::ToGraphvizGraph;
+use redstone_compiler::graph::logic::LogicGraph;
 use redstone_compiler::graph::world::{WorldGraph, WorldGraphBuilder};
 use redstone_compiler::graph::{GraphNodeId, GraphNodeKind};
 use redstone_compiler::nbt::{NBTRoot, ToNBT};
 use redstone_compiler::output::OutputMetadata;
+use redstone_compiler::transform::logic::LogicGraphTransformer;
 use redstone_compiler::transform::place_and_route::place_bound::{PlaceBound, PropagateType};
 use redstone_compiler::transform::place_and_route::utils::world_to_logic_with_outputs_unoptimized;
 use redstone_compiler::transform::world_to_logic::WorldToLogicTransformer;
@@ -50,6 +52,10 @@ struct GraphDotInfo {
     folded_world_dot_without_tags: String,
     logic_dot: String,
     logic_dot_without_tags: String,
+    simplified_logic_dot: String,
+    simplified_logic_dot_without_tags: String,
+    high_level_logic_dot: String,
+    high_level_logic_dot_without_tags: String,
 }
 
 #[wasm_bindgen]
@@ -201,6 +207,10 @@ impl NbtSimulator {
         let folded_world_dot = transformer.world_graph().to_graphviz();
         let folded_world_dot_without_tags = transformer.world_graph().to_graphviz_without_tags();
         let logic_graph = transformer.transform().map_err(to_js_error)?;
+        let simplified_logic_graph =
+            simplified_logic_graph(logic_graph.clone()).map_err(to_js_error)?;
+        let high_level_logic_graph =
+            high_level_logic_graph(logic_graph.clone()).map_err(to_js_error)?;
         let graph_dot = GraphDotInfo {
             raw_world_dot: selected_world_graph.to_graphviz(),
             raw_world_dot_without_tags: selected_world_graph.to_graphviz_without_tags(),
@@ -208,6 +218,10 @@ impl NbtSimulator {
             folded_world_dot_without_tags,
             logic_dot: logic_graph.to_graphviz(),
             logic_dot_without_tags: logic_graph.to_graphviz_without_tags(),
+            simplified_logic_dot: simplified_logic_graph.to_graphviz(),
+            simplified_logic_dot_without_tags: simplified_logic_graph.to_graphviz_without_tags(),
+            high_level_logic_dot: high_level_logic_graph.to_graphviz(),
+            high_level_logic_dot_without_tags: high_level_logic_graph.to_graphviz_without_tags(),
         };
 
         serde_wasm_bindgen::to_value(&graph_dot).map_err(to_js_error)
@@ -354,6 +368,10 @@ fn graph_dot_info(nbt_bytes: &[u8], metadata: Option<&OutputMetadata>) -> Result
     } else {
         transformer.transform().map_err(to_js_error)?
     };
+    let simplified_logic_graph =
+        simplified_logic_graph(logic_graph.clone()).map_err(to_js_error)?;
+    let high_level_logic_graph =
+        high_level_logic_graph(logic_graph.clone()).map_err(to_js_error)?;
     let graph_dot = GraphDotInfo {
         raw_world_dot: raw_world_graph.to_graphviz(),
         raw_world_dot_without_tags: raw_world_graph.to_graphviz_without_tags(),
@@ -361,9 +379,33 @@ fn graph_dot_info(nbt_bytes: &[u8], metadata: Option<&OutputMetadata>) -> Result
         folded_world_dot_without_tags,
         logic_dot: logic_graph.to_graphviz(),
         logic_dot_without_tags: logic_graph.to_graphviz_without_tags(),
+        simplified_logic_dot: simplified_logic_graph.to_graphviz(),
+        simplified_logic_dot_without_tags: simplified_logic_graph.to_graphviz_without_tags(),
+        high_level_logic_dot: high_level_logic_graph.to_graphviz(),
+        high_level_logic_dot_without_tags: high_level_logic_graph.to_graphviz_without_tags(),
     };
 
     serde_wasm_bindgen::to_value(&graph_dot).map_err(to_js_error)
+}
+
+fn simplified_logic_graph(logic_graph: LogicGraph) -> eyre::Result<LogicGraph> {
+    let mut transformer = LogicGraphTransformer::new(logic_graph);
+    transformer.remove_double_neg_expression();
+    optimize_cse_if_acyclic(&mut transformer)?;
+    transformer.fold_or_chains()?;
+    optimize_cse_if_acyclic(&mut transformer)?;
+    Ok(transformer.finish())
+}
+
+fn high_level_logic_graph(logic_graph: LogicGraph) -> eyre::Result<LogicGraph> {
+    let mut transformer = LogicGraphTransformer::new(simplified_logic_graph(logic_graph)?);
+    transformer.compose_high_level_gates()?;
+    optimize_cse_if_acyclic(&mut transformer)?;
+    Ok(transformer.finish())
+}
+
+fn optimize_cse_if_acyclic(transformer: &mut LogicGraphTransformer) -> eyre::Result<()> {
+    transformer.optimize_cse_if_acyclic()
 }
 
 fn snapshots_to_info(snapshots: &[SimulationSnapshot]) -> Vec<SnapshotInfo> {
@@ -555,4 +597,120 @@ fn source_node_ids_from_tag(tag: &str) -> Vec<GraphNodeId> {
         .split(',')
         .filter_map(|value| value.trim().parse().ok())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use redstone_compiler::graph::{Graph, GraphNode};
+    use redstone_compiler::logic::{Logic, LogicType};
+
+    use super::*;
+
+    fn cyclic_logic_graph() -> LogicGraph {
+        let mut graph = Graph::from_nodes(vec![
+            GraphNode {
+                kind: GraphNodeKind::Logic(Logic {
+                    logic_type: LogicType::Or,
+                }),
+                inputs: vec![1],
+                outputs: vec![1],
+                ..Default::default()
+            },
+            GraphNode {
+                kind: GraphNodeKind::Logic(Logic {
+                    logic_type: LogicType::Or,
+                }),
+                inputs: vec![0],
+                outputs: vec![0],
+                ..Default::default()
+            },
+        ]);
+        graph.build_inputs();
+        graph.build_outputs();
+        LogicGraph { graph }
+    }
+
+    #[test]
+    fn simplified_logic_graph_folds_acyclic_or_chains_inside_cyclic_graphs() -> eyre::Result<()> {
+        let mut graph = Graph::from_nodes(vec![
+            GraphNode {
+                kind: GraphNodeKind::Input("a".to_owned()),
+                outputs: vec![2],
+                ..Default::default()
+            },
+            GraphNode {
+                kind: GraphNodeKind::Input("b".to_owned()),
+                outputs: vec![2],
+                ..Default::default()
+            },
+            GraphNode {
+                kind: GraphNodeKind::Logic(Logic {
+                    logic_type: LogicType::Or,
+                }),
+                inputs: vec![0, 1],
+                outputs: vec![4],
+                ..Default::default()
+            },
+            GraphNode {
+                kind: GraphNodeKind::Input("c".to_owned()),
+                outputs: vec![4],
+                ..Default::default()
+            },
+            GraphNode {
+                kind: GraphNodeKind::Logic(Logic {
+                    logic_type: LogicType::Or,
+                }),
+                inputs: vec![2, 3],
+                outputs: vec![5],
+                ..Default::default()
+            },
+            GraphNode {
+                kind: GraphNodeKind::Output("out".to_owned()),
+                inputs: vec![4],
+                ..Default::default()
+            },
+            GraphNode {
+                kind: GraphNodeKind::Logic(Logic {
+                    logic_type: LogicType::Or,
+                }),
+                inputs: vec![7],
+                outputs: vec![7],
+                ..Default::default()
+            },
+            GraphNode {
+                kind: GraphNodeKind::Logic(Logic {
+                    logic_type: LogicType::Or,
+                }),
+                inputs: vec![6],
+                outputs: vec![6],
+                ..Default::default()
+            },
+        ]);
+        graph.build_inputs();
+        graph.build_outputs();
+
+        let simplified = simplified_logic_graph(LogicGraph { graph })?;
+
+        assert!(simplified.graph.has_cycle());
+        assert!(simplified.graph.find_node_by_id(2).is_none());
+        assert!(simplified.graph.nodes.iter().all(|node| {
+            !matches!(&node.kind, GraphNodeKind::Logic(logic) if logic.logic_type == LogicType::Or)
+                || node.inputs.len() <= 2
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn high_level_logic_graph_composes_acyclic_gates_inside_cyclic_graphs() -> eyre::Result<()> {
+        let mut graph = LogicGraph::from_stmt("a&b", "out")?.prepare_place()?;
+        graph.graph.merge(cyclic_logic_graph().graph);
+
+        let high_level = high_level_logic_graph(graph)?;
+
+        assert!(high_level.graph.has_cycle());
+        assert!(high_level.graph.nodes.iter().any(|node| {
+            matches!(&node.kind, GraphNodeKind::Logic(logic) if logic.logic_type == LogicType::And)
+        }));
+        Ok(())
+    }
 }

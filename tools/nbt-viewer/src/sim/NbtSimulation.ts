@@ -76,6 +76,10 @@ type RawGraphDotInfo = {
   folded_world_dot_without_tags: string;
   logic_dot: string;
   logic_dot_without_tags: string;
+  simplified_logic_dot: string;
+  simplified_logic_dot_without_tags: string;
+  high_level_logic_dot: string;
+  high_level_logic_dot_without_tags: string;
 };
 
 export type GraphDotInfo = {
@@ -85,6 +89,10 @@ export type GraphDotInfo = {
   foldedWorldDotWithoutTags: string;
   logicDot: string;
   logicDotWithoutTags: string;
+  simplifiedLogicDot: string;
+  simplifiedLogicDotWithoutTags: string;
+  highLevelLogicDot: string;
+  highLevelLogicDotWithoutTags: string;
 };
 
 export class NbtSimulationError extends Error {
@@ -252,6 +260,10 @@ function mapGraphDotInfo(graphDot: RawGraphDotInfo): GraphDotInfo {
     foldedWorldDotWithoutTags: graphDot.folded_world_dot_without_tags,
     logicDot: graphDot.logic_dot,
     logicDotWithoutTags: graphDot.logic_dot_without_tags,
+    simplifiedLogicDot: graphDot.simplified_logic_dot,
+    simplifiedLogicDotWithoutTags: graphDot.simplified_logic_dot_without_tags,
+    highLevelLogicDot: graphDot.high_level_logic_dot,
+    highLevelLogicDotWithoutTags: graphDot.high_level_logic_dot_without_tags,
   };
 }
 
