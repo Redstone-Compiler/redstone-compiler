@@ -540,6 +540,9 @@ mod tests {
     use crate::graph::GraphNodeKind;
     use crate::nbt::{NBTRoot, ToNBT};
     use crate::transform::place_and_route::global_pnr::candidate::d_latch_child_candidate_config;
+    use crate::transform::place_and_route::global_pnr::policy::{
+        Free3DPlacementConfig, PlacementHeuristic,
+    };
     use crate::transform::place_and_route::local_placer::{
         InputPlacementStrategy, LocalPlacerConfig, NotRouteStrategy, PlacementSamplingPolicy,
         TorchPlacementStrategy,
@@ -781,6 +784,15 @@ mod tests {
                 spacing: 4,
                 shelf_width: 64,
                 max_attempts: 64,
+                ..Default::default()
+            },
+            search: GlobalSearchConfig {
+                policies: GlobalPnrPolicies {
+                    placement_heuristics: vec![PlacementHeuristic::Free3D(
+                        Free3DPlacementConfig::default(),
+                    )],
+                    ..GlobalPnrPolicies::balanced()
+                },
                 ..Default::default()
             },
             verifier: Some(assert_two_bit_counter_behavior),

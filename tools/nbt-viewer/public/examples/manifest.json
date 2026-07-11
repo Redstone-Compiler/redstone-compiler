@@ -21,13 +21,13 @@
     "name": "counter-global-placement-bbox.nbt",
     "file": "counter-global-placement-bbox.nbt",
     "path": "examples/counter-global-placement-bbox.nbt",
-    "size": 1282
+    "size": 1197
   },
   {
     "name": "counter-global-smoke.nbt",
     "file": "counter-global-smoke.nbt",
     "path": "examples/counter-global-smoke.nbt",
-    "size": 3588,
+    "size": 3005,
     "outputsPath": "examples/counter-global-smoke.outputs.json"
   },
   {
