@@ -973,8 +973,11 @@ pub(crate) fn placement_cost_breakdown(
         .iter()
         .map(|placed| (placed.module_name.as_str(), placed))
         .collect::<HashMap<_, _>>();
+    let (placement_volume, xy_footprint, height_span) = placement_bbox_metrics(placed);
     let mut cost = PlacementCostBreakdown {
-        placement_volume: placement_bbox_cost(placed),
+        placement_volume,
+        xy_footprint,
+        height_span,
         ..PlacementCostBreakdown::default()
     };
 
@@ -1022,9 +1025,9 @@ pub(crate) fn placement_cost_breakdown(
     cost
 }
 
-fn placement_bbox_cost(placed: &[PlacedModule]) -> usize {
+fn placement_bbox_metrics(placed: &[PlacedModule]) -> (usize, usize, usize) {
     let Some(first) = placed.first() else {
-        return 0;
+        return (0, 0, 0);
     };
     let mut min = first.origin;
     let mut max = first.origin;
@@ -1036,7 +1039,10 @@ fn placement_bbox_cost(placed: &[PlacedModule]) -> usize {
         max.1 = max.1.max(placed.origin.1 + placed.bbox.depth());
         max.2 = max.2.max(placed.origin.2 + placed.bbox.height());
     }
-    (max.0 - min.0 + 1) * (max.1 - min.1 + 1) * (max.2 - min.2 + 1)
+    let width = max.0 - min.0 + 1;
+    let depth = max.1 - min.1 + 1;
+    let height = max.2 - min.2 + 1;
+    (width * depth * height, width * depth, height)
 }
 
 fn translate_candidate_position(

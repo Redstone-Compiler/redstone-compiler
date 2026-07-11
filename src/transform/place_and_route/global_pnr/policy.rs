@@ -52,6 +52,8 @@ pub struct GlobalPnrPolicies {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlacementCostWeights {
     pub placement_volume: usize,
+    pub xy_footprint: usize,
+    pub height_span: usize,
     pub estimated_wire_length: usize,
     pub vertical_distance: usize,
 }
@@ -60,6 +62,8 @@ impl Default for PlacementCostWeights {
     fn default() -> Self {
         Self {
             placement_volume: 1,
+            xy_footprint: 0,
+            height_span: 0,
             estimated_wire_length: 8,
             vertical_distance: 16,
         }
@@ -69,6 +73,8 @@ impl Default for PlacementCostWeights {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PlacementCostBreakdown {
     pub placement_volume: usize,
+    pub xy_footprint: usize,
+    pub height_span: usize,
     pub estimated_wire_length: usize,
     pub vertical_distance: usize,
 }
@@ -77,6 +83,8 @@ impl PlacementCostBreakdown {
     pub fn weighted_total(self, weights: PlacementCostWeights) -> usize {
         self.placement_volume
             .saturating_mul(weights.placement_volume)
+            .saturating_add(self.xy_footprint.saturating_mul(weights.xy_footprint))
+            .saturating_add(self.height_span.saturating_mul(weights.height_span))
             .saturating_add(
                 self.estimated_wire_length
                     .saturating_mul(weights.estimated_wire_length),
@@ -193,6 +201,8 @@ mod tests {
     fn placement_cost_breakdown_uses_adjustable_weights() {
         let cost = PlacementCostBreakdown {
             placement_volume: 100,
+            xy_footprint: 40,
+            height_span: 8,
             estimated_wire_length: 10,
             vertical_distance: 2,
         };
@@ -204,6 +214,16 @@ mod tests {
                 ..PlacementCostWeights::default()
             }),
             380
+        );
+        assert_eq!(
+            cost.weighted_total(PlacementCostWeights {
+                placement_volume: 0,
+                xy_footprint: 1,
+                height_span: 10,
+                estimated_wire_length: 0,
+                vertical_distance: 0,
+            }),
+            120
         );
     }
 }

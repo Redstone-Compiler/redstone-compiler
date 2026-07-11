@@ -462,8 +462,10 @@ fn search_layout_combinations(
             Ok((placed, routed_nets)) => {
                 let cost = placement_cost_breakdown(module, &candidates, &placed);
                 progress.detail(format!(
-                    "selected placement cost: volume={} wire={} vertical={} weighted_total={}",
+                    "selected placement cost: volume={} xy={} height={} wire={} vertical={} weighted_total={}",
                     cost.placement_volume,
+                    cost.xy_footprint,
+                    cost.height_span,
                     cost.estimated_wire_length,
                     cost.vertical_distance,
                     cost.weighted_total(config.placement.cost_weights),
