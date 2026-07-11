@@ -51,18 +51,55 @@ pub fn rank_child_candidates(
         )
     });
 
+    select_ranked_candidates(instance_name, candidates, limit)
+}
+
+pub fn rank_child_candidates_with_preferred(
+    instance_name: impl Into<String>,
+    mut candidates: Vec<LayoutCandidate>,
+    limit: usize,
+    preferred_index: usize,
+) -> ChildCandidatePool {
+    if candidates.is_empty() {
+        return ChildCandidatePool {
+            instance_name: instance_name.into(),
+            candidates,
+        };
+    }
+    let preferred = candidates.remove(preferred_index.min(candidates.len() - 1));
+    candidates.sort_by_key(|candidate| {
+        (
+            candidate.cost.bbox_volume,
+            candidate.cost.block_count,
+            candidate_geometry_signature(candidate),
+        )
+    });
+    candidates.insert(0, preferred);
+    select_ranked_candidates(instance_name, candidates, limit)
+}
+
+fn select_ranked_candidates(
+    instance_name: impl Into<String>,
+    candidates: Vec<LayoutCandidate>,
+    limit: usize,
+) -> ChildCandidatePool {
     let mut selected = Vec::new();
     let mut selected_signatures = HashSet::new();
     let mut overflow = Vec::new();
-    for candidate in candidates {
+    for (index, candidate) in candidates.into_iter().enumerate() {
         let signature = candidate_geometry_signature(&candidate);
-        if selected.len() < limit && selected_signatures.insert(signature) {
+        let geometry_is_new = selected_signatures.insert(signature);
+        if selected.len() < limit && (index == 0 || geometry_is_new) {
             selected.push(candidate);
         } else {
             overflow.push(candidate);
         }
     }
-    selected.extend(overflow.into_iter().take(limit.saturating_sub(selected.len())));
+    selected.extend(
+        overflow
+            .into_iter()
+            .take(limit.saturating_sub(selected.len())),
+    );
 
     ChildCandidatePool {
         instance_name: instance_name.into(),
@@ -90,6 +127,20 @@ pub fn layout_combinations(pools: &[ChildCandidatePool], limit: usize) -> Vec<Ve
     combinations
 }
 
+pub fn select_layout_combination(
+    pools: &[ChildCandidatePool],
+    selection: &[usize],
+) -> Option<Vec<LayoutCandidate>> {
+    if pools.len() != selection.len() {
+        return None;
+    }
+    pools
+        .iter()
+        .zip(selection)
+        .map(|(pool, &candidate_index)| pool.candidates.get(candidate_index).cloned())
+        .collect()
+}
+
 fn candidate_geometry_signature(candidate: &LayoutCandidate) -> Vec<(String, Position)> {
     let mut ports = candidate
         .ports
@@ -104,16 +155,20 @@ fn candidate_geometry_signature(candidate: &LayoutCandidate) -> Vec<(String, Pos
 mod tests {
     use std::collections::HashSet;
 
+    use super::{
+        layout_combinations, rank_child_candidates, rank_child_candidates_with_preferred,
+        select_layout_combination, ChildCandidatePool, GlobalSolutionCost,
+    };
+    use crate::graph::module::{GraphModulePortType, GraphModuleVariable};
     use crate::transform::place_and_route::estimate::BoundingBox;
     use crate::transform::place_and_route::global_pnr::ir::{
         LayoutCandidate, LayoutCandidateCost, PhysicalPort, PhysicalPortDirection, PortConnection,
     };
+    use crate::transform::place_and_route::global_pnr::router::{
+        ordered_module_variables, NetOrderStrategy,
+    };
     use crate::world::position::{DimSize, Position};
     use crate::world::World3D;
-
-    use super::{
-        layout_combinations, rank_child_candidates, ChildCandidatePool, GlobalSolutionCost,
-    };
 
     fn candidate(name: &str, volume: usize, block_count: usize, port: Position) -> LayoutCandidate {
         LayoutCandidate {
@@ -140,6 +195,14 @@ mod tests {
         }
     }
 
+    fn variable(source: &str, target: &str) -> GraphModuleVariable {
+        GraphModuleVariable {
+            var_type: GraphModulePortType::InputNet,
+            source: (source.to_owned(), "q".to_owned()),
+            target: (target.to_owned(), "d".to_owned()),
+        }
+    }
+
     #[test]
     fn rank_child_candidates_keeps_bounded_geometry_diversity() {
         let candidates = vec![
@@ -154,6 +217,20 @@ mod tests {
         assert_eq!(pool.candidates.len(), 2);
         assert_eq!(pool.candidates[0].cost.bbox_volume, 1);
         assert_eq!(pool.candidates[1].ports[0].position, Position(8, 0, 0));
+    }
+
+    #[test]
+    fn rank_child_candidates_preserves_legacy_preferred_candidate_first() {
+        let candidates = vec![
+            candidate("child", 5, 5, Position(5, 0, 0)),
+            candidate("child", 1, 1, Position(0, 0, 0)),
+            candidate("child", 2, 2, Position(8, 0, 0)),
+        ];
+
+        let pool = rank_child_candidates_with_preferred("instance", candidates, 3, 0);
+
+        assert_eq!(pool.candidates[0].cost.bbox_volume, 5);
+        assert_eq!(pool.candidates.len(), 3);
     }
 
     #[test]
@@ -206,5 +283,46 @@ mod tests {
 
         assert!(compact < long_routes);
         assert!(long_routes < incomplete);
+    }
+
+    #[test]
+    fn select_layout_combination_uses_one_candidate_from_each_pool() {
+        let pools = vec![
+            ChildCandidatePool {
+                instance_name: "a".to_owned(),
+                candidates: vec![
+                    candidate("a", 1, 1, Position(0, 0, 0)),
+                    candidate("a", 2, 2, Position(1, 0, 0)),
+                ],
+            },
+            ChildCandidatePool {
+                instance_name: "b".to_owned(),
+                candidates: vec![
+                    candidate("b", 3, 3, Position(0, 0, 0)),
+                    candidate("b", 4, 4, Position(1, 0, 0)),
+                ],
+            },
+        ];
+
+        let selected = select_layout_combination(&pools, &[1, 0]).unwrap();
+
+        assert_eq!(selected[0].cost.bbox_volume, 2);
+        assert_eq!(selected[1].cost.bbox_volume, 3);
+    }
+
+    #[test]
+    fn ordered_module_variables_supports_fanout_and_reverse_strategies() {
+        let vars = vec![
+            variable("shared", "a"),
+            variable("single", "b"),
+            variable("shared", "c"),
+        ];
+
+        let fanout = ordered_module_variables(&vars, NetOrderStrategy::HighestFanoutFirst);
+        let reverse = ordered_module_variables(&vars, NetOrderStrategy::ReverseCriticality);
+
+        assert_eq!(fanout[0].source.0, "shared");
+        assert_eq!(fanout[1].source.0, "shared");
+        assert_eq!(reverse.last().unwrap().source.0, "shared");
     }
 }

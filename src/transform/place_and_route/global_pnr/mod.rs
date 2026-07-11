@@ -24,7 +24,11 @@ use crate::transform::place_and_route::global_pnr::placer::{
 use crate::transform::place_and_route::global_pnr::progress::GlobalPnrProgress;
 use crate::transform::place_and_route::global_pnr::router::{
     collect_module_input_endpoints, collect_module_output_endpoints, first_invalid_active_route,
-    route_module_variables, GlobalRoutingConfig, RoutedNet,
+    route_module_variables_with_order, GlobalRoutingConfig, NetOrderStrategy, RoutedNet,
+};
+use crate::transform::place_and_route::global_pnr::search::{
+    layout_combinations, rank_child_candidates_with_preferred, select_layout_combination,
+    ChildCandidatePool,
 };
 use crate::transform::place_and_route::global_pnr::visualize::placement_bbox_wireframe_world;
 use crate::transform::place_and_route::local_placer::{LocalPlacerConfig, NotRouteStrategy};
@@ -36,8 +40,30 @@ pub struct GlobalPnrConfig {
     pub candidate: UnitCandidateConfig,
     pub placement: GlobalPlacementConfig,
     pub routing: GlobalRoutingConfig,
+    pub search: GlobalSearchConfig,
     pub show_progress: bool,
     pub verifier: Option<fn(&PlacedWorld) -> eyre::Result<()>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GlobalSearchConfig {
+    pub max_candidates_per_child: usize,
+    pub max_layout_combinations: usize,
+    pub route_order_strategies: Vec<NetOrderStrategy>,
+}
+
+impl Default for GlobalSearchConfig {
+    fn default() -> Self {
+        Self {
+            max_candidates_per_child: 4,
+            max_layout_combinations: 16,
+            route_order_strategies: vec![
+                NetOrderStrategy::Criticality,
+                NetOrderStrategy::HighestFanoutFirst,
+                NetOrderStrategy::ReverseCriticality,
+            ],
+        }
+    }
 }
 
 pub struct GlobalPnrResult {
@@ -51,6 +77,7 @@ impl Default for GlobalPnrConfig {
             candidate: UnitCandidateConfig::default(),
             placement: GlobalPlacementConfig::default(),
             routing: GlobalRoutingConfig::default(),
+            search: GlobalSearchConfig::default(),
             show_progress: true,
             verifier: None,
         }
@@ -109,23 +136,11 @@ pub fn place_and_route_module_with_visualization(
     }
 
     progress.stage(1, 5, "generate child layout candidates");
-    let candidates = generate_child_candidates(context, module, config, &progress)?;
+    let candidate_pools = generate_child_candidate_pools(context, module, config, &progress)?;
 
-    progress.stage(2, 5, "place child candidates");
-    let placement_attempts = placement_candidates(module, &candidates, &config.placement);
-    progress.detail(format!(
-        "generated {} placement attempt(s)",
-        placement_attempts.len()
-    ));
-
-    progress.stage(3, 5, "route module ports and variables");
-    let (placed, routed_nets) = route_first_successful_placement(
-        module,
-        &candidates,
-        placement_attempts,
-        config,
-        &progress,
-    )?;
+    progress.stage(2, 5, "search child layouts and placements");
+    let (candidates, placed, routed_nets) =
+        search_layout_combinations(module, &candidate_pools, config, &progress)?;
 
     progress.stage(4, 5, "assemble world and collect outputs");
     let inputs = collect_module_input_endpoints(module, &routed_nets);
@@ -159,69 +174,94 @@ fn route_first_successful_placement(
     progress: &GlobalPnrProgress,
 ) -> eyre::Result<(Vec<PlacedModule>, Vec<RoutedNet>)> {
     let mut last_error = None;
-    let total_attempts = placement_attempts.len();
+    let order_strategies = if config.search.route_order_strategies.is_empty() {
+        vec![NetOrderStrategy::Criticality]
+    } else {
+        config.search.route_order_strategies.clone()
+    };
+    let total_attempts = placement_attempts.len() * order_strategies.len();
 
     for (attempt_index, placed) in placement_attempts.into_iter().enumerate() {
-        progress.item(attempt_index + 1, total_attempts, "route placement attempt");
-        match route_module_variables(module, candidates, &placed, &config.routing, progress) {
-            Ok(routed_nets) => {
-                match placed_world_from_routing(module, candidates, &placed, &routed_nets) {
-                    Ok(world) => {
-                        if let Some(route) = first_invalid_active_route(&world.world, &routed_nets)
-                        {
-                            let error = eyre::eyre!(
+        for (order_index, order_strategy) in order_strategies.iter().copied().enumerate() {
+            let route_attempt_index = attempt_index * order_strategies.len() + order_index;
+            progress.item(
+                route_attempt_index + 1,
+                total_attempts,
+                format!("route placement attempt with {order_strategy:?}"),
+            );
+            match route_module_variables_with_order(
+                module,
+                candidates,
+                &placed,
+                &config.routing,
+                order_strategy,
+                progress,
+            ) {
+                Ok(routed_nets) => {
+                    match placed_world_from_routing(module, candidates, &placed, &routed_nets) {
+                        Ok(world) => {
+                            if let Some(route) =
+                                first_invalid_active_route(&world.world, &routed_nets)
+                            {
+                                let error = eyre::eyre!(
                                 "assembled route from {:?} to {:?} does not satisfy its powered-position contract",
                                 route.source,
                                 route.sink
                             );
-                            progress.detail(format!(
-                                "placement attempt {} failed: {error}",
-                                attempt_index + 1
-                            ));
-                            last_error = Some(error);
-                            continue;
-                        }
-                        if let Some(verifier) = config.verifier {
-                            if let Err(error) = verifier(&world) {
-                                save_failed_verifier_world(
-                                    module,
-                                    attempt_index + 1,
-                                    &world,
-                                    &routed_nets,
-                                );
                                 progress.detail(format!(
-                                    "placement attempt {} failed verifier: {error}",
-                                    attempt_index + 1
+                                    "placement attempt {} failed: {error}",
+                                    route_attempt_index + 1
                                 ));
                                 last_error = Some(error);
                                 continue;
                             }
+                            if let Some(verifier) = config.verifier {
+                                if let Err(error) = verifier(&world) {
+                                    save_failed_verifier_world(
+                                        module,
+                                        route_attempt_index + 1,
+                                        &world,
+                                        &routed_nets,
+                                    );
+                                    progress.detail(format!(
+                                        "placement attempt {} failed verifier: {error}",
+                                        route_attempt_index + 1
+                                    ));
+                                    last_error = Some(error);
+                                    continue;
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            let error = eyre::eyre!(error);
+                            progress.detail(format!(
+                                "placement attempt {} failed: {error}",
+                                route_attempt_index + 1
+                            ));
+                            last_error = Some(error);
+                            continue;
                         }
                     }
-                    Err(error) => {
-                        let error = eyre::eyre!(error);
-                        progress.detail(format!(
-                            "placement attempt {} failed: {error}",
-                            attempt_index + 1
-                        ));
-                        last_error = Some(error);
-                        continue;
-                    }
+                    progress.detail(format!(
+                        "selected placement attempt {} with {} route(s)",
+                        route_attempt_index + 1,
+                        routed_nets.len()
+                    ));
+                    return Ok((placed, routed_nets));
                 }
-                progress.detail(format!(
-                    "selected placement attempt {} with {} route(s)",
-                    attempt_index + 1,
-                    routed_nets.len()
-                ));
-                return Ok((placed, routed_nets));
-            }
-            Err(error) => {
-                save_failed_route_base_world(module, attempt_index + 1, candidates, &placed);
-                progress.detail(format!(
-                    "placement attempt {} failed: {error}",
-                    attempt_index + 1
-                ));
-                last_error = Some(error);
+                Err(error) => {
+                    save_failed_route_base_world(
+                        module,
+                        route_attempt_index + 1,
+                        candidates,
+                        &placed,
+                    );
+                    progress.detail(format!(
+                        "placement attempt {} failed: {error}",
+                        route_attempt_index + 1
+                    ));
+                    last_error = Some(error);
+                }
             }
         }
     }
@@ -336,13 +376,13 @@ fn place_graph_backed_module(
 }
 
 // 하위 모듈마다 local placer를 실행해서 global PnR이 배치할 layout 후보를 하나씩 뽑는다.
-fn generate_child_candidates(
+fn generate_child_candidate_pools(
     context: &GraphModuleContext,
     module: &GraphModule,
     config: &GlobalPnrConfig,
     progress: &GlobalPnrProgress,
-) -> eyre::Result<Vec<LayoutCandidate>> {
-    let mut candidates = Vec::new();
+) -> eyre::Result<Vec<ChildCandidatePool>> {
+    let mut pools = Vec::new();
     for (index, instance) in module.instances.iter().enumerate() {
         progress.item(
             index + 1,
@@ -351,7 +391,7 @@ fn generate_child_candidates(
         );
         let child = &context[instance.as_str()];
         let child_config = candidate_config_for_child(child, &config.candidate);
-        let mut child_candidates = generate_graph_module_candidates_with_progress_label(
+        let child_candidates = generate_graph_module_candidates_with_progress_label(
             child,
             &child_config,
             config.show_progress.then_some(instance.as_str()),
@@ -360,17 +400,74 @@ fn generate_child_candidates(
             "`{instance}` produced {} candidate(s)",
             child_candidates.len()
         ));
-        let candidate = if graph_module_input_port_count(child) > 1 {
-            child_candidates
-                .drain(..)
-                .min_by_key(child_candidate_selection_cost)
-        } else {
-            child_candidates.drain(..).next()
+        if child_candidates.is_empty() {
+            return Err(eyre::eyre!(
+                "module instance `{instance}` produced no candidates"
+            ));
         }
-        .with_context(|| format!("module instance `{instance}` produced no candidates"))?;
-        candidates.push(candidate);
+        let preferred_index = if graph_module_input_port_count(child) > 1 {
+            child_candidates
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, candidate)| {
+                    (candidate.cost.bbox_volume, candidate.cost.block_count)
+                })
+                .map(|(index, _)| index)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        pools.push(rank_child_candidates_with_preferred(
+            instance,
+            child_candidates,
+            config.search.max_candidates_per_child.max(1),
+            preferred_index,
+        ));
     }
-    Ok(candidates)
+    Ok(pools)
+}
+
+fn search_layout_combinations(
+    module: &GraphModule,
+    pools: &[ChildCandidatePool],
+    config: &GlobalPnrConfig,
+    progress: &GlobalPnrProgress,
+) -> eyre::Result<(Vec<LayoutCandidate>, Vec<PlacedModule>, Vec<RoutedNet>)> {
+    let combinations = layout_combinations(pools, config.search.max_layout_combinations.max(1));
+    let mut last_error = None;
+    for (combination_index, selection) in combinations.iter().enumerate() {
+        progress.detail(format!(
+            "layout combination {}/{}: {:?}",
+            combination_index + 1,
+            combinations.len(),
+            selection
+        ));
+        let candidates = select_layout_combination(pools, selection)
+            .context("invalid child layout combination")?;
+        let placement_attempts = placement_candidates(module, &candidates, &config.placement);
+        progress.detail(format!(
+            "layout combination {} generated {} placement attempt(s)",
+            combination_index + 1,
+            placement_attempts.len()
+        ));
+        match route_first_successful_placement(
+            module,
+            &candidates,
+            placement_attempts,
+            config,
+            progress,
+        ) {
+            Ok((placed, routed_nets)) => return Ok((candidates, placed, routed_nets)),
+            Err(error) => {
+                progress.detail(format!(
+                    "layout combination {} failed: {error}",
+                    combination_index + 1
+                ));
+                last_error = Some(error);
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| eyre::eyre!("no child layout combinations generated")))
 }
 
 fn candidate_config_for_child(
@@ -409,10 +506,6 @@ fn graph_module_input_port_count(module: &GraphModule) -> usize {
         .iter()
         .filter(|port| port.port_type.is_input())
         .count()
-}
-
-fn child_candidate_selection_cost(candidate: &LayoutCandidate) -> (usize, usize) {
-    (candidate.cost.bbox_volume, candidate.cost.block_count)
 }
 
 #[cfg(test)]

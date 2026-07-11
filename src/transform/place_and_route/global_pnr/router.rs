@@ -36,6 +36,14 @@ pub enum GlobalRoutingStrategy {
     AStar,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NetOrderStrategy {
+    #[default]
+    Criticality,
+    HighestFanoutFirst,
+    ReverseCriticality,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GlobalRoutingConfig {
     pub strategy: GlobalRoutingStrategy,
@@ -154,11 +162,28 @@ pub fn route_module_variables(
     config: &GlobalRoutingConfig,
     progress: &GlobalPnrProgress,
 ) -> eyre::Result<Vec<RoutedNet>> {
+    route_module_variables_with_order(
+        module,
+        candidates,
+        placed_modules,
+        config,
+        NetOrderStrategy::Criticality,
+        progress,
+    )
+}
+
+pub fn route_module_variables_with_order(
+    module: &GraphModule,
+    candidates: &[LayoutCandidate],
+    placed_modules: &[PlacedModule],
+    config: &GlobalRoutingConfig,
+    order_strategy: NetOrderStrategy,
+    progress: &GlobalPnrProgress,
+) -> eyre::Result<Vec<RoutedNet>> {
     let mut route_world = placed_candidate_world(candidates, placed_modules)?;
     let mut routes = Vec::new();
 
-    let mut vars = module.vars.iter().collect::<Vec<_>>();
-    vars.sort_by_key(|var| route_variable_priority(var));
+    let vars = ordered_module_variables(&module.vars, order_strategy);
 
     route_top_input_ports(
         module,
@@ -189,6 +214,35 @@ pub fn route_module_variables(
     }
 
     Ok(routes)
+}
+
+pub(crate) fn ordered_module_variables(
+    vars: &[GraphModuleVariable],
+    strategy: NetOrderStrategy,
+) -> Vec<&GraphModuleVariable> {
+    let mut ordered = vars.iter().collect::<Vec<_>>();
+    match strategy {
+        NetOrderStrategy::Criticality => {
+            ordered.sort_by_key(|var| route_variable_priority(var));
+        }
+        NetOrderStrategy::ReverseCriticality => {
+            ordered.sort_by_key(|var| route_variable_priority(var));
+            ordered.reverse();
+        }
+        NetOrderStrategy::HighestFanoutFirst => {
+            let fanout = vars.iter().fold(HashMap::new(), |mut counts, var| {
+                *counts.entry(var.source.clone()).or_insert(0usize) += 1;
+                counts
+            });
+            ordered.sort_by_key(|var| {
+                (
+                    std::cmp::Reverse(fanout.get(&var.source).copied().unwrap_or_default()),
+                    route_variable_priority(var),
+                )
+            });
+        }
+    }
+    ordered
 }
 
 fn route_internal_module_nets(
