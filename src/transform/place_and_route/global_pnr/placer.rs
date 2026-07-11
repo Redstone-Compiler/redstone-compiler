@@ -73,6 +73,16 @@ pub fn placement_candidates(
                 _ => None,
             })
             .collect::<Vec<_>>();
+        let has_register_seed = heuristics.iter().any(|heuristic| {
+            matches!(
+                heuristic,
+                PlacementHeuristic::RegisterCarryChain
+                    | PlacementHeuristic::RegisterCarryAlignedSlices
+                    | PlacementHeuristic::RegisterGrid
+                    | PlacementHeuristic::RegisterTriangles
+                    | PlacementHeuristic::RegisterSlices
+            )
+        });
         for spacing in placement_spacing_options(config.spacing) {
             let config = GlobalPlacementConfig { spacing, ..*config };
             for heuristic in heuristics {
@@ -98,6 +108,23 @@ pub fn placement_candidates(
                 };
                 if let Some(placed) = placed {
                     push_unique_placement(&mut placements, placed.clone());
+                    for layered in &layered_configs {
+                        push_unique_placement(
+                            &mut placements,
+                            apply_layered_placement(module, candidates, placed.clone(), *layered),
+                        );
+                    }
+                }
+            }
+            if !has_register_seed {
+                let seeds = [
+                    place_register_bit_carry_chain(candidates, &config),
+                    place_register_bit_carry_aligned_slices(candidates, &config),
+                    place_register_bit_grid(candidates, &config),
+                    place_register_bit_triangles(candidates, &config),
+                    place_register_bit_slices(candidates, &config),
+                ];
+                for placed in seeds.into_iter().flatten() {
                     for layered in &layered_configs {
                         push_unique_placement(
                             &mut placements,
@@ -1293,6 +1320,36 @@ mod tests {
         );
 
         assert!(placements.iter().any(|placed| {
+            placed
+                .iter()
+                .map(|module| module.origin.2)
+                .collect::<HashSet<_>>()
+                .len()
+                > 1
+        }));
+    }
+
+    #[test]
+    fn layered_placement_can_run_alone_for_register_modules() {
+        let candidates = vec![
+            test_candidate("q_0_clk_inv", &[("clk_n", Position(1, 3, 1))]),
+            test_candidate("q_0_next", &[("q_0", Position(0, 2, 1))]),
+            test_candidate("q_0_master", &[("q", Position(5, 8, 1))]),
+            test_candidate("q_0_slave", &[("q", Position(5, 10, 1))]),
+        ];
+        let placements = placement_candidates(
+            &GraphModule::default(),
+            &candidates,
+            &GlobalPlacementConfig::default(),
+            &[PlacementHeuristic::Layered3D(LayeredPlacementConfig {
+                layers: 2,
+                layer_spacing: 4,
+                assignment: LayerAssignmentStrategy::Alternating,
+            })],
+        );
+
+        assert!(!placements.is_empty());
+        assert!(placements.iter().all(|placed| {
             placed
                 .iter()
                 .map(|module| module.origin.2)
