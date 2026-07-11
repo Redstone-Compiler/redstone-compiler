@@ -1658,6 +1658,7 @@ impl Simulator {
 mod test {
     use super::*;
     use crate::nbt::NBTRoot;
+    use crate::output::OutputMetadata;
     use crate::sequential::layout::SequentialMacro;
     use crate::sequential::SequentialPrimitive;
     use crate::world::block::RedstoneState;
@@ -1681,6 +1682,50 @@ mod test {
             sim.world()[torch].kind,
             BlockKind::Torch { is_on } if is_on != support_is_powered
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn simulator_counts_through_full_two_bit_cycle() -> eyre::Result<()> {
+        let nbt = NBTRoot::from_nbt_bytes(&std::fs::read("test/counter-global-smoke.nbt")?)?;
+        let world = nbt.to_world();
+        let clock = world
+            .blocks
+            .iter()
+            .find_map(|(position, block)| {
+                matches!(block.kind, BlockKind::Switch { .. }).then_some(*position)
+            })
+            .expect("counter should contain a clock switch");
+        let metadata = OutputMetadata::load("test/counter-global-smoke.outputs.json")?;
+        let output_position = |name: &str| {
+            metadata
+                .outputs
+                .iter()
+                .find(|output| output.name == name)
+                .unwrap_or_else(|| panic!("missing counter output `{name}`"))
+                .position()
+        };
+        let q0 = output_position("q_0");
+        let q1 = output_position("q_1");
+        let mut sim =
+            Simulator::from_preserving_torch_states_with_limits_and_trace(&world, 256, 50_000, 0)
+                .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
+        let output = |sim: &Simulator| {
+            let powered = |position| match sim.world()[position].kind {
+                BlockKind::Redstone { strength, .. } => strength > 0,
+                _ => false,
+            };
+            usize::from(powered(q0)) | (usize::from(powered(q1)) << 1)
+        };
+
+        assert_eq!(output(&sim), 0);
+        for expected in [1, 2, 3, 0] {
+            sim.change_state_with_limits(vec![(clock, true)], 256, 50_000)?;
+            assert_eq!(output(&sim), expected);
+            sim.change_state_with_limits(vec![(clock, false)], 256, 50_000)?;
+            assert_eq!(output(&sim), expected);
+        }
+
         Ok(())
     }
 

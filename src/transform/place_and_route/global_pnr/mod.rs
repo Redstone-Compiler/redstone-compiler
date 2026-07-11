@@ -876,26 +876,26 @@ mod tests {
                 .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
 
         let initial = counter_output_value(sim.world(), output_q0, output_q1);
-        sim.change_state_with_limits(vec![(clock, true)], 256, 50_000)?;
-        let first_rise = counter_output_value(sim.world(), output_q0, output_q1);
         eyre::ensure!(
-            first_rise == 1,
-            "counter output should become 1 on first rising edge: initial={initial}, first_rise={first_rise}"
+            initial == 0,
+            "counter should initialize to 0: initial={initial}"
         );
 
-        sim.change_state_with_limits(vec![(clock, false)], 256, 50_000)?;
-        let first_fall = counter_output_value(sim.world(), output_q0, output_q1);
-        eyre::ensure!(
-            first_fall == first_rise,
-            "counter output should hold on falling edge: first_rise={first_rise}, first_fall={first_fall}"
-        );
+        for expected in [1, 2, 3, 0] {
+            sim.change_state_with_limits(vec![(clock, true)], 256, 50_000)?;
+            let rising = counter_output_value(sim.world(), output_q0, output_q1);
+            eyre::ensure!(
+                rising == expected,
+                "counter output mismatch on rising edge: expected={expected}, actual={rising}"
+            );
 
-        sim.change_state_with_limits(vec![(clock, true)], 256, 50_000)?;
-        let second_rise = counter_output_value(sim.world(), output_q0, output_q1);
-        eyre::ensure!(
-            second_rise == 2,
-            "counter output should become 2 on second rising edge: initial={initial}, first_rise={first_rise}, first_fall={first_fall}, second_rise={second_rise}"
-        );
+            sim.change_state_with_limits(vec![(clock, false)], 256, 50_000)?;
+            let falling = counter_output_value(sim.world(), output_q0, output_q1);
+            eyre::ensure!(
+                falling == expected,
+                "counter output should hold on falling edge: expected={expected}, actual={falling}"
+            );
+        }
         Ok(())
     }
 
