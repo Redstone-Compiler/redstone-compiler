@@ -1,12 +1,41 @@
 use std::collections::HashSet;
 
 use crate::transform::place_and_route::global_pnr::ir::LayoutCandidate;
+use crate::transform::place_and_route::global_pnr::placer::PlacedModule;
+use crate::transform::place_and_route::global_pnr::router::RoutedNet;
 use crate::world::position::Position;
 
 #[derive(Clone, Debug)]
 pub struct ChildCandidatePool {
     pub instance_name: String,
     pub candidates: Vec<LayoutCandidate>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct GlobalSolutionCost {
+    pub unrouted_nets: usize,
+    pub placement_volume: usize,
+    pub estimated_wire_length: usize,
+    pub vertical_distance: usize,
+    pub routed_path_length: usize,
+    pub routed_block_count: usize,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GlobalSolutionDiagnostics {
+    pub layout_combination_index: usize,
+    pub placement_attempt_index: usize,
+    pub route_order: String,
+    pub last_failure: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct GlobalSolution {
+    pub selected_candidate_indices: Vec<usize>,
+    pub placed_modules: Vec<PlacedModule>,
+    pub routed_nets: Vec<RoutedNet>,
+    pub cost: GlobalSolutionCost,
+    pub diagnostics: GlobalSolutionDiagnostics,
 }
 
 pub fn rank_child_candidates(
@@ -82,7 +111,9 @@ mod tests {
     use crate::world::position::{DimSize, Position};
     use crate::world::World3D;
 
-    use super::{layout_combinations, rank_child_candidates, ChildCandidatePool};
+    use super::{
+        layout_combinations, rank_child_candidates, ChildCandidatePool, GlobalSolutionCost,
+    };
 
     fn candidate(name: &str, volume: usize, block_count: usize, port: Position) -> LayoutCandidate {
         LayoutCandidate {
@@ -148,5 +179,32 @@ mod tests {
             layout_combinations(&pools, 3),
             vec![vec![0, 0], vec![1, 0], vec![0, 1]]
         );
+    }
+
+    #[test]
+    fn global_solution_cost_orders_complete_solutions() {
+        let compact = GlobalSolutionCost {
+            unrouted_nets: 0,
+            placement_volume: 100,
+            estimated_wire_length: 30,
+            vertical_distance: 2,
+            routed_path_length: 40,
+            routed_block_count: 45,
+        };
+        let long_routes = GlobalSolutionCost {
+            routed_path_length: 80,
+            ..compact
+        };
+        let incomplete = GlobalSolutionCost {
+            unrouted_nets: 1,
+            placement_volume: 1,
+            estimated_wire_length: 1,
+            vertical_distance: 0,
+            routed_path_length: 0,
+            routed_block_count: 0,
+        };
+
+        assert!(compact < long_routes);
+        assert!(long_routes < incomplete);
     }
 }
