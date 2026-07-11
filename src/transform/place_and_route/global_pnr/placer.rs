@@ -143,6 +143,10 @@ pub fn placement_candidates(
                 }
             }
         }
+        placements.sort_by_key(|placed| {
+            placement_cost_breakdown(module, candidates, placed, config.congestion)
+                .weighted_total(config.cost_weights)
+        });
         placements.truncate(config.max_attempts.max(1));
         return placements;
     }
@@ -1140,7 +1144,7 @@ mod tests {
         LayoutCandidateCost, PhysicalPort, PhysicalPortDirection, PortConnection,
     };
     use crate::transform::place_and_route::global_pnr::policy::{
-        LayerAssignmentStrategy, LayeredPlacementConfig, PlacementHeuristic,
+        Free3DPlacementConfig, LayerAssignmentStrategy, LayeredPlacementConfig, PlacementHeuristic,
         RoutingCongestionConfig,
     };
     use crate::world::position::DimSize;
@@ -1366,6 +1370,50 @@ mod tests {
                 .len()
                 > 1
         }));
+    }
+
+    #[test]
+    fn register_placements_rank_free_3d_with_shared_cost_weights() {
+        let candidates = vec![
+            test_candidate("q_0_clk_inv", &[("clk_n", Position(1, 3, 1))]),
+            test_candidate("q_0_next", &[("q_0", Position(0, 2, 1))]),
+            test_candidate("q_0_master", &[("q", Position(5, 8, 1))]),
+            test_candidate("q_0_slave", &[("q", Position(5, 10, 1))]),
+            test_candidate("q_1_clk_inv", &[("clk_n", Position(1, 3, 1))]),
+            test_candidate("q_1_next", &[("q_1", Position(0, 2, 1))]),
+            test_candidate("q_1_master", &[("q", Position(5, 8, 1))]),
+            test_candidate("q_1_slave", &[("q", Position(5, 10, 1))]),
+        ];
+        let module = GraphModule::default();
+        let config = GlobalPlacementConfig {
+            cost_weights: PlacementCostWeights {
+                placement_volume: 0,
+                xy_footprint: 0,
+                height_span: 1,
+                estimated_wire_length: 0,
+                vertical_distance: 0,
+                routing_congestion: 0,
+            },
+            ..Default::default()
+        };
+        let placements = placement_candidates(
+            &module,
+            &candidates,
+            &config,
+            &[
+                PlacementHeuristic::RegisterSlices,
+                PlacementHeuristic::Free3D(Free3DPlacementConfig::default()),
+            ],
+        );
+        let costs = placements
+            .iter()
+            .map(|placed| {
+                placement_cost_breakdown(&module, &candidates, placed, config.congestion)
+                    .weighted_total(config.cost_weights)
+            })
+            .collect::<Vec<_>>();
+
+        assert!(costs.windows(2).all(|pair| pair[0] <= pair[1]));
     }
 
     #[test]

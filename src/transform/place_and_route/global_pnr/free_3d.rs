@@ -37,7 +37,7 @@ struct Body {
 }
 
 pub(crate) fn place_free_3d(
-    _module: &GraphModule,
+    module: &GraphModule,
     candidates: &[LayoutCandidate],
     config: Free3DPlacementConfig,
 ) -> Option<Vec<PlacedModule>> {
@@ -46,7 +46,7 @@ pub(crate) fn place_free_3d(
     }
 
     let mut bodies = seed_bodies(candidates, config.clearance);
-    relax(&mut bodies, config);
+    relax(&mut bodies, module, candidates, config);
     let mut origins = snap_origins(&bodies);
     legalize(&mut origins, candidates, config.clearance)?;
     shift_into_positive_world(&mut origins, 4);
@@ -117,7 +117,27 @@ fn seed_bodies(candidates: &[LayoutCandidate], clearance: usize) -> Vec<Body> {
         .collect()
 }
 
-fn relax(bodies: &mut [Body], config: Free3DPlacementConfig) {
+fn relax(
+    bodies: &mut [Body],
+    module: &GraphModule,
+    candidates: &[LayoutCandidate],
+    config: Free3DPlacementConfig,
+) {
+    let candidate_by_name = candidates
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| (candidate.module_name.as_str(), index))
+        .collect::<HashMap<_, _>>();
+    let edges = module
+        .vars
+        .iter()
+        .filter_map(|var| {
+            let source = *candidate_by_name.get(var.source.0.as_str())?;
+            let target = *candidate_by_name.get(var.target.0.as_str())?;
+            (source != target).then_some((source, target))
+        })
+        .collect::<Vec<_>>();
+
     for _ in 0..config.iterations {
         let count = bodies.len() as f64;
         let centroid = bodies.iter().fold(Vec3::default(), |mut sum, body| {
@@ -140,6 +160,25 @@ fn relax(bodies: &mut [Body], config: Free3DPlacementConfig) {
                     / config.vertical_scale.max(0.001),
             })
             .collect::<Vec<_>>();
+
+        for &(source, target) in &edges {
+            let delta = Vec3 {
+                x: bodies[target].center.x - bodies[source].center.x,
+                y: bodies[target].center.y - bodies[source].center.y,
+                z: bodies[target].center.z - bodies[source].center.z,
+            };
+            let spring = Vec3 {
+                x: delta.x * config.attraction,
+                y: delta.y * config.attraction,
+                z: delta.z * config.attraction / config.vertical_scale.max(0.001),
+            };
+            forces[source].x += spring.x;
+            forces[source].y += spring.y;
+            forces[source].z += spring.z;
+            forces[target].x -= spring.x;
+            forces[target].y -= spring.y;
+            forces[target].z -= spring.z;
+        }
 
         for left_index in 0..bodies.len() {
             for right_index in left_index + 1..bodies.len() {
@@ -256,7 +295,7 @@ mod tests {
     use std::collections::HashSet;
 
     use super::place_free_3d;
-    use crate::graph::module::GraphModule;
+    use crate::graph::module::{GraphModule, GraphModuleVariable};
     use crate::transform::place_and_route::estimate::BoundingBox;
     use crate::transform::place_and_route::global_pnr::ir::{LayoutCandidate, LayoutCandidateCost};
     use crate::transform::place_and_route::global_pnr::placer::PlacedModule;
@@ -322,4 +361,58 @@ mod tests {
                 .all(|right| !overlaps(left, right, config.clearance))
         }));
     }
+
+    fn squared_center_distance(placed: &[PlacedModule], left: usize, right: usize) -> usize {
+        let center = |item: &PlacedModule| {
+            [
+                item.origin.0 + item.bbox.width() / 2,
+                item.origin.1 + item.bbox.depth() / 2,
+                item.origin.2 + item.bbox.height() / 2,
+            ]
+        };
+        let left = center(&placed[left]);
+        let right = center(&placed[right]);
+        left[0].abs_diff(right[0]).pow(2)
+            + left[1].abs_diff(right[1]).pow(2)
+            + left[2].abs_diff(right[2]).pow(2)
+    }
+
+    #[test]
+    fn attraction_reduces_connected_module_distance() {
+        let candidates = (0..4).map(candidate).collect::<Vec<_>>();
+        let module = GraphModule {
+            vars: vec![GraphModuleVariable {
+                source: ("child_0".to_owned(), "out".to_owned()),
+                target: ("child_3".to_owned(), "in".to_owned()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let base = Free3DPlacementConfig {
+            compactness: 0.0,
+            iterations: 40,
+            ..Default::default()
+        };
+        let without = place_free_3d(
+            &module,
+            &candidates,
+            Free3DPlacementConfig {
+                attraction: 0.0,
+                ..base
+            },
+        )
+        .unwrap();
+        let with = place_free_3d(
+            &module,
+            &candidates,
+            Free3DPlacementConfig {
+                attraction: 0.08,
+                ..base
+            },
+        )
+        .unwrap();
+
+        assert!(squared_center_distance(&with, 0, 3) < squared_center_distance(&without, 0, 3));
+    }
 }
+use std::collections::HashMap;
