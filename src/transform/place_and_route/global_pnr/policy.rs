@@ -27,6 +27,20 @@ pub enum PlacementHeuristic {
     RegisterGrid,
     RegisterTriangles,
     RegisterSlices,
+    Layered3D(LayeredPlacementConfig),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LayeredPlacementConfig {
+    pub layers: usize,
+    pub layer_spacing: usize,
+    pub assignment: LayerAssignmentStrategy,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LayerAssignmentStrategy {
+    Alternating,
+    NetAware,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -114,6 +128,14 @@ impl GlobalPnrPreset {
         let mut policies = GlobalPnrPolicies::balanced();
         if self == Self::Fast {
             policies.net_order_strategies.truncate(1);
+        } else if self == Self::Thorough {
+            policies
+                .placement_heuristics
+                .push(PlacementHeuristic::Layered3D(LayeredPlacementConfig {
+                    layers: 2,
+                    layer_spacing: 4,
+                    assignment: LayerAssignmentStrategy::NetAware,
+                }));
         }
         GlobalSearchConfig { budget, policies }
     }

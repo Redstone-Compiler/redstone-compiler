@@ -4,7 +4,8 @@ use crate::graph::module::{GraphModule, GraphModulePortTarget};
 use crate::transform::place_and_route::estimate::BoundingBox;
 use crate::transform::place_and_route::global_pnr::ir::LayoutCandidate;
 use crate::transform::place_and_route::global_pnr::policy::{
-    PlacementCostBreakdown, PlacementCostWeights, PlacementHeuristic,
+    LayerAssignmentStrategy, LayeredPlacementConfig, PlacementCostBreakdown, PlacementCostWeights,
+    PlacementHeuristic,
 };
 use crate::world::position::Position;
 
@@ -63,6 +64,13 @@ pub fn placement_candidates(
     let net_order = net_aware_candidate_order(module, candidates);
 
     if is_register_bit_module_set(candidates) {
+        let layered_configs = heuristics
+            .iter()
+            .filter_map(|heuristic| match heuristic {
+                PlacementHeuristic::Layered3D(config) => Some(*config),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
         for spacing in placement_spacing_options(config.spacing) {
             let config = GlobalPlacementConfig { spacing, ..*config };
             for heuristic in heuristics {
@@ -82,10 +90,18 @@ pub fn placement_candidates(
                     PlacementHeuristic::RegisterSlices => {
                         place_register_bit_slices(candidates, &config)
                     }
-                    PlacementHeuristic::Shelf | PlacementHeuristic::Grid => None,
+                    PlacementHeuristic::Shelf
+                    | PlacementHeuristic::Grid
+                    | PlacementHeuristic::Layered3D(_) => None,
                 };
                 if let Some(placed) = placed {
-                    push_unique_placement(&mut placements, placed);
+                    push_unique_placement(&mut placements, placed.clone());
+                    for layered in &layered_configs {
+                        push_unique_placement(
+                            &mut placements,
+                            apply_layered_placement(module, candidates, placed.clone(), *layered),
+                        );
+                    }
                 }
             }
         }
@@ -127,6 +143,16 @@ pub fn placement_candidates(
                     );
                 }
             }
+            for layered in heuristics.iter().filter_map(|heuristic| match heuristic {
+                PlacementHeuristic::Layered3D(config) => Some(*config),
+                _ => None,
+            }) {
+                let seed = place_candidates_on_shelves_in_order(candidates, &net_order, &config);
+                push_unique_placement(
+                    &mut placements,
+                    apply_layered_placement(module, candidates, seed, layered),
+                );
+            }
         }
     }
 
@@ -135,6 +161,74 @@ pub fn placement_candidates(
     });
     placements.truncate(config.max_attempts.max(1));
     placements
+}
+
+fn apply_layered_placement(
+    module: &GraphModule,
+    candidates: &[LayoutCandidate],
+    mut placed: Vec<PlacedModule>,
+    config: LayeredPlacementConfig,
+) -> Vec<PlacedModule> {
+    let layer_count = config.layers.max(1);
+    let layer_stride = candidates
+        .iter()
+        .map(|candidate| candidate.bbox.height())
+        .max()
+        .unwrap_or(1)
+        .saturating_add(config.layer_spacing);
+    let assignments = match config.assignment {
+        LayerAssignmentStrategy::Alternating => {
+            (0..placed.len()).map(|index| index % layer_count).collect()
+        }
+        LayerAssignmentStrategy::NetAware => {
+            net_aware_layer_assignments(module, &placed, layer_count)
+        }
+    };
+    for (placed, layer) in placed.iter_mut().zip(assignments) {
+        placed.origin.2 = placed.bbox.min.2 + layer * layer_stride;
+    }
+    placed
+}
+
+fn net_aware_layer_assignments(
+    module: &GraphModule,
+    placed: &[PlacedModule],
+    layer_count: usize,
+) -> Vec<usize> {
+    let target_load = placed.len().div_ceil(layer_count.max(1));
+    let mut assignments = Vec::with_capacity(placed.len());
+    let mut assigned_by_module = HashMap::<&str, usize>::new();
+    let mut layer_loads = vec![0usize; layer_count.max(1)];
+
+    for item in placed {
+        let connected_layers = module
+            .vars
+            .iter()
+            .filter_map(|var| {
+                if var.source.0 == item.module_name {
+                    assigned_by_module.get(var.target.0.as_str()).copied()
+                } else if var.target.0 == item.module_name {
+                    assigned_by_module.get(var.source.0.as_str()).copied()
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        let layer = (0..layer_loads.len())
+            .min_by_key(|&layer| {
+                let cross_layer_edges = connected_layers
+                    .iter()
+                    .filter(|&&connected| connected != layer)
+                    .count();
+                let overflow = usize::from(layer_loads[layer] >= target_load);
+                (overflow, cross_layer_edges, layer_loads[layer], layer)
+            })
+            .unwrap_or(0);
+        assignments.push(layer);
+        assigned_by_module.insert(item.module_name.as_str(), layer);
+        layer_loads[layer] += 1;
+    }
+    assignments
 }
 
 fn is_register_bit_module_set(candidates: &[LayoutCandidate]) -> bool {
@@ -963,7 +1057,9 @@ mod tests {
     use crate::transform::place_and_route::global_pnr::ir::{
         LayoutCandidateCost, PhysicalPort, PhysicalPortDirection, PortConnection,
     };
-    use crate::transform::place_and_route::global_pnr::policy::PlacementHeuristic;
+    use crate::transform::place_and_route::global_pnr::policy::{
+        LayerAssignmentStrategy, LayeredPlacementConfig, PlacementHeuristic,
+    };
     use crate::world::position::DimSize;
     use crate::world::World3D;
 
@@ -1100,5 +1196,62 @@ mod tests {
 
         assert!(!shelf_only.is_empty());
         assert!(shelf_only.len() < shelf_and_grid.len());
+    }
+
+    #[test]
+    fn layered_placement_heuristic_assigns_modules_to_multiple_z_layers() {
+        let candidates = (0..4)
+            .map(|index| test_candidate(&format!("child_{index}"), &[]))
+            .collect::<Vec<_>>();
+        let placements = placement_candidates(
+            &GraphModule::default(),
+            &candidates,
+            &GlobalPlacementConfig::default(),
+            &[PlacementHeuristic::Layered3D(LayeredPlacementConfig {
+                layers: 2,
+                layer_spacing: 4,
+                assignment: LayerAssignmentStrategy::Alternating,
+            })],
+        );
+
+        assert!(!placements.is_empty());
+        let z_origins = placements[0]
+            .iter()
+            .map(|placed| placed.origin.2)
+            .collect::<HashSet<_>>();
+        assert_eq!(z_origins.len(), 2);
+        assert!(z_origins.iter().copied().max().unwrap() >= 7);
+    }
+
+    #[test]
+    fn layered_placement_can_wrap_register_specific_heuristics() {
+        let candidates = vec![
+            test_candidate("q_0_clk_inv", &[("clk_n", Position(1, 3, 1))]),
+            test_candidate("q_0_next", &[("q_0", Position(0, 2, 1))]),
+            test_candidate("q_0_master", &[("q", Position(5, 8, 1))]),
+            test_candidate("q_0_slave", &[("q", Position(5, 10, 1))]),
+        ];
+        let placements = placement_candidates(
+            &GraphModule::default(),
+            &candidates,
+            &GlobalPlacementConfig::default(),
+            &[
+                PlacementHeuristic::RegisterSlices,
+                PlacementHeuristic::Layered3D(LayeredPlacementConfig {
+                    layers: 2,
+                    layer_spacing: 4,
+                    assignment: LayerAssignmentStrategy::Alternating,
+                }),
+            ],
+        );
+
+        assert!(placements.iter().any(|placed| {
+            placed
+                .iter()
+                .map(|module| module.origin.2)
+                .collect::<HashSet<_>>()
+                .len()
+                > 1
+        }));
     }
 }
