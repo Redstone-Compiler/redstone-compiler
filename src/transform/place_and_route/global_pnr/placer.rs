@@ -5,7 +5,7 @@ use crate::transform::place_and_route::estimate::BoundingBox;
 use crate::transform::place_and_route::global_pnr::ir::LayoutCandidate;
 use crate::transform::place_and_route::global_pnr::policy::{
     LayerAssignmentStrategy, LayeredPlacementConfig, PlacementCostBreakdown, PlacementCostWeights,
-    PlacementHeuristic,
+    PlacementHeuristic, RoutingCongestionConfig,
 };
 use crate::world::position::Position;
 
@@ -17,6 +17,7 @@ pub struct GlobalPlacementConfig {
     pub shelf_width: usize,
     pub max_attempts: usize,
     pub cost_weights: PlacementCostWeights,
+    pub congestion: RoutingCongestionConfig,
 }
 
 impl Default for GlobalPlacementConfig {
@@ -26,6 +27,7 @@ impl Default for GlobalPlacementConfig {
             shelf_width: 64,
             max_attempts: 16,
             cost_weights: PlacementCostWeights::default(),
+            congestion: RoutingCongestionConfig::default(),
         }
     }
 }
@@ -157,7 +159,8 @@ pub fn placement_candidates(
     }
 
     placements.sort_by_key(|placed| {
-        placement_cost_breakdown(module, candidates, placed).weighted_total(config.cost_weights)
+        placement_cost_breakdown(module, candidates, placed, config.congestion)
+            .weighted_total(config.cost_weights)
     });
     placements.truncate(config.max_attempts.max(1));
     placements
@@ -968,6 +971,7 @@ pub(crate) fn placement_cost_breakdown(
     module: &GraphModule,
     candidates: &[LayoutCandidate],
     placed: &[PlacedModule],
+    congestion_config: RoutingCongestionConfig,
 ) -> PlacementCostBreakdown {
     let placed_by_module = placed
         .iter()
@@ -981,6 +985,7 @@ pub(crate) fn placement_cost_breakdown(
         ..PlacementCostBreakdown::default()
     };
 
+    let mut net_regions = Vec::new();
     for var in &module.vars {
         let Some(source) = placed_by_module.get(var.source.0.as_str()) else {
             continue;
@@ -1020,9 +1025,44 @@ pub(crate) fn placement_cost_breakdown(
         };
         cost.estimated_wire_length += source_position.manhattan_distance(&target_position);
         cost.vertical_distance += source_position.2.abs_diff(target_position.2);
+        net_regions.push((source_position, target_position));
     }
+    cost.routing_congestion = estimate_routing_congestion(&net_regions, congestion_config);
 
     cost
+}
+
+fn estimate_routing_congestion(
+    net_regions: &[(Position, Position)],
+    config: RoutingCongestionConfig,
+) -> usize {
+    let bin_xy = config.bin_size_xy.max(1);
+    let bin_z = config.bin_size_z.max(1);
+    let mut demand = HashMap::<(usize, usize, usize), usize>::new();
+
+    for &(source, target) in net_regions {
+        let min = Position(
+            source.0.min(target.0) / bin_xy,
+            source.1.min(target.1) / bin_xy,
+            source.2.min(target.2) / bin_z,
+        );
+        let max = Position(
+            source.0.max(target.0) / bin_xy,
+            source.1.max(target.1) / bin_xy,
+            source.2.max(target.2) / bin_z,
+        );
+        for x in min.0..=max.0 {
+            for y in min.1..=max.1 {
+                for z in min.2..=max.2 {
+                    *demand.entry((x, y, z)).or_default() += 1;
+                }
+            }
+        }
+    }
+
+    demand.values().fold(0usize, |total, &count| {
+        total.saturating_add(count.saturating_mul(count.saturating_sub(1)) / 2)
+    })
 }
 
 fn placement_bbox_metrics(placed: &[PlacedModule]) -> (usize, usize, usize) {
@@ -1065,6 +1105,7 @@ mod tests {
     };
     use crate::transform::place_and_route::global_pnr::policy::{
         LayerAssignmentStrategy, LayeredPlacementConfig, PlacementHeuristic,
+        RoutingCongestionConfig,
     };
     use crate::world::position::DimSize;
     use crate::world::World3D;
@@ -1259,5 +1300,30 @@ mod tests {
                 .len()
                 > 1
         }));
+    }
+
+    #[test]
+    fn routing_congestion_penalizes_overlapping_net_regions() {
+        let config = RoutingCongestionConfig {
+            bin_size_xy: 4,
+            bin_size_z: 2,
+        };
+        let overlapping = estimate_routing_congestion(
+            &[
+                (Position(0, 0, 0), Position(12, 0, 0)),
+                (Position(0, 1, 0), Position(12, 1, 0)),
+            ],
+            config,
+        );
+        let separated = estimate_routing_congestion(
+            &[
+                (Position(0, 0, 0), Position(12, 0, 0)),
+                (Position(0, 8, 0), Position(12, 8, 0)),
+            ],
+            config,
+        );
+
+        assert!(overlapping > separated);
+        assert_eq!(separated, 0);
     }
 }

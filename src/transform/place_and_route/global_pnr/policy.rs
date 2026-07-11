@@ -38,6 +38,21 @@ pub struct LayeredPlacementConfig {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RoutingCongestionConfig {
+    pub bin_size_xy: usize,
+    pub bin_size_z: usize,
+}
+
+impl Default for RoutingCongestionConfig {
+    fn default() -> Self {
+        Self {
+            bin_size_xy: 8,
+            bin_size_z: 4,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LayerAssignmentStrategy {
     Alternating,
     NetAware,
@@ -56,6 +71,7 @@ pub struct PlacementCostWeights {
     pub height_span: usize,
     pub estimated_wire_length: usize,
     pub vertical_distance: usize,
+    pub routing_congestion: usize,
 }
 
 impl Default for PlacementCostWeights {
@@ -66,6 +82,7 @@ impl Default for PlacementCostWeights {
             height_span: 0,
             estimated_wire_length: 8,
             vertical_distance: 16,
+            routing_congestion: 0,
         }
     }
 }
@@ -77,6 +94,7 @@ pub struct PlacementCostBreakdown {
     pub height_span: usize,
     pub estimated_wire_length: usize,
     pub vertical_distance: usize,
+    pub routing_congestion: usize,
 }
 
 impl PlacementCostBreakdown {
@@ -92,6 +110,10 @@ impl PlacementCostBreakdown {
             .saturating_add(
                 self.vertical_distance
                     .saturating_mul(weights.vertical_distance),
+            )
+            .saturating_add(
+                self.routing_congestion
+                    .saturating_mul(weights.routing_congestion),
             )
     }
 }
@@ -149,14 +171,18 @@ impl GlobalPnrPreset {
     }
 
     pub fn config(self) -> GlobalPnrConfig {
-        GlobalPnrConfig {
+        let mut config = GlobalPnrConfig {
             candidate: UnitCandidateConfig::default(),
             placement: GlobalPlacementConfig::default(),
             routing: GlobalRoutingConfig::default(),
             search: self.search_config(),
             show_progress: true,
             verifier: None,
+        };
+        if self == Self::Thorough {
+            config.placement.cost_weights.routing_congestion = 4;
         }
+        config
     }
 }
 
@@ -219,6 +245,15 @@ mod tests {
     }
 
     #[test]
+    fn routing_congestion_cost_is_opt_in_through_the_thorough_preset() {
+        let balanced = GlobalPnrPreset::Balanced.config();
+        let thorough = GlobalPnrPreset::Thorough.config();
+
+        assert_eq!(balanced.placement.cost_weights.routing_congestion, 0);
+        assert!(thorough.placement.cost_weights.routing_congestion > 0);
+    }
+
+    #[test]
     fn placement_cost_breakdown_uses_adjustable_weights() {
         let cost = PlacementCostBreakdown {
             placement_volume: 100,
@@ -226,6 +261,7 @@ mod tests {
             height_span: 8,
             estimated_wire_length: 10,
             vertical_distance: 2,
+            routing_congestion: 7,
         };
 
         assert_eq!(cost.weighted_total(PlacementCostWeights::default()), 212);
@@ -243,8 +279,9 @@ mod tests {
                 height_span: 10,
                 estimated_wire_length: 0,
                 vertical_distance: 0,
+                routing_congestion: 11,
             }),
-            120
+            197
         );
     }
 }

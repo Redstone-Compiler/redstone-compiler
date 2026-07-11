@@ -460,14 +460,20 @@ fn search_layout_combinations(
             progress,
         ) {
             Ok((placed, routed_nets)) => {
-                let cost = placement_cost_breakdown(module, &candidates, &placed);
+                let cost = placement_cost_breakdown(
+                    module,
+                    &candidates,
+                    &placed,
+                    config.placement.congestion,
+                );
                 progress.detail(format!(
-                    "selected placement cost: volume={} xy={} height={} wire={} vertical={} weighted_total={}",
+                    "selected placement cost: volume={} xy={} height={} wire={} vertical={} congestion={} weighted_total={}",
                     cost.placement_volume,
                     cost.xy_footprint,
                     cost.height_span,
                     cost.estimated_wire_length,
                     cost.vertical_distance,
+                    cost.routing_congestion,
                     cost.weighted_total(config.placement.cost_weights),
                 ));
                 return Ok((candidates, placed, routed_nets));
