@@ -18,7 +18,7 @@ pub struct GlobalSearchBudget {
     pub max_layout_combinations: usize,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PlacementHeuristic {
     Shelf,
     Grid,
@@ -28,6 +28,34 @@ pub enum PlacementHeuristic {
     RegisterTriangles,
     RegisterSlices,
     Layered3D(LayeredPlacementConfig),
+    Free3D(Free3DPlacementConfig),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Free3DPlacementConfig {
+    pub iterations: usize,
+    pub step_size: f64,
+    pub attraction: f64,
+    pub repulsion: f64,
+    pub compactness: f64,
+    pub damping: f64,
+    pub vertical_scale: f64,
+    pub clearance: usize,
+}
+
+impl Default for Free3DPlacementConfig {
+    fn default() -> Self {
+        Self {
+            iterations: 80,
+            step_size: 0.5,
+            attraction: 0.08,
+            repulsion: 0.5,
+            compactness: 0.01,
+            damping: 0.8,
+            vertical_scale: 2.0,
+            clearance: 2,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,7 +86,7 @@ pub enum LayerAssignmentStrategy {
     NetAware,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct GlobalPnrPolicies {
     pub placement_heuristics: Vec<PlacementHeuristic>,
     pub net_order_strategies: Vec<NetOrderStrategy>,
@@ -166,6 +194,9 @@ impl GlobalPnrPreset {
                     layer_spacing: 4,
                     assignment: LayerAssignmentStrategy::NetAware,
                 }));
+            policies
+                .placement_heuristics
+                .push(PlacementHeuristic::Free3D(Free3DPlacementConfig::default()));
         }
         GlobalSearchConfig { budget, policies }
     }
@@ -251,6 +282,25 @@ mod tests {
 
         assert_eq!(balanced.placement.cost_weights.routing_congestion, 0);
         assert!(thorough.placement.cost_weights.routing_congestion > 0);
+    }
+
+    #[test]
+    fn free_3d_is_opt_in_through_the_thorough_preset() {
+        let balanced = GlobalPnrPreset::Balanced.config();
+        let thorough = GlobalPnrPreset::Thorough.config();
+
+        assert!(!balanced
+            .search
+            .policies
+            .placement_heuristics
+            .iter()
+            .any(|heuristic| matches!(heuristic, PlacementHeuristic::Free3D(_))));
+        assert!(thorough
+            .search
+            .policies
+            .placement_heuristics
+            .iter()
+            .any(|heuristic| matches!(heuristic, PlacementHeuristic::Free3D(_))));
     }
 
     #[test]

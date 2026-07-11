@@ -50,7 +50,7 @@ pub struct GlobalPnrConfig {
     pub verifier: Option<fn(&PlacedWorld) -> eyre::Result<()>>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct GlobalSearchConfig {
     pub budget: GlobalSearchBudget,
     pub policies: GlobalPnrPolicies,

@@ -104,7 +104,8 @@ pub fn placement_candidates(
                     }
                     PlacementHeuristic::Shelf
                     | PlacementHeuristic::Grid
-                    | PlacementHeuristic::Layered3D(_) => None,
+                    | PlacementHeuristic::Layered3D(_)
+                    | PlacementHeuristic::Free3D(_) => None,
                 };
                 if let Some(placed) = placed {
                     push_unique_placement(&mut placements, placed.clone());
