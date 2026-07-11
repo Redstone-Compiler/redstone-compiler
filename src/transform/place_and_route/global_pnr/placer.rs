@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::graph::module::{GraphModule, GraphModulePortTarget};
 use crate::transform::place_and_route::estimate::BoundingBox;
+use crate::transform::place_and_route::global_pnr::free_3d::place_free_3d;
 use crate::transform::place_and_route::global_pnr::ir::LayoutCandidate;
 use crate::transform::place_and_route::global_pnr::policy::{
     LayerAssignmentStrategy, LayeredPlacementConfig, PlacementCostBreakdown, PlacementCostWeights,
@@ -62,6 +63,13 @@ pub fn placement_candidates(
     }
 
     let mut placements = Vec::new();
+    for heuristic in heuristics {
+        if let PlacementHeuristic::Free3D(free_3d) = heuristic {
+            if let Some(placed) = place_free_3d(module, candidates, *free_3d) {
+                push_unique_placement(&mut placements, placed);
+            }
+        }
+    }
     let original_order = (0..candidates.len()).collect::<Vec<_>>();
     let net_order = net_aware_candidate_order(module, candidates);
 

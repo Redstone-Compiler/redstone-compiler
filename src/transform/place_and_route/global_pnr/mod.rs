@@ -1,5 +1,6 @@
 pub mod assembly;
 pub mod candidate;
+mod free_3d;
 pub mod ir;
 pub mod placer;
 pub mod policy;
