@@ -162,7 +162,9 @@ impl GlobalPnrPreset {
 
 #[cfg(test)]
 mod tests {
-    use super::{GlobalPnrPreset, PlacementCostBreakdown, PlacementCostWeights};
+    use super::{
+        GlobalPnrPreset, PlacementCostBreakdown, PlacementCostWeights, PlacementHeuristic,
+    };
     use crate::transform::place_and_route::global_pnr::GlobalPnrConfig;
 
     #[test]
@@ -195,6 +197,25 @@ mod tests {
         let balanced = GlobalPnrPreset::Balanced.config();
 
         assert_eq!(default.search, balanced.search);
+    }
+
+    #[test]
+    fn layered_3d_is_opt_in_through_the_thorough_preset() {
+        let balanced = GlobalPnrPreset::Balanced.config();
+        let thorough = GlobalPnrPreset::Thorough.config();
+
+        assert!(!balanced
+            .search
+            .policies
+            .placement_heuristics
+            .iter()
+            .any(|heuristic| matches!(heuristic, PlacementHeuristic::Layered3D(_))));
+        assert!(thorough
+            .search
+            .policies
+            .placement_heuristics
+            .iter()
+            .any(|heuristic| matches!(heuristic, PlacementHeuristic::Layered3D(_))));
     }
 
     #[test]

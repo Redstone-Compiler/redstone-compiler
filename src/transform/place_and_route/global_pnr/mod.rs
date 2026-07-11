@@ -528,7 +528,7 @@ mod tests {
     use crate::graph::logic::LogicGraph;
     use crate::graph::module::{
         GraphModule, GraphModuleContext, GraphModuleDesign, GraphModulePort, GraphModulePortTarget,
-        GraphModulePortType,
+        GraphModulePortType, GraphModuleVariable,
     };
     use crate::graph::GraphNodeKind;
     use crate::nbt::{NBTRoot, ToNBT};
@@ -619,6 +619,66 @@ mod tests {
         assert_eq!(placed.outputs[0].name, "q");
         let output_position = placed.outputs[0].position();
         assert_ne!(placed.world[output_position].kind, BlockKind::Air);
+        Ok(())
+    }
+
+    #[test]
+    fn layered_global_pnr_routes_connected_children_across_z_layers() -> eyre::Result<()> {
+        let mut first: GraphModule = LogicGraph::from_stmt("~a", "x")?.graph.into();
+        first.name = "first".to_owned();
+        let mut second: GraphModule = LogicGraph::from_stmt("~x", "y")?.graph.into();
+        second.name = "second".to_owned();
+        let mut context = GraphModuleContext::default();
+        context.append(first);
+        context.append(second);
+        let top = GraphModule {
+            name: "layered_top".to_owned(),
+            instances: vec!["first".to_owned(), "second".to_owned()],
+            vars: vec![GraphModuleVariable {
+                var_type: GraphModulePortType::InputNet,
+                source: ("first".to_owned(), "x".to_owned()),
+                target: ("second".to_owned(), "x".to_owned()),
+            }],
+            ports: vec![GraphModulePort {
+                name: "y".to_owned(),
+                port_type: GraphModulePortType::OutputNet,
+                target: GraphModulePortTarget::Module("second".to_owned(), "y".to_owned()),
+            }],
+            ..Default::default()
+        };
+        let mut config = GlobalPnrPreset::Fast.config();
+        config.candidate.max_candidates = 1;
+        config.candidate.dim = DimSize(8, 8, 4);
+        config.search.policies.placement_heuristics = vec![
+            crate::transform::place_and_route::global_pnr::policy::PlacementHeuristic::Layered3D(
+                crate::transform::place_and_route::global_pnr::policy::LayeredPlacementConfig {
+                    layers: 2,
+                    layer_spacing: 4,
+                    assignment: crate::transform::place_and_route::global_pnr::policy::LayerAssignmentStrategy::Alternating,
+                },
+            ),
+        ];
+
+        let result = place_and_route_module_with_visualization(&context, &top, &config)?;
+        let bbox_positions = result
+            .placement_bbox_world
+            .iter_block()
+            .into_iter()
+            .map(|(position, _)| position)
+            .collect::<Vec<_>>();
+        let min_z = bbox_positions
+            .iter()
+            .map(|position| position.2)
+            .min()
+            .unwrap();
+        let max_z = bbox_positions
+            .iter()
+            .map(|position| position.2)
+            .max()
+            .unwrap();
+
+        assert!(max_z > min_z + 4);
+        assert_eq!(result.placed_world.outputs.len(), 1);
         Ok(())
     }
 
