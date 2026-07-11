@@ -4,6 +4,7 @@ pub mod ir;
 pub mod placer;
 pub mod progress;
 pub mod router;
+pub mod search;
 pub mod visualize;
 
 use eyre::ContextCompat;
