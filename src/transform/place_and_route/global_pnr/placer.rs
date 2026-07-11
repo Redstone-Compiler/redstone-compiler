@@ -3,6 +3,9 @@ use std::collections::{HashMap, HashSet};
 use crate::graph::module::{GraphModule, GraphModulePortTarget};
 use crate::transform::place_and_route::estimate::BoundingBox;
 use crate::transform::place_and_route::global_pnr::ir::LayoutCandidate;
+use crate::transform::place_and_route::global_pnr::policy::{
+    PlacementCostBreakdown, PlacementCostWeights, PlacementHeuristic,
+};
 use crate::world::position::Position;
 
 const GLOBAL_PLACEMENT_MARGIN: usize = 4;
@@ -12,6 +15,7 @@ pub struct GlobalPlacementConfig {
     pub spacing: usize,
     pub shelf_width: usize,
     pub max_attempts: usize,
+    pub cost_weights: PlacementCostWeights,
 }
 
 impl Default for GlobalPlacementConfig {
@@ -20,6 +24,7 @@ impl Default for GlobalPlacementConfig {
             spacing: 2,
             shelf_width: 64,
             max_attempts: 16,
+            cost_weights: PlacementCostWeights::default(),
         }
     }
 }
@@ -47,6 +52,7 @@ pub fn placement_candidates(
     module: &GraphModule,
     candidates: &[LayoutCandidate],
     config: &GlobalPlacementConfig,
+    heuristics: &[PlacementHeuristic],
 ) -> Vec<Vec<PlacedModule>> {
     if candidates.is_empty() {
         return Vec::new();
@@ -59,20 +65,28 @@ pub fn placement_candidates(
     if is_register_bit_module_set(candidates) {
         for spacing in placement_spacing_options(config.spacing) {
             let config = GlobalPlacementConfig { spacing, ..*config };
-            if let Some(placed) = place_register_bit_carry_chain(candidates, &config) {
-                push_unique_placement(&mut placements, placed);
-            }
-            if let Some(placed) = place_register_bit_carry_aligned_slices(candidates, &config) {
-                push_unique_placement(&mut placements, placed);
-            }
-            if let Some(placed) = place_register_bit_grid(candidates, &config) {
-                push_unique_placement(&mut placements, placed);
-            }
-            if let Some(placed) = place_register_bit_triangles(candidates, &config) {
-                push_unique_placement(&mut placements, placed);
-            }
-            if let Some(placed) = place_register_bit_slices(candidates, &config) {
-                push_unique_placement(&mut placements, placed);
+            for heuristic in heuristics {
+                let placed = match heuristic {
+                    PlacementHeuristic::RegisterCarryChain => {
+                        place_register_bit_carry_chain(candidates, &config)
+                    }
+                    PlacementHeuristic::RegisterCarryAlignedSlices => {
+                        place_register_bit_carry_aligned_slices(candidates, &config)
+                    }
+                    PlacementHeuristic::RegisterGrid => {
+                        place_register_bit_grid(candidates, &config)
+                    }
+                    PlacementHeuristic::RegisterTriangles => {
+                        place_register_bit_triangles(candidates, &config)
+                    }
+                    PlacementHeuristic::RegisterSlices => {
+                        place_register_bit_slices(candidates, &config)
+                    }
+                    PlacementHeuristic::Shelf | PlacementHeuristic::Grid => None,
+                };
+                if let Some(placed) = placed {
+                    push_unique_placement(&mut placements, placed);
+                }
             }
         }
         placements.truncate(config.max_attempts.max(1));
@@ -86,34 +100,39 @@ pub fn placement_candidates(
                 shelf_width,
                 ..*config
             };
-            push_unique_placement(
-                &mut placements,
-                place_candidates_on_shelves_in_order(candidates, &original_order, &config),
-            );
-            push_unique_placement(
-                &mut placements,
-                place_candidates_on_shelves_in_order(candidates, &net_order, &config),
-            );
-
-            for columns in grid_column_options(candidates.len()) {
+            if heuristics.contains(&PlacementHeuristic::Shelf) {
                 push_unique_placement(
                     &mut placements,
-                    place_candidates_on_grid_in_order(
-                        candidates,
-                        &original_order,
-                        columns,
-                        &config,
-                    ),
+                    place_candidates_on_shelves_in_order(candidates, &original_order, &config),
                 );
                 push_unique_placement(
                     &mut placements,
-                    place_candidates_on_grid_in_order(candidates, &net_order, columns, &config),
+                    place_candidates_on_shelves_in_order(candidates, &net_order, &config),
                 );
+            }
+            if heuristics.contains(&PlacementHeuristic::Grid) {
+                for columns in grid_column_options(candidates.len()) {
+                    push_unique_placement(
+                        &mut placements,
+                        place_candidates_on_grid_in_order(
+                            candidates,
+                            &original_order,
+                            columns,
+                            &config,
+                        ),
+                    );
+                    push_unique_placement(
+                        &mut placements,
+                        place_candidates_on_grid_in_order(candidates, &net_order, columns, &config),
+                    );
+                }
             }
         }
     }
 
-    placements.sort_by_key(|placed| placement_cost(module, candidates, placed));
+    placements.sort_by_key(|placed| {
+        placement_cost_breakdown(module, candidates, placed).weighted_total(config.cost_weights)
+    });
     placements.truncate(config.max_attempts.max(1));
     placements
 }
@@ -851,16 +870,19 @@ fn target_modules(target: &GraphModulePortTarget) -> Vec<String> {
     }
 }
 
-fn placement_cost(
+pub(crate) fn placement_cost_breakdown(
     module: &GraphModule,
     candidates: &[LayoutCandidate],
     placed: &[PlacedModule],
-) -> usize {
+) -> PlacementCostBreakdown {
     let placed_by_module = placed
         .iter()
         .map(|placed| (placed.module_name.as_str(), placed))
         .collect::<HashMap<_, _>>();
-    let mut cost = placement_bbox_cost(placed);
+    let mut cost = PlacementCostBreakdown {
+        placement_volume: placement_bbox_cost(placed),
+        ..PlacementCostBreakdown::default()
+    };
 
     for var in &module.vars {
         let Some(source) = placed_by_module.get(var.source.0.as_str()) else {
@@ -899,8 +921,8 @@ fn placement_cost(
         else {
             continue;
         };
-        cost += source_position.manhattan_distance(&target_position) * 8;
-        cost += source_position.2.abs_diff(target_position.2) * 16;
+        cost.estimated_wire_length += source_position.manhattan_distance(&target_position);
+        cost.vertical_distance += source_position.2.abs_diff(target_position.2);
     }
 
     cost
@@ -941,6 +963,7 @@ mod tests {
     use crate::transform::place_and_route::global_pnr::ir::{
         LayoutCandidateCost, PhysicalPort, PhysicalPortDirection, PortConnection,
     };
+    use crate::transform::place_and_route::global_pnr::policy::PlacementHeuristic;
     use crate::world::position::DimSize;
     use crate::world::World3D;
 
@@ -1053,5 +1076,29 @@ mod tests {
             placed_port_y(&candidates, &placed, "q_1_next", "d"),
             placed_port_y(&candidates, &placed, "q_1_master", "d")
         );
+    }
+
+    #[test]
+    fn placement_policy_can_disable_grid_attempts() {
+        let candidates = (0..5)
+            .map(|index| test_candidate(&format!("child_{index}"), &[]))
+            .collect::<Vec<_>>();
+        let module = GraphModule::default();
+        let config = GlobalPlacementConfig {
+            max_attempts: 128,
+            ..Default::default()
+        };
+
+        let shelf_only =
+            placement_candidates(&module, &candidates, &config, &[PlacementHeuristic::Shelf]);
+        let shelf_and_grid = placement_candidates(
+            &module,
+            &candidates,
+            &config,
+            &[PlacementHeuristic::Shelf, PlacementHeuristic::Grid],
+        );
+
+        assert!(!shelf_only.is_empty());
+        assert!(shelf_only.len() < shelf_and_grid.len());
     }
 }

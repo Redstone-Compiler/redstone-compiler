@@ -2,6 +2,7 @@ pub mod assembly;
 pub mod candidate;
 pub mod ir;
 pub mod placer;
+pub mod policy;
 pub mod progress;
 pub mod router;
 pub mod search;
@@ -19,7 +20,11 @@ use crate::transform::place_and_route::global_pnr::candidate::{
 };
 use crate::transform::place_and_route::global_pnr::ir::{LayoutCandidate, PhysicalPortDirection};
 use crate::transform::place_and_route::global_pnr::placer::{
-    place_candidates_on_shelves, placement_candidates, GlobalPlacementConfig, PlacedModule,
+    place_candidates_on_shelves, placement_candidates, placement_cost_breakdown,
+    GlobalPlacementConfig, PlacedModule,
+};
+use crate::transform::place_and_route::global_pnr::policy::{
+    GlobalPnrPolicies, GlobalPnrPreset, GlobalSearchBudget,
 };
 use crate::transform::place_and_route::global_pnr::progress::GlobalPnrProgress;
 use crate::transform::place_and_route::global_pnr::router::{
@@ -47,22 +52,13 @@ pub struct GlobalPnrConfig {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GlobalSearchConfig {
-    pub max_candidates_per_child: usize,
-    pub max_layout_combinations: usize,
-    pub route_order_strategies: Vec<NetOrderStrategy>,
+    pub budget: GlobalSearchBudget,
+    pub policies: GlobalPnrPolicies,
 }
 
 impl Default for GlobalSearchConfig {
     fn default() -> Self {
-        Self {
-            max_candidates_per_child: 4,
-            max_layout_combinations: 16,
-            route_order_strategies: vec![
-                NetOrderStrategy::Criticality,
-                NetOrderStrategy::HighestFanoutFirst,
-                NetOrderStrategy::ReverseCriticality,
-            ],
-        }
+        GlobalPnrPreset::Balanced.search_config()
     }
 }
 
@@ -174,10 +170,10 @@ fn route_first_successful_placement(
     progress: &GlobalPnrProgress,
 ) -> eyre::Result<(Vec<PlacedModule>, Vec<RoutedNet>)> {
     let mut last_error = None;
-    let order_strategies = if config.search.route_order_strategies.is_empty() {
+    let order_strategies = if config.search.policies.net_order_strategies.is_empty() {
         vec![NetOrderStrategy::Criticality]
     } else {
-        config.search.route_order_strategies.clone()
+        config.search.policies.net_order_strategies.clone()
     };
     let total_attempts = placement_attempts.len() * order_strategies.len();
 
@@ -420,7 +416,7 @@ fn generate_child_candidate_pools(
         pools.push(rank_child_candidates_with_preferred(
             instance,
             child_candidates,
-            config.search.max_candidates_per_child.max(1),
+            config.search.budget.max_candidates_per_child.max(1),
             preferred_index,
         ));
     }
@@ -433,7 +429,8 @@ fn search_layout_combinations(
     config: &GlobalPnrConfig,
     progress: &GlobalPnrProgress,
 ) -> eyre::Result<(Vec<LayoutCandidate>, Vec<PlacedModule>, Vec<RoutedNet>)> {
-    let combinations = layout_combinations(pools, config.search.max_layout_combinations.max(1));
+    let combinations =
+        layout_combinations(pools, config.search.budget.max_layout_combinations.max(1));
     let mut last_error = None;
     for (combination_index, selection) in combinations.iter().enumerate() {
         progress.detail(format!(
@@ -444,7 +441,12 @@ fn search_layout_combinations(
         ));
         let candidates = select_layout_combination(pools, selection)
             .context("invalid child layout combination")?;
-        let placement_attempts = placement_candidates(module, &candidates, &config.placement);
+        let placement_attempts = placement_candidates(
+            module,
+            &candidates,
+            &config.placement,
+            &config.search.policies.placement_heuristics,
+        );
         progress.detail(format!(
             "layout combination {} generated {} placement attempt(s)",
             combination_index + 1,
@@ -457,7 +459,17 @@ fn search_layout_combinations(
             config,
             progress,
         ) {
-            Ok((placed, routed_nets)) => return Ok((candidates, placed, routed_nets)),
+            Ok((placed, routed_nets)) => {
+                let cost = placement_cost_breakdown(module, &candidates, &placed);
+                progress.detail(format!(
+                    "selected placement cost: volume={} wire={} vertical={} weighted_total={}",
+                    cost.placement_volume,
+                    cost.estimated_wire_length,
+                    cost.vertical_distance,
+                    cost.weighted_total(config.placement.cost_weights),
+                ));
+                return Ok((candidates, placed, routed_nets));
+            }
             Err(error) => {
                 progress.detail(format!(
                     "layout combination {} failed: {error}",
