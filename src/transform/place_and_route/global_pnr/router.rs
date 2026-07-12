@@ -34,6 +34,7 @@ const SIGNAL_CONTACT_SEARCH_RADIUS: usize = 3;
 pub enum GlobalRoutingStrategy {
     BreadthFirst,
     AStar,
+    DirectGreedy { max_steps: usize },
     GreedyBeam {
         beam_width: usize,
         max_expansions: usize,
@@ -2859,6 +2860,7 @@ fn route_expansion_limit(strategy: GlobalRoutingStrategy) -> Option<usize> {
     match strategy {
         GlobalRoutingStrategy::BreadthFirst => None,
         GlobalRoutingStrategy::AStar => Some(GLOBAL_ROUTE_ASTAR_MAX_EXPANSIONS),
+        GlobalRoutingStrategy::DirectGreedy { max_steps } => Some(max_steps),
         GlobalRoutingStrategy::GreedyBeam { max_expansions, .. } => Some(max_expansions),
     }
 }
@@ -2887,7 +2889,9 @@ fn route_visited_key(
 fn route_visited_depth(strategy: GlobalRoutingStrategy, route_depth: usize) -> usize {
     match strategy {
         GlobalRoutingStrategy::BreadthFirst => route_depth,
-        GlobalRoutingStrategy::AStar | GlobalRoutingStrategy::GreedyBeam { .. } => 0,
+        GlobalRoutingStrategy::AStar
+        | GlobalRoutingStrategy::DirectGreedy { .. }
+        | GlobalRoutingStrategy::GreedyBeam { .. } => 0,
     }
 }
 
@@ -2895,6 +2899,11 @@ enum RouteSearchQueue {
     BreadthFirst(VecDeque<RouteSearchState>),
     AStar {
         heap: BinaryHeap<AStarQueueEntry>,
+        next_sequence: usize,
+        sink: Position,
+    },
+    DirectGreedy {
+        entry: Option<AStarQueueEntry>,
         next_sequence: usize,
         sink: Position,
     },
@@ -2925,6 +2934,17 @@ impl RouteSearchQueue {
                 }
                 queue
             }
+            GlobalRoutingStrategy::DirectGreedy { .. } => {
+                let mut queue = Self::DirectGreedy {
+                    entry: None,
+                    next_sequence: 0,
+                    sink,
+                };
+                for state in initial_states {
+                    queue.push(state);
+                }
+                queue
+            }
             GlobalRoutingStrategy::GreedyBeam { beam_width, .. } => {
                 let mut queue = Self::GreedyBeam {
                     entries: Vec::new(),
@@ -2944,6 +2964,7 @@ impl RouteSearchQueue {
         match self {
             Self::BreadthFirst(queue) => queue.pop_front(),
             Self::AStar { heap, .. } => heap.pop().map(|entry| entry.state),
+            Self::DirectGreedy { entry, .. } => entry.take().map(|entry| entry.state),
             Self::GreedyBeam { entries, .. } => {
                 let best = entries
                     .iter()
@@ -2965,6 +2986,20 @@ impl RouteSearchQueue {
             } => {
                 heap.push(AStarQueueEntry::new(state, *sink, *next_sequence));
                 *next_sequence += 1;
+            }
+            Self::DirectGreedy {
+                entry,
+                next_sequence,
+                sink,
+            } => {
+                let candidate = AStarQueueEntry::new(state, *sink, *next_sequence);
+                *next_sequence += 1;
+                if entry
+                    .as_ref()
+                    .is_none_or(|current| candidate.priority < current.priority)
+                {
+                    *entry = Some(candidate);
+                }
             }
             Self::GreedyBeam {
                 entries,
@@ -3621,6 +3656,25 @@ mod tests {
                 beam_width: 64,
                 max_expansions: 1_024,
             },
+        )
+        .unwrap();
+
+        assert!(route
+            .blocks
+            .iter()
+            .any(|(_, block)| block.kind.is_repeater()));
+    }
+
+    #[test]
+    fn route_point_to_point_direct_greedy_handles_counter_carry_like_coordinates() {
+        let source = Position(26, 10, 3);
+        let sink = Position(70, 4, 3);
+        let world = route_test_world_with_size(source, sink, DimSize(76, 16, 6));
+        let (route, _) = route_point_to_point_with_strategy(
+            &world,
+            source,
+            sink,
+            GlobalRoutingStrategy::DirectGreedy { max_steps: 128 },
         )
         .unwrap();
 
