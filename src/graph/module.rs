@@ -37,7 +37,7 @@ impl GraphModulePortType {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GraphModulePortTarget {
     Node(String),
     // (module name, port name)
@@ -51,7 +51,7 @@ impl Default for GraphModulePortTarget {
     }
 }
 
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub struct GraphModulePort {
     pub name: String,
     pub port_type: GraphModulePortType,

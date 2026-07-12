@@ -18,25 +18,25 @@
 - Modify: `src/transform/place_and_route/local_placer/config.rs`
 - Modify: `src/world/position.rs`
 
-- [ ] Derive equality for candidate configuration value types.
-- [ ] Add exact graph/port structural comparison that ignores only module name.
-- [ ] Add a generator-count regression test and verify it fails before caching.
+- [x] Derive equality for candidate configuration value types.
+- [x] Add exact graph/port structural comparison that ignores only module name.
+- [x] Add a generator-count regression test and verify it fails before caching.
 
 ### Task 2: Implement run-scoped candidate reuse
 
 **Files:**
 - Modify: `src/transform/place_and_route/global_pnr/mod.rs`
 
-- [ ] Cache generated candidates by module structure and configuration.
-- [ ] Clone and relabel candidates on cache hits.
-- [ ] Verify graph, port, and config differences miss the cache.
+- [x] Cache generated candidates by module structure and configuration.
+- [x] Clone and relabel candidates on cache hits.
+- [x] Verify graph, port, and config differences miss the cache.
 
 ### Task 3: Verify performance and behavior
 
 **Files:**
 - Modify generated counter artifacts only after a successful two-cycle Free3D run.
 
-- [ ] Run focused release tests.
-- [ ] Re-measure child candidate generation against the 288.6-second baseline.
+- [x] Run focused release tests.
+- [x] Re-measure child candidate generation against the 288.6-second baseline.
 - [ ] Run the two-cycle Free3D counter search and artifact regression.
 - [ ] Commit intended source, documentation, and regenerated artifacts with an intent-bearing message body.

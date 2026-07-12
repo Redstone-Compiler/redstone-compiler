@@ -20,7 +20,7 @@ use crate::world::position::{DimSize, Position};
 use crate::world::simulator::Simulator;
 use crate::world::{World, World3D};
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UnitCandidateConfig {
     pub dim: DimSize,
     pub local_config: LocalPlacerConfig,

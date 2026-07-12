@@ -380,6 +380,7 @@ fn generate_child_candidate_pools(
     progress: &GlobalPnrProgress,
 ) -> eyre::Result<Vec<ChildCandidatePool>> {
     let mut pools = Vec::new();
+    let mut cache = ChildCandidateCache::default();
     for (index, instance) in module.instances.iter().enumerate() {
         progress.item(
             index + 1,
@@ -388,11 +389,18 @@ fn generate_child_candidate_pools(
         );
         let child = &context[instance.as_str()];
         let child_config = candidate_config_for_child(child, &config.candidate);
-        let child_candidates = generate_graph_module_candidates_with_progress_label(
-            child,
-            &child_config,
-            config.show_progress.then_some(instance.as_str()),
-        )?;
+        let (child_candidates, cache_hit) = cache.get_or_generate(child, &child_config, || {
+            generate_graph_module_candidates_with_progress_label(
+                child,
+                &child_config,
+                config.show_progress.then_some(instance.as_str()),
+            )
+        })?;
+        if cache_hit {
+            progress.detail(format!(
+                "`{instance}` reused structurally identical candidates"
+            ));
+        }
         progress.detail(format!(
             "`{instance}` produced {} candidate(s)",
             child_candidates.len()
@@ -422,6 +430,74 @@ fn generate_child_candidate_pools(
         ));
     }
     Ok(pools)
+}
+
+#[derive(Default)]
+struct ChildCandidateCache {
+    entries: Vec<ChildCandidateCacheEntry>,
+}
+
+struct ChildCandidateCacheEntry {
+    module: GraphModule,
+    config: UnitCandidateConfig,
+    candidates: Vec<LayoutCandidate>,
+}
+
+impl ChildCandidateCache {
+    fn get_or_generate(
+        &mut self,
+        module: &GraphModule,
+        config: &UnitCandidateConfig,
+        generate: impl FnOnce() -> eyre::Result<Vec<LayoutCandidate>>,
+    ) -> eyre::Result<(Vec<LayoutCandidate>, bool)> {
+        if let Some(entry) = self.entries.iter().find(|entry| {
+            entry.config == *config && modules_have_same_candidate_shape(&entry.module, module)
+        }) {
+            return Ok((relabel_candidates(&entry.candidates, &module.name), true));
+        }
+
+        let candidates = generate()?;
+        self.entries.push(ChildCandidateCacheEntry {
+            module: module.clone(),
+            config: config.clone(),
+            candidates: candidates.clone(),
+        });
+        Ok((relabel_candidates(&candidates, &module.name), false))
+    }
+}
+
+fn relabel_candidates(candidates: &[LayoutCandidate], module_name: &str) -> Vec<LayoutCandidate> {
+    candidates
+        .iter()
+        .cloned()
+        .map(|mut candidate| {
+            candidate.module_name = module_name.to_owned();
+            candidate
+        })
+        .collect()
+}
+
+fn modules_have_same_candidate_shape(left: &GraphModule, right: &GraphModule) -> bool {
+    match (&left.graph, &right.graph) {
+        (Some(left_graph), Some(right_graph)) => {
+            let left_nodes = left_graph.nodes.iter().collect::<Vec<_>>();
+            let right_nodes = right_graph.nodes.iter().collect::<Vec<_>>();
+            if left_nodes.len() != right_nodes.len()
+                || left_nodes.iter().zip(&right_nodes).any(|(left, right)| {
+                    left.id != right.id
+                        || left.kind != right.kind
+                        || left.inputs != right.inputs
+                        || left.outputs != right.outputs
+                })
+            {
+                return false;
+            }
+        }
+        (None, None) => {}
+        _ => return false,
+    }
+
+    left.ports == right.ports
 }
 
 fn search_layout_combinations(
@@ -551,6 +627,7 @@ mod tests {
     use crate::transform::place_and_route::utils::world_to_logic_with_outputs;
     use crate::verilog::design::lower_design_modules;
     use crate::verilog::parser::parse_modules;
+    use crate::verilog::synth::d_latch_graph_module;
     use crate::world::block::BlockKind;
     use crate::world::position::{DimSize, Position};
     use crate::world::simulator::Simulator;
@@ -574,6 +651,62 @@ mod tests {
             max_route_step: 4,
             route_step_sampling_policy: SamplingPolicy::Random(256),
         }
+    }
+
+    #[test]
+    fn child_candidate_cache_reuses_identical_module_structure() -> eyre::Result<()> {
+        let first = d_latch_graph_module("q_0_master", "d", "en", "q");
+        let second = d_latch_graph_module("q_1_slave", "d", "en", "q");
+        let config = UnitCandidateConfig {
+            dim: DimSize(3, 3, 3),
+            max_candidates: 1,
+            ..Default::default()
+        };
+        let mut cache = ChildCandidateCache::default();
+        let calls = std::cell::Cell::new(0);
+        let generate = |module: &GraphModule| {
+            calls.set(calls.get() + 1);
+            let mut world = World3D::new(DimSize(3, 3, 3));
+            world[Position(1, 1, 1)] = crate::world::block::Block {
+                kind: BlockKind::Cobble {
+                    on_count: 0,
+                    on_base_count: 0,
+                },
+                direction: crate::world::block::Direction::None,
+            };
+            Ok(vec![LayoutCandidate::from_world(
+                module.name.clone(),
+                world,
+                Vec::new(),
+            )?])
+        };
+
+        let (first_candidates, first_hit) =
+            cache.get_or_generate(&first, &config, || generate(&first))?;
+        let (second_candidates, second_hit) =
+            cache.get_or_generate(&second, &config, || generate(&second))?;
+
+        assert_eq!(calls.get(), 1);
+        assert!(!first_hit);
+        assert!(second_hit);
+        assert_eq!(first_candidates[0].module_name, "q_0_master");
+        assert_eq!(second_candidates[0].module_name, "q_1_slave");
+
+        let different_config = UnitCandidateConfig {
+            max_candidates: 2,
+            ..config.clone()
+        };
+        let (_, config_hit) =
+            cache.get_or_generate(&second, &different_config, || generate(&second))?;
+        assert!(!config_hit);
+
+        let mut different_port = second.clone();
+        different_port.ports[0].name = "renamed".to_owned();
+        let (_, port_hit) =
+            cache.get_or_generate(&different_port, &config, || generate(&different_port))?;
+        assert!(!port_hit);
+        assert_eq!(calls.get(), 3);
+        Ok(())
     }
 
     #[test]
