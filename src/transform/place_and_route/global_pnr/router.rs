@@ -34,6 +34,10 @@ const SIGNAL_CONTACT_SEARCH_RADIUS: usize = 3;
 pub enum GlobalRoutingStrategy {
     BreadthFirst,
     AStar,
+    GreedyBeam {
+        beam_width: usize,
+        max_expansions: usize,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -2855,6 +2859,7 @@ fn route_expansion_limit(strategy: GlobalRoutingStrategy) -> Option<usize> {
     match strategy {
         GlobalRoutingStrategy::BreadthFirst => None,
         GlobalRoutingStrategy::AStar => Some(GLOBAL_ROUTE_ASTAR_MAX_EXPANSIONS),
+        GlobalRoutingStrategy::GreedyBeam { max_expansions, .. } => Some(max_expansions),
     }
 }
 
@@ -2882,7 +2887,7 @@ fn route_visited_key(
 fn route_visited_depth(strategy: GlobalRoutingStrategy, route_depth: usize) -> usize {
     match strategy {
         GlobalRoutingStrategy::BreadthFirst => route_depth,
-        GlobalRoutingStrategy::AStar => 0,
+        GlobalRoutingStrategy::AStar | GlobalRoutingStrategy::GreedyBeam { .. } => 0,
     }
 }
 
@@ -2890,6 +2895,12 @@ enum RouteSearchQueue {
     BreadthFirst(VecDeque<RouteSearchState>),
     AStar {
         heap: BinaryHeap<AStarQueueEntry>,
+        next_sequence: usize,
+        sink: Position,
+    },
+    GreedyBeam {
+        entries: Vec<AStarQueueEntry>,
+        beam_width: usize,
         next_sequence: usize,
         sink: Position,
     },
@@ -2914,6 +2925,18 @@ impl RouteSearchQueue {
                 }
                 queue
             }
+            GlobalRoutingStrategy::GreedyBeam { beam_width, .. } => {
+                let mut queue = Self::GreedyBeam {
+                    entries: Vec::new(),
+                    beam_width: beam_width.max(1),
+                    next_sequence: 0,
+                    sink,
+                };
+                for state in initial_states {
+                    queue.push(state);
+                }
+                queue
+            }
         }
     }
 
@@ -2921,6 +2944,14 @@ impl RouteSearchQueue {
         match self {
             Self::BreadthFirst(queue) => queue.pop_front(),
             Self::AStar { heap, .. } => heap.pop().map(|entry| entry.state),
+            Self::GreedyBeam { entries, .. } => {
+                let best = entries
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, entry)| entry.priority)
+                    .map(|(index, _)| index)?;
+                Some(entries.swap_remove(best).state)
+            }
         }
     }
 
@@ -2934,6 +2965,24 @@ impl RouteSearchQueue {
             } => {
                 heap.push(AStarQueueEntry::new(state, *sink, *next_sequence));
                 *next_sequence += 1;
+            }
+            Self::GreedyBeam {
+                entries,
+                beam_width,
+                next_sequence,
+                sink,
+            } => {
+                entries.push(AStarQueueEntry::new(state, *sink, *next_sequence));
+                *next_sequence += 1;
+                if entries.len() > *beam_width {
+                    let worst = entries
+                        .iter()
+                        .enumerate()
+                        .max_by_key(|(_, entry)| entry.priority)
+                        .map(|(index, _)| index)
+                        .expect("greedy beam contains the pushed entry");
+                    entries.swap_remove(worst);
+                }
             }
         }
     }
@@ -3552,6 +3601,28 @@ mod tests {
         let (route, _) =
             route_point_to_point_with_strategy(&world, source, sink, GlobalRoutingStrategy::AStar)
                 .unwrap();
+
+        assert!(route
+            .blocks
+            .iter()
+            .any(|(_, block)| block.kind.is_repeater()));
+    }
+
+    #[test]
+    fn route_point_to_point_greedy_beam_handles_counter_carry_like_coordinates() {
+        let source = Position(26, 10, 3);
+        let sink = Position(70, 4, 3);
+        let world = route_test_world_with_size(source, sink, DimSize(76, 16, 6));
+        let (route, _) = route_point_to_point_with_strategy(
+            &world,
+            source,
+            sink,
+            GlobalRoutingStrategy::GreedyBeam {
+                beam_width: 64,
+                max_expansions: 1_024,
+            },
+        )
+        .unwrap();
 
         assert!(route
             .blocks
