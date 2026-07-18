@@ -442,6 +442,12 @@ physical router implementation still consumes that shape internally. Every
 physical route branch carries its `NetId` and typed source/sink endpoints, so
 snapshots and diagnostics no longer need to recover identity from labels.
 
-Placement cost estimation and several feedback heuristics still inspect the
-legacy module shape. Migrating those consumers, followed by removing the
-router adapter itself, is the next IR-boundary milestone.
+Placement candidate ordering, Free3D attraction, layered assignment, and
+wire/congestion cost now also receive connectivity reconstructed from the
+resolved topology rather than from the original legacy module. Routing retry
+feedback groups branches by `NetId`; labels remain presentation metadata and a
+compatibility fallback only.
+
+The physical placer/router implementations still consume a temporary
+`GraphModule`-shaped adapter internally. Replacing that adapter with native
+typed placement and routing plan structs is the final IR-boundary migration.

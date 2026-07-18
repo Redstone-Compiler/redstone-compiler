@@ -227,7 +227,8 @@ pub fn route_resolved_topology_with_order_from_prefix(
             error,
             routed_nets: prefix.to_vec(),
         })?;
-    match route_module_variables_with_order_from_prefix(
+    match route_module_variables_with_order_from_prefix_impl(
+        Some(topology),
         &module,
         candidates,
         placed_modules,
@@ -393,6 +394,28 @@ pub fn route_module_variables_with_order_from_prefix(
     progress: &GlobalPnrProgress,
     prefix: &[RoutedNet],
 ) -> Result<Vec<RoutedNet>, PartialRoutingFailure> {
+    route_module_variables_with_order_from_prefix_impl(
+        None,
+        module,
+        candidates,
+        placed_modules,
+        config,
+        order_strategy,
+        progress,
+        prefix,
+    )
+}
+
+fn route_module_variables_with_order_from_prefix_impl(
+    topology: Option<&ResolvedPnrTopology>,
+    module: &GraphModule,
+    candidates: &[LayoutCandidate],
+    placed_modules: &[PlacedModule],
+    config: &GlobalRoutingConfig,
+    order_strategy: NetOrderStrategy,
+    progress: &GlobalPnrProgress,
+    prefix: &[RoutedNet],
+) -> Result<Vec<RoutedNet>, PartialRoutingFailure> {
     let mut route_world = placed_candidate_world(candidates, placed_modules).map_err(|error| {
         PartialRoutingFailure {
             error,
@@ -417,9 +440,21 @@ pub fn route_module_variables_with_order_from_prefix(
         .iter()
         .filter_map(|route| Some((route.source_label.as_ref()?, route.sink_label.as_ref()?)))
         .collect::<HashSet<_>>();
+    let completed_typed_connections = prefix
+        .iter()
+        .filter_map(|route| Some((route.net_id?, route.sink_endpoint.clone()?)))
+        .collect::<HashSet<_>>();
     let vars = ordered_module_variables(&module.vars, order_strategy)
         .into_iter()
         .filter(|var| {
+            if let Some(connection) = topology.and_then(|topology| {
+                let source = format!("{}.{}", var.source.0, var.source.1);
+                let sink = format!("{}.{}", var.target.0, var.target.1);
+                let net = topology.net_by_driver_label(&source)?;
+                Some((net.id, topology.sink_by_label(net, &sink)?.clone()))
+            }) {
+                return !completed_typed_connections.contains(&connection);
+            }
             let source = format!("{}.{}", var.source.0, var.source.1);
             let sink = format!("{}.{}", var.target.0, var.target.1);
             !completed_connections
@@ -431,7 +466,10 @@ pub fn route_module_variables_with_order_from_prefix(
         .collect::<Vec<_>>();
 
     let has_internal_prefix = prefix.iter().any(|route| {
-        route
+        matches!(
+            route.source_endpoint,
+            Some(ResolvedEndpoint::InstancePort { .. })
+        ) || route
             .source_label
             .as_deref()
             .is_some_and(|label| label.contains('.'))

@@ -33,7 +33,7 @@ use crate::transform::place_and_route::global_pnr::candidate::{
 };
 use crate::transform::place_and_route::global_pnr::ir::{LayoutCandidate, PhysicalPortDirection};
 use crate::transform::place_and_route::global_pnr::placer::{
-    place_candidates_on_shelves, placement_candidates, placement_cost_breakdown,
+    place_candidates_on_shelves, placement_candidates_resolved, placement_cost_breakdown_resolved,
     GlobalPlacementConfig, PlacedModule,
 };
 use crate::transform::place_and_route::global_pnr::policy::{
@@ -49,7 +49,9 @@ use crate::transform::place_and_route::global_pnr::search::{
     layout_combinations, rank_child_candidates_with_preferred, select_layout_combination,
     ChildCandidatePool,
 };
-use crate::transform::place_and_route::global_pnr::topology::ResolvedPnrTopology;
+use crate::transform::place_and_route::global_pnr::topology::{
+    NetId, ResolvedEndpoint, ResolvedPnrTopology,
+};
 use crate::transform::place_and_route::global_pnr::visualize::placement_bbox_wireframe_world;
 use crate::transform::place_and_route::local_placer::{LocalPlacerConfig, NotRouteStrategy};
 use crate::transform::place_and_route::sampling::SamplingPolicy;
@@ -822,14 +824,7 @@ pub fn run_prepared_pnr_with_visualization(
     ));
 
     if let PreparedPnrBody::Leaf { candidates } = &prepared.body {
-        return run_prepared_leaf(
-            module,
-            &prepared.topology,
-            candidates,
-            config,
-            &progress,
-            started,
-        );
+        return run_prepared_leaf(&prepared.topology, candidates, config, &progress, started);
     }
 
     let candidate_pools =
@@ -854,8 +849,12 @@ pub fn run_prepared_pnr_with_visualization(
         outputs,
     };
     let placement_bbox_world = placement_bbox_wireframe_world(&placed);
-    let placement_cost =
-        placement_cost_breakdown(module, &candidates, &placed, config.placement.congestion);
+    let placement_cost = placement_cost_breakdown_resolved(
+        &prepared.topology,
+        &candidates,
+        &placed,
+        config.placement.congestion,
+    )?;
     let weighted_placement_cost = placement_cost.weighted_total(config.placement.cost_weights);
 
     progress.stage(4, 4, "complete");
@@ -946,7 +945,7 @@ struct RankedRoutingDecision {
     placement_index: usize,
     order_index: usize,
     prefix: Vec<RoutedNet>,
-    semantic_feedback_labels: Vec<String>,
+    semantic_feedback_nets: Vec<NetId>,
 }
 
 struct RoutingSearchProgress {
@@ -1010,6 +1009,13 @@ impl RoutingSearchProgress {
 }
 
 fn reroute_last_source_group(routes: &[RoutedNet]) -> Vec<RoutedNet> {
+    if let Some(net_id) = routes.iter().rev().find_map(internal_route_net_id) {
+        return routes
+            .iter()
+            .filter(|route| route.net_id != Some(net_id))
+            .cloned()
+            .collect();
+    }
     let Some(source_label) = routes
         .iter()
         .rev()
@@ -1027,7 +1033,27 @@ fn reroute_last_source_group(routes: &[RoutedNet]) -> Vec<RoutedNet> {
         .collect()
 }
 
-fn reroute_source_group(routes: &[RoutedNet], source_label: Option<&str>) -> Vec<RoutedNet> {
+fn internal_route_net_id(route: &RoutedNet) -> Option<NetId> {
+    matches!(
+        route.source_endpoint,
+        Some(ResolvedEndpoint::InstancePort { .. })
+    )
+    .then_some(route.net_id)
+    .flatten()
+}
+
+fn reroute_source_group(
+    routes: &[RoutedNet],
+    net_id: Option<NetId>,
+    source_label: Option<&str>,
+) -> Vec<RoutedNet> {
+    if let Some(net_id) = net_id {
+        return routes
+            .iter()
+            .filter(|route| route.net_id != Some(net_id))
+            .cloned()
+            .collect();
+    }
     let Some(source_label) = source_label else {
         return reroute_last_source_group(routes);
     };
@@ -1040,47 +1066,43 @@ fn reroute_source_group(routes: &[RoutedNet], source_label: Option<&str>) -> Vec
 
 fn reroute_untried_source_groups(
     routes: &[RoutedNet],
-    previously_tried: &[String],
+    previously_tried: &[NetId],
     count: usize,
-) -> (Vec<RoutedNet>, Vec<String>) {
-    let labels = routes
+) -> (Vec<RoutedNet>, Vec<NetId>) {
+    let net_ids = routes
         .iter()
         .rev()
-        .filter_map(|route| route.source_label.as_deref())
-        .filter(|label| label.contains('.') && !previously_tried.iter().any(|tried| tried == label))
-        .fold(Vec::<String>::new(), |mut labels, label| {
-            if !labels.iter().any(|selected| selected == label) && labels.len() < count {
-                labels.push(label.to_owned());
+        .filter_map(internal_route_net_id)
+        .filter(|net_id| !previously_tried.contains(net_id))
+        .fold(Vec::<NetId>::new(), |mut selected, net_id| {
+            if !selected.contains(&net_id) && selected.len() < count {
+                selected.push(net_id);
             }
-            labels
+            selected
         });
-    let labels = if labels.is_empty() {
-        routes
-            .iter()
-            .rev()
-            .filter_map(|route| route.source_label.as_deref())
-            .filter(|label| label.contains('.'))
-            .fold(Vec::<String>::new(), |mut labels, label| {
-                if !labels.iter().any(|selected| selected == label) && labels.len() < count {
-                    labels.push(label.to_owned());
+    let net_ids = if net_ids.is_empty() {
+        routes.iter().rev().filter_map(internal_route_net_id).fold(
+            Vec::<NetId>::new(),
+            |mut selected, net_id| {
+                if !selected.contains(&net_id) && selected.len() < count {
+                    selected.push(net_id);
                 }
-                labels
-            })
+                selected
+            },
+        )
     } else {
-        labels
+        net_ids
     };
+    if net_ids.is_empty() {
+        return (reroute_last_source_group(routes), previously_tried.to_vec());
+    }
     let prefix = routes
         .iter()
-        .filter(|route| {
-            !route
-                .source_label
-                .as_deref()
-                .is_some_and(|label| labels.iter().any(|selected| selected == label))
-        })
+        .filter(|route| !route.net_id.is_some_and(|id| net_ids.contains(&id)))
         .cloned()
         .collect();
     let mut tried = previously_tried.to_vec();
-    tried.extend(labels);
+    tried.extend(net_ids);
     (prefix, tried)
 }
 
@@ -1127,7 +1149,7 @@ fn route_first_successful_placement(
                 placement_index,
                 order_index,
                 prefix: Vec::new(),
-                semantic_feedback_labels: Vec::new(),
+                semantic_feedback_nets: Vec::new(),
             })
         })
         .collect::<Vec<_>>();
@@ -1222,7 +1244,7 @@ fn route_first_successful_placement(
                             placement_index,
                             order_index,
                             prefix: failure.routed_nets.clone(),
-                            semantic_feedback_labels: decision.semantic_feedback_labels.clone(),
+                            semantic_feedback_nets: decision.semantic_feedback_nets.clone(),
                         });
                     }
                     save_failed_route_base_world(module, attempt_serial, candidates, placed);
@@ -1266,8 +1288,12 @@ fn route_first_successful_placement(
                         sequence: next_scores.len(),
                         placement_index,
                         order_index,
-                        prefix: reroute_source_group(&routed_nets, route.source_label.as_deref()),
-                        semantic_feedback_labels: decision.semantic_feedback_labels.clone(),
+                        prefix: reroute_source_group(
+                            &routed_nets,
+                            route.net_id,
+                            route.source_label.as_deref(),
+                        ),
+                        semantic_feedback_nets: decision.semantic_feedback_nets.clone(),
                     });
                 }
                 last_error = Some(error);
@@ -1282,9 +1308,9 @@ fn route_first_successful_placement(
                         "placement attempt {attempt_serial} failed verifier: {error}"
                     ));
                     if routing_index + 1 < routing_configs.len() {
-                        let (prefix, semantic_feedback_labels) = reroute_untried_source_groups(
+                        let (prefix, semantic_feedback_nets) = reroute_untried_source_groups(
                             &routed_nets,
-                            &decision.semantic_feedback_labels,
+                            &decision.semantic_feedback_nets,
                             2,
                         );
                         next_scores.push(RankedRoutingDecision {
@@ -1293,7 +1319,7 @@ fn route_first_successful_placement(
                             placement_index,
                             order_index,
                             prefix,
-                            semantic_feedback_labels,
+                            semantic_feedback_nets,
                         });
                     }
                     last_error = Some(error);
@@ -1405,7 +1431,6 @@ fn save_failed_route_base_world(
 }
 
 fn run_prepared_leaf(
-    module: &GraphModule,
     topology: &ResolvedPnrTopology,
     prepared_candidates: &[LayoutCandidate],
     config: &GlobalPnrConfig,
@@ -1435,8 +1460,12 @@ fn run_prepared_leaf(
     let candidates = vec![candidate];
     let world = assemble_world(&candidates, &placed, &[])?;
     let placement_bbox_world = placement_bbox_wireframe_world(&placed);
-    let placement_cost =
-        placement_cost_breakdown(module, &candidates, &placed, config.placement.congestion);
+    let placement_cost = placement_cost_breakdown_resolved(
+        topology,
+        &candidates,
+        &placed,
+        config.placement.congestion,
+    )?;
     let weighted_placement_cost = placement_cost.weighted_total(config.placement.cost_weights);
 
     progress.stage(4, 4, "complete");
@@ -1676,12 +1705,12 @@ fn search_layout_combinations(
         ));
         let candidates = select_layout_combination(pools, selection)
             .context("invalid child layout combination")?;
-        let placement_attempts = placement_candidates(
-            module,
+        let placement_attempts = placement_candidates_resolved(
+            topology,
             &candidates,
             &config.placement,
             &config.search.policies.placement_heuristics,
-        );
+        )?;
         progress.detail(format!(
             "layout combination {} generated {} placement attempt(s)",
             combination_index + 1,
@@ -1696,12 +1725,12 @@ fn search_layout_combinations(
             progress,
         ) {
             Ok((placed, routed_nets)) => {
-                let cost = placement_cost_breakdown(
-                    module,
+                let cost = placement_cost_breakdown_resolved(
+                    topology,
                     &candidates,
                     &placed,
                     config.placement.congestion,
-                );
+                )?;
                 let weighted_total = cost.weighted_total(config.placement.cost_weights);
                 progress.summary(format!(
                     "selected placement cost: volume={} xy={} height={} wire={} vertical={} congestion={} weighted_total={}",

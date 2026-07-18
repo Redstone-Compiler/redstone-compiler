@@ -8,6 +8,7 @@ use crate::transform::place_and_route::global_pnr::policy::{
     LayerAssignmentStrategy, LayeredPlacementConfig, PlacementCostBreakdown, PlacementCostWeights,
     PlacementHeuristic, RoutingCongestionConfig,
 };
+use crate::transform::place_and_route::global_pnr::topology::ResolvedPnrTopology;
 use crate::world::position::Position;
 
 const GLOBAL_PLACEMENT_MARGIN: usize = 4;
@@ -204,6 +205,18 @@ pub fn placement_candidates(
     });
     placements.truncate(config.max_attempts.max(1));
     placements
+}
+
+pub fn placement_candidates_resolved(
+    topology: &ResolvedPnrTopology,
+    candidates: &[LayoutCandidate],
+    config: &GlobalPlacementConfig,
+    heuristics: &[PlacementHeuristic],
+) -> eyre::Result<Vec<Vec<PlacedModule>>> {
+    let adapter = topology.legacy_routing_adapter()?;
+    Ok(placement_candidates(
+        &adapter, candidates, config, heuristics,
+    ))
 }
 
 fn apply_layered_placement(
@@ -1070,6 +1083,21 @@ pub(crate) fn placement_cost_breakdown(
     cost.routing_congestion = estimate_routing_congestion(&net_regions, congestion_config);
 
     cost
+}
+
+pub(crate) fn placement_cost_breakdown_resolved(
+    topology: &ResolvedPnrTopology,
+    candidates: &[LayoutCandidate],
+    placed: &[PlacedModule],
+    congestion_config: RoutingCongestionConfig,
+) -> eyre::Result<PlacementCostBreakdown> {
+    let adapter = topology.legacy_routing_adapter()?;
+    Ok(placement_cost_breakdown(
+        &adapter,
+        candidates,
+        placed,
+        congestion_config,
+    ))
 }
 
 fn estimate_routing_congestion(
