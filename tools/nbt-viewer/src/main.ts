@@ -114,13 +114,13 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
           <div id="switches-actions" class="switches-actions hidden">
             <button id="switches-all-on" type="button">All On</button>
             <button id="switches-all-off" type="button">All Off</button>
-            <label id="trace-simulation-toggle" class="trace-simulation-toggle active" title="Collect trace and waveform data while switches simulate">
-              <input id="trace-simulation-enabled" type="checkbox" checked />
+            <label id="trace-simulation-toggle" class="trace-simulation-toggle" title="Collect trace and waveform data while switches simulate">
+              <input id="trace-simulation-enabled" type="checkbox" />
               <span class="trace-simulation-label">Trace</span>
               <span class="trace-simulation-track" aria-hidden="true">
                 <span class="trace-simulation-knob"></span>
               </span>
-              <strong id="trace-simulation-state">On</strong>
+              <strong id="trace-simulation-state">Off</strong>
             </label>
           </div>
           <div id="switches-list" class="switches-list empty">Open an NBT file to control switches.</div>
@@ -170,7 +170,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
             </div>
             <details class="trace-log">
               <summary>Log</summary>
-              <pre id="trace-output">Run a simulation to inspect events.</pre>
+              <pre id="trace-output">Trace simulation is off.</pre>
             </details>
           </div>
         </details>
@@ -373,7 +373,7 @@ let historyWaveform: Waveform = emptyWaveform;
 let historyTraceCycles: number[] = [];
 let traceCycleDisplayOffset = 0;
 let traceShowActualCycles = false;
-let traceSimulationEnabled = true;
+let traceSimulationEnabled = false;
 let currentSnapshots: SnapshotInfo[] = [];
 let currentWaveform: Waveform = emptyWaveform;
 let selectedWaveformSignal: WaveformSignal | undefined;

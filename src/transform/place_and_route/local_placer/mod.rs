@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 
 use eyre::ensure;
 use indicatif::{ParallelProgressIterator, ProgressStyle};
@@ -294,20 +295,19 @@ impl LocalPlacer {
         input_constraints: Option<&LocalPlacerInputConstraints>,
         progress_label: Option<&str>,
     ) -> PlacerQueue {
-        tracing::info!("generate starts");
-        let print_progress = local_placer_progress_label(progress_label);
-        if let Some(progress) = print_progress {
-            eprintln!(
-                "{}: generate starts ({} steps)",
-                progress.label(),
-                self.visit_orders.len()
-            );
-        }
+        let started = Instant::now();
+        let progress = local_placer_progress_label(progress_label);
+        tracing::info!(
+            target: "redstone_compiler::local_placer",
+            placer = progress.label(),
+            steps = self.visit_orders.len(),
+            "local candidate generation started"
+        );
 
         let mut step = 0;
         while step < self.visit_orders.len() && Some(step) != finish_step {
             let prev_len = queue.len();
-            let result = self.do_step(step, queue, input_constraints, print_progress);
+            let result = self.do_step(step, queue, input_constraints, Some(progress));
             let next_len = result.queue.len();
 
             let compacted = self.compact_queue_after_step(step, result.queue);
@@ -321,25 +321,25 @@ impl LocalPlacer {
             }
 
             step += 1;
-            tracing::info!(
-                "from {prev_len} -> generated {next_len} -> compacted {compacted_len} -> sampled {sampled_len}"
+            tracing::trace!(
+                target: "redstone_compiler::local_placer",
+                placer = progress.label(),
+                step,
+                input_candidates = prev_len,
+                generated_candidates = next_len,
+                compacted_candidates = compacted_len,
+                sampled_candidates = sampled_len,
+                "local placement step completed"
             );
-            if let Some(progress) = print_progress {
-                eprintln!(
-                    "{}: from {prev_len} -> generated {next_len} -> compacted {compacted_len} -> sampled {sampled_len}",
-                    progress.label()
-                );
-            }
         }
 
-        tracing::info!("generate complete");
-        if let Some(progress) = print_progress {
-            eprintln!(
-                "{}: generate complete ({} candidates)",
-                progress.label(),
-                queue.len()
-            );
-        }
+        tracing::info!(
+            target: "redstone_compiler::local_placer",
+            placer = progress.label(),
+            candidates = queue.len(),
+            elapsed_ms = started.elapsed().as_millis(),
+            "local candidate generation completed"
+        );
         queue
     }
 
@@ -348,18 +348,18 @@ impl LocalPlacer {
         step: usize,
         queue: PlacerQueue,
         input_constraints: Option<&LocalPlacerInputConstraints>,
-        print_progress: Option<LocalPlacerProgress<'_>>,
+        progress: Option<LocalPlacerProgress<'_>>,
     ) -> StepResult {
+        let progress = progress.unwrap_or(LocalPlacerProgress { label: "" });
         let node = self.graph.find_node_by_id(self.visit_orders[step]).unwrap();
-        tracing::info!("[{}/{}] {node}", step + 1, self.visit_orders.len());
-        if let Some(progress) = print_progress {
-            eprintln!(
-                "{}: [{}/{}] {node}",
-                progress.label(),
-                step + 1,
-                self.visit_orders.len()
-            );
-        }
+        tracing::trace!(
+            target: "redstone_compiler::local_placer",
+            placer = progress.label(),
+            step = step + 1,
+            total = self.visit_orders.len(),
+            node = %node,
+            "placing local node"
+        );
 
         let input_positions = queue
             .first()
@@ -887,31 +887,25 @@ fn local_density(world: &World3D, position: Position) -> usize {
         .count()
 }
 
-fn print_local_placer_progress_enabled() -> bool {
-    std::env::var_os("PRINT_LOCAL_PLACER_PROGRESS").is_some()
-}
-
 #[derive(Clone, Copy)]
 struct LocalPlacerProgress<'a> {
     label: &'a str,
 }
 
-impl LocalPlacerProgress<'_> {
-    fn label(self) -> String {
+impl<'a> LocalPlacerProgress<'a> {
+    fn label(self) -> &'a str {
         if self.label.is_empty() {
-            "local placer".to_owned()
+            "local placer"
         } else {
-            format!("local placer {}", self.label)
+            self.label
         }
     }
 }
 
-fn local_placer_progress_label(progress_label: Option<&str>) -> Option<LocalPlacerProgress<'_>> {
-    progress_label
-        .map(|label| LocalPlacerProgress { label })
-        .or_else(|| {
-            print_local_placer_progress_enabled().then_some(LocalPlacerProgress { label: "" })
-        })
+fn local_placer_progress_label(progress_label: Option<&str>) -> LocalPlacerProgress<'_> {
+    LocalPlacerProgress {
+        label: progress_label.unwrap_or(""),
+    }
 }
 
 struct StepResult {

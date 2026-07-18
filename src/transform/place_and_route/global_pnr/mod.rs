@@ -10,14 +10,19 @@ pub mod router;
 pub mod search;
 pub mod visualize;
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use eyre::ContextCompat;
+use serde_json::{json, Value};
 
 use crate::graph::module::{GraphModule, GraphModuleContext, GraphModuleDesign};
 use crate::graph::GraphNodeKind;
 use crate::nbt::ToNBT;
 use crate::output::{OutputEndpoint, PlacedWorld};
+use crate::snapshot::{
+    duration_ms, emit_json, emit_nbt, record as record_snapshot, SnapshotEvent, SnapshotProduct,
+    SnapshotProductInfo,
+};
 use crate::transform::place_and_route::global_pnr::assembly::assemble_world;
 use crate::transform::place_and_route::global_pnr::candidate::{
     generate_graph_module_candidates_with_progress_label, UnitCandidateConfig,
@@ -43,9 +48,10 @@ use crate::transform::place_and_route::global_pnr::search::{
 use crate::transform::place_and_route::global_pnr::visualize::placement_bbox_wireframe_world;
 use crate::transform::place_and_route::local_placer::{LocalPlacerConfig, NotRouteStrategy};
 use crate::transform::place_and_route::sampling::SamplingPolicy;
+use crate::world::position::{DimSize, Position};
 use crate::world::World3D;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct GlobalPnrConfig {
     pub candidate: UnitCandidateConfig,
     pub placement: GlobalPlacementConfig,
@@ -74,6 +80,289 @@ impl Default for GlobalSearchConfig {
 pub struct GlobalPnrResult {
     pub placed_world: PlacedWorld,
     pub placement_bbox_world: World3D,
+    pub selected_candidates: Vec<LayoutCandidate>,
+    pub placed_modules: Vec<PlacedModule>,
+    pub routed_nets: Vec<RoutedNet>,
+    pub placement_cost:
+        crate::transform::place_and_route::global_pnr::policy::PlacementCostBreakdown,
+    pub weighted_placement_cost: usize,
+    pub config_snapshot: Value,
+}
+
+impl SnapshotProduct for GlobalPnrResult {
+    fn emit_snapshot(&self, design_name: &str) -> eyre::Result<SnapshotProductInfo> {
+        let artifact_name = snapshot_artifact_name(design_name);
+        let final_nbt = format!("{artifact_name}.nbt");
+        emit_nbt(&final_nbt, self.placed_world.world.to_nbt())?;
+        emit_nbt("placement-bboxes.nbt", self.placement_bbox_world.to_nbt())?;
+        emit_json(
+            "interface.json",
+            json!({
+                "format": "redstone-compiler.interface.v1",
+                "inputs": self.placed_world.inputs,
+                "outputs": self.placed_world.outputs,
+            }),
+        )?;
+        emit_json("pnr/config.json", self.config_snapshot.clone())?;
+
+        for (index, placed) in self.placed_modules.iter().enumerate() {
+            let Some(candidate) = self.selected_candidates.get(placed.candidate_index) else {
+                continue;
+            };
+            let directory = format!(
+                "instances/{index:02}-{}",
+                snapshot_artifact_name(&placed.module_name)
+            );
+            emit_nbt(
+                format!("{directory}/circuit.nbt"),
+                normalized_candidate_world(candidate).to_nbt(),
+            )?;
+            let ports = candidate
+                .ports
+                .iter()
+                .map(|port| {
+                    let local = Position(
+                        port.position.0 - candidate.bbox.min.0,
+                        port.position.1 - candidate.bbox.min.1,
+                        port.position.2 - candidate.bbox.min.2,
+                    );
+                    let global = Position(
+                        placed.origin.0 + local.0,
+                        placed.origin.1 + local.1,
+                        placed.origin.2 + local.2,
+                    );
+                    json!({
+                        "name": port.name,
+                        "direction": format!("{:?}", port.direction),
+                        "connection": format!("{:?}", port.connection),
+                        "local_position": position_json(local),
+                        "global_position": position_json(global),
+                    })
+                })
+                .collect::<Vec<_>>();
+            emit_json(
+                format!("{directory}/instance.json"),
+                json!({
+                    "instance": placed.module_name,
+                    "module": candidate.module_name,
+                    "candidate_index": placed.candidate_index,
+                    "global_origin": position_json(placed.origin),
+                    "global_bbox": {
+                        "min": position_json(placed.origin),
+                        "max": [
+                            placed.origin.0 + placed.bbox.width() - 1,
+                            placed.origin.1 + placed.bbox.depth() - 1,
+                            placed.origin.2 + placed.bbox.height() - 1,
+                        ],
+                    },
+                    "local_size": [
+                        candidate.bbox.width(),
+                        candidate.bbox.depth(),
+                        candidate.bbox.height(),
+                    ],
+                    "cost": {
+                        "blocks": candidate.cost.block_count,
+                        "bbox_volume": candidate.cost.bbox_volume,
+                    },
+                    "ports": ports,
+                }),
+            )?;
+        }
+
+        let route_descriptions = self
+            .routed_nets
+            .iter()
+            .enumerate()
+            .map(|(index, route)| {
+                json!({
+                    "index": index,
+                    "source_label": route.source_label,
+                    "sink_label": route.sink_label,
+                    "source": position_json(route.source),
+                    "sink": position_json(route.sink),
+                    "path": route.path.iter().copied().map(position_json).collect::<Vec<_>>(),
+                    "path_length": route.path.len(),
+                    "block_count": route.blocks.len(),
+                    "required_powered_positions": route.required_powered_positions.iter().copied().map(position_json).collect::<Vec<_>>(),
+                    "required_released_positions": route.required_released_positions.iter().copied().map(position_json).collect::<Vec<_>>(),
+                })
+            })
+            .collect::<Vec<_>>();
+        emit_json(
+            "routes/routes.json",
+            json!({
+                "format": "redstone-compiler.routes.v1",
+                "routes": route_descriptions,
+            }),
+        )?;
+        emit_nbt(
+            "routes/routes.nbt",
+            routed_net_world(&self.routed_nets).to_nbt(),
+        )?;
+
+        Ok(SnapshotProductInfo {
+            top_module: design_name.to_owned(),
+            final_nbt,
+            summary: json!({
+                "world": {
+                    "size": [
+                        self.placed_world.world.size.0,
+                        self.placed_world.world.size.1,
+                        self.placed_world.world.size.2,
+                    ],
+                    "non_air_blocks": self.placed_world.world.iter_block().len(),
+                },
+                "interface": {
+                    "inputs": self.placed_world.inputs.len(),
+                    "outputs": self.placed_world.outputs.len(),
+                },
+                "placement": {
+                    "instances": self.placed_modules.len(),
+                    "volume": self.placement_cost.placement_volume,
+                    "xy_footprint": self.placement_cost.xy_footprint,
+                    "height": self.placement_cost.height_span,
+                    "estimated_wire_length": self.placement_cost.estimated_wire_length,
+                    "vertical_distance": self.placement_cost.vertical_distance,
+                    "congestion": self.placement_cost.routing_congestion,
+                    "weighted_total": self.weighted_placement_cost,
+                },
+                "routing": {
+                    "routes": self.routed_nets.len(),
+                    "path_length": self.routed_nets.iter().map(|route| route.path.len()).sum::<usize>(),
+                    "blocks": self.routed_nets.iter().map(|route| route.blocks.len()).sum::<usize>(),
+                },
+            }),
+        })
+    }
+}
+
+fn snapshot_artifact_name(name: &str) -> String {
+    let safe = name
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    if safe.is_empty() {
+        "design".to_owned()
+    } else {
+        safe
+    }
+}
+
+fn normalized_candidate_world(candidate: &LayoutCandidate) -> World3D {
+    let mut world = World3D::new(DimSize(
+        candidate.bbox.width(),
+        candidate.bbox.depth(),
+        candidate.bbox.height(),
+    ));
+    for (position, block) in candidate.world.iter_block() {
+        let local = Position(
+            position.0 - candidate.bbox.min.0,
+            position.1 - candidate.bbox.min.1,
+            position.2 - candidate.bbox.min.2,
+        );
+        world[local] = block;
+    }
+    world
+}
+
+fn routed_net_world(routes: &[RoutedNet]) -> World3D {
+    let mut max = Position(0, 0, 0);
+    for (position, _) in routes.iter().flat_map(|route| &route.blocks) {
+        max.0 = max.0.max(position.0);
+        max.1 = max.1.max(position.1);
+        max.2 = max.2.max(position.2);
+    }
+    let mut world = World3D::new(DimSize(max.0 + 1, max.1 + 1, max.2 + 1));
+    for (position, block) in routes.iter().flat_map(|route| &route.blocks) {
+        world[*position] = *block;
+    }
+    world
+}
+
+fn position_json(position: Position) -> Value {
+    json!([position.0, position.1, position.2])
+}
+
+fn global_pnr_config_snapshot(config: &GlobalPnrConfig) -> Value {
+    let local = config.candidate.local_config;
+    let weights = config.placement.cost_weights;
+    let congestion = config.placement.congestion;
+    let budget = config.search.budget;
+    let routing_json = |routing: GlobalRoutingConfig| {
+        json!({
+            "strategy": format!("{:?}", routing.strategy),
+            "validation": format!("{:?}", routing.validation),
+        })
+    };
+    json!({
+        "format": "redstone-compiler.pnr-config.v1",
+        "candidate": {
+            "dimensions": [
+                config.candidate.dim.0,
+                config.candidate.dim.1,
+                config.candidate.dim.2,
+            ],
+            "max_candidates": config.candidate.max_candidates,
+            "combinational_sampling_limit": config.candidate.combinational_sampling_limit,
+            "input_constraints": format!("{:?}", config.candidate.input_constraints),
+            "local_placer": {
+                "random_seed": local.random_seed,
+                "greedy_input_generation": local.greedy_input_generation,
+                "input_placement_strategy": format!("{:?}", local.input_placement_strategy),
+                "input_candidate_limit": local.input_candidate_limit,
+                "step_sampling_policy": format!("{:?}", local.step_sampling_policy),
+                "placement_sampling_policy": format!("{:?}", local.placement_sampling_policy),
+                "leak_sampling": local.leak_sampling,
+                "route_torch_directly": local.route_torch_directly,
+                "materialize_outputs": local.materialize_outputs,
+                "torch_placement_strategy": format!("{:?}", local.torch_placement_strategy),
+                "not_route_strategy": format!("{:?}", local.not_route_strategy),
+                "max_not_route_step": local.max_not_route_step,
+                "not_route_step_sampling_policy": format!("{:?}", local.not_route_step_sampling_policy),
+                "max_route_step": local.max_route_step,
+                "route_step_sampling_policy": format!("{:?}", local.route_step_sampling_policy),
+            },
+        },
+        "placement": {
+            "spacing": config.placement.spacing,
+            "shelf_width": config.placement.shelf_width,
+            "max_attempts": config.placement.max_attempts,
+            "cost_weights": {
+                "placement_volume": weights.placement_volume,
+                "xy_footprint": weights.xy_footprint,
+                "height_span": weights.height_span,
+                "estimated_wire_length": weights.estimated_wire_length,
+                "vertical_distance": weights.vertical_distance,
+                "routing_congestion": weights.routing_congestion,
+            },
+            "congestion": {
+                "bin_size_xy": congestion.bin_size_xy,
+                "bin_size_z": congestion.bin_size_z,
+            },
+            "heuristics": config.search.policies.placement_heuristics.iter().map(|heuristic| format!("{heuristic:?}")).collect::<Vec<_>>(),
+        },
+        "routing": {
+            "probe": config.routing_probe.map(routing_json),
+            "primary": routing_json(config.routing),
+            "refinement": config.routing_refinement.map(routing_json),
+            "net_orders": config.search.policies.net_order_strategies.iter().map(|order| format!("{order:?}")).collect::<Vec<_>>(),
+        },
+        "budget": {
+            "max_candidates_per_child": budget.max_candidates_per_child,
+            "max_layout_combinations": budget.max_layout_combinations,
+            "max_detailed_routing_attempts": budget.max_detailed_routing_attempts,
+            "max_refined_routing_attempts": budget.max_refined_routing_attempts,
+            "max_refinement_rounds": budget.max_refinement_rounds,
+        },
+        "show_progress": config.show_progress,
+        "verifier_enabled": config.verifier.is_some(),
+    })
 }
 
 impl Default for GlobalPnrConfig {
@@ -137,19 +426,20 @@ pub fn place_and_route_module_with_visualization(
     module: &GraphModule,
     config: &GlobalPnrConfig,
 ) -> eyre::Result<GlobalPnrResult> {
+    let started = Instant::now();
     let progress = GlobalPnrProgress::new(config.show_progress, module.name.clone());
     if module.graph.is_some() {
         return place_graph_backed_module(module, config, &progress);
     }
 
-    progress.stage(1, 5, "generate child layout candidates");
+    progress.stage(1, 4, "generate child layout candidates");
     let candidate_pools = generate_child_candidate_pools(context, module, config, &progress)?;
 
-    progress.stage(2, 5, "search child layouts and placements");
+    progress.stage(2, 4, "search child layouts, placements, and routes");
     let (candidates, placed, routed_nets) =
         search_layout_combinations(module, &candidate_pools, config, &progress)?;
 
-    progress.stage(4, 5, "assemble world and collect outputs");
+    progress.stage(3, 4, "assemble world and collect outputs");
     let inputs = collect_module_input_endpoints(module, &routed_nets);
     let outputs = collect_module_output_endpoints(module, &candidates, &placed);
     let world = assemble_world(&candidates, &placed, &routed_nets)?;
@@ -159,17 +449,27 @@ pub fn place_and_route_module_with_visualization(
         outputs,
     };
     let placement_bbox_world = placement_bbox_wireframe_world(&placed);
+    let placement_cost =
+        placement_cost_breakdown(module, &candidates, &placed, config.placement.congestion);
+    let weighted_placement_cost = placement_cost.weighted_total(config.placement.cost_weights);
 
-    progress.stage(5, 5, "complete");
-    progress.detail(format!(
-        "outputs={} routes={}",
+    progress.stage(4, 4, "complete");
+    progress.summary(format!(
+        "global PnR completed: outputs={} routes={} elapsed={:.2?}",
         placed_world.outputs.len(),
-        routed_nets.len()
+        routed_nets.len(),
+        started.elapsed()
     ));
 
     Ok(GlobalPnrResult {
         placed_world,
         placement_bbox_world,
+        selected_candidates: candidates,
+        placed_modules: placed,
+        routed_nets,
+        placement_cost,
+        weighted_placement_cost,
+        config_snapshot: global_pnr_config_snapshot(config),
     })
 }
 
@@ -181,6 +481,66 @@ struct RankedRoutingDecision {
     order_index: usize,
     prefix: Vec<RoutedNet>,
     semantic_feedback_labels: Vec<String>,
+}
+
+struct RoutingSearchProgress {
+    started: Instant,
+    last_reported: Instant,
+    best_routed: usize,
+    routing_failures: usize,
+    assembly_failures: usize,
+    contract_failures: usize,
+    verifier_failures: usize,
+}
+
+impl RoutingSearchProgress {
+    const REPORT_INTERVAL: Duration = Duration::from_secs(10);
+
+    fn new() -> Self {
+        let now = Instant::now();
+        Self {
+            started: now,
+            last_reported: now,
+            best_routed: 0,
+            routing_failures: 0,
+            assembly_failures: 0,
+            contract_failures: 0,
+            verifier_failures: 0,
+        }
+    }
+
+    fn observe_routes(&mut self, routed: usize) {
+        self.best_routed = self.best_routed.max(routed);
+    }
+
+    fn maybe_report(
+        &mut self,
+        progress: &GlobalPnrProgress,
+        attempt: usize,
+        total_attempts: usize,
+    ) {
+        if self.last_reported.elapsed() < Self::REPORT_INTERVAL {
+            return;
+        }
+        record_snapshot(SnapshotEvent::RoutingProgress {
+            attempt,
+            total_attempts,
+            best_routes: self.best_routed,
+            routing_failures: self.routing_failures,
+            contract_failures: self.contract_failures,
+            elapsed_ms: duration_ms(self.started.elapsed()),
+        });
+        progress.summary(format!(
+            "routing search progress: attempts={attempt}/{total_attempts} best_routes={} routing_failures={} assembly_failures={} contract_failures={} verifier_failures={} elapsed={:.2?}",
+            self.best_routed,
+            self.routing_failures,
+            self.assembly_failures,
+            self.contract_failures,
+            self.verifier_failures,
+            self.started.elapsed()
+        ));
+        self.last_reported = Instant::now();
+    }
 }
 
 fn reroute_last_source_group(routes: &[RoutedNet]) -> Vec<RoutedNet> {
@@ -324,6 +684,13 @@ fn route_first_successful_placement(
             .saturating_mul(refined_limit);
     let mut previous_scores = Vec::<RankedRoutingDecision>::new();
     let mut attempt_serial = 0usize;
+    let mut routing_progress = RoutingSearchProgress::new();
+    progress.summary(format!(
+        "routing search started: placements={} net_orders={} routing_stages={} max_attempts={total_attempts}",
+        placement_attempts.len(),
+        order_strategies.len(),
+        routing_configs.len()
+    ));
 
     for (routing_index, routing_config) in routing_configs.iter().enumerate() {
         let decisions = if routing_index == 0 || routing_configs.len() == 1 {
@@ -347,7 +714,7 @@ fn route_first_successful_placement(
             let order_index = decision.order_index;
             let placed = &placement_attempts[placement_index];
             let order_strategy = order_strategies[order_index];
-            progress.item(
+            progress.attempt(
                 attempt_serial,
                 total_attempts,
                 format!(
@@ -374,7 +741,9 @@ fn route_first_successful_placement(
                     routed_nets
                 }
                 Err(failure) => {
+                    routing_progress.routing_failures += 1;
                     let routed_count = failure.routed_nets.len();
+                    routing_progress.observe_routes(routed_count);
                     progress.detail(format!(
                         "routing attempt {attempt_serial} exhausted after {routed_count} route(s) in {:.2?}",
                         route_started.elapsed()
@@ -395,22 +764,27 @@ fn route_first_successful_placement(
                         failure.error
                     ));
                     last_error = Some(failure.error);
+                    routing_progress.maybe_report(progress, attempt_serial, total_attempts);
                     continue;
                 }
             };
+            routing_progress.observe_routes(routed_nets.len());
 
             let world = match placed_world_from_routing(module, candidates, placed, &routed_nets) {
                 Ok(world) => world,
                 Err(error) => {
+                    routing_progress.assembly_failures += 1;
                     let error = eyre::eyre!(error);
                     progress.detail(format!(
                         "placement attempt {attempt_serial} failed: {error}"
                     ));
                     last_error = Some(error);
+                    routing_progress.maybe_report(progress, attempt_serial, total_attempts);
                     continue;
                 }
             };
             if let Some(route) = first_invalid_active_route(&world.world, &routed_nets) {
+                routing_progress.contract_failures += 1;
                 let error = eyre::eyre!(
                     "assembled route from {:?} to {:?} does not satisfy its powered-position contract",
                     route.source,
@@ -430,10 +804,12 @@ fn route_first_successful_placement(
                     });
                 }
                 last_error = Some(error);
+                routing_progress.maybe_report(progress, attempt_serial, total_attempts);
                 continue;
             }
             if let Some(verifier) = config.verifier {
                 if let Err(error) = verifier(&world) {
+                    routing_progress.verifier_failures += 1;
                     save_failed_verifier_world(module, attempt_serial, &world, &routed_nets);
                     progress.detail(format!(
                         "placement attempt {attempt_serial} failed verifier: {error}"
@@ -454,18 +830,43 @@ fn route_first_successful_placement(
                         });
                     }
                     last_error = Some(error);
+                    routing_progress.maybe_report(progress, attempt_serial, total_attempts);
                     continue;
                 }
             }
-            progress.detail(format!(
-                "selected placement attempt {attempt_serial} with {} route(s)",
-                routed_nets.len()
+            progress.summary(format!(
+                "routing search completed: selected_attempt={attempt_serial} routes={} attempts={} routing_failures={} assembly_failures={} contract_failures={} verifier_failures={} elapsed={:.2?}",
+                routed_nets.len(),
+                attempt_serial,
+                routing_progress.routing_failures,
+                routing_progress.assembly_failures,
+                routing_progress.contract_failures,
+                routing_progress.verifier_failures,
+                routing_progress.started.elapsed()
             ));
+            record_snapshot(SnapshotEvent::RoutingSummary {
+                selected_attempt: attempt_serial,
+                routes: routed_nets.len(),
+                routing_failures: routing_progress.routing_failures,
+                assembly_failures: routing_progress.assembly_failures,
+                contract_failures: routing_progress.contract_failures,
+                verifier_failures: routing_progress.verifier_failures,
+                elapsed_ms: duration_ms(routing_progress.started.elapsed()),
+            });
             return Ok((placed.clone(), routed_nets));
         }
         previous_scores = next_scores;
     }
 
+    progress.warning(format!(
+        "routing search exhausted: attempts={} routing_failures={} assembly_failures={} contract_failures={} verifier_failures={} elapsed={:.2?}",
+        attempt_serial,
+        routing_progress.routing_failures,
+        routing_progress.assembly_failures,
+        routing_progress.contract_failures,
+        routing_progress.verifier_failures,
+        routing_progress.started.elapsed()
+    ));
     Err(last_error.unwrap_or_else(|| eyre::eyre!("no global placement attempts generated")))
 }
 
@@ -566,8 +967,12 @@ fn place_graph_backed_module(
         .collect();
 
     progress.stage(3, 4, "assemble leaf world");
-    let world = assemble_world(&[candidate], &placed, &[])?;
+    let candidates = vec![candidate];
+    let world = assemble_world(&candidates, &placed, &[])?;
     let placement_bbox_world = placement_bbox_wireframe_world(&placed);
+    let placement_cost =
+        placement_cost_breakdown(module, &candidates, &placed, config.placement.congestion);
+    let weighted_placement_cost = placement_cost.weighted_total(config.placement.cost_weights);
 
     progress.stage(4, 4, "complete");
     Ok(GlobalPnrResult {
@@ -577,6 +982,12 @@ fn place_graph_backed_module(
             outputs: Vec::new(),
         },
         placement_bbox_world,
+        selected_candidates: candidates,
+        placed_modules: placed,
+        routed_nets: Vec::new(),
+        placement_cost,
+        weighted_placement_cost,
+        config_snapshot: global_pnr_config_snapshot(config),
     })
 }
 
@@ -587,8 +998,11 @@ fn generate_child_candidate_pools(
     config: &GlobalPnrConfig,
     progress: &GlobalPnrProgress,
 ) -> eyre::Result<Vec<ChildCandidatePool>> {
+    let started = Instant::now();
     let mut pools = Vec::new();
     let mut cache = ChildCandidateCache::default();
+    let mut reused = 0usize;
+    let mut total_candidates = 0usize;
     for (index, instance) in module.instances.iter().enumerate() {
         progress.item(
             index + 1,
@@ -606,6 +1020,7 @@ fn generate_child_candidate_pools(
             )
         })?;
         if cache_hit {
+            reused += 1;
             progress.detail(format!(
                 "`{instance}` reused structurally identical candidates"
             ));
@@ -620,6 +1035,7 @@ fn generate_child_candidate_pools(
                 "module instance `{instance}` produced no candidates"
             ));
         }
+        total_candidates += child_candidates.len();
         let preferred_index = if graph_module_input_port_count(child) > 1 {
             child_candidates
                 .iter()
@@ -639,6 +1055,21 @@ fn generate_child_candidate_pools(
             preferred_index,
         ));
     }
+    progress.summary(format!(
+        "child candidates completed: instances={} unique={} reused={} candidates={} elapsed={:.2?}",
+        module.instances.len(),
+        module.instances.len().saturating_sub(reused),
+        reused,
+        total_candidates,
+        started.elapsed()
+    ));
+    record_snapshot(SnapshotEvent::CandidateSummary {
+        instances: module.instances.len(),
+        unique: module.instances.len().saturating_sub(reused),
+        reused,
+        candidates: total_candidates,
+        elapsed_ms: duration_ms(started.elapsed()),
+    });
     Ok(pools)
 }
 
@@ -753,7 +1184,8 @@ fn search_layout_combinations(
                     &placed,
                     config.placement.congestion,
                 );
-                progress.detail(format!(
+                let weighted_total = cost.weighted_total(config.placement.cost_weights);
+                progress.summary(format!(
                     "selected placement cost: volume={} xy={} height={} wire={} vertical={} congestion={} weighted_total={}",
                     cost.placement_volume,
                     cost.xy_footprint,
@@ -761,8 +1193,17 @@ fn search_layout_combinations(
                     cost.estimated_wire_length,
                     cost.vertical_distance,
                     cost.routing_congestion,
-                    cost.weighted_total(config.placement.cost_weights),
+                    weighted_total,
                 ));
+                record_snapshot(SnapshotEvent::PlacementCost {
+                    volume: cost.placement_volume,
+                    xy_footprint: cost.xy_footprint,
+                    height: cost.height_span,
+                    wire_length: cost.estimated_wire_length,
+                    vertical_distance: cost.vertical_distance,
+                    congestion: cost.routing_congestion,
+                    weighted_total,
+                });
                 return Ok((candidates, placed, routed_nets));
             }
             Err(error) => {
@@ -832,6 +1273,7 @@ mod tests {
     };
     use crate::graph::GraphNodeKind;
     use crate::nbt::{NBTRoot, ToNBT};
+    use crate::snapshot::{compile_with_snapshot, SnapshotOptions};
     use crate::transform::place_and_route::global_pnr::candidate::d_latch_child_candidate_config;
     use crate::transform::place_and_route::global_pnr::policy::{
         Free3DPlacementConfig, PlacementHeuristic,
@@ -1114,8 +1556,7 @@ mod tests {
     #[ignore = "search-heavy sequential global pnr smoke test"]
     fn counter_module_generates_world_from_child_layout_candidates() -> eyre::Result<()> {
         init_tracing_from_env();
-        let design = lower_design_modules(&parse_modules(
-            r#"
+        let source = r#"
             module counter(clk, q);
               input clk;
               output reg [1:0] q;
@@ -1123,8 +1564,8 @@ mod tests {
                 q <= q + 1;
               end
             endmodule
-            "#,
-        )?)?;
+            "#;
+        let design = lower_design_modules(&parse_modules(source)?)?;
         let sampling_limit = std::env::var("COUNTER_SAMPLING_LIMIT")
             .ok()
             .and_then(|value| value.parse().ok())
@@ -1204,7 +1645,11 @@ mod tests {
             ..Default::default()
         };
 
-        let result = place_and_route_design_with_visualization(&design, &config)?;
+        let result = compile_with_snapshot(
+            SnapshotOptions::new("test/counter.snapshot", "counter")
+                .with_source_text("counter.v", source),
+            || place_and_route_design_with_visualization(&design, &config),
+        )?;
         let placed = result.placed_world;
 
         assert!(!placed.world.iter_block().is_empty());
@@ -1229,9 +1674,7 @@ mod tests {
     }
 
     fn init_tracing_from_env() {
-        let Some(level) = rust_log_level() else {
-            return;
-        };
+        let level = rust_log_level().unwrap_or(tracing::Level::INFO);
         let _ = tracing_subscriber::fmt().with_max_level(level).try_init();
     }
 

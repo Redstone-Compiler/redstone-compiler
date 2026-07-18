@@ -395,7 +395,7 @@ impl Simulator {
             max_events: Some(max_events),
         };
 
-        tracing::info!("Simulation target\n{:?}", sim.world);
+        tracing::trace!("Simulation target\n{:?}", sim.world);
 
         sim.queue.push_back(VecDeque::new());
         sim.world.initialize_redstone_states();
@@ -430,7 +430,7 @@ impl Simulator {
             max_events: Some(max_events),
         };
 
-        tracing::info!("Simulation target\n{:?}", sim.world);
+        tracing::trace!("Simulation target\n{:?}", sim.world);
 
         sim.queue.push_back(VecDeque::new());
         sim.world.initialize_redstone_states();
@@ -460,7 +460,7 @@ impl Simulator {
     ) -> eyre::Result<Self> {
         let mut sim = Self::new(world, trace_limit);
 
-        tracing::info!("Simulation target\n{:?}", sim.world);
+        tracing::trace!("Simulation target\n{:?}", sim.world);
 
         sim.queue.push_back(VecDeque::new());
         sim.world.initialize_redstone_states();
@@ -800,7 +800,7 @@ impl Simulator {
                 self.consume_events(limits.max_events, &mut local_events)?;
                 local_cycle += 1;
                 self.record_snapshot();
-                tracing::info!("simulator cycle: {local_cycle}/{}", self.cycle);
+                tracing::debug!("simulator cycle: {local_cycle}/{}", self.cycle);
             }
 
             if !self.normalize_signal_levels() {
@@ -1307,7 +1307,7 @@ impl Simulator {
             return Ok(());
         }
 
-        tracing::info!("trigger cobble event: {event:?}, {block:?}");
+        tracing::trace!("trigger cobble event: {event:?}, {block:?}");
 
         let events = event
             .target_position
@@ -1413,7 +1413,7 @@ impl Simulator {
                 if *on_count == 1 {
                     *strength = 15;
 
-                    tracing::info!("trigger redstone event: {event:?}, {block:?}");
+                    tracing::trace!("trigger redstone event: {event:?}, {block:?}");
 
                     propagate_targets.into_iter().for_each(|pos| {
                         self.push_event_to_current_tick(Event {
@@ -1462,7 +1462,7 @@ impl Simulator {
                 if *on_count == 0 {
                     *strength = 0;
 
-                    tracing::info!("trigger redstone event: {event:?}, {block:?}");
+                    tracing::trace!("trigger redstone event: {event:?}, {block:?}");
 
                     propagate_targets.into_iter().for_each(|pos| {
                         self.push_event_to_current_tick(Event {
@@ -1540,7 +1540,7 @@ impl Simulator {
                         }
                     });
 
-                    tracing::info!("trigger redstone event: {event:?}, {block:?}");
+                    tracing::trace!("trigger redstone event: {event:?}, {block:?}");
                 }
             }
             EventType::RedstoneOff => {
@@ -1624,7 +1624,7 @@ impl Simulator {
                     });
                 }
 
-                tracing::info!("trigger redstone event: {event:?}, {block:?}");
+                tracing::trace!("trigger redstone event: {event:?}, {block:?}");
             }
         };
 
@@ -1705,7 +1705,7 @@ impl Simulator {
             self.push_event_to_next_tick(event);
         });
 
-        tracing::info!("trigger torch event: {event:?}, {block:?}");
+        tracing::trace!("trigger torch event: {event:?}, {block:?}");
 
         Ok(())
     }
@@ -1760,7 +1760,7 @@ impl Simulator {
                     if !is_locked {
                         block.kind.set_repeater_lock(true)?;
 
-                        tracing::info!("trigger repeater event: {event:?}, {block:?}");
+                        tracing::trace!("trigger repeater event: {event:?}, {block:?}");
                     }
                 } else {
                     self.push_event_to_next_tick(Event {
@@ -1780,7 +1780,7 @@ impl Simulator {
                     if is_locked {
                         block.kind.set_repeater_lock(false)?;
 
-                        tracing::info!("trigger repeater event: {event:?}, {block:?}");
+                        tracing::trace!("trigger repeater event: {event:?}, {block:?}");
                     }
                 } else {
                     self.push_event_to_next_tick(Event {
@@ -1817,7 +1817,7 @@ impl Simulator {
                         });
                     }
 
-                    tracing::info!("trigger repeater event: {event:?}, {block:?}");
+                    tracing::trace!("trigger repeater event: {event:?}, {block:?}");
                 }
             }
             EventType::RepeaterOff { delay } => {
@@ -1844,7 +1844,7 @@ impl Simulator {
                         });
                     }
 
-                    tracing::info!("trigger repeater event: {event:?}, {block:?}");
+                    tracing::trace!("trigger repeater event: {event:?}, {block:?}");
                 }
             }
         }
