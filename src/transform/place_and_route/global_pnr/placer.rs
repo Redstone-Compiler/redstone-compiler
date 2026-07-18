@@ -177,11 +177,16 @@ impl PlacementConnectivity {
             .enumerate()
             .map(|(index, candidate)| (candidate.module_name.as_str(), index))
             .collect::<HashMap<_, _>>();
-        self.proximity_edges
+        // Free3D historically derives its attraction springs from routed
+        // instance-to-instance variables only. `proximity_edges` additionally
+        // contains a clique between the sinks of a top-level fanout net; using
+        // that here changes seeded placements during the typed-topology
+        // migration and can promote substantially more expensive routes.
+        self.connections
             .iter()
-            .filter_map(|(left, right)| {
-                let left = *by_name.get(left.as_str())?;
-                let right = *by_name.get(right.as_str())?;
+            .filter_map(|connection| {
+                let left = *by_name.get(connection.source_instance.as_str())?;
+                let right = *by_name.get(connection.target_instance.as_str())?;
                 (left != right).then_some((left, right))
             })
             .collect()
@@ -1816,6 +1821,32 @@ mod tests {
 
         assert!(!shelf_only.is_empty());
         assert!(shelf_only.len() < shelf_and_grid.len());
+    }
+
+    #[test]
+    fn free_3d_springs_exclude_top_input_fanout_proximity_edges() {
+        let candidates = vec![
+            test_candidate("source", &[]),
+            test_candidate("first_sink", &[]),
+            test_candidate("second_sink", &[]),
+        ];
+        let connectivity = PlacementConnectivity {
+            connections: vec![PlacementConnection {
+                source_instance: "source".to_owned(),
+                source_port: "q".to_owned(),
+                target_instance: "first_sink".to_owned(),
+                target_port: "d".to_owned(),
+            }],
+            // This edge represents two sinks sharing a top-level input. It is
+            // useful to placement cost/order, but was never a Free3D spring in
+            // the legacy GraphModule path.
+            proximity_edges: vec![
+                ("source".to_owned(), "first_sink".to_owned()),
+                ("first_sink".to_owned(), "second_sink".to_owned()),
+            ],
+        };
+
+        assert_eq!(connectivity.candidate_edges(&candidates), vec![(0, 1)]);
     }
 
     #[test]
