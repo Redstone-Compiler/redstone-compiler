@@ -436,7 +436,12 @@ deduplicated local candidate sets. Snapshot archives persist both, so a later
 run can change global placement, routing, and search settings without invoking
 the local placer again.
 
-The current placement and routing algorithms still execute through the legacy
-`GraphModule` connectivity representation. The typed topology is resolved,
-validated, archived, and used for stable snapshot identities, but making it
-the algorithms' sole connectivity source remains the next migration step.
+Global routing connectivity now originates from the resolved topology. A small
+`GraphModule` adapter is materialized from typed nets only because the current
+physical router implementation still consumes that shape internally. Every
+physical route branch carries its `NetId` and typed source/sink endpoints, so
+snapshots and diagnostics no longer need to recover identity from labels.
+
+Placement cost estimation and several feedback heuristics still inspect the
+legacy module shape. Migrating those consumers, followed by removing the
+router adapter itself, is the next IR-boundary milestone.

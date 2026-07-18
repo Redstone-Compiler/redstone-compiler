@@ -42,7 +42,7 @@ use crate::transform::place_and_route::global_pnr::policy::{
 use crate::transform::place_and_route::global_pnr::progress::GlobalPnrProgress;
 use crate::transform::place_and_route::global_pnr::router::{
     collect_module_input_endpoints, collect_module_output_endpoints, first_invalid_active_route,
-    route_module_variables_with_order_from_prefix, GlobalRoutingConfig, NetOrderStrategy,
+    route_resolved_topology_with_order_from_prefix, GlobalRoutingConfig, NetOrderStrategy,
     RoutedNet,
 };
 use crate::transform::place_and_route::global_pnr::search::{
@@ -371,19 +371,27 @@ impl SnapshotProduct for GlobalPnrResult {
             .enumerate()
             .map(|(index, route)| {
                 let resolved_net = route
-                    .source_label
-                    .as_deref()
-                    .and_then(|label| self.topology.net_by_driver_label(label));
-                let resolved_sink = resolved_net.and_then(|net| {
-                    route
-                        .sink_label
-                        .as_deref()
-                        .and_then(|label| self.topology.sink_by_label(net, label))
+                    .net_id
+                    .and_then(|id| self.topology.nets.get(id.0))
+                    .or_else(|| {
+                        route
+                            .source_label
+                            .as_deref()
+                            .and_then(|label| self.topology.net_by_driver_label(label))
+                    });
+                let resolved_sink = route.sink_endpoint.as_ref().or_else(|| {
+                    resolved_net.and_then(|net| {
+                        route
+                            .sink_label
+                            .as_deref()
+                            .and_then(|label| self.topology.sink_by_label(net, label))
+                    })
                 });
                 json!({
                     "index": index,
                     "net_id": resolved_net.map(|net| net.id.0),
                     "net_key": resolved_net.map(|net| &net.key),
+                    "source_endpoint": route.source_endpoint,
                     "sink_endpoint": resolved_sink,
                     "source_label": route.source_label,
                     "sink_label": route.sink_label,
@@ -828,8 +836,13 @@ pub fn run_prepared_pnr_with_visualization(
         prepared.ranked_candidate_pools(config.search.budget.max_candidates_per_child);
 
     progress.stage(2, 4, "search child layouts, placements, and routes");
-    let (candidates, placed, routed_nets) =
-        search_layout_combinations(module, &candidate_pools, config, &progress)?;
+    let (candidates, placed, routed_nets) = search_layout_combinations(
+        &prepared.topology,
+        module,
+        &candidate_pools,
+        config,
+        &progress,
+    )?;
 
     progress.stage(3, 4, "assemble world and collect outputs");
     let inputs = collect_module_input_endpoints(module, &routed_nets);
@@ -1072,6 +1085,7 @@ fn reroute_untried_source_groups(
 }
 
 fn route_first_successful_placement(
+    topology: &ResolvedPnrTopology,
     module: &GraphModule,
     candidates: &[LayoutCandidate],
     placement_attempts: Vec<Vec<PlacedModule>>,
@@ -1177,8 +1191,8 @@ fn route_first_successful_placement(
                 ),
             );
             let route_started = Instant::now();
-            let routed_nets = match route_module_variables_with_order_from_prefix(
-                module,
+            let routed_nets = match route_resolved_topology_with_order_from_prefix(
+                topology,
                 candidates,
                 placed,
                 routing_config,
@@ -1644,6 +1658,7 @@ fn modules_have_same_candidate_shape(left: &GraphModule, right: &GraphModule) ->
 }
 
 fn search_layout_combinations(
+    topology: &ResolvedPnrTopology,
     module: &GraphModule,
     pools: &[ChildCandidatePool],
     config: &GlobalPnrConfig,
@@ -1673,6 +1688,7 @@ fn search_layout_combinations(
             placement_attempts.len()
         ));
         match route_first_successful_placement(
+            topology,
             module,
             &candidates,
             placement_attempts,
@@ -2304,6 +2320,17 @@ mod tests {
         let routable: RoutableDesign = routable_source.parse()?;
         assert_eq!(routable.top, "counter");
         assert!(routable.modules.len() > 1);
+        assert!(result
+            .routed_nets
+            .iter()
+            .all(|route| route.net_id.is_some() && route.source_endpoint.is_some()));
+        assert!(result.routed_nets.iter().all(|route| {
+            route
+                .sink_label
+                .as_deref()
+                .is_some_and(|label| label.ends_with(".switch"))
+                || route.sink_endpoint.is_some()
+        }));
         let placed = result.placed_world;
 
         assert!(!placed.world.iter_block().is_empty());
