@@ -15,6 +15,7 @@ use crate::ir::RoutableDesign;
 use crate::nbt::{NBTRoot, ToNBT};
 use crate::snapshot::{emit_json, emit_nbt as snapshot_emit_nbt};
 use crate::transform::place_and_route::global_pnr::topology::ResolvedPnrTopology;
+use crate::transform::place_and_route::global_pnr::ResolvedPhysicalIntent;
 use crate::world::position::Position;
 use crate::world::World3D;
 
@@ -166,6 +167,13 @@ pub fn load_prepared_pnr_snapshot(
     let routable: RoutableDesign = routable_source.parse()?;
     let topology = ResolvedPnrTopology::from_routable(&routable)?;
     let graph_design = routable.to_graph_module_design()?;
+    let snapshot_intent = source
+        .read_optional("intent/resolved.json")?
+        .map(|bytes| serde_json::from_slice::<ResolvedPhysicalIntent>(&bytes))
+        .transpose()?;
+    if let Some(intent) = &snapshot_intent {
+        intent.validate(&topology)?;
+    }
     let manifest: CandidateLibraryManifest =
         serde_json::from_slice(&source.read("candidates/index.json")?)?;
     if manifest.format != CANDIDATE_LIBRARY_FORMAT {
@@ -264,6 +272,7 @@ pub fn load_prepared_pnr_snapshot(
         prepare_config: config.clone(),
         body,
         summary: manifest.summary,
+        snapshot_intent,
     })
 }
 
@@ -303,6 +312,27 @@ impl SnapshotSource {
                 entry.read_to_end(&mut bytes)?;
                 Ok(bytes)
             }
+        }
+    }
+
+    fn read_optional(&mut self, relative_path: &str) -> eyre::Result<Option<Vec<u8>>> {
+        match self {
+            Self::Directory(root) => {
+                let path = root.join(relative_path);
+                if !path.is_file() {
+                    return Ok(None);
+                }
+                Ok(Some(std::fs::read(path)?))
+            }
+            Self::Archive(archive) => match archive.by_name(relative_path) {
+                Ok(mut entry) => {
+                    let mut bytes = Vec::new();
+                    entry.read_to_end(&mut bytes)?;
+                    Ok(Some(bytes))
+                }
+                Err(zip::result::ZipError::FileNotFound) => Ok(None),
+                Err(error) => Err(error.into()),
+            },
         }
     }
 }

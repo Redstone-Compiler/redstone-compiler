@@ -3,11 +3,12 @@ use std::path::PathBuf;
 use mimalloc::MiMalloc;
 use redstone_compiler::ir::{CircuitIr, LogicalDesign};
 use redstone_compiler::snapshot::{compile_with_snapshot, SnapshotOptions};
+use redstone_compiler::transform::place_and_route::global_pnr::topology::ResolvedPnrTopology;
 use redstone_compiler::transform::place_and_route::global_pnr::{
     emit_prepared_pnr_snapshot, load_prepared_pnr_snapshot,
     place_and_route_logical_design_with_visualization,
     place_and_route_routable_design_with_visualization, run_prepared_pnr_with_visualization,
-    GlobalPnrConfig, PnrPrepareConfig,
+    GlobalPnrConfig, PhysicalIntent, PnrPrepareConfig,
 };
 use structopt::StructOpt;
 
@@ -22,6 +23,10 @@ pub struct CompilerOption {
 
     #[structopt(parse(from_os_str))]
     pub output: Option<PathBuf>,
+
+    /// Optional per-design floorplan and routing intent.
+    #[structopt(long, parse(from_os_str))]
+    pub intent: Option<PathBuf>,
 }
 
 fn main() -> eyre::Result<()> {
@@ -37,24 +42,35 @@ fn main() -> eyre::Result<()> {
 }
 
 fn replay_snapshot_input(opt: CompilerOption) -> eyre::Result<()> {
-    let config = GlobalPnrConfig::default();
-    let prepare_config = PnrPrepareConfig::from(&config);
+    let base_config = GlobalPnrConfig::default();
+    let prepare_config = PnrPrepareConfig::from(&base_config);
     let Some(output) = opt.output else {
         let prepared = load_prepared_pnr_snapshot(&opt.input, &prepare_config)?;
+        let (explicit_intent, _) =
+            bind_physical_intent(opt.intent.as_deref(), prepared.topology())?;
+        let active_intent = explicit_intent
+            .as_ref()
+            .or_else(|| prepared.snapshot_intent());
         println!(
-            "loaded prepared PnR: module={} instances={} candidate_sets={} candidates={}",
+            "loaded prepared PnR: module={} instances={} candidate_sets={} candidates={} constraints={}",
             prepared.module_name(),
             prepared.summary().instances,
             prepared.summary().unique_candidate_sets,
             prepared.summary().candidates,
+            active_intent.map_or(0, |intent| intent.constraints.len()),
         );
         return Ok(());
     };
 
     let (snapshot_dir, snapshot_archive, options) =
         snapshot_options_without_source(&opt.input, &output);
+    let prepared = load_prepared_pnr_snapshot(&opt.input, &prepare_config)?;
+    let (physical_intent, intent_source) =
+        bind_physical_intent(opt.intent.as_deref(), prepared.topology())?;
+    let mut config = base_config;
+    config.physical_intent = physical_intent.or_else(|| prepared.snapshot_intent().cloned());
     compile_with_snapshot(options, || {
-        let prepared = load_prepared_pnr_snapshot(&opt.input, &prepare_config)?;
+        emit_intent_source(intent_source.as_ref())?;
         emit_prepared_pnr_snapshot(&prepared)?;
         run_prepared_pnr_with_visualization(&prepared, &config)
     })?;
@@ -94,8 +110,14 @@ fn compile_verilog_input(opt: CompilerOption) -> eyre::Result<()> {
     };
 
     let (snapshot_dir, snapshot_archive, options) = snapshot_options(&opt.input, &output);
+    let routable = logical.lower_to_routable()?;
+    let topology = ResolvedPnrTopology::from_routable(&routable)?;
+    let (physical_intent, intent_source) = bind_physical_intent(opt.intent.as_deref(), &topology)?;
+    let mut config = GlobalPnrConfig::default();
+    config.physical_intent = physical_intent;
     compile_with_snapshot(options, || {
-        place_and_route_logical_design_with_visualization(&logical, &GlobalPnrConfig::default())
+        emit_intent_source(intent_source.as_ref())?;
+        place_and_route_logical_design_with_visualization(&logical, &config)
     })?;
 
     println!("exported Verilog snapshot: path={}", snapshot_dir.display());
@@ -128,12 +150,22 @@ fn compile_rcir_input(opt: CompilerOption) -> eyre::Result<()> {
     };
 
     let (snapshot_dir, snapshot_archive, options) = snapshot_options(&opt.input, &output);
+    let routable = match &ir {
+        CircuitIr::Logical(design) => design.lower_to_routable()?,
+        CircuitIr::Routable(design) => design.clone(),
+    };
+    let topology = ResolvedPnrTopology::from_routable(&routable)?;
+    let (physical_intent, intent_source) = bind_physical_intent(opt.intent.as_deref(), &topology)?;
+    let mut config = GlobalPnrConfig::default();
+    config.physical_intent = physical_intent;
     match &ir {
         CircuitIr::Logical(design) => compile_with_snapshot(options, || {
-            place_and_route_logical_design_with_visualization(design, &GlobalPnrConfig::default())
+            emit_intent_source(intent_source.as_ref())?;
+            place_and_route_logical_design_with_visualization(design, &config)
         })?,
         CircuitIr::Routable(design) => compile_with_snapshot(options, || {
-            place_and_route_routable_design_with_visualization(design, &GlobalPnrConfig::default())
+            emit_intent_source(intent_source.as_ref())?;
+            place_and_route_routable_design_with_visualization(design, &config)
         })?,
     };
 
@@ -159,6 +191,34 @@ fn snapshot_options(
         .to_owned();
     let options = SnapshotOptions::new(&snapshot_dir, design_name).with_source(input);
     (snapshot_dir, snapshot_archive, options)
+}
+
+fn bind_physical_intent(
+    path: Option<&std::path::Path>,
+    topology: &ResolvedPnrTopology,
+) -> eyre::Result<(
+    Option<redstone_compiler::transform::place_and_route::global_pnr::ResolvedPhysicalIntent>,
+    Option<(String, String)>,
+)> {
+    let Some(path) = path else {
+        return Ok((None, None));
+    };
+    let source = std::fs::read_to_string(path)?;
+    let intent: PhysicalIntent = source.parse()?;
+    let resolved = intent.bind(topology)?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("design.rclayout")
+        .to_owned();
+    Ok((Some(resolved), Some((file_name, source))))
+}
+
+fn emit_intent_source(source: Option<&(String, String)>) -> eyre::Result<()> {
+    if let Some((file_name, source)) = source {
+        redstone_compiler::snapshot::emit_text(format!("intent/{file_name}"), source.clone())?;
+    }
+    Ok(())
 }
 
 fn snapshot_options_without_source(

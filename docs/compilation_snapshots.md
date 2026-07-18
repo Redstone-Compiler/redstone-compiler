@@ -27,6 +27,10 @@ counter.snapshot/
 |-- routes/
 |   |-- routes.nbt
 |   `-- routes.json
+|-- intent/
+|   |-- <source>.rclayout
+|   |-- resolved.json
+|   `-- report.json
 `-- pnr/
     |-- config.json
     |-- preparation.json
@@ -107,3 +111,5 @@ redstone-compiler build/design.rsnap build/design-rerun.snapshot
 
 Candidate-affecting settings must match the preparation fingerprint. Placement,
 routing, and global search settings may change without regenerating candidates.
+When a snapshot contains resolved physical intent, replay reuses it unless a
+new `--intent` file is supplied explicitly.

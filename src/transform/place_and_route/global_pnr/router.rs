@@ -12,6 +12,7 @@ use crate::transform::place_and_route::global_pnr::assembly::reset_dynamic_power
 use crate::transform::place_and_route::global_pnr::ir::{
     LayoutCandidate, PhysicalPort, PhysicalPortDirection,
 };
+use crate::transform::place_and_route::global_pnr::physical_intent::ResolvedPhysicalIntent;
 use crate::transform::place_and_route::global_pnr::placer::PlacedModule;
 use crate::transform::place_and_route::global_pnr::progress::GlobalPnrProgress;
 use crate::transform::place_and_route::global_pnr::topology::{
@@ -214,6 +215,7 @@ impl RoutedNet {
 /// display labels after routing.
 pub fn route_resolved_topology_with_order_from_prefix(
     topology: &ResolvedPnrTopology,
+    intent: Option<&ResolvedPhysicalIntent>,
     candidates: &[LayoutCandidate],
     placed_modules: &[PlacedModule],
     config: &GlobalRoutingConfig,
@@ -229,6 +231,7 @@ pub fn route_resolved_topology_with_order_from_prefix(
         })?;
     match route_module_variables_with_order_from_prefix_impl(
         Some(topology),
+        intent,
         &module,
         candidates,
         placed_modules,
@@ -396,6 +399,7 @@ pub fn route_module_variables_with_order_from_prefix(
 ) -> Result<Vec<RoutedNet>, PartialRoutingFailure> {
     route_module_variables_with_order_from_prefix_impl(
         None,
+        None,
         module,
         candidates,
         placed_modules,
@@ -408,6 +412,7 @@ pub fn route_module_variables_with_order_from_prefix(
 
 fn route_module_variables_with_order_from_prefix_impl(
     topology: Option<&ResolvedPnrTopology>,
+    intent: Option<&ResolvedPhysicalIntent>,
     module: &GraphModule,
     candidates: &[LayoutCandidate],
     placed_modules: &[PlacedModule],
@@ -444,7 +449,18 @@ fn route_module_variables_with_order_from_prefix_impl(
         .iter()
         .filter_map(|route| Some((route.net_id?, route.sink_endpoint.clone()?)))
         .collect::<HashSet<_>>();
-    let vars = ordered_module_variables(&module.vars, order_strategy)
+    let mut ordered_vars = ordered_module_variables(&module.vars, order_strategy);
+    if let (Some(topology), Some(intent)) = (topology, intent) {
+        ordered_vars.sort_by_key(|var| {
+            let label = format!("{}.{}", var.source.0, var.source.1);
+            std::cmp::Reverse(
+                topology
+                    .net_by_driver_label(&label)
+                    .map_or(0, |net| intent.net_priority(net.id)),
+            )
+        });
+    }
+    let vars = ordered_vars
         .into_iter()
         .filter(|var| {
             if let Some(connection) = topology.and_then(|topology| {
@@ -5027,6 +5043,7 @@ mod tests {
 
         let routes = route_resolved_topology_with_order_from_prefix(
             &topology,
+            None,
             &candidates,
             &placed,
             &GlobalRoutingConfig::default(),

@@ -3,6 +3,7 @@ pub mod candidate;
 pub mod diagnostics;
 mod free_3d;
 pub mod ir;
+pub mod physical_intent;
 pub mod placer;
 pub mod policy;
 mod prepared_snapshot;
@@ -32,6 +33,9 @@ use crate::transform::place_and_route::global_pnr::candidate::{
     generate_graph_module_candidates_with_progress_label, UnitCandidateConfig,
 };
 use crate::transform::place_and_route::global_pnr::ir::{LayoutCandidate, PhysicalPortDirection};
+pub use crate::transform::place_and_route::global_pnr::physical_intent::{
+    ConstraintSatisfaction, PhysicalIntent, ResolvedPhysicalIntent,
+};
 use crate::transform::place_and_route::global_pnr::placer::{
     place_candidates_on_shelves, placement_candidates_resolved, placement_cost_breakdown_resolved,
     GlobalPlacementConfig, PlacedModule,
@@ -70,6 +74,9 @@ pub struct GlobalPnrConfig {
     pub search: GlobalSearchConfig,
     pub show_progress: bool,
     pub verifier: Option<fn(&PlacedWorld) -> eyre::Result<()>>,
+    /// Optional per-design physical constraints resolved against the stable
+    /// typed topology. Search knobs remain separate from this design intent.
+    pub physical_intent: Option<ResolvedPhysicalIntent>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -145,6 +152,7 @@ pub struct PreparedPnrDesign {
     prepare_config: PnrPrepareConfig,
     body: PreparedPnrBody,
     summary: PnrPreparationSummary,
+    snapshot_intent: Option<ResolvedPhysicalIntent>,
 }
 
 impl PreparedPnrDesign {
@@ -158,6 +166,10 @@ impl PreparedPnrDesign {
 
     pub fn topology(&self) -> &ResolvedPnrTopology {
         &self.topology
+    }
+
+    pub fn snapshot_intent(&self) -> Option<&ResolvedPhysicalIntent> {
+        self.snapshot_intent.as_ref()
     }
 
     /// A deterministic, migration-only observation point for candidate and
@@ -278,6 +290,8 @@ pub struct GlobalPnrResult {
         crate::transform::place_and_route::global_pnr::policy::PlacementCostBreakdown,
     pub weighted_placement_cost: usize,
     pub config_snapshot: Value,
+    pub physical_intent: Option<ResolvedPhysicalIntent>,
+    pub constraint_report: Vec<ConstraintSatisfaction>,
 }
 
 impl SnapshotProduct for GlobalPnrResult {
@@ -295,6 +309,10 @@ impl SnapshotProduct for GlobalPnrResult {
             }),
         )?;
         emit_json("pnr/config.json", self.config_snapshot.clone())?;
+        if let Some(intent) = &self.physical_intent {
+            emit_json("intent/resolved.json", intent)?;
+            emit_json("intent/report.json", &self.constraint_report)?;
+        }
 
         for (index, placed) in self.placed_modules.iter().enumerate() {
             let Some(candidate) = self.selected_candidates.get(placed.candidate_index) else {
@@ -440,6 +458,11 @@ impl SnapshotProduct for GlobalPnrResult {
                     "definitions": self.topology.definitions.len(),
                     "instances": self.topology.instances.len(),
                     "nets": self.topology.nets.len(),
+                },
+                "physical_intent": {
+                    "constraints": self.physical_intent.as_ref().map_or(0, |intent| intent.constraints.len()),
+                    "satisfied": self.constraint_report.iter().filter(|item| matches!(item.status, physical_intent::ConstraintStatus::Satisfied)).count(),
+                    "violated": self.constraint_report.iter().filter(|item| matches!(item.status, physical_intent::ConstraintStatus::Violated)).count(),
                 },
                 "placement": {
                     "instances": self.placed_modules.len(),
@@ -587,6 +610,11 @@ fn global_pnr_config_snapshot(config: &GlobalPnrConfig) -> Value {
         },
         "show_progress": config.show_progress,
         "verifier_enabled": config.verifier.is_some(),
+        "physical_intent": config.physical_intent.as_ref().map(|intent| json!({
+            "design": intent.design,
+            "regions": intent.regions.len(),
+            "constraints": intent.constraints.len(),
+        })),
     })
 }
 
@@ -601,6 +629,7 @@ impl Default for GlobalPnrConfig {
             search: GlobalSearchConfig::default(),
             show_progress: true,
             verifier: None,
+            physical_intent: None,
         }
     }
 }
@@ -776,6 +805,7 @@ fn prepare_module_with_topology(
             prepare_config: config.clone(),
             body: PreparedPnrBody::Leaf { candidates },
             summary,
+            snapshot_intent: None,
         };
         emit_prepared_pnr_snapshot(&prepared)?;
         return Ok(prepared);
@@ -794,6 +824,7 @@ fn prepare_module_with_topology(
             instance_bindings,
         },
         summary,
+        snapshot_intent: None,
     };
     emit_prepared_pnr_snapshot(&prepared)?;
     Ok(prepared)
@@ -813,6 +844,9 @@ pub fn run_prepared_pnr_with_visualization(
     config: &GlobalPnrConfig,
 ) -> eyre::Result<GlobalPnrResult> {
     prepared.ensure_compatible(config)?;
+    if let Some(intent) = &config.physical_intent {
+        intent.validate(&prepared.topology)?;
+    }
     let started = Instant::now();
     let module = &prepared.module;
     let progress = GlobalPnrProgress::new(config.show_progress, module.name.clone());
@@ -851,6 +885,12 @@ pub fn run_prepared_pnr_with_visualization(
         config.placement.congestion,
     )?;
     let weighted_placement_cost = placement_cost.weighted_total(config.placement.cost_weights);
+    let constraint_report = config
+        .physical_intent
+        .as_ref()
+        .map_or_else(Vec::new, |intent| {
+            intent.evaluate(&prepared.topology, &candidates, &placed, &routed_nets)
+        });
 
     progress.stage(4, 4, "complete");
     progress.summary(format!(
@@ -871,6 +911,8 @@ pub fn run_prepared_pnr_with_visualization(
         placement_cost,
         weighted_placement_cost,
         config_snapshot: global_pnr_config_snapshot(config),
+        physical_intent: config.physical_intent.clone(),
+        constraint_report,
     })
 }
 
@@ -1209,6 +1251,7 @@ fn route_first_successful_placement(
             let route_started = Instant::now();
             let routed_nets = match route_resolved_topology_with_order_from_prefix(
                 topology,
+                config.physical_intent.as_ref(),
                 candidates,
                 placed,
                 routing_config,
@@ -1252,6 +1295,28 @@ fn route_first_successful_placement(
                 }
             };
             routing_progress.observe_routes(routed_nets.len());
+
+            if let Some(intent) = &config.physical_intent
+                && let Err(error) = intent.validate_routes(&routed_nets)
+            {
+                routing_progress.contract_failures += 1;
+                if routing_index + 1 < routing_configs.len() {
+                    next_scores.push(RankedRoutingDecision {
+                        routed_count: routed_nets.len(),
+                        sequence: next_scores.len(),
+                        placement_index,
+                        order_index,
+                        prefix: Vec::new(),
+                        semantic_feedback_nets: decision.semantic_feedback_nets.clone(),
+                    });
+                }
+                progress.detail(format!(
+                    "routing attempt {attempt_serial} violated physical intent: {error}"
+                ));
+                last_error = Some(error);
+                routing_progress.maybe_report(progress, attempt_serial, total_attempts);
+                continue;
+            }
 
             let world = match placed_world_from_routing(topology, candidates, placed, &routed_nets)
             {
@@ -1465,6 +1530,12 @@ fn run_prepared_leaf(
         config.placement.congestion,
     )?;
     let weighted_placement_cost = placement_cost.weighted_total(config.placement.cost_weights);
+    let constraint_report = config
+        .physical_intent
+        .as_ref()
+        .map_or_else(Vec::new, |intent| {
+            intent.evaluate(topology, &candidates, &placed, &[])
+        });
 
     progress.stage(4, 4, "complete");
     progress.summary(format!(
@@ -1485,6 +1556,8 @@ fn run_prepared_leaf(
         placement_cost,
         weighted_placement_cost,
         config_snapshot: global_pnr_config_snapshot(config),
+        physical_intent: config.physical_intent.clone(),
+        constraint_report,
     })
 }
 
@@ -1704,6 +1777,7 @@ fn search_layout_combinations(
             .context("invalid child layout combination")?;
         let placement_attempts = placement_candidates_resolved(
             topology,
+            config.physical_intent.as_ref(),
             &candidates,
             &config.placement,
             &config.search.policies.placement_heuristics,
@@ -2076,6 +2150,12 @@ mod tests {
                 ..Default::default()
             },
             show_progress: false,
+            physical_intent: Some(ResolvedPhysicalIntent {
+                format: physical_intent::PHYSICAL_INTENT_FORMAT.to_owned(),
+                design: "prepared_snapshot_top".to_owned(),
+                regions: Default::default(),
+                constraints: Vec::new(),
+            }),
             ..Default::default()
         };
         let prepare_config = PnrPrepareConfig::from(&config);
@@ -2085,8 +2165,10 @@ mod tests {
             || place_and_route_design_with_visualization(&design, &config),
         )?;
         let from_directory = load_prepared_pnr_snapshot(&output, &prepare_config)?;
+        assert!(from_directory.snapshot_intent().is_some());
         let directory_result = run_prepared_pnr_with_visualization(&from_directory, &config)?;
         let from_archive = load_prepared_pnr_snapshot(&archive, &prepare_config)?;
+        assert!(from_archive.snapshot_intent().is_some());
         let archive_result = run_prepared_pnr_with_visualization(&from_archive, &config)?;
 
         let expected_candidate = candidate_parity_hash(&original.selected_candidates[0]);

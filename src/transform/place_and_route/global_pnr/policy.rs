@@ -229,6 +229,7 @@ impl GlobalPnrPreset {
             search: self.search_config(),
             show_progress: true,
             verifier: None,
+            physical_intent: None,
         };
         if self == Self::Thorough {
             config.placement.cost_weights.routing_congestion = 4;

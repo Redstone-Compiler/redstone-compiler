@@ -4,11 +4,28 @@
 
 This document records the design direction for human-authored physical intent,
 reusable local-cell layout recipes, and the physical representations produced by
-placement and routing. It is exploratory design guidance, not an implemented or
-versioned public format.
+placement and routing.
 
-The syntax examples are illustrative. They exist to make semantics concrete;
-they do not reserve keywords or establish a parser contract.
+An initial, deliberately small `rclayout 1` subset is implemented:
+
+```text
+rclayout 1;
+for design counter;
+
+region state = box x 0..63 y 0..47 z 2..9;
+region clock_keepout = box x 24..31 y 0..47 z 0..9;
+require instance q_0_master inside state;
+require instance q_0_master layer 2..6;
+lock instance q_0_slave at 20 10 4;
+priority net clk 100;
+require net clk avoid clock_keepout;
+```
+
+Pass the file with `--intent design.rclayout`. Hard placement constraints are
+applied before routing, net priority affects routing order, and hard avoid
+regions reject intersecting routes. Source, resolved constraints, and a
+satisfaction report are stored under `intent/` in the snapshot. Larger syntax
+examples below remain exploratory and are not all accepted by the parser.
 
 ## Decision summary
 

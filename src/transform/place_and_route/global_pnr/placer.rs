@@ -1,9 +1,14 @@
 use std::collections::{HashMap, HashSet};
 
+use eyre::ContextCompat;
+
 use crate::graph::module::{GraphModule, GraphModulePortTarget};
 use crate::transform::place_and_route::estimate::BoundingBox;
 use crate::transform::place_and_route::global_pnr::free_3d::place_free_3d;
 use crate::transform::place_and_route::global_pnr::ir::LayoutCandidate;
+use crate::transform::place_and_route::global_pnr::physical_intent::{
+    ResolvedPhysicalConstraint, ResolvedPhysicalIntent,
+};
 use crate::transform::place_and_route::global_pnr::policy::{
     LayerAssignmentStrategy, LayeredPlacementConfig, PlacementCostBreakdown, PlacementCostWeights,
     PlacementHeuristic, RoutingCongestionConfig,
@@ -209,14 +214,209 @@ pub fn placement_candidates(
 
 pub fn placement_candidates_resolved(
     topology: &ResolvedPnrTopology,
+    intent: Option<&ResolvedPhysicalIntent>,
     candidates: &[LayoutCandidate],
     config: &GlobalPlacementConfig,
     heuristics: &[PlacementHeuristic],
 ) -> eyre::Result<Vec<Vec<PlacedModule>>> {
     let adapter = topology.legacy_routing_adapter()?;
-    Ok(placement_candidates(
-        &adapter, candidates, config, heuristics,
-    ))
+    let placements = placement_candidates(&adapter, candidates, config, heuristics);
+    let Some(intent) = intent else {
+        return Ok(placements);
+    };
+
+    let mut constrained = Vec::new();
+    let mut last_error = None;
+    for mut placed in placements {
+        match apply_placement_intent(topology, intent, candidates, &mut placed) {
+            Ok(()) => push_unique_placement(&mut constrained, placed),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    if constrained.is_empty() {
+        return Err(last_error.unwrap_or_else(|| {
+            eyre::eyre!("physical placement constraints eliminated every placement attempt")
+        }));
+    }
+    constrained.sort_by_key(|placed| {
+        placement_cost_breakdown(&adapter, candidates, placed, config.congestion)
+            .weighted_total(config.cost_weights)
+    });
+    constrained.truncate(config.max_attempts.max(1));
+    Ok(constrained)
+}
+
+fn apply_placement_intent(
+    topology: &ResolvedPnrTopology,
+    intent: &ResolvedPhysicalIntent,
+    candidates: &[LayoutCandidate],
+    placed: &mut [PlacedModule],
+) -> eyre::Result<()> {
+    let fixed_instances = intent
+        .constraints
+        .iter()
+        .filter_map(|constraint| match constraint {
+            ResolvedPhysicalConstraint::FixedOrigin { instance, .. } => Some(*instance),
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+
+    // Exact locks are applied first. Other hard constraints may move only
+    // unlocked instances and must validate locked origins as written.
+    for constraint in &intent.constraints {
+        let ResolvedPhysicalConstraint::FixedOrigin {
+            id,
+            instance,
+            origin,
+        } = constraint
+        else {
+            continue;
+        };
+        let item = placed_instance_mut(topology, placed, *instance, id)?;
+        item.origin = Position(origin[0], origin[1], origin[2]);
+    }
+
+    for constraint in &intent.constraints {
+        let (instance_id, id) = match constraint {
+            ResolvedPhysicalConstraint::Inside { instance, id, .. }
+            | ResolvedPhysicalConstraint::LayerRange { instance, id, .. } => (*instance, id),
+            _ => continue,
+        };
+        let item = placed_instance_mut(topology, placed, instance_id, id)?;
+        let candidate = candidates
+            .get(item.candidate_index)
+            .with_context(|| format!("constraint `{id}` references a missing candidate"))?;
+        let size = [
+            candidate.bbox.width(),
+            candidate.bbox.depth(),
+            candidate.bbox.height(),
+        ];
+        let locked = fixed_instances.contains(&instance_id);
+
+        match constraint {
+            ResolvedPhysicalConstraint::Inside { region, .. } => {
+                let region = intent
+                    .regions
+                    .get(region)
+                    .with_context(|| format!("constraint `{id}` has an unknown region"))?;
+                let max_origin = [
+                    maximum_origin(region.max[0], size[0], id)?,
+                    maximum_origin(region.max[1], size[1], id)?,
+                    maximum_origin(region.max[2], size[2], id)?,
+                ];
+                if !locked {
+                    item.origin.0 = item.origin.0.clamp(region.min[0], max_origin[0]);
+                    item.origin.1 = item.origin.1.clamp(region.min[1], max_origin[1]);
+                    item.origin.2 = item.origin.2.clamp(region.min[2], max_origin[2]);
+                }
+            }
+            ResolvedPhysicalConstraint::LayerRange { min, max, .. } => {
+                let max_origin = maximum_origin(*max, size[2], id)?;
+                if !locked {
+                    item.origin.2 = item.origin.2.clamp(*min, max_origin);
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    validate_placement_intent(topology, intent, candidates, placed)?;
+    validate_no_placement_overlap(placed)
+}
+
+fn placed_instance_mut<'a>(
+    topology: &ResolvedPnrTopology,
+    placed: &'a mut [PlacedModule],
+    instance: crate::transform::place_and_route::global_pnr::topology::InstanceId,
+    constraint_id: &str,
+) -> eyre::Result<&'a mut PlacedModule> {
+    let instance = topology
+        .instances
+        .get(instance.0)
+        .with_context(|| format!("constraint `{constraint_id}` has an unknown instance id"))?;
+    placed
+        .iter_mut()
+        .find(|placed| placed.module_name == instance.display_name)
+        .with_context(|| {
+            format!(
+                "constraint `{constraint_id}` targets unplaced instance `{}`",
+                instance.display_name
+            )
+        })
+}
+
+fn maximum_origin(region_max: usize, size: usize, id: &str) -> eyre::Result<usize> {
+    region_max
+        .checked_add(1)
+        .and_then(|extent| extent.checked_sub(size))
+        .with_context(|| format!("constraint `{id}` region is smaller than the selected candidate"))
+}
+
+fn validate_placement_intent(
+    topology: &ResolvedPnrTopology,
+    intent: &ResolvedPhysicalIntent,
+    candidates: &[LayoutCandidate],
+    placed: &[PlacedModule],
+) -> eyre::Result<()> {
+    for constraint in &intent.constraints {
+        let (instance_id, id) = match constraint {
+            ResolvedPhysicalConstraint::Inside { instance, id, .. }
+            | ResolvedPhysicalConstraint::LayerRange { instance, id, .. }
+            | ResolvedPhysicalConstraint::FixedOrigin { instance, id, .. } => (*instance, id),
+            _ => continue,
+        };
+        let instance = &topology.instances[instance_id.0];
+        let item = placed
+            .iter()
+            .find(|placed| placed.module_name == instance.display_name)
+            .with_context(|| format!("constraint `{id}` targets an unplaced instance"))?;
+        let candidate = &candidates[item.candidate_index];
+        let min = [item.origin.0, item.origin.1, item.origin.2];
+        let max = [
+            item.origin.0 + candidate.bbox.width() - 1,
+            item.origin.1 + candidate.bbox.depth() - 1,
+            item.origin.2 + candidate.bbox.height() - 1,
+        ];
+        let satisfied = match constraint {
+            ResolvedPhysicalConstraint::Inside { region, .. } => {
+                intent.regions[region].contains_box(min, max)
+            }
+            ResolvedPhysicalConstraint::LayerRange { min, max, .. } => {
+                item.origin.2 >= *min && item.origin.2 + candidate.bbox.height() - 1 <= *max
+            }
+            ResolvedPhysicalConstraint::FixedOrigin { origin, .. } => min == *origin,
+            _ => true,
+        };
+        if !satisfied {
+            eyre::bail!(
+                "physical constraint `{id}` is violated by instance `{}` at {:?}",
+                instance.display_name,
+                item.origin
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_no_placement_overlap(placed: &[PlacedModule]) -> eyre::Result<()> {
+    for (index, left) in placed.iter().enumerate() {
+        for right in placed.iter().skip(index + 1) {
+            let overlaps = left.origin.0 < right.origin.0 + right.bbox.width()
+                && right.origin.0 < left.origin.0 + left.bbox.width()
+                && left.origin.1 < right.origin.1 + right.bbox.depth()
+                && right.origin.1 < left.origin.1 + left.bbox.depth()
+                && left.origin.2 < right.origin.2 + right.bbox.height()
+                && right.origin.2 < left.origin.2 + left.bbox.height();
+            if overlaps {
+                eyre::bail!(
+                    "physical constraints overlap instances `{}` and `{}`",
+                    left.module_name,
+                    right.module_name
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 fn apply_layered_placement(
@@ -1171,9 +1371,15 @@ mod tests {
     use crate::transform::place_and_route::global_pnr::ir::{
         LayoutCandidateCost, PhysicalPort, PhysicalPortDirection, PortConnection,
     };
+    use crate::transform::place_and_route::global_pnr::physical_intent::{
+        IntentRegion, ResolvedPhysicalConstraint, ResolvedPhysicalIntent,
+    };
     use crate::transform::place_and_route::global_pnr::policy::{
         Free3DPlacementConfig, LayerAssignmentStrategy, LayeredPlacementConfig, PlacementHeuristic,
         RoutingCongestionConfig,
+    };
+    use crate::transform::place_and_route::global_pnr::topology::{
+        DefinitionId, DefinitionKey, InstanceId, InstanceKey, ResolvedDefinition,
     };
     use crate::world::position::DimSize;
     use crate::world::World3D;
@@ -1225,6 +1431,83 @@ mod tests {
             true,
         )
         .expect("port y")
+    }
+
+    #[test]
+    fn resolved_placement_applies_fixed_origin_and_region_constraints() -> eyre::Result<()> {
+        let candidates = vec![test_candidate("child", &[])];
+        let topology = ResolvedPnrTopology {
+            top: DefinitionId(0),
+            definitions: vec![
+                ResolvedDefinition {
+                    id: DefinitionId(0),
+                    key: DefinitionKey("top".to_owned()),
+                    display_name: "top".to_owned(),
+                    ports: Vec::new(),
+                    is_leaf: false,
+                },
+                ResolvedDefinition {
+                    id: DefinitionId(1),
+                    key: DefinitionKey("child".to_owned()),
+                    display_name: "child".to_owned(),
+                    ports: Vec::new(),
+                    is_leaf: true,
+                },
+            ],
+            ports: Vec::new(),
+            instances: vec![
+                crate::transform::place_and_route::global_pnr::topology::ResolvedInstance {
+                    id: InstanceId(0),
+                    key: InstanceKey("top/child".to_owned()),
+                    display_name: "child".to_owned(),
+                    definition: DefinitionId(1),
+                },
+            ],
+            nets: Vec::new(),
+        };
+        let intent = ResolvedPhysicalIntent {
+            format: "test".to_owned(),
+            design: "top".to_owned(),
+            regions: [(
+                "logic".to_owned(),
+                IntentRegion {
+                    min: [10, 10, 2],
+                    max: [30, 30, 8],
+                },
+            )]
+            .into_iter()
+            .collect(),
+            constraints: vec![
+                ResolvedPhysicalConstraint::Inside {
+                    id: "inside".to_owned(),
+                    instance: InstanceId(0),
+                    region: "logic".to_owned(),
+                },
+                ResolvedPhysicalConstraint::LayerRange {
+                    id: "layers".to_owned(),
+                    instance: InstanceId(0),
+                    min: 2,
+                    max: 6,
+                },
+                ResolvedPhysicalConstraint::FixedOrigin {
+                    id: "lock".to_owned(),
+                    instance: InstanceId(0),
+                    origin: [12, 14, 3],
+                },
+            ],
+        };
+
+        let placements = placement_candidates_resolved(
+            &topology,
+            Some(&intent),
+            &candidates,
+            &GlobalPlacementConfig::default(),
+            &[PlacementHeuristic::Shelf],
+        )?;
+
+        assert!(!placements.is_empty());
+        assert_eq!(placements[0][0].origin, Position(12, 14, 3));
+        Ok(())
     }
 
     #[test]
