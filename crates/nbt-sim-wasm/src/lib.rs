@@ -12,6 +12,7 @@ use redstone_compiler::world::block::{Block, BlockKind, Direction};
 use redstone_compiler::world::position::{DimSize, Position};
 use redstone_compiler::world::simulator::{
     SimulationSnapshot, SimulationTraceEntry, SimulationWaveform, Simulator,
+    MANUAL_INPUT_IDLE_CYCLES,
 };
 use redstone_compiler::world::{World, World3D};
 use serde::Serialize;
@@ -120,6 +121,19 @@ impl NbtSimulator {
         self.history_trace = trace.to_vec();
         self.history_snapshots = snapshots_to_info(snapshots);
         self.history_waveform = self.sim.waveform();
+    }
+
+    fn change_switch_state(&mut self, position: Position, is_on: bool) -> Result<(), String> {
+        self.sim
+            .change_state_with_limits(
+                vec![(position, is_on)],
+                MAX_SIMULATION_CYCLES,
+                MAX_SIMULATION_EVENTS,
+            )
+            .map_err(|error| error.to_string())?;
+        self.sim
+            .advance_idle_cycles(MANUAL_INPUT_IDLE_CYCLES)
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -274,11 +288,7 @@ impl NbtSimulator {
             .snapshots()
             .last()
             .map_or(1, |snapshot| snapshot.cycle + 1);
-        if let Err(error) = self.sim.change_state_with_limits(
-            vec![(Position(x, y, z), is_on)],
-            MAX_SIMULATION_CYCLES,
-            MAX_SIMULATION_EVENTS,
-        ) {
+        if let Err(error) = self.change_switch_state(Position(x, y, z), is_on) {
             self.refresh_trace_views_from_cycle(start_cycle);
             return Err(to_js_error(error));
         }
@@ -555,4 +565,50 @@ fn source_node_ids_from_tag(tag: &str) -> Vec<GraphNodeId> {
         .split(',')
         .filter_map(|value| value.trim().parse().ok())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn full_adder_manual_input_walk_does_not_burn_out_internal_torches() {
+        let nbt_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test/full-adder.nbt");
+        let nbt_bytes = std::fs::read(nbt_path).unwrap();
+        let mut simulator = NbtSimulator::new_with_trace_limit(&nbt_bytes, 0).unwrap();
+        let mut switches = simulator
+            .sim
+            .world()
+            .iter_block()
+            .into_iter()
+            .filter_map(|(position, block)| {
+                matches!(block.kind, BlockKind::Switch { .. }).then_some(position)
+            })
+            .collect::<Vec<_>>();
+        switches.sort();
+        assert_eq!(switches.len(), 3);
+
+        let observed_torch = Position(5, 4, 2);
+        let mut previous_mask = 0usize;
+        for mask in 0usize..8 {
+            for (index, position) in switches.iter().copied().enumerate() {
+                let previous = previous_mask & (1 << index) != 0;
+                let next = mask & (1 << index) != 0;
+                if previous != next {
+                    simulator.change_switch_state(position, next).unwrap();
+                }
+            }
+            previous_mask = mask;
+
+            let BlockKind::Torch { is_on } = simulator.sim.world()[observed_torch].kind else {
+                panic!("expected the observed full-adder block to remain a torch");
+            };
+            assert_eq!(
+                is_on,
+                mask == 0b100 || mask == 0b111,
+                "observed full-adder torch mismatch after manual input mask {mask:03b}"
+            );
+        }
+    }
 }
