@@ -96,10 +96,22 @@ type SnapshotInstance = {
   };
   blockCount?: number;
 };
+type SnapshotRoute = {
+  id: string;
+  index: number;
+  source: [number, number, number];
+  sourceLabel: string;
+  sink: [number, number, number];
+  sinkLabel: string;
+  path: Array<[number, number, number]>;
+  pathLength: number;
+  blockCount: number;
+};
 type LoadedSnapshot = {
   manifest: SnapshotManifest;
   filesByPath: Map<string, File>;
   instances: SnapshotInstance[];
+  routes: SnapshotRoute[];
   interfaceJson?: string;
 };
 
@@ -142,7 +154,10 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
               <input id="file-input" type="file" accept=".nbt,.dat,.schem,.schematic,.litematic,.mcstructure" />
             </label>
           </div>
+          <button id="toggle-blocks" class="file-button graph-button snapshot-box-button active" type="button" aria-pressed="true">Blocks</button>
+          <button id="toggle-grid" class="file-button graph-button snapshot-box-button active" type="button" aria-pressed="true">Grid</button>
           <button id="toggle-snapshot-boxes" class="file-button graph-button snapshot-box-button hidden" type="button">Boxes</button>
+          <button id="toggle-snapshot-routes" class="file-button graph-button snapshot-box-button hidden" type="button">Routes</button>
           <button id="open-graphs" class="file-button graph-button" type="button">Graphs</button>
         </div>
         <details id="switches-panel" class="floating-panel switches-panel" open>
@@ -361,7 +376,10 @@ const traceSimulationToggle = document.querySelector<HTMLLabelElement>('#trace-s
 const traceSimulationEnabledInput = document.querySelector<HTMLInputElement>('#trace-simulation-enabled')!;
 const traceSimulationState = document.querySelector<HTMLElement>('#trace-simulation-state')!;
 const openGraphsButton = document.querySelector<HTMLButtonElement>('#open-graphs')!;
+const toggleBlocksButton = document.querySelector<HTMLButtonElement>('#toggle-blocks')!;
+const toggleGridButton = document.querySelector<HTMLButtonElement>('#toggle-grid')!;
 const toggleSnapshotBoxesButton = document.querySelector<HTMLButtonElement>('#toggle-snapshot-boxes')!;
+const toggleSnapshotRoutesButton = document.querySelector<HTMLButtonElement>('#toggle-snapshot-routes')!;
 const closeGraphsButton = document.querySelector<HTMLButtonElement>('#close-graphs')!;
 const graphDialog = document.querySelector<HTMLDialogElement>('#graph-dialog')!;
 const graphWorldTab = document.querySelector<HTMLButtonElement>('#graph-world-tab')!;
@@ -463,7 +481,10 @@ let selectedGraphShowTags = true;
 let selectedGraphZoom = 1;
 let currentSnapshot: LoadedSnapshot | undefined;
 let currentSnapshotPath: string | undefined;
+let blocksVisible = true;
+let gridVisible = true;
 let snapshotBoxesVisible = true;
+let snapshotRoutesVisible = true;
 
 folderInput.setAttribute('webkitdirectory', '');
 folderInput.setAttribute('directory', '');
@@ -495,6 +516,25 @@ folderInput.addEventListener('change', () => {
 toggleSnapshotBoxesButton.addEventListener('click', () => {
   snapshotBoxesVisible = !snapshotBoxesVisible;
   updateSnapshotBoxes();
+});
+
+toggleBlocksButton.addEventListener('click', () => {
+  blocksVisible = !blocksVisible;
+  viewer.setBlocksVisible(blocksVisible);
+  toggleBlocksButton.classList.toggle('active', blocksVisible);
+  toggleBlocksButton.setAttribute('aria-pressed', String(blocksVisible));
+});
+
+toggleGridButton.addEventListener('click', () => {
+  gridVisible = !gridVisible;
+  viewer.setGridVisible(gridVisible);
+  toggleGridButton.classList.toggle('active', gridVisible);
+  toggleGridButton.setAttribute('aria-pressed', String(gridVisible));
+});
+
+toggleSnapshotRoutesButton.addEventListener('click', () => {
+  snapshotRoutesVisible = !snapshotRoutesVisible;
+  updateSnapshotRoutes();
 });
 
 toggleSwitchButton.addEventListener('click', () => {
@@ -1708,8 +1748,10 @@ async function tryOpenSnapshot(files: File[]): Promise<boolean> {
   currentSnapshot = snapshot;
   currentSnapshotPath = undefined;
   snapshotBoxesVisible = true;
+  snapshotRoutesVisible = true;
   renderSnapshotBrowser(snapshot);
   updateSnapshotBoxes();
+  updateSnapshotRoutes();
 
   const finalPath = snapshot.manifest.final_nbt;
   if (finalPath && snapshot.filesByPath.has(finalPath)) {
@@ -1796,7 +1838,17 @@ async function parseSnapshot(files: File[]): Promise<LoadedSnapshot | undefined>
     }
     instances.sort((a, b) => a.instance.localeCompare(b.instance));
 
-    return { manifest, filesByPath, instances, interfaceJson };
+    const routesFile = filesByPath.get('routes/routes.json');
+    let routes: SnapshotRoute[] = [];
+    if (routesFile) {
+      try {
+        routes = parseSnapshotRoutes(JSON.parse(await routesFile.text()));
+      } catch (error) {
+        console.warn('Skipping invalid snapshot route metadata.', error);
+      }
+    }
+
+    return { manifest, filesByPath, instances, routes, interfaceJson };
   }
 
   return undefined;
@@ -1827,6 +1879,46 @@ function readNumberTuple(value: unknown): [number, number, number] | undefined {
   if (!Array.isArray(value) || value.length < 3) return undefined;
   const tuple = value.slice(0, 3).map(Number);
   return tuple.every(Number.isFinite) ? [tuple[0], tuple[1], tuple[2]] : undefined;
+}
+
+function parseSnapshotRoutes(value: unknown): SnapshotRoute[] {
+  const routeValues = asRecord(value)?.routes;
+  if (!Array.isArray(routeValues)) return [];
+
+  const routes: SnapshotRoute[] = [];
+  for (const value of routeValues) {
+    const route = asRecord(value);
+    const source = readNumberTuple(route?.source);
+    const sink = readNumberTuple(route?.sink);
+    const path = Array.isArray(route?.path)
+      ? route.path.map(readNumberTuple).filter((point): point is [number, number, number] => Boolean(point))
+      : [];
+    const index = Number(route?.index);
+    const pathLength = Number(route?.path_length);
+    const blockCount = Number(route?.block_count);
+    if (
+      !route
+      || !source
+      || !sink
+      || typeof route.source_label !== 'string'
+      || typeof route.sink_label !== 'string'
+      || !Number.isInteger(index)
+    ) {
+      continue;
+    }
+    routes.push({
+      id: `route-${index}`,
+      index,
+      source,
+      sourceLabel: route.source_label,
+      sink,
+      sinkLabel: route.sink_label,
+      path,
+      pathLength: Number.isFinite(pathLength) ? pathLength : path.length,
+      blockCount: Number.isFinite(blockCount) ? blockCount : 0,
+    });
+  }
+  return routes.sort((left, right) => left.index - right.index);
 }
 
 function renderSnapshotBrowser(snapshot: LoadedSnapshot): void {
@@ -1991,21 +2083,110 @@ function updateSnapshotBoxes(): void {
   toggleSnapshotBoxesButton.setAttribute('aria-pressed', String(visible));
 }
 
+function updateSnapshotRoutes(): void {
+  const snapshot = currentSnapshot;
+  const available = Boolean(
+    snapshot && currentSnapshotPath === snapshot.manifest.final_nbt && snapshot.routes.length > 0,
+  );
+  const visible = available && snapshotRoutesVisible;
+  const routes = visible
+    ? snapshot!.routes.map(route => ({
+        id: route.id,
+        sourceLabel: route.sourceLabel,
+        sinkLabel: route.sinkLabel,
+        points: routePoints(route).map(position => {
+          const [x, y, z] = compilerPositionToNbt(position);
+          return [x + 0.5, y + 0.5, z + 0.5] as [number, number, number];
+        }),
+        pathLength: route.pathLength,
+        blockCount: route.blockCount,
+      }))
+    : [];
+  viewer.setRoutes(
+    routes,
+    route => renderSnapshotRouteSelection(route.id),
+    renderSnapshotRouteHover,
+  );
+  toggleSnapshotRoutesButton.classList.toggle('hidden', !available);
+  toggleSnapshotRoutesButton.classList.toggle('active', visible);
+  toggleSnapshotRoutesButton.textContent = snapshot ? `Routes: ${snapshot.routes.length}` : 'Routes';
+  toggleSnapshotRoutesButton.setAttribute('aria-pressed', String(visible));
+}
+
+function routePoints(route: SnapshotRoute): Array<[number, number, number]> {
+  const points = [route.source, ...route.path, route.sink];
+  return points.filter((point, index) => index === 0 || !sameTuple(point, points[index - 1]));
+}
+
+function sameTuple(left: [number, number, number], right: [number, number, number]): boolean {
+  return left[0] === right[0] && left[1] === right[1] && left[2] === right[2];
+}
+
+function renderSnapshotRouteSelection(routeId: string): void {
+  const route = currentSnapshot?.routes.find(candidate => candidate.id === routeId);
+  if (!route) return;
+  selectedBlock = undefined;
+  toggleSwitchButton.classList.add('hidden');
+  inspector.textContent = [
+    `route #${route.index}`,
+    `source: ${route.sourceLabel}`,
+    `sink: ${route.sinkLabel}`,
+    `path: ${route.pathLength}`,
+    `blocks: ${route.blockCount}`,
+  ].join('\n');
+}
+
+function renderSnapshotRouteHover(
+  route: { id: string } | undefined,
+  clientX: number,
+  clientY: number,
+): void {
+  clearSnapshotHoverUi();
+  const snapshotRoute = route
+    ? currentSnapshot?.routes.find(candidate => candidate.id === route.id)
+    : undefined;
+  if (!snapshotRoute) return;
+
+  const instanceNames = new Set([
+    routeInstanceName(snapshotRoute.sourceLabel),
+    routeInstanceName(snapshotRoute.sinkLabel),
+  ]);
+  for (const entry of filesList.querySelectorAll<HTMLElement>('[data-snapshot-instance]')) {
+    const instance = currentSnapshot?.instances.find(candidate => candidate.artifactPath === entry.dataset.snapshotInstance);
+    if (instance && instanceNames.has(instance.instance)) entry.classList.add('bbox-hover');
+  }
+
+  bboxTooltipTitle.textContent = `${snapshotRoute.sourceLabel} → ${snapshotRoute.sinkLabel}`;
+  bboxTooltipDetail.textContent = `route #${snapshotRoute.index} · path ${snapshotRoute.pathLength} · blocks ${snapshotRoute.blockCount}`;
+  showSnapshotTooltip(clientX, clientY);
+}
+
+function routeInstanceName(label: string): string {
+  const separator = label.lastIndexOf('.');
+  return separator < 0 ? label : label.slice(0, separator);
+}
+
 function renderSnapshotBoxHover(
   box: { id: string } | undefined,
   clientX: number,
   clientY: number,
 ): void {
-  filesList.querySelectorAll('.file-entry.bbox-hover').forEach(entry => entry.classList.remove('bbox-hover'));
+  clearSnapshotHoverUi();
 
   const instance = box
     ? currentSnapshot?.instances.find(candidate => candidate.artifactPath === box.id)
     : undefined;
   if (!instance) {
-    bboxTooltip.classList.add('hidden');
-    bboxTooltip.setAttribute('aria-hidden', 'true');
+    viewer.setRelatedRouteIds([]);
     return;
   }
+
+  const routePrefix = `${instance.instance}.`;
+  viewer.setRelatedRouteIds(
+    currentSnapshot?.routes
+      .filter(route => route.sourceLabel.startsWith(routePrefix) || route.sinkLabel.startsWith(routePrefix))
+      .map(route => route.id) ?? [],
+  );
 
   const entry = Array.from(filesList.querySelectorAll<HTMLElement>('[data-snapshot-instance]')).find(
     candidate => candidate.dataset.snapshotInstance === instance.artifactPath,
@@ -2017,6 +2198,16 @@ function renderSnapshotBoxHover(
   const modulePrefix = instance.module === instance.instance ? '' : `${instance.module} · `;
   bboxTooltipTitle.textContent = instance.instance;
   bboxTooltipDetail.textContent = `${modulePrefix}size ${size.join(' × ')} · origin (${min.join(', ')})`;
+  showSnapshotTooltip(clientX, clientY);
+}
+
+function clearSnapshotHoverUi(): void {
+  filesList.querySelectorAll('.file-entry.bbox-hover').forEach(entry => entry.classList.remove('bbox-hover'));
+  bboxTooltip.classList.add('hidden');
+  bboxTooltip.setAttribute('aria-hidden', 'true');
+}
+
+function showSnapshotTooltip(clientX: number, clientY: number): void {
   bboxTooltip.classList.remove('hidden');
   bboxTooltip.setAttribute('aria-hidden', 'false');
 
@@ -2037,7 +2228,9 @@ function leaveSnapshotMode(): void {
   currentSnapshot = undefined;
   currentSnapshotPath = undefined;
   snapshotBoxesVisible = true;
+  snapshotRoutesVisible = true;
   updateSnapshotBoxes();
+  updateSnapshotRoutes();
 }
 
 function normalizePath(path: string): string {
@@ -2197,6 +2390,7 @@ async function openFile(
       renderTrace([], [], emptyWaveform, undefined);
     }
     updateSnapshotBoxes();
+    updateSnapshotRoutes();
   } catch (error) {
     simulation = undefined;
     currentNbtBytes = undefined;
@@ -2215,6 +2409,7 @@ async function openFile(
     renderSwitches();
     renderTrace([], [], emptyWaveform, undefined);
     updateSnapshotBoxes();
+    updateSnapshotRoutes();
   }
 }
 
