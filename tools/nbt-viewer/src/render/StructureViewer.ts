@@ -86,7 +86,9 @@ export class StructureViewer {
 
     if (!this.renderer) {
       const resources = await this.resourcesPromise;
-      this.renderer = new StructureRenderer(this.gl, this.structure, resources);
+      this.renderer = new StructureRenderer(this.gl, this.structure, resources, {
+        useInvisibleBlockBuffer: false,
+      });
     } else {
       this.renderer.setStructure(this.structure);
     }
@@ -117,7 +119,9 @@ export class StructureViewer {
 
   private async initialize(): Promise<void> {
     const resources = await this.resourcesPromise;
-    this.renderer = new StructureRenderer(this.gl, this.structure, resources);
+    this.renderer = new StructureRenderer(this.gl, this.structure, resources, {
+      useInvisibleBlockBuffer: false,
+    });
     this.render();
   }
 

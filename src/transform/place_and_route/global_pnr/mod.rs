@@ -1,10 +1,16 @@
 pub mod assembly;
 pub mod candidate;
+pub mod diagnostics;
+mod free_3d;
 pub mod ir;
 pub mod placer;
+pub mod policy;
 pub mod progress;
 pub mod router;
+pub mod search;
 pub mod visualize;
+
+use std::time::Instant;
 
 use eyre::ContextCompat;
 
@@ -18,12 +24,21 @@ use crate::transform::place_and_route::global_pnr::candidate::{
 };
 use crate::transform::place_and_route::global_pnr::ir::{LayoutCandidate, PhysicalPortDirection};
 use crate::transform::place_and_route::global_pnr::placer::{
-    place_candidates_on_shelves, placement_candidates, GlobalPlacementConfig, PlacedModule,
+    place_candidates_on_shelves, placement_candidates, placement_cost_breakdown,
+    GlobalPlacementConfig, PlacedModule,
+};
+use crate::transform::place_and_route::global_pnr::policy::{
+    GlobalPnrPolicies, GlobalPnrPreset, GlobalSearchBudget,
 };
 use crate::transform::place_and_route::global_pnr::progress::GlobalPnrProgress;
 use crate::transform::place_and_route::global_pnr::router::{
     collect_module_input_endpoints, collect_module_output_endpoints, first_invalid_active_route,
-    route_module_variables, GlobalRoutingConfig, RoutedNet,
+    route_module_variables_with_order_from_prefix, GlobalRoutingConfig, NetOrderStrategy,
+    RoutedNet,
+};
+use crate::transform::place_and_route::global_pnr::search::{
+    layout_combinations, rank_child_candidates_with_preferred, select_layout_combination,
+    ChildCandidatePool,
 };
 use crate::transform::place_and_route::global_pnr::visualize::placement_bbox_wireframe_world;
 use crate::transform::place_and_route::local_placer::{LocalPlacerConfig, NotRouteStrategy};
@@ -34,9 +49,26 @@ use crate::world::World3D;
 pub struct GlobalPnrConfig {
     pub candidate: UnitCandidateConfig,
     pub placement: GlobalPlacementConfig,
+    /// Optional cheap whole-design routing attempt evaluated before `routing`.
+    /// It shares the exact same local candidates and placement.
+    pub routing_probe: Option<GlobalRoutingConfig>,
     pub routing: GlobalRoutingConfig,
+    pub routing_refinement: Option<GlobalRoutingConfig>,
+    pub search: GlobalSearchConfig,
     pub show_progress: bool,
     pub verifier: Option<fn(&PlacedWorld) -> eyre::Result<()>>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct GlobalSearchConfig {
+    pub budget: GlobalSearchBudget,
+    pub policies: GlobalPnrPolicies,
+}
+
+impl Default for GlobalSearchConfig {
+    fn default() -> Self {
+        GlobalPnrPreset::Balanced.search_config()
+    }
 }
 
 pub struct GlobalPnrResult {
@@ -49,7 +81,10 @@ impl Default for GlobalPnrConfig {
         Self {
             candidate: UnitCandidateConfig::default(),
             placement: GlobalPlacementConfig::default(),
+            routing_probe: None,
             routing: GlobalRoutingConfig::default(),
+            routing_refinement: None,
+            search: GlobalSearchConfig::default(),
             show_progress: true,
             verifier: None,
         }
@@ -108,23 +143,11 @@ pub fn place_and_route_module_with_visualization(
     }
 
     progress.stage(1, 5, "generate child layout candidates");
-    let candidates = generate_child_candidates(context, module, config, &progress)?;
+    let candidate_pools = generate_child_candidate_pools(context, module, config, &progress)?;
 
-    progress.stage(2, 5, "place child candidates");
-    let placement_attempts = placement_candidates(module, &candidates, &config.placement);
-    progress.detail(format!(
-        "generated {} placement attempt(s)",
-        placement_attempts.len()
-    ));
-
-    progress.stage(3, 5, "route module ports and variables");
-    let (placed, routed_nets) = route_first_successful_placement(
-        module,
-        &candidates,
-        placement_attempts,
-        config,
-        &progress,
-    )?;
+    progress.stage(2, 5, "search child layouts and placements");
+    let (candidates, placed, routed_nets) =
+        search_layout_combinations(module, &candidate_pools, config, &progress)?;
 
     progress.stage(4, 5, "assemble world and collect outputs");
     let inputs = collect_module_input_endpoints(module, &routed_nets);
@@ -150,6 +173,91 @@ pub fn place_and_route_module_with_visualization(
     })
 }
 
+#[derive(Clone)]
+struct RankedRoutingDecision {
+    routed_count: usize,
+    sequence: usize,
+    placement_index: usize,
+    order_index: usize,
+    prefix: Vec<RoutedNet>,
+    semantic_feedback_labels: Vec<String>,
+}
+
+fn reroute_last_source_group(routes: &[RoutedNet]) -> Vec<RoutedNet> {
+    let Some(source_label) = routes
+        .iter()
+        .rev()
+        .filter_map(|route| route.source_label.as_deref())
+        .find(|label| label.contains('.'))
+    else {
+        let mut prefix = routes.to_vec();
+        prefix.pop();
+        return prefix;
+    };
+    routes
+        .iter()
+        .filter(|route| route.source_label.as_deref() != Some(source_label))
+        .cloned()
+        .collect()
+}
+
+fn reroute_source_group(routes: &[RoutedNet], source_label: Option<&str>) -> Vec<RoutedNet> {
+    let Some(source_label) = source_label else {
+        return reroute_last_source_group(routes);
+    };
+    routes
+        .iter()
+        .filter(|route| route.source_label.as_deref() != Some(source_label))
+        .cloned()
+        .collect()
+}
+
+fn reroute_untried_source_groups(
+    routes: &[RoutedNet],
+    previously_tried: &[String],
+    count: usize,
+) -> (Vec<RoutedNet>, Vec<String>) {
+    let labels = routes
+        .iter()
+        .rev()
+        .filter_map(|route| route.source_label.as_deref())
+        .filter(|label| label.contains('.') && !previously_tried.iter().any(|tried| tried == label))
+        .fold(Vec::<String>::new(), |mut labels, label| {
+            if !labels.iter().any(|selected| selected == label) && labels.len() < count {
+                labels.push(label.to_owned());
+            }
+            labels
+        });
+    let labels = if labels.is_empty() {
+        routes
+            .iter()
+            .rev()
+            .filter_map(|route| route.source_label.as_deref())
+            .filter(|label| label.contains('.'))
+            .fold(Vec::<String>::new(), |mut labels, label| {
+                if !labels.iter().any(|selected| selected == label) && labels.len() < count {
+                    labels.push(label.to_owned());
+                }
+                labels
+            })
+    } else {
+        labels
+    };
+    let prefix = routes
+        .iter()
+        .filter(|route| {
+            !route
+                .source_label
+                .as_deref()
+                .is_some_and(|label| labels.iter().any(|selected| selected == label))
+        })
+        .cloned()
+        .collect();
+    let mut tried = previously_tried.to_vec();
+    tried.extend(labels);
+    (prefix, tried)
+}
+
 fn route_first_successful_placement(
     module: &GraphModule,
     candidates: &[LayoutCandidate],
@@ -158,71 +266,204 @@ fn route_first_successful_placement(
     progress: &GlobalPnrProgress,
 ) -> eyre::Result<(Vec<PlacedModule>, Vec<RoutedNet>)> {
     let mut last_error = None;
-    let total_attempts = placement_attempts.len();
-
-    for (attempt_index, placed) in placement_attempts.into_iter().enumerate() {
-        progress.item(attempt_index + 1, total_attempts, "route placement attempt");
-        match route_module_variables(module, candidates, &placed, &config.routing, progress) {
-            Ok(routed_nets) => {
-                match placed_world_from_routing(module, candidates, &placed, &routed_nets) {
-                    Ok(world) => {
-                        if let Some(route) = first_invalid_active_route(&world.world, &routed_nets)
-                        {
-                            let error = eyre::eyre!(
-                                "assembled route from {:?} to {:?} does not satisfy its powered-position contract",
-                                route.source,
-                                route.sink
-                            );
-                            progress.detail(format!(
-                                "placement attempt {} failed: {error}",
-                                attempt_index + 1
-                            ));
-                            last_error = Some(error);
-                            continue;
-                        }
-                        if let Some(verifier) = config.verifier {
-                            if let Err(error) = verifier(&world) {
-                                save_failed_verifier_world(
-                                    module,
-                                    attempt_index + 1,
-                                    &world,
-                                    &routed_nets,
-                                );
-                                progress.detail(format!(
-                                    "placement attempt {} failed verifier: {error}",
-                                    attempt_index + 1
-                                ));
-                                last_error = Some(error);
-                                continue;
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        let error = eyre::eyre!(error);
-                        progress.detail(format!(
-                            "placement attempt {} failed: {error}",
-                            attempt_index + 1
-                        ));
-                        last_error = Some(error);
-                        continue;
-                    }
-                }
-                progress.detail(format!(
-                    "selected placement attempt {} with {} route(s)",
-                    attempt_index + 1,
-                    routed_nets.len()
-                ));
-                return Ok((placed, routed_nets));
+    let order_strategies = if config.search.policies.net_order_strategies.is_empty() {
+        vec![NetOrderStrategy::Criticality]
+    } else {
+        config.search.policies.net_order_strategies.clone()
+    };
+    let mut routing_configs = Vec::with_capacity(3);
+    if let Some(probe) = config.routing_probe {
+        routing_configs.push(probe);
+    }
+    if !routing_configs.contains(&config.routing) {
+        routing_configs.push(config.routing);
+    }
+    if let Some(refinement) = config.routing_refinement {
+        for round in 0..config.search.budget.max_refinement_rounds.max(1) {
+            let mut refinement = refinement;
+            if let crate::transform::place_and_route::global_pnr::router::GlobalRoutingStrategy::GreedyBeam {
+                variant_seed,
+                ..
+            } = &mut refinement.strategy
+            {
+                *variant_seed = variant_seed.wrapping_add(round as u64 + 1);
             }
-            Err(error) => {
-                save_failed_route_base_world(module, attempt_index + 1, candidates, &placed);
-                progress.detail(format!(
-                    "placement attempt {} failed: {error}",
-                    attempt_index + 1
-                ));
-                last_error = Some(error);
-            }
+            routing_configs.push(refinement);
         }
+    }
+    let order_count = order_strategies.len();
+    let all_decisions = (0..placement_attempts.len())
+        .flat_map(|placement_index| {
+            (0..order_count).map(move |order_index| RankedRoutingDecision {
+                routed_count: 0,
+                sequence: placement_index * order_count + order_index,
+                placement_index,
+                order_index,
+                prefix: Vec::new(),
+                semantic_feedback_labels: Vec::new(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let promoted_limit = config
+        .search
+        .budget
+        .max_detailed_routing_attempts
+        .max(1)
+        .min(all_decisions.len());
+    let refined_limit = config
+        .search
+        .budget
+        .max_refined_routing_attempts
+        .max(1)
+        .min(promoted_limit);
+    let total_attempts = all_decisions.len()
+        + usize::from(routing_configs.len() > 1).saturating_mul(promoted_limit)
+        + routing_configs
+            .len()
+            .saturating_sub(2)
+            .saturating_mul(refined_limit);
+    let mut previous_scores = Vec::<RankedRoutingDecision>::new();
+    let mut attempt_serial = 0usize;
+
+    for (routing_index, routing_config) in routing_configs.iter().enumerate() {
+        let decisions = if routing_index == 0 || routing_configs.len() == 1 {
+            all_decisions.clone()
+        } else {
+            previous_scores.sort_by_key(|decision| {
+                (std::cmp::Reverse(decision.routed_count), decision.sequence)
+            });
+            let stage_limit = if routing_index >= 2 {
+                refined_limit
+            } else {
+                promoted_limit
+            };
+            previous_scores.iter().take(stage_limit).cloned().collect()
+        };
+        let mut next_scores = Vec::<RankedRoutingDecision>::new();
+
+        for decision in decisions {
+            attempt_serial += 1;
+            let placement_index = decision.placement_index;
+            let order_index = decision.order_index;
+            let placed = &placement_attempts[placement_index];
+            let order_strategy = order_strategies[order_index];
+            progress.item(
+                attempt_serial,
+                total_attempts,
+                format!(
+                    "route placement {} with {order_strategy:?} / {:?}",
+                    placement_index + 1,
+                    routing_config.strategy
+                ),
+            );
+            let route_started = Instant::now();
+            let routed_nets = match route_module_variables_with_order_from_prefix(
+                module,
+                candidates,
+                placed,
+                routing_config,
+                order_strategy,
+                progress,
+                &decision.prefix,
+            ) {
+                Ok(routed_nets) => {
+                    progress.detail(format!(
+                        "routing attempt {attempt_serial} completed in {:.2?}",
+                        route_started.elapsed()
+                    ));
+                    routed_nets
+                }
+                Err(failure) => {
+                    let routed_count = failure.routed_nets.len();
+                    progress.detail(format!(
+                        "routing attempt {attempt_serial} exhausted after {routed_count} route(s) in {:.2?}",
+                        route_started.elapsed()
+                    ));
+                    if routing_index + 1 < routing_configs.len() {
+                        next_scores.push(RankedRoutingDecision {
+                            routed_count,
+                            sequence: next_scores.len(),
+                            placement_index,
+                            order_index,
+                            prefix: failure.routed_nets.clone(),
+                            semantic_feedback_labels: decision.semantic_feedback_labels.clone(),
+                        });
+                    }
+                    save_failed_route_base_world(module, attempt_serial, candidates, placed);
+                    progress.detail(format!(
+                        "placement attempt {attempt_serial} failed: {}",
+                        failure.error
+                    ));
+                    last_error = Some(failure.error);
+                    continue;
+                }
+            };
+
+            let world = match placed_world_from_routing(module, candidates, placed, &routed_nets) {
+                Ok(world) => world,
+                Err(error) => {
+                    let error = eyre::eyre!(error);
+                    progress.detail(format!(
+                        "placement attempt {attempt_serial} failed: {error}"
+                    ));
+                    last_error = Some(error);
+                    continue;
+                }
+            };
+            if let Some(route) = first_invalid_active_route(&world.world, &routed_nets) {
+                let error = eyre::eyre!(
+                    "assembled route from {:?} to {:?} does not satisfy its powered-position contract",
+                    route.source,
+                    route.sink
+                );
+                progress.detail(format!(
+                    "placement attempt {attempt_serial} failed: {error}"
+                ));
+                if routing_index + 1 < routing_configs.len() {
+                    next_scores.push(RankedRoutingDecision {
+                        routed_count: routed_nets.len(),
+                        sequence: next_scores.len(),
+                        placement_index,
+                        order_index,
+                        prefix: reroute_source_group(&routed_nets, route.source_label.as_deref()),
+                        semantic_feedback_labels: decision.semantic_feedback_labels.clone(),
+                    });
+                }
+                last_error = Some(error);
+                continue;
+            }
+            if let Some(verifier) = config.verifier {
+                if let Err(error) = verifier(&world) {
+                    save_failed_verifier_world(module, attempt_serial, &world, &routed_nets);
+                    progress.detail(format!(
+                        "placement attempt {attempt_serial} failed verifier: {error}"
+                    ));
+                    if routing_index + 1 < routing_configs.len() {
+                        let (prefix, semantic_feedback_labels) = reroute_untried_source_groups(
+                            &routed_nets,
+                            &decision.semantic_feedback_labels,
+                            2,
+                        );
+                        next_scores.push(RankedRoutingDecision {
+                            routed_count: routed_nets.len(),
+                            sequence: next_scores.len(),
+                            placement_index,
+                            order_index,
+                            prefix,
+                            semantic_feedback_labels,
+                        });
+                    }
+                    last_error = Some(error);
+                    continue;
+                }
+            }
+            progress.detail(format!(
+                "selected placement attempt {attempt_serial} with {} route(s)",
+                routed_nets.len()
+            ));
+            return Ok((placed.clone(), routed_nets));
+        }
+        previous_scores = next_scores;
     }
 
     Err(last_error.unwrap_or_else(|| eyre::eyre!("no global placement attempts generated")))
@@ -260,8 +501,13 @@ fn save_failed_verifier_world(
         .iter()
         .map(|route| {
             format!(
-                "source={:?} sink={:?} required={:?} path={:?}\n",
-                route.source, route.sink, route.required_powered_positions, route.path
+                "source_label={:?} sink_label={:?} source={:?} sink={:?} required={:?} path={:?}\n",
+                route.source_label,
+                route.sink_label,
+                route.source,
+                route.sink,
+                route.required_powered_positions,
+                route.path
             )
         })
         .collect::<String>();
@@ -335,13 +581,14 @@ fn place_graph_backed_module(
 }
 
 // 하위 모듈마다 local placer를 실행해서 global PnR이 배치할 layout 후보를 하나씩 뽑는다.
-fn generate_child_candidates(
+fn generate_child_candidate_pools(
     context: &GraphModuleContext,
     module: &GraphModule,
     config: &GlobalPnrConfig,
     progress: &GlobalPnrProgress,
-) -> eyre::Result<Vec<LayoutCandidate>> {
-    let mut candidates = Vec::new();
+) -> eyre::Result<Vec<ChildCandidatePool>> {
+    let mut pools = Vec::new();
+    let mut cache = ChildCandidateCache::default();
     for (index, instance) in module.instances.iter().enumerate() {
         progress.item(
             index + 1,
@@ -350,26 +597,184 @@ fn generate_child_candidates(
         );
         let child = &context[instance.as_str()];
         let child_config = candidate_config_for_child(child, &config.candidate);
-        let mut child_candidates = generate_graph_module_candidates_with_progress_label(
-            child,
-            &child_config,
-            config.show_progress.then_some(instance.as_str()),
-        )?;
-        progress.detail(format!(
-            "`{instance}` produced {} candidate(s)",
-            child_candidates.len()
-        ));
-        let candidate = if graph_module_input_port_count(child) > 1 {
-            child_candidates
-                .drain(..)
-                .min_by_key(child_candidate_selection_cost)
-        } else {
-            child_candidates.drain(..).next()
+        let candidate_started = Instant::now();
+        let (child_candidates, cache_hit) = cache.get_or_generate(child, &child_config, || {
+            generate_graph_module_candidates_with_progress_label(
+                child,
+                &child_config,
+                config.show_progress.then_some(instance.as_str()),
+            )
+        })?;
+        if cache_hit {
+            progress.detail(format!(
+                "`{instance}` reused structurally identical candidates"
+            ));
         }
-        .with_context(|| format!("module instance `{instance}` produced no candidates"))?;
-        candidates.push(candidate);
+        progress.detail(format!(
+            "`{instance}` produced {} candidate(s) in {:.2?}",
+            child_candidates.len(),
+            candidate_started.elapsed()
+        ));
+        if child_candidates.is_empty() {
+            return Err(eyre::eyre!(
+                "module instance `{instance}` produced no candidates"
+            ));
+        }
+        let preferred_index = if graph_module_input_port_count(child) > 1 {
+            child_candidates
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, candidate)| {
+                    (candidate.cost.bbox_volume, candidate.cost.block_count)
+                })
+                .map(|(index, _)| index)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        pools.push(rank_child_candidates_with_preferred(
+            instance,
+            child_candidates,
+            config.search.budget.max_candidates_per_child.max(1),
+            preferred_index,
+        ));
     }
-    Ok(candidates)
+    Ok(pools)
+}
+
+#[derive(Default)]
+struct ChildCandidateCache {
+    entries: Vec<ChildCandidateCacheEntry>,
+}
+
+struct ChildCandidateCacheEntry {
+    module: GraphModule,
+    config: UnitCandidateConfig,
+    candidates: Vec<LayoutCandidate>,
+}
+
+impl ChildCandidateCache {
+    fn get_or_generate(
+        &mut self,
+        module: &GraphModule,
+        config: &UnitCandidateConfig,
+        generate: impl FnOnce() -> eyre::Result<Vec<LayoutCandidate>>,
+    ) -> eyre::Result<(Vec<LayoutCandidate>, bool)> {
+        if let Some(entry) = self.entries.iter().find(|entry| {
+            entry.config == *config && modules_have_same_candidate_shape(&entry.module, module)
+        }) {
+            return Ok((relabel_candidates(&entry.candidates, &module.name), true));
+        }
+
+        let candidates = generate()?;
+        self.entries.push(ChildCandidateCacheEntry {
+            module: module.clone(),
+            config: config.clone(),
+            candidates: candidates.clone(),
+        });
+        Ok((relabel_candidates(&candidates, &module.name), false))
+    }
+}
+
+fn relabel_candidates(candidates: &[LayoutCandidate], module_name: &str) -> Vec<LayoutCandidate> {
+    candidates
+        .iter()
+        .cloned()
+        .map(|mut candidate| {
+            candidate.module_name = module_name.to_owned();
+            candidate
+        })
+        .collect()
+}
+
+fn modules_have_same_candidate_shape(left: &GraphModule, right: &GraphModule) -> bool {
+    match (&left.graph, &right.graph) {
+        (Some(left_graph), Some(right_graph)) => {
+            let left_nodes = left_graph.nodes.iter().collect::<Vec<_>>();
+            let right_nodes = right_graph.nodes.iter().collect::<Vec<_>>();
+            if left_nodes.len() != right_nodes.len()
+                || left_nodes.iter().zip(&right_nodes).any(|(left, right)| {
+                    left.id != right.id
+                        || left.kind != right.kind
+                        || left.inputs != right.inputs
+                        || left.outputs != right.outputs
+                })
+            {
+                return false;
+            }
+        }
+        (None, None) => {}
+        _ => return false,
+    }
+
+    left.ports == right.ports
+}
+
+fn search_layout_combinations(
+    module: &GraphModule,
+    pools: &[ChildCandidatePool],
+    config: &GlobalPnrConfig,
+    progress: &GlobalPnrProgress,
+) -> eyre::Result<(Vec<LayoutCandidate>, Vec<PlacedModule>, Vec<RoutedNet>)> {
+    let combinations =
+        layout_combinations(pools, config.search.budget.max_layout_combinations.max(1));
+    let mut last_error = None;
+    for (combination_index, selection) in combinations.iter().enumerate() {
+        progress.detail(format!(
+            "layout combination {}/{}: {:?}",
+            combination_index + 1,
+            combinations.len(),
+            selection
+        ));
+        let candidates = select_layout_combination(pools, selection)
+            .context("invalid child layout combination")?;
+        let placement_attempts = placement_candidates(
+            module,
+            &candidates,
+            &config.placement,
+            &config.search.policies.placement_heuristics,
+        );
+        progress.detail(format!(
+            "layout combination {} generated {} placement attempt(s)",
+            combination_index + 1,
+            placement_attempts.len()
+        ));
+        match route_first_successful_placement(
+            module,
+            &candidates,
+            placement_attempts,
+            config,
+            progress,
+        ) {
+            Ok((placed, routed_nets)) => {
+                let cost = placement_cost_breakdown(
+                    module,
+                    &candidates,
+                    &placed,
+                    config.placement.congestion,
+                );
+                progress.detail(format!(
+                    "selected placement cost: volume={} xy={} height={} wire={} vertical={} congestion={} weighted_total={}",
+                    cost.placement_volume,
+                    cost.xy_footprint,
+                    cost.height_span,
+                    cost.estimated_wire_length,
+                    cost.vertical_distance,
+                    cost.routing_congestion,
+                    cost.weighted_total(config.placement.cost_weights),
+                ));
+                return Ok((candidates, placed, routed_nets));
+            }
+            Err(error) => {
+                progress.detail(format!(
+                    "layout combination {} failed: {error}",
+                    combination_index + 1
+                ));
+                last_error = Some(error);
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| eyre::eyre!("no child layout combinations generated")))
 }
 
 fn candidate_config_for_child(
@@ -377,8 +782,15 @@ fn candidate_config_for_child(
     base_config: &UnitCandidateConfig,
 ) -> UnitCandidateConfig {
     let mut config = base_config.clone();
-    if graph_module_input_port_count(child) > 1 && graph_module_is_combinational(child) {
-        config.local_config = multi_input_combinational_local_config(config.local_config);
+    if graph_module_is_combinational(child) {
+        if graph_module_input_port_count(child) > 1 {
+            config.local_config = multi_input_combinational_local_config(config.local_config);
+        }
+        if let Some(limit) = config.combinational_sampling_limit {
+            config.local_config.step_sampling_policy = SamplingPolicy::Random(limit);
+            config.local_config.not_route_step_sampling_policy = SamplingPolicy::Random(limit);
+            config.local_config.route_step_sampling_policy = SamplingPolicy::Random(limit);
+        }
     }
     config
 }
@@ -410,21 +822,20 @@ fn graph_module_input_port_count(module: &GraphModule) -> usize {
         .count()
 }
 
-fn child_candidate_selection_cost(candidate: &LayoutCandidate) -> (usize, usize) {
-    (candidate.cost.bbox_volume, candidate.cost.block_count)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::graph::logic::LogicGraph;
     use crate::graph::module::{
         GraphModule, GraphModuleContext, GraphModuleDesign, GraphModulePort, GraphModulePortTarget,
-        GraphModulePortType,
+        GraphModulePortType, GraphModuleVariable,
     };
     use crate::graph::GraphNodeKind;
     use crate::nbt::{NBTRoot, ToNBT};
     use crate::transform::place_and_route::global_pnr::candidate::d_latch_child_candidate_config;
+    use crate::transform::place_and_route::global_pnr::policy::{
+        Free3DPlacementConfig, PlacementHeuristic,
+    };
     use crate::transform::place_and_route::local_placer::{
         InputPlacementStrategy, LocalPlacerConfig, NotRouteStrategy, PlacementSamplingPolicy,
         TorchPlacementStrategy,
@@ -433,9 +844,10 @@ mod tests {
     use crate::transform::place_and_route::utils::world_to_logic_with_outputs;
     use crate::verilog::design::lower_design_modules;
     use crate::verilog::parser::parse_modules;
+    use crate::verilog::synth::d_latch_graph_module;
     use crate::world::block::BlockKind;
     use crate::world::position::{DimSize, Position};
-    use crate::world::simulator::Simulator;
+    use crate::world::simulator::{Simulator, MANUAL_INPUT_IDLE_CYCLES};
     use crate::world::{World, World3D};
 
     fn sequential_local_config() -> LocalPlacerConfig {
@@ -456,6 +868,62 @@ mod tests {
             max_route_step: 4,
             route_step_sampling_policy: SamplingPolicy::Random(256),
         }
+    }
+
+    #[test]
+    fn child_candidate_cache_reuses_identical_module_structure() -> eyre::Result<()> {
+        let first = d_latch_graph_module("q_0_master", "d", "en", "q");
+        let second = d_latch_graph_module("q_1_slave", "d", "en", "q");
+        let config = UnitCandidateConfig {
+            dim: DimSize(3, 3, 3),
+            max_candidates: 1,
+            ..Default::default()
+        };
+        let mut cache = ChildCandidateCache::default();
+        let calls = std::cell::Cell::new(0);
+        let generate = |module: &GraphModule| {
+            calls.set(calls.get() + 1);
+            let mut world = World3D::new(DimSize(3, 3, 3));
+            world[Position(1, 1, 1)] = crate::world::block::Block {
+                kind: BlockKind::Cobble {
+                    on_count: 0,
+                    on_base_count: 0,
+                },
+                direction: crate::world::block::Direction::None,
+            };
+            Ok(vec![LayoutCandidate::from_world(
+                module.name.clone(),
+                world,
+                Vec::new(),
+            )?])
+        };
+
+        let (first_candidates, first_hit) =
+            cache.get_or_generate(&first, &config, || generate(&first))?;
+        let (second_candidates, second_hit) =
+            cache.get_or_generate(&second, &config, || generate(&second))?;
+
+        assert_eq!(calls.get(), 1);
+        assert!(!first_hit);
+        assert!(second_hit);
+        assert_eq!(first_candidates[0].module_name, "q_0_master");
+        assert_eq!(second_candidates[0].module_name, "q_1_slave");
+
+        let different_config = UnitCandidateConfig {
+            max_candidates: 2,
+            ..config.clone()
+        };
+        let (_, config_hit) =
+            cache.get_or_generate(&second, &different_config, || generate(&second))?;
+        assert!(!config_hit);
+
+        let mut different_port = second.clone();
+        different_port.ports[0].name = "renamed".to_owned();
+        let (_, port_hit) =
+            cache.get_or_generate(&different_port, &config, || generate(&different_port))?;
+        assert!(!port_hit);
+        assert_eq!(calls.get(), 3);
+        Ok(())
     }
 
     #[test]
@@ -511,6 +979,66 @@ mod tests {
         assert_eq!(placed.outputs[0].name, "q");
         let output_position = placed.outputs[0].position();
         assert_ne!(placed.world[output_position].kind, BlockKind::Air);
+        Ok(())
+    }
+
+    #[test]
+    fn layered_global_pnr_routes_connected_children_across_z_layers() -> eyre::Result<()> {
+        let mut first: GraphModule = LogicGraph::from_stmt("~a", "x")?.graph.into();
+        first.name = "first".to_owned();
+        let mut second: GraphModule = LogicGraph::from_stmt("~x", "y")?.graph.into();
+        second.name = "second".to_owned();
+        let mut context = GraphModuleContext::default();
+        context.append(first);
+        context.append(second);
+        let top = GraphModule {
+            name: "layered_top".to_owned(),
+            instances: vec!["first".to_owned(), "second".to_owned()],
+            vars: vec![GraphModuleVariable {
+                var_type: GraphModulePortType::InputNet,
+                source: ("first".to_owned(), "x".to_owned()),
+                target: ("second".to_owned(), "x".to_owned()),
+            }],
+            ports: vec![GraphModulePort {
+                name: "y".to_owned(),
+                port_type: GraphModulePortType::OutputNet,
+                target: GraphModulePortTarget::Module("second".to_owned(), "y".to_owned()),
+            }],
+            ..Default::default()
+        };
+        let mut config = GlobalPnrPreset::Fast.config();
+        config.candidate.max_candidates = 1;
+        config.candidate.dim = DimSize(8, 8, 4);
+        config.search.policies.placement_heuristics = vec![
+            crate::transform::place_and_route::global_pnr::policy::PlacementHeuristic::Layered3D(
+                crate::transform::place_and_route::global_pnr::policy::LayeredPlacementConfig {
+                    layers: 2,
+                    layer_spacing: 4,
+                    assignment: crate::transform::place_and_route::global_pnr::policy::LayerAssignmentStrategy::Alternating,
+                },
+            ),
+        ];
+
+        let result = place_and_route_module_with_visualization(&context, &top, &config)?;
+        let bbox_positions = result
+            .placement_bbox_world
+            .iter_block()
+            .into_iter()
+            .map(|(position, _)| position)
+            .collect::<Vec<_>>();
+        let min_z = bbox_positions
+            .iter()
+            .map(|position| position.2)
+            .min()
+            .unwrap();
+        let max_z = bbox_positions
+            .iter()
+            .map(|position| position.2)
+            .max()
+            .unwrap();
+
+        assert!(max_z > min_z + 4);
+        assert_eq!(result.placed_world.outputs.len(), 1);
         Ok(())
     }
 
@@ -597,16 +1125,80 @@ mod tests {
             endmodule
             "#,
         )?)?;
+        let sampling_limit = std::env::var("COUNTER_SAMPLING_LIMIT")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(32);
+        let layout_limit = std::env::var("COUNTER_LAYOUT_LIMIT")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(4);
+        let mut counter_local_config = sequential_local_config();
+        counter_local_config.random_seed = std::env::var("COUNTER_LOCAL_SEED")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(6);
+        let free_3d_heuristics = [2, 4, 6]
+            .into_iter()
+            .flat_map(|clearance| {
+                (0..8).map(move |seed| {
+                    PlacementHeuristic::Free3D(Free3DPlacementConfig {
+                        seed,
+                        clearance,
+                        ..Free3DPlacementConfig::default()
+                    })
+                })
+            })
+            .collect();
         let config = GlobalPnrConfig {
             candidate: UnitCandidateConfig {
-                max_candidates: 4,
-                ..d_latch_child_candidate_config(sequential_local_config())
+                max_candidates: 2,
+                combinational_sampling_limit: Some(sampling_limit),
+                ..d_latch_child_candidate_config(counter_local_config)
             },
             placement: GlobalPlacementConfig {
                 spacing: 4,
                 shelf_width: 64,
                 max_attempts: 64,
                 ..Default::default()
+            },
+            routing_probe: Some(GlobalRoutingConfig {
+                strategy: crate::transform::place_and_route::global_pnr::router::GlobalRoutingStrategy::DirectGreedy {
+                    max_steps: 128,
+                },
+                validation: crate::transform::place_and_route::global_pnr::router::RouteValidationMode::Deferred,
+            }),
+            routing: GlobalRoutingConfig {
+                strategy: crate::transform::place_and_route::global_pnr::router::GlobalRoutingStrategy::GreedyBeam {
+                    beam_width: 128,
+                    max_expansions: 4_096,
+                    variant_seed: 0,
+                },
+                validation: crate::transform::place_and_route::global_pnr::router::RouteValidationMode::Deferred,
+            },
+            routing_refinement: Some(GlobalRoutingConfig {
+                strategy: crate::transform::place_and_route::global_pnr::router::GlobalRoutingStrategy::GreedyBeam {
+                    beam_width: 128,
+                    max_expansions: 4_096,
+                    variant_seed: 0,
+                },
+                validation: crate::transform::place_and_route::global_pnr::router::RouteValidationMode::Deferred,
+            }),
+            search: GlobalSearchConfig {
+                budget: GlobalSearchBudget {
+                    max_candidates_per_child: 2,
+                    max_layout_combinations: layout_limit,
+                    max_detailed_routing_attempts: 2,
+                    max_refined_routing_attempts: 2,
+                    max_refinement_rounds: 8,
+                },
+                policies: GlobalPnrPolicies {
+                    placement_heuristics: free_3d_heuristics,
+                    net_order_strategies: vec![
+                        NetOrderStrategy::Criticality,
+                        NetOrderStrategy::HighestFanoutFirst,
+                    ],
+                },
             },
             verifier: Some(assert_two_bit_counter_behavior),
             ..Default::default()
@@ -701,26 +1293,28 @@ mod tests {
                 .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
 
         let initial = counter_output_value(sim.world(), output_q0, output_q1);
-        sim.change_state_with_limits(vec![(clock, true)], 256, 50_000)?;
-        let first_rise = counter_output_value(sim.world(), output_q0, output_q1);
         eyre::ensure!(
-            first_rise == 1,
-            "counter output should become 1 on first rising edge: initial={initial}, first_rise={first_rise}"
+            initial == 0,
+            "counter should initialize to 0: initial={initial}"
         );
 
-        sim.change_state_with_limits(vec![(clock, false)], 256, 50_000)?;
-        let first_fall = counter_output_value(sim.world(), output_q0, output_q1);
-        eyre::ensure!(
-            first_fall == first_rise,
-            "counter output should hold on falling edge: first_rise={first_rise}, first_fall={first_fall}"
-        );
+        for expected in [1, 2, 3, 0, 1, 2, 3, 0] {
+            sim.change_state_with_limits(vec![(clock, true)], 256, 50_000)?;
+            let rising = counter_output_value(sim.world(), output_q0, output_q1);
+            eyre::ensure!(
+                rising == expected,
+                "counter output mismatch on rising edge: expected={expected}, actual={rising}"
+            );
+            sim.advance_idle_cycles(MANUAL_INPUT_IDLE_CYCLES)?;
 
-        sim.change_state_with_limits(vec![(clock, true)], 256, 50_000)?;
-        let second_rise = counter_output_value(sim.world(), output_q0, output_q1);
-        eyre::ensure!(
-            second_rise == 2,
-            "counter output should become 2 on second rising edge: initial={initial}, first_rise={first_rise}, first_fall={first_fall}, second_rise={second_rise}"
-        );
+            sim.change_state_with_limits(vec![(clock, false)], 256, 50_000)?;
+            let falling = counter_output_value(sim.world(), output_q0, output_q1);
+            eyre::ensure!(
+                falling == expected,
+                "counter output should hold on falling edge: expected={expected}, actual={falling}"
+            );
+            sim.advance_idle_cycles(MANUAL_INPUT_IDLE_CYCLES)?;
+        }
         Ok(())
     }
 

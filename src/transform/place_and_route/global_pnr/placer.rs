@@ -2,7 +2,12 @@ use std::collections::{HashMap, HashSet};
 
 use crate::graph::module::{GraphModule, GraphModulePortTarget};
 use crate::transform::place_and_route::estimate::BoundingBox;
+use crate::transform::place_and_route::global_pnr::free_3d::place_free_3d;
 use crate::transform::place_and_route::global_pnr::ir::LayoutCandidate;
+use crate::transform::place_and_route::global_pnr::policy::{
+    LayerAssignmentStrategy, LayeredPlacementConfig, PlacementCostBreakdown, PlacementCostWeights,
+    PlacementHeuristic, RoutingCongestionConfig,
+};
 use crate::world::position::Position;
 
 const GLOBAL_PLACEMENT_MARGIN: usize = 4;
@@ -12,6 +17,8 @@ pub struct GlobalPlacementConfig {
     pub spacing: usize,
     pub shelf_width: usize,
     pub max_attempts: usize,
+    pub cost_weights: PlacementCostWeights,
+    pub congestion: RoutingCongestionConfig,
 }
 
 impl Default for GlobalPlacementConfig {
@@ -20,6 +27,8 @@ impl Default for GlobalPlacementConfig {
             spacing: 2,
             shelf_width: 64,
             max_attempts: 16,
+            cost_weights: PlacementCostWeights::default(),
+            congestion: RoutingCongestionConfig::default(),
         }
     }
 }
@@ -47,34 +56,97 @@ pub fn placement_candidates(
     module: &GraphModule,
     candidates: &[LayoutCandidate],
     config: &GlobalPlacementConfig,
+    heuristics: &[PlacementHeuristic],
 ) -> Vec<Vec<PlacedModule>> {
     if candidates.is_empty() {
         return Vec::new();
     }
 
     let mut placements = Vec::new();
+    for heuristic in heuristics {
+        if let PlacementHeuristic::Free3D(free_3d) = heuristic {
+            if let Some(placed) = place_free_3d(module, candidates, *free_3d) {
+                push_unique_placement(&mut placements, placed);
+            }
+        }
+    }
     let original_order = (0..candidates.len()).collect::<Vec<_>>();
     let net_order = net_aware_candidate_order(module, candidates);
 
     if is_register_bit_module_set(candidates) {
+        let layered_configs = heuristics
+            .iter()
+            .filter_map(|heuristic| match heuristic {
+                PlacementHeuristic::Layered3D(config) => Some(*config),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let has_register_seed = heuristics.iter().any(|heuristic| {
+            matches!(
+                heuristic,
+                PlacementHeuristic::RegisterCarryChain
+                    | PlacementHeuristic::RegisterCarryAlignedSlices
+                    | PlacementHeuristic::RegisterGrid
+                    | PlacementHeuristic::RegisterTriangles
+                    | PlacementHeuristic::RegisterSlices
+            )
+        });
         for spacing in placement_spacing_options(config.spacing) {
             let config = GlobalPlacementConfig { spacing, ..*config };
-            if let Some(placed) = place_register_bit_carry_chain(candidates, &config) {
-                push_unique_placement(&mut placements, placed);
+            for heuristic in heuristics {
+                let placed = match heuristic {
+                    PlacementHeuristic::RegisterCarryChain => {
+                        place_register_bit_carry_chain(candidates, &config)
+                    }
+                    PlacementHeuristic::RegisterCarryAlignedSlices => {
+                        place_register_bit_carry_aligned_slices(candidates, &config)
+                    }
+                    PlacementHeuristic::RegisterGrid => {
+                        place_register_bit_grid(candidates, &config)
+                    }
+                    PlacementHeuristic::RegisterTriangles => {
+                        place_register_bit_triangles(candidates, &config)
+                    }
+                    PlacementHeuristic::RegisterSlices => {
+                        place_register_bit_slices(candidates, &config)
+                    }
+                    PlacementHeuristic::Shelf
+                    | PlacementHeuristic::Grid
+                    | PlacementHeuristic::Layered3D(_)
+                    | PlacementHeuristic::Free3D(_) => None,
+                };
+                if let Some(placed) = placed {
+                    push_unique_placement(&mut placements, placed.clone());
+                    for layered in &layered_configs {
+                        push_unique_placement(
+                            &mut placements,
+                            apply_layered_placement(module, candidates, placed.clone(), *layered),
+                        );
+                    }
+                }
             }
-            if let Some(placed) = place_register_bit_carry_aligned_slices(candidates, &config) {
-                push_unique_placement(&mut placements, placed);
-            }
-            if let Some(placed) = place_register_bit_grid(candidates, &config) {
-                push_unique_placement(&mut placements, placed);
-            }
-            if let Some(placed) = place_register_bit_triangles(candidates, &config) {
-                push_unique_placement(&mut placements, placed);
-            }
-            if let Some(placed) = place_register_bit_slices(candidates, &config) {
-                push_unique_placement(&mut placements, placed);
+            if !has_register_seed {
+                let seeds = [
+                    place_register_bit_carry_chain(candidates, &config),
+                    place_register_bit_carry_aligned_slices(candidates, &config),
+                    place_register_bit_grid(candidates, &config),
+                    place_register_bit_triangles(candidates, &config),
+                    place_register_bit_slices(candidates, &config),
+                ];
+                for placed in seeds.into_iter().flatten() {
+                    for layered in &layered_configs {
+                        push_unique_placement(
+                            &mut placements,
+                            apply_layered_placement(module, candidates, placed.clone(), *layered),
+                        );
+                    }
+                }
             }
         }
+        placements.sort_by_key(|placed| {
+            placement_cost_breakdown(module, candidates, placed, config.congestion)
+                .weighted_total(config.cost_weights)
+        });
         placements.truncate(config.max_attempts.max(1));
         return placements;
     }
@@ -86,36 +158,120 @@ pub fn placement_candidates(
                 shelf_width,
                 ..*config
             };
-            push_unique_placement(
-                &mut placements,
-                place_candidates_on_shelves_in_order(candidates, &original_order, &config),
-            );
-            push_unique_placement(
-                &mut placements,
-                place_candidates_on_shelves_in_order(candidates, &net_order, &config),
-            );
-
-            for columns in grid_column_options(candidates.len()) {
+            if heuristics.contains(&PlacementHeuristic::Shelf) {
                 push_unique_placement(
                     &mut placements,
-                    place_candidates_on_grid_in_order(
-                        candidates,
-                        &original_order,
-                        columns,
-                        &config,
-                    ),
+                    place_candidates_on_shelves_in_order(candidates, &original_order, &config),
                 );
                 push_unique_placement(
                     &mut placements,
-                    place_candidates_on_grid_in_order(candidates, &net_order, columns, &config),
+                    place_candidates_on_shelves_in_order(candidates, &net_order, &config),
+                );
+            }
+            if heuristics.contains(&PlacementHeuristic::Grid) {
+                for columns in grid_column_options(candidates.len()) {
+                    push_unique_placement(
+                        &mut placements,
+                        place_candidates_on_grid_in_order(
+                            candidates,
+                            &original_order,
+                            columns,
+                            &config,
+                        ),
+                    );
+                    push_unique_placement(
+                        &mut placements,
+                        place_candidates_on_grid_in_order(candidates, &net_order, columns, &config),
+                    );
+                }
+            }
+            for layered in heuristics.iter().filter_map(|heuristic| match heuristic {
+                PlacementHeuristic::Layered3D(config) => Some(*config),
+                _ => None,
+            }) {
+                let seed = place_candidates_on_shelves_in_order(candidates, &net_order, &config);
+                push_unique_placement(
+                    &mut placements,
+                    apply_layered_placement(module, candidates, seed, layered),
                 );
             }
         }
     }
 
-    placements.sort_by_key(|placed| placement_cost(module, candidates, placed));
+    placements.sort_by_key(|placed| {
+        placement_cost_breakdown(module, candidates, placed, config.congestion)
+            .weighted_total(config.cost_weights)
+    });
     placements.truncate(config.max_attempts.max(1));
     placements
+}
+
+fn apply_layered_placement(
+    module: &GraphModule,
+    candidates: &[LayoutCandidate],
+    mut placed: Vec<PlacedModule>,
+    config: LayeredPlacementConfig,
+) -> Vec<PlacedModule> {
+    let layer_count = config.layers.max(1);
+    let layer_stride = candidates
+        .iter()
+        .map(|candidate| candidate.bbox.height())
+        .max()
+        .unwrap_or(1)
+        .saturating_add(config.layer_spacing);
+    let assignments = match config.assignment {
+        LayerAssignmentStrategy::Alternating => {
+            (0..placed.len()).map(|index| index % layer_count).collect()
+        }
+        LayerAssignmentStrategy::NetAware => {
+            net_aware_layer_assignments(module, &placed, layer_count)
+        }
+    };
+    for (placed, layer) in placed.iter_mut().zip(assignments) {
+        placed.origin.2 = placed.bbox.min.2 + layer * layer_stride;
+    }
+    placed
+}
+
+fn net_aware_layer_assignments(
+    module: &GraphModule,
+    placed: &[PlacedModule],
+    layer_count: usize,
+) -> Vec<usize> {
+    let target_load = placed.len().div_ceil(layer_count.max(1));
+    let mut assignments = Vec::with_capacity(placed.len());
+    let mut assigned_by_module = HashMap::<&str, usize>::new();
+    let mut layer_loads = vec![0usize; layer_count.max(1)];
+
+    for item in placed {
+        let connected_layers = module
+            .vars
+            .iter()
+            .filter_map(|var| {
+                if var.source.0 == item.module_name {
+                    assigned_by_module.get(var.target.0.as_str()).copied()
+                } else if var.target.0 == item.module_name {
+                    assigned_by_module.get(var.source.0.as_str()).copied()
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        let layer = (0..layer_loads.len())
+            .min_by_key(|&layer| {
+                let cross_layer_edges = connected_layers
+                    .iter()
+                    .filter(|&&connected| connected != layer)
+                    .count();
+                let overflow = usize::from(layer_loads[layer] >= target_load);
+                (overflow, cross_layer_edges, layer_loads[layer], layer)
+            })
+            .unwrap_or(0);
+        assignments.push(layer);
+        assigned_by_module.insert(item.module_name.as_str(), layer);
+        layer_loads[layer] += 1;
+    }
+    assignments
 }
 
 fn is_register_bit_module_set(candidates: &[LayoutCandidate]) -> bool {
@@ -851,17 +1007,25 @@ fn target_modules(target: &GraphModulePortTarget) -> Vec<String> {
     }
 }
 
-fn placement_cost(
+pub(crate) fn placement_cost_breakdown(
     module: &GraphModule,
     candidates: &[LayoutCandidate],
     placed: &[PlacedModule],
-) -> usize {
+    congestion_config: RoutingCongestionConfig,
+) -> PlacementCostBreakdown {
     let placed_by_module = placed
         .iter()
         .map(|placed| (placed.module_name.as_str(), placed))
         .collect::<HashMap<_, _>>();
-    let mut cost = placement_bbox_cost(placed);
+    let (placement_volume, xy_footprint, height_span) = placement_bbox_metrics(placed);
+    let mut cost = PlacementCostBreakdown {
+        placement_volume,
+        xy_footprint,
+        height_span,
+        ..PlacementCostBreakdown::default()
+    };
 
+    let mut net_regions = Vec::new();
     for var in &module.vars {
         let Some(source) = placed_by_module.get(var.source.0.as_str()) else {
             continue;
@@ -899,16 +1063,51 @@ fn placement_cost(
         else {
             continue;
         };
-        cost += source_position.manhattan_distance(&target_position) * 8;
-        cost += source_position.2.abs_diff(target_position.2) * 16;
+        cost.estimated_wire_length += source_position.manhattan_distance(&target_position);
+        cost.vertical_distance += source_position.2.abs_diff(target_position.2);
+        net_regions.push((source_position, target_position));
     }
+    cost.routing_congestion = estimate_routing_congestion(&net_regions, congestion_config);
 
     cost
 }
 
-fn placement_bbox_cost(placed: &[PlacedModule]) -> usize {
+fn estimate_routing_congestion(
+    net_regions: &[(Position, Position)],
+    config: RoutingCongestionConfig,
+) -> usize {
+    let bin_xy = config.bin_size_xy.max(1);
+    let bin_z = config.bin_size_z.max(1);
+    let mut demand = HashMap::<(usize, usize, usize), usize>::new();
+
+    for &(source, target) in net_regions {
+        let min = Position(
+            source.0.min(target.0) / bin_xy,
+            source.1.min(target.1) / bin_xy,
+            source.2.min(target.2) / bin_z,
+        );
+        let max = Position(
+            source.0.max(target.0) / bin_xy,
+            source.1.max(target.1) / bin_xy,
+            source.2.max(target.2) / bin_z,
+        );
+        for x in min.0..=max.0 {
+            for y in min.1..=max.1 {
+                for z in min.2..=max.2 {
+                    *demand.entry((x, y, z)).or_default() += 1;
+                }
+            }
+        }
+    }
+
+    demand.values().fold(0usize, |total, &count| {
+        total.saturating_add(count.saturating_mul(count.saturating_sub(1)) / 2)
+    })
+}
+
+fn placement_bbox_metrics(placed: &[PlacedModule]) -> (usize, usize, usize) {
     let Some(first) = placed.first() else {
-        return 0;
+        return (0, 0, 0);
     };
     let mut min = first.origin;
     let mut max = first.origin;
@@ -920,7 +1119,10 @@ fn placement_bbox_cost(placed: &[PlacedModule]) -> usize {
         max.1 = max.1.max(placed.origin.1 + placed.bbox.depth());
         max.2 = max.2.max(placed.origin.2 + placed.bbox.height());
     }
-    (max.0 - min.0 + 1) * (max.1 - min.1 + 1) * (max.2 - min.2 + 1)
+    let width = max.0 - min.0 + 1;
+    let depth = max.1 - min.1 + 1;
+    let height = max.2 - min.2 + 1;
+    (width * depth * height, width * depth, height)
 }
 
 fn translate_candidate_position(
@@ -940,6 +1142,10 @@ mod tests {
     use super::*;
     use crate::transform::place_and_route::global_pnr::ir::{
         LayoutCandidateCost, PhysicalPort, PhysicalPortDirection, PortConnection,
+    };
+    use crate::transform::place_and_route::global_pnr::policy::{
+        Free3DPlacementConfig, LayerAssignmentStrategy, LayeredPlacementConfig, PlacementHeuristic,
+        RoutingCongestionConfig,
     };
     use crate::world::position::DimSize;
     use crate::world::World3D;
@@ -1053,5 +1259,185 @@ mod tests {
             placed_port_y(&candidates, &placed, "q_1_next", "d"),
             placed_port_y(&candidates, &placed, "q_1_master", "d")
         );
+    }
+
+    #[test]
+    fn placement_policy_can_disable_grid_attempts() {
+        let candidates = (0..5)
+            .map(|index| test_candidate(&format!("child_{index}"), &[]))
+            .collect::<Vec<_>>();
+        let module = GraphModule::default();
+        let config = GlobalPlacementConfig {
+            max_attempts: 128,
+            ..Default::default()
+        };
+
+        let shelf_only =
+            placement_candidates(&module, &candidates, &config, &[PlacementHeuristic::Shelf]);
+        let shelf_and_grid = placement_candidates(
+            &module,
+            &candidates,
+            &config,
+            &[PlacementHeuristic::Shelf, PlacementHeuristic::Grid],
+        );
+
+        assert!(!shelf_only.is_empty());
+        assert!(shelf_only.len() < shelf_and_grid.len());
+    }
+
+    #[test]
+    fn layered_placement_heuristic_assigns_modules_to_multiple_z_layers() {
+        let candidates = (0..4)
+            .map(|index| test_candidate(&format!("child_{index}"), &[]))
+            .collect::<Vec<_>>();
+        let placements = placement_candidates(
+            &GraphModule::default(),
+            &candidates,
+            &GlobalPlacementConfig::default(),
+            &[PlacementHeuristic::Layered3D(LayeredPlacementConfig {
+                layers: 2,
+                layer_spacing: 4,
+                assignment: LayerAssignmentStrategy::Alternating,
+            })],
+        );
+
+        assert!(!placements.is_empty());
+        let z_origins = placements[0]
+            .iter()
+            .map(|placed| placed.origin.2)
+            .collect::<HashSet<_>>();
+        assert_eq!(z_origins.len(), 2);
+        assert!(z_origins.iter().copied().max().unwrap() >= 7);
+    }
+
+    #[test]
+    fn layered_placement_can_wrap_register_specific_heuristics() {
+        let candidates = vec![
+            test_candidate("q_0_clk_inv", &[("clk_n", Position(1, 3, 1))]),
+            test_candidate("q_0_next", &[("q_0", Position(0, 2, 1))]),
+            test_candidate("q_0_master", &[("q", Position(5, 8, 1))]),
+            test_candidate("q_0_slave", &[("q", Position(5, 10, 1))]),
+        ];
+        let placements = placement_candidates(
+            &GraphModule::default(),
+            &candidates,
+            &GlobalPlacementConfig::default(),
+            &[
+                PlacementHeuristic::RegisterSlices,
+                PlacementHeuristic::Layered3D(LayeredPlacementConfig {
+                    layers: 2,
+                    layer_spacing: 4,
+                    assignment: LayerAssignmentStrategy::Alternating,
+                }),
+            ],
+        );
+
+        assert!(placements.iter().any(|placed| {
+            placed
+                .iter()
+                .map(|module| module.origin.2)
+                .collect::<HashSet<_>>()
+                .len()
+                > 1
+        }));
+    }
+
+    #[test]
+    fn layered_placement_can_run_alone_for_register_modules() {
+        let candidates = vec![
+            test_candidate("q_0_clk_inv", &[("clk_n", Position(1, 3, 1))]),
+            test_candidate("q_0_next", &[("q_0", Position(0, 2, 1))]),
+            test_candidate("q_0_master", &[("q", Position(5, 8, 1))]),
+            test_candidate("q_0_slave", &[("q", Position(5, 10, 1))]),
+        ];
+        let placements = placement_candidates(
+            &GraphModule::default(),
+            &candidates,
+            &GlobalPlacementConfig::default(),
+            &[PlacementHeuristic::Layered3D(LayeredPlacementConfig {
+                layers: 2,
+                layer_spacing: 4,
+                assignment: LayerAssignmentStrategy::Alternating,
+            })],
+        );
+
+        assert!(!placements.is_empty());
+        assert!(placements.iter().all(|placed| {
+            placed
+                .iter()
+                .map(|module| module.origin.2)
+                .collect::<HashSet<_>>()
+                .len()
+                > 1
+        }));
+    }
+
+    #[test]
+    fn register_placements_rank_free_3d_with_shared_cost_weights() {
+        let candidates = vec![
+            test_candidate("q_0_clk_inv", &[("clk_n", Position(1, 3, 1))]),
+            test_candidate("q_0_next", &[("q_0", Position(0, 2, 1))]),
+            test_candidate("q_0_master", &[("q", Position(5, 8, 1))]),
+            test_candidate("q_0_slave", &[("q", Position(5, 10, 1))]),
+            test_candidate("q_1_clk_inv", &[("clk_n", Position(1, 3, 1))]),
+            test_candidate("q_1_next", &[("q_1", Position(0, 2, 1))]),
+            test_candidate("q_1_master", &[("q", Position(5, 8, 1))]),
+            test_candidate("q_1_slave", &[("q", Position(5, 10, 1))]),
+        ];
+        let module = GraphModule::default();
+        let config = GlobalPlacementConfig {
+            cost_weights: PlacementCostWeights {
+                placement_volume: 0,
+                xy_footprint: 0,
+                height_span: 1,
+                estimated_wire_length: 0,
+                vertical_distance: 0,
+                routing_congestion: 0,
+            },
+            ..Default::default()
+        };
+        let placements = placement_candidates(
+            &module,
+            &candidates,
+            &config,
+            &[
+                PlacementHeuristic::RegisterSlices,
+                PlacementHeuristic::Free3D(Free3DPlacementConfig::default()),
+            ],
+        );
+        let costs = placements
+            .iter()
+            .map(|placed| {
+                placement_cost_breakdown(&module, &candidates, placed, config.congestion)
+                    .weighted_total(config.cost_weights)
+            })
+            .collect::<Vec<_>>();
+
+        assert!(costs.windows(2).all(|pair| pair[0] <= pair[1]));
+    }
+
+    #[test]
+    fn routing_congestion_penalizes_overlapping_net_regions() {
+        let config = RoutingCongestionConfig {
+            bin_size_xy: 4,
+            bin_size_z: 2,
+        };
+        let overlapping = estimate_routing_congestion(
+            &[
+                (Position(0, 0, 0), Position(12, 0, 0)),
+                (Position(0, 1, 0), Position(12, 1, 0)),
+            ],
+            config,
+        );
+        let separated = estimate_routing_congestion(
+            &[
+                (Position(0, 0, 0), Position(12, 0, 0)),
+                (Position(0, 8, 0), Position(12, 8, 0)),
+            ],
+            config,
+        );
+
+        assert!(overlapping > separated);
+        assert_eq!(separated, 0);
     }
 }

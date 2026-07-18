@@ -175,7 +175,7 @@ impl Position {
 
 // 사이즈
 
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
 pub struct DimSize(pub usize, pub usize, pub usize);
 
 impl DimSize {

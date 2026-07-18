@@ -4,7 +4,7 @@ use crate::graph::GraphNodeId;
 use crate::transform::place_and_route::sampling::SamplingPolicy;
 use crate::world::position::Position;
 
-#[derive(Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct LocalPlacerConfig {
     pub random_seed: u64,
     pub greedy_input_generation: bool,
