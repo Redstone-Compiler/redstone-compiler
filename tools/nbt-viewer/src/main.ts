@@ -4,6 +4,7 @@ import { unzipSync } from 'fflate';
 import { loadNbtFile, stringifyNbt } from './nbt/loadNbt';
 import { toStructureModel } from './nbt/toStructure';
 import { StructureViewer } from './render/StructureViewer';
+import { highlightRcir } from './syntax/rcir';
 import {
   NbtSimulation,
   NbtSimulationError,
@@ -2177,6 +2178,12 @@ async function openTextArtifact(path: string): Promise<void> {
   if (!file) throw new Error(`Snapshot artifact is missing: ${path}`);
   const text = await file.text();
   artifactTitle.textContent = path;
+  artifactContent.classList.toggle('language-rcir', path.toLowerCase().endsWith('.rcir'));
+  if (path.toLowerCase().endsWith('.rcir')) {
+    artifactContent.replaceChildren(highlightRcir(text));
+    if (!artifactDialog.open) artifactDialog.showModal();
+    return;
+  }
   try {
     artifactContent.textContent = JSON.stringify(JSON.parse(text), null, 2);
   } catch {

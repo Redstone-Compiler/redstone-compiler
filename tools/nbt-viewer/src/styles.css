@@ -1108,6 +1108,42 @@ input {
   white-space: pre;
 }
 
+.artifact-content.language-rcir {
+  color: #c9d1d9;
+  tab-size: 2;
+}
+
+.rcir-comment {
+  color: #708090;
+  font-style: italic;
+}
+
+.rcir-keyword {
+  color: #ff7b72;
+  font-weight: 600;
+}
+
+.rcir-stage {
+  color: #d2a8ff;
+  font-weight: 600;
+}
+
+.rcir-type {
+  color: #79c0ff;
+}
+
+.rcir-operation {
+  color: #d2a8ff;
+}
+
+.rcir-string {
+  color: #a5d6ff;
+}
+
+.rcir-number {
+  color: #ffa657;
+}
+
 .graph-output svg g.node {
   cursor: pointer;
 }
