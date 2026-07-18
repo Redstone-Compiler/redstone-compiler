@@ -4,7 +4,9 @@ use eyre::{ContextCompat, WrapErr};
 
 use crate::graph::module::{GraphModule, GraphModulePortTarget};
 use crate::transform::place_and_route::estimate::BoundingBox;
-use crate::transform::place_and_route::global_pnr::free_3d::place_free_3d;
+use crate::transform::place_and_route::global_pnr::free_3d::{
+    place_free_3d, place_free_3d_with_edges,
+};
 use crate::transform::place_and_route::global_pnr::heuristics::{
     GlobalHeuristicHooks, PlacementHeuristicContext,
 };
@@ -16,7 +18,9 @@ use crate::transform::place_and_route::global_pnr::policy::{
     LayerAssignmentStrategy, LayeredPlacementConfig, PlacementCostBreakdown, PlacementCostWeights,
     PlacementHeuristic, RoutingCongestionConfig,
 };
-use crate::transform::place_and_route::global_pnr::topology::ResolvedPnrTopology;
+use crate::transform::place_and_route::global_pnr::topology::{
+    ResolvedEndpoint, ResolvedPnrTopology,
+};
 use crate::world::position::Position;
 
 const GLOBAL_PLACEMENT_MARGIN: usize = 4;
@@ -50,6 +54,140 @@ pub struct PlacedModule {
     pub bbox: BoundingBox,
 }
 
+#[derive(Clone, Debug)]
+struct PlacementConnection {
+    source_instance: String,
+    source_port: String,
+    target_instance: String,
+    target_port: String,
+}
+
+#[derive(Clone, Debug, Default)]
+struct PlacementConnectivity {
+    connections: Vec<PlacementConnection>,
+    proximity_edges: Vec<(String, String)>,
+}
+
+impl PlacementConnectivity {
+    fn from_legacy(module: &GraphModule) -> Self {
+        let connections = module
+            .vars
+            .iter()
+            .map(|var| PlacementConnection {
+                source_instance: var.source.0.clone(),
+                source_port: var.source.1.clone(),
+                target_instance: var.target.0.clone(),
+                target_port: var.target.1.clone(),
+            })
+            .collect::<Vec<_>>();
+        let mut proximity_edges = connections
+            .iter()
+            .map(|connection| {
+                (
+                    connection.source_instance.clone(),
+                    connection.target_instance.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        for port in &module.ports {
+            let targets = target_modules(&port.target);
+            for (index, left) in targets.iter().enumerate() {
+                for right in targets.iter().skip(index + 1) {
+                    proximity_edges.push((left.clone(), right.clone()));
+                }
+            }
+        }
+        Self {
+            connections,
+            proximity_edges,
+        }
+    }
+
+    fn from_resolved(topology: &ResolvedPnrTopology) -> eyre::Result<Self> {
+        let mut connections = Vec::new();
+        let mut proximity_edges = Vec::new();
+        for net in &topology.nets {
+            let endpoints = std::iter::once(&net.driver)
+                .chain(net.sinks.iter())
+                .filter_map(|endpoint| match endpoint {
+                    ResolvedEndpoint::InstancePort { instance, port } => Some((*instance, *port)),
+                    ResolvedEndpoint::TopPort { .. } => None,
+                })
+                .collect::<Vec<_>>();
+            for (index, (left, _)) in endpoints.iter().enumerate() {
+                for (right, _) in endpoints.iter().skip(index + 1) {
+                    let left = topology
+                        .instances
+                        .get(left.0)
+                        .context("resolved placement edge has an unknown instance")?;
+                    let right = topology
+                        .instances
+                        .get(right.0)
+                        .context("resolved placement edge has an unknown instance")?;
+                    if left.id != right.id {
+                        proximity_edges
+                            .push((left.display_name.clone(), right.display_name.clone()));
+                    }
+                }
+            }
+            let ResolvedEndpoint::InstancePort {
+                instance: source_instance,
+                port: source_port,
+            } = net.driver
+            else {
+                continue;
+            };
+            let source_instance = topology
+                .instances
+                .get(source_instance.0)
+                .context("resolved placement net has an unknown driver instance")?;
+            let source_port = topology
+                .port(source_port)
+                .context("resolved placement net has an unknown driver port")?;
+            for sink in &net.sinks {
+                let ResolvedEndpoint::InstancePort { instance, port } = sink else {
+                    continue;
+                };
+                let target_instance = topology
+                    .instances
+                    .get(instance.0)
+                    .context("resolved placement net has an unknown sink instance")?;
+                let target_port = topology
+                    .port(*port)
+                    .context("resolved placement net has an unknown sink port")?;
+                connections.push(PlacementConnection {
+                    source_instance: source_instance.display_name.clone(),
+                    source_port: source_port.name.clone(),
+                    target_instance: target_instance.display_name.clone(),
+                    target_port: target_port.name.clone(),
+                });
+            }
+        }
+        proximity_edges.sort();
+        proximity_edges.dedup();
+        Ok(Self {
+            connections,
+            proximity_edges,
+        })
+    }
+
+    fn candidate_edges(&self, candidates: &[LayoutCandidate]) -> Vec<(usize, usize)> {
+        let by_name = candidates
+            .iter()
+            .enumerate()
+            .map(|(index, candidate)| (candidate.module_name.as_str(), index))
+            .collect::<HashMap<_, _>>();
+        self.proximity_edges
+            .iter()
+            .filter_map(|(left, right)| {
+                let left = *by_name.get(left.as_str())?;
+                let right = *by_name.get(right.as_str())?;
+                (left != right).then_some((left, right))
+            })
+            .collect()
+    }
+}
+
 pub fn place_candidates_on_shelves(
     candidates: &[LayoutCandidate],
     config: &GlobalPlacementConfig,
@@ -67,6 +205,23 @@ pub fn placement_candidates(
     config: &GlobalPlacementConfig,
     heuristics: &[PlacementHeuristic],
 ) -> Vec<Vec<PlacedModule>> {
+    let connectivity = PlacementConnectivity::from_legacy(module);
+    placement_candidates_with_connectivity(
+        &connectivity,
+        Some(module),
+        candidates,
+        config,
+        heuristics,
+    )
+}
+
+fn placement_candidates_with_connectivity(
+    connectivity: &PlacementConnectivity,
+    legacy_module: Option<&GraphModule>,
+    candidates: &[LayoutCandidate],
+    config: &GlobalPlacementConfig,
+    heuristics: &[PlacementHeuristic],
+) -> Vec<Vec<PlacedModule>> {
     if candidates.is_empty() {
         return Vec::new();
     }
@@ -74,13 +229,18 @@ pub fn placement_candidates(
     let mut placements = Vec::new();
     for heuristic in heuristics {
         if let PlacementHeuristic::Free3D(free_3d) = heuristic {
-            if let Some(placed) = place_free_3d(module, candidates, *free_3d) {
+            let edges = connectivity.candidate_edges(candidates);
+            let placed = legacy_module.map_or_else(
+                || place_free_3d_with_edges(candidates, &edges, *free_3d),
+                |module| place_free_3d(module, candidates, *free_3d),
+            );
+            if let Some(placed) = placed {
                 push_unique_placement(&mut placements, placed);
             }
         }
     }
     let original_order = (0..candidates.len()).collect::<Vec<_>>();
-    let net_order = net_aware_candidate_order(module, candidates);
+    let net_order = net_aware_candidate_order(connectivity, candidates);
 
     if is_register_bit_module_set(candidates) {
         let layered_configs = heuristics
@@ -129,7 +289,12 @@ pub fn placement_candidates(
                     for layered in &layered_configs {
                         push_unique_placement(
                             &mut placements,
-                            apply_layered_placement(module, candidates, placed.clone(), *layered),
+                            apply_layered_placement(
+                                connectivity,
+                                candidates,
+                                placed.clone(),
+                                *layered,
+                            ),
                         );
                     }
                 }
@@ -146,15 +311,25 @@ pub fn placement_candidates(
                     for layered in &layered_configs {
                         push_unique_placement(
                             &mut placements,
-                            apply_layered_placement(module, candidates, placed.clone(), *layered),
+                            apply_layered_placement(
+                                connectivity,
+                                candidates,
+                                placed.clone(),
+                                *layered,
+                            ),
                         );
                     }
                 }
             }
         }
         placements.sort_by_key(|placed| {
-            placement_cost_breakdown(module, candidates, placed, config.congestion)
-                .weighted_total(config.cost_weights)
+            placement_cost_breakdown_connectivity(
+                connectivity,
+                candidates,
+                placed,
+                config.congestion,
+            )
+            .weighted_total(config.cost_weights)
         });
         placements.truncate(config.max_attempts.max(1));
         return placements;
@@ -201,14 +376,14 @@ pub fn placement_candidates(
                 let seed = place_candidates_on_shelves_in_order(candidates, &net_order, &config);
                 push_unique_placement(
                     &mut placements,
-                    apply_layered_placement(module, candidates, seed, layered),
+                    apply_layered_placement(connectivity, candidates, seed, layered),
                 );
             }
         }
     }
 
     placements.sort_by_key(|placed| {
-        placement_cost_breakdown(module, candidates, placed, config.congestion)
+        placement_cost_breakdown_connectivity(connectivity, candidates, placed, config.congestion)
             .weighted_total(config.cost_weights)
     });
     placements.truncate(config.max_attempts.max(1));
@@ -223,8 +398,9 @@ pub fn placement_candidates_resolved(
     config: &GlobalPlacementConfig,
     heuristics: &[PlacementHeuristic],
 ) -> eyre::Result<Vec<Vec<PlacedModule>>> {
-    let adapter = topology.legacy_routing_adapter()?;
-    let mut placements = placement_candidates(&adapter, candidates, config, heuristics);
+    let connectivity = PlacementConnectivity::from_resolved(topology)?;
+    let mut placements =
+        placement_candidates_with_connectivity(&connectivity, None, candidates, config, heuristics);
     let context = PlacementHeuristicContext {
         topology,
         candidates,
@@ -267,8 +443,13 @@ pub fn placement_candidates_resolved(
             preference.medium,
             preference.weak,
             hook_cost,
-            placement_cost_breakdown(&adapter, candidates, placed, config.congestion)
-                .weighted_total(config.cost_weights),
+            placement_cost_breakdown_connectivity(
+                &connectivity,
+                candidates,
+                placed,
+                config.congestion,
+            )
+            .weighted_total(config.cost_weights),
         )
     });
     constrained.truncate(config.max_attempts.max(1));
@@ -449,7 +630,7 @@ fn validate_no_placement_overlap(placed: &[PlacedModule]) -> eyre::Result<()> {
 }
 
 fn apply_layered_placement(
-    module: &GraphModule,
+    connectivity: &PlacementConnectivity,
     candidates: &[LayoutCandidate],
     mut placed: Vec<PlacedModule>,
     config: LayeredPlacementConfig,
@@ -466,7 +647,7 @@ fn apply_layered_placement(
             (0..placed.len()).map(|index| index % layer_count).collect()
         }
         LayerAssignmentStrategy::NetAware => {
-            net_aware_layer_assignments(module, &placed, layer_count)
+            net_aware_layer_assignments(connectivity, &placed, layer_count)
         }
     };
     for (placed, layer) in placed.iter_mut().zip(assignments) {
@@ -476,7 +657,7 @@ fn apply_layered_placement(
 }
 
 fn net_aware_layer_assignments(
-    module: &GraphModule,
+    connectivity: &PlacementConnectivity,
     placed: &[PlacedModule],
     layer_count: usize,
 ) -> Vec<usize> {
@@ -486,14 +667,14 @@ fn net_aware_layer_assignments(
     let mut layer_loads = vec![0usize; layer_count.max(1)];
 
     for item in placed {
-        let connected_layers = module
-            .vars
+        let connected_layers = connectivity
+            .proximity_edges
             .iter()
-            .filter_map(|var| {
-                if var.source.0 == item.module_name {
-                    assigned_by_module.get(var.target.0.as_str()).copied()
-                } else if var.target.0 == item.module_name {
-                    assigned_by_module.get(var.source.0.as_str()).copied()
+            .filter_map(|(left, right)| {
+                if left == &item.module_name {
+                    assigned_by_module.get(right.as_str()).copied()
+                } else if right == &item.module_name {
+                    assigned_by_module.get(left.as_str()).copied()
                 } else {
                     None
                 }
@@ -1152,13 +1333,24 @@ fn placement_signature(placed: &[PlacedModule]) -> Vec<(usize, Position)> {
     signature
 }
 
-fn net_aware_candidate_order(module: &GraphModule, candidates: &[LayoutCandidate]) -> Vec<usize> {
+fn net_aware_candidate_order(
+    connectivity: &PlacementConnectivity,
+    candidates: &[LayoutCandidate],
+) -> Vec<usize> {
     let module_to_candidate = candidates
         .iter()
         .enumerate()
         .map(|(index, candidate)| (candidate.module_name.as_str(), index))
         .collect::<HashMap<_, _>>();
-    let edges = module_edges(module, &module_to_candidate);
+    let edges = connectivity
+        .proximity_edges
+        .iter()
+        .filter_map(|(left, right)| {
+            let left = *module_to_candidate.get(left.as_str())?;
+            let right = *module_to_candidate.get(right.as_str())?;
+            (left != right).then_some((left, right))
+        })
+        .collect::<Vec<_>>();
     if edges.is_empty() {
         return (0..candidates.len()).collect();
     }
@@ -1199,43 +1391,6 @@ fn net_aware_candidate_order(module: &GraphModule, candidates: &[LayoutCandidate
     order
 }
 
-fn module_edges(
-    module: &GraphModule,
-    module_to_candidate: &HashMap<&str, usize>,
-) -> Vec<(usize, usize)> {
-    let mut edges = Vec::new();
-    for var in &module.vars {
-        let Some(&source) = module_to_candidate.get(var.source.0.as_str()) else {
-            continue;
-        };
-        let Some(&target) = module_to_candidate.get(var.target.0.as_str()) else {
-            continue;
-        };
-        if source != target {
-            edges.push((source, target));
-        }
-    }
-
-    for port in &module.ports {
-        let targets = target_modules(&port.target);
-        for (left_index, left) in targets.iter().enumerate() {
-            for right in targets.iter().skip(left_index + 1) {
-                let Some(&left) = module_to_candidate.get(left.as_str()) else {
-                    continue;
-                };
-                let Some(&right) = module_to_candidate.get(right.as_str()) else {
-                    continue;
-                };
-                if left != right {
-                    edges.push((left, right));
-                }
-            }
-        }
-    }
-
-    edges
-}
-
 fn target_modules(target: &GraphModulePortTarget) -> Vec<String> {
     match target {
         GraphModulePortTarget::Module(module, _) => vec![module.clone()],
@@ -1249,8 +1404,23 @@ fn target_modules(target: &GraphModulePortTarget) -> Vec<String> {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn placement_cost_breakdown(
     module: &GraphModule,
+    candidates: &[LayoutCandidate],
+    placed: &[PlacedModule],
+    congestion_config: RoutingCongestionConfig,
+) -> PlacementCostBreakdown {
+    placement_cost_breakdown_connectivity(
+        &PlacementConnectivity::from_legacy(module),
+        candidates,
+        placed,
+        congestion_config,
+    )
+}
+
+fn placement_cost_breakdown_connectivity(
+    connectivity: &PlacementConnectivity,
     candidates: &[LayoutCandidate],
     placed: &[PlacedModule],
     congestion_config: RoutingCongestionConfig,
@@ -1268,11 +1438,11 @@ pub(crate) fn placement_cost_breakdown(
     };
 
     let mut net_regions = Vec::new();
-    for var in &module.vars {
-        let Some(source) = placed_by_module.get(var.source.0.as_str()) else {
+    for connection in &connectivity.connections {
+        let Some(source) = placed_by_module.get(connection.source_instance.as_str()) else {
             continue;
         };
-        let Some(target) = placed_by_module.get(var.target.0.as_str()) else {
+        let Some(target) = placed_by_module.get(connection.target_instance.as_str()) else {
             continue;
         };
         let source_candidate = &candidates[source.candidate_index];
@@ -1280,14 +1450,14 @@ pub(crate) fn placement_cost_breakdown(
         let Some(source_port) = source_candidate
             .ports
             .iter()
-            .find(|port| port.name == var.source.1)
+            .find(|port| port.name == connection.source_port)
         else {
             continue;
         };
         let Some(target_port) = target_candidate
             .ports
             .iter()
-            .find(|port| port.name == var.target.1)
+            .find(|port| port.name == connection.target_port)
         else {
             continue;
         };
@@ -1320,9 +1490,9 @@ pub(crate) fn placement_cost_breakdown_resolved(
     placed: &[PlacedModule],
     congestion_config: RoutingCongestionConfig,
 ) -> eyre::Result<PlacementCostBreakdown> {
-    let adapter = topology.legacy_routing_adapter()?;
-    Ok(placement_cost_breakdown(
-        &adapter,
+    let connectivity = PlacementConnectivity::from_resolved(topology)?;
+    Ok(placement_cost_breakdown_connectivity(
+        &connectivity,
         candidates,
         placed,
         congestion_config,
