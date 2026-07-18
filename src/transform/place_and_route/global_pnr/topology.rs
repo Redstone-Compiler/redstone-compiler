@@ -4,8 +4,7 @@ use eyre::ContextCompat;
 use serde::{Deserialize, Serialize};
 
 use crate::graph::module::{
-    GraphModule, GraphModuleContext, GraphModulePort, GraphModulePortTarget, GraphModulePortType,
-    GraphModuleVariable,
+    GraphModule, GraphModuleContext, GraphModulePortTarget, GraphModulePortType,
 };
 use crate::ir::{Endpoint, NetClass, RoutableDesign, RoutableModuleBody, RoutablePortDirection};
 
@@ -119,98 +118,6 @@ impl ResolvedPnrTopology {
         self.nets
             .iter()
             .find(|net| self.endpoint_label(&net.driver).as_deref() == Some(label))
-    }
-
-    /// Materialize the small compatibility shape consumed by the current
-    /// physical router. Connectivity is derived exclusively from typed nets;
-    /// the original legacy `GraphModule` is no longer a routing input.
-    pub(crate) fn legacy_routing_adapter(&self) -> eyre::Result<GraphModule> {
-        let top = self
-            .definition(self.top)
-            .context("resolved topology is missing its top definition")?;
-        let mut ports = Vec::new();
-        let mut vars = Vec::new();
-
-        for net in &self.nets {
-            match &net.driver {
-                ResolvedEndpoint::TopPort { port } => {
-                    let source_port = self
-                        .port(*port)
-                        .with_context(|| format!("net {:?} has an unknown top port", net.id))?;
-                    if source_port.direction != RoutablePortDirection::Input {
-                        continue;
-                    }
-                    let targets = net
-                        .sinks
-                        .iter()
-                        .map(|sink| self.legacy_instance_port(sink))
-                        .collect::<eyre::Result<Vec<_>>>()?
-                        .into_iter()
-                        .flatten()
-                        .collect::<Vec<_>>();
-                    if targets.is_empty() {
-                        continue;
-                    }
-                    let target = if targets.len() == 1 {
-                        let (instance, port) = targets.into_iter().next().unwrap();
-                        GraphModulePortTarget::Module(instance, port)
-                    } else {
-                        GraphModulePortTarget::Wire(targets)
-                    };
-                    ports.push(GraphModulePort {
-                        name: source_port.name.clone(),
-                        port_type: GraphModulePortType::InputNet,
-                        target,
-                    });
-                }
-                ResolvedEndpoint::InstancePort { .. } => {
-                    let source = self
-                        .legacy_instance_port(&net.driver)?
-                        .context("instance-driven net did not resolve to an instance port")?;
-                    for sink in &net.sinks {
-                        let Some(target) = self.legacy_instance_port(sink)? else {
-                            // A top-level output is exposed directly from the
-                            // placed source and does not require a route branch.
-                            continue;
-                        };
-                        vars.push(GraphModuleVariable {
-                            var_type: GraphModulePortType::InputNet,
-                            source: source.clone(),
-                            target,
-                        });
-                    }
-                }
-            }
-        }
-
-        Ok(GraphModule {
-            name: top.display_name.clone(),
-            instances: self
-                .instances
-                .iter()
-                .map(|instance| instance.display_name.clone())
-                .collect(),
-            ports,
-            vars,
-            ..Default::default()
-        })
-    }
-
-    fn legacy_instance_port(
-        &self,
-        endpoint: &ResolvedEndpoint,
-    ) -> eyre::Result<Option<(String, String)>> {
-        let ResolvedEndpoint::InstancePort { instance, port } = endpoint else {
-            return Ok(None);
-        };
-        let instance = self
-            .instances
-            .get(instance.0)
-            .with_context(|| format!("unknown resolved instance {instance:?}"))?;
-        let port = self
-            .port(*port)
-            .with_context(|| format!("unknown resolved port {port:?}"))?;
-        Ok(Some((instance.display_name.clone(), port.name.clone())))
     }
 
     pub fn sink_by_label<'a>(

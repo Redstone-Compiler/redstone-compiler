@@ -3,7 +3,9 @@ use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 
 use eyre::ContextCompat;
 
-use crate::graph::module::{GraphModule, GraphModulePortTarget, GraphModuleVariable};
+use crate::graph::module::{
+    GraphModule, GraphModulePortTarget, GraphModulePortType, GraphModuleVariable,
+};
 use crate::output::OutputEndpoint;
 use crate::transform::place_and_route::detailed_router::{
     self, PlaceRedstoneResult, PlaceRepeaterResult,
@@ -33,6 +35,95 @@ const MAX_REDSTONE_STRENGTH: usize = 15;
 const FANOUT_ROUTE_SOURCE_LIMIT: usize = 8;
 const FANOUT_ROUTE_TERMINAL_LIMIT: usize = 24;
 const OUTPUT_ISOLATION_ESCAPE_MAX_STEPS: usize = 4;
+
+#[derive(Clone, Debug)]
+struct RoutingTopInput {
+    name: String,
+    targets: Vec<(String, String)>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct RoutingPlan {
+    top_inputs: Vec<RoutingTopInput>,
+    vars: Vec<GraphModuleVariable>,
+}
+
+impl RoutingPlan {
+    fn from_legacy(module: &GraphModule) -> Self {
+        Self {
+            top_inputs: module
+                .ports
+                .iter()
+                .filter(|port| port.port_type.is_input())
+                .map(|port| RoutingTopInput {
+                    name: port.name.clone(),
+                    targets: legacy_target_pairs(&port.target),
+                })
+                .collect(),
+            vars: module.vars.clone(),
+        }
+    }
+
+    fn from_resolved(topology: &ResolvedPnrTopology) -> eyre::Result<Self> {
+        let mut plan = Self::default();
+        for net in &topology.nets {
+            match &net.driver {
+                ResolvedEndpoint::TopPort { port } => {
+                    let port = topology
+                        .port(*port)
+                        .context("resolved routing plan has an unknown top input")?;
+                    let targets = net
+                        .sinks
+                        .iter()
+                        .filter_map(|sink| resolved_instance_port_pair(topology, sink))
+                        .collect::<Vec<_>>();
+                    if !targets.is_empty() {
+                        plan.top_inputs.push(RoutingTopInput {
+                            name: port.name.clone(),
+                            targets,
+                        });
+                    }
+                }
+                ResolvedEndpoint::InstancePort { .. } => {
+                    let source = resolved_instance_port_pair(topology, &net.driver)
+                        .context("resolved routing plan has an invalid driver")?;
+                    for sink in &net.sinks {
+                        let Some(target) = resolved_instance_port_pair(topology, sink) else {
+                            continue;
+                        };
+                        plan.vars.push(GraphModuleVariable {
+                            var_type: GraphModulePortType::InputNet,
+                            source: source.clone(),
+                            target,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(plan)
+    }
+}
+
+fn resolved_instance_port_pair(
+    topology: &ResolvedPnrTopology,
+    endpoint: &ResolvedEndpoint,
+) -> Option<(String, String)> {
+    let ResolvedEndpoint::InstancePort { instance, port } = endpoint else {
+        return None;
+    };
+    Some((
+        topology.instances.get(instance.0)?.display_name.clone(),
+        topology.port(*port)?.name.clone(),
+    ))
+}
+
+fn legacy_target_pairs(target: &GraphModulePortTarget) -> Vec<(String, String)> {
+    match target {
+        GraphModulePortTarget::Module(module, port) => vec![(module.clone(), port.clone())],
+        GraphModulePortTarget::Wire(targets) => targets.clone(),
+        GraphModulePortTarget::Node(_) => Vec::new(),
+    }
+}
 const SIGNAL_CONTACT_SEARCH_RADIUS: usize = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -225,17 +316,15 @@ pub fn route_resolved_topology_with_order_from_prefix(
     progress: &GlobalPnrProgress,
     prefix: &[RoutedNet],
 ) -> Result<Vec<RoutedNet>, PartialRoutingFailure> {
-    let module = topology
-        .legacy_routing_adapter()
-        .map_err(|error| PartialRoutingFailure {
-            error,
-            routed_nets: prefix.to_vec(),
-        })?;
+    let plan = RoutingPlan::from_resolved(topology).map_err(|error| PartialRoutingFailure {
+        error,
+        routed_nets: prefix.to_vec(),
+    })?;
     match route_module_variables_with_order_from_prefix_impl(
         Some(topology),
         intent,
         hooks,
-        &module,
+        &plan,
         candidates,
         placed_modules,
         config,
@@ -401,11 +490,12 @@ pub fn route_module_variables_with_order_from_prefix(
     prefix: &[RoutedNet],
 ) -> Result<Vec<RoutedNet>, PartialRoutingFailure> {
     let hooks = GlobalHeuristicHooks::default();
+    let plan = RoutingPlan::from_legacy(module);
     route_module_variables_with_order_from_prefix_impl(
         None,
         None,
         &hooks,
-        module,
+        &plan,
         candidates,
         placed_modules,
         config,
@@ -419,7 +509,7 @@ fn route_module_variables_with_order_from_prefix_impl(
     topology: Option<&ResolvedPnrTopology>,
     intent: Option<&ResolvedPhysicalIntent>,
     hooks: &GlobalHeuristicHooks,
-    module: &GraphModule,
+    plan: &RoutingPlan,
     candidates: &[LayoutCandidate],
     placed_modules: &[PlacedModule],
     config: &GlobalRoutingConfig,
@@ -455,7 +545,7 @@ fn route_module_variables_with_order_from_prefix_impl(
         .iter()
         .filter_map(|route| Some((route.net_id?, route.sink_endpoint.clone()?)))
         .collect::<HashSet<_>>();
-    let mut ordered_vars = ordered_module_variables(&module.vars, order_strategy);
+    let mut ordered_vars = ordered_module_variables(&plan.vars, order_strategy);
     if let Some(topology) = topology {
         ordered_vars.sort_by_key(|var| {
             let label = format!("{}.{}", var.source.0, var.source.1);
@@ -517,7 +607,7 @@ fn route_module_variables_with_order_from_prefix_impl(
         .map(str::to_owned)
         .collect::<HashSet<_>>();
     if let Err(error) = route_top_input_ports(
-        module,
+        &plan.top_inputs,
         candidates,
         placed_modules,
         config,
@@ -793,7 +883,7 @@ fn group_vars_by_source_ordered<'a>(
 }
 
 fn route_top_input_ports(
-    module: &GraphModule,
+    top_inputs: &[RoutingTopInput],
     candidates: &[LayoutCandidate],
     placed_modules: &[PlacedModule],
     config: &GlobalRoutingConfig,
@@ -802,15 +892,15 @@ fn route_top_input_ports(
     route_world: &mut World3D,
     routes: &mut Vec<RoutedNet>,
 ) -> eyre::Result<()> {
-    let top_inputs = module
-        .ports
-        .iter()
-        .filter(|port| port.port_type.is_input())
-        .collect::<Vec<_>>();
-
     let mut top_input_index = 0;
     for (port_index, port) in top_inputs.iter().enumerate() {
-        let sinks = resolve_port_target_positions(candidates, placed_modules, &port.target);
+        let sinks = port
+            .targets
+            .iter()
+            .flat_map(|(module, port)| {
+                resolve_port_targets(candidates, placed_modules, module, port)
+            })
+            .collect::<Vec<_>>();
         if sinks.is_empty() {
             progress.item(
                 port_index + 1,
@@ -2072,25 +2162,6 @@ fn resolve_observable_port_target_positions(
             .iter()
             .filter_map(|(module_name, port_name)| {
                 resolve_observable_port_position(candidates, placed_modules, module_name, port_name)
-            })
-            .collect(),
-        GraphModulePortTarget::Node(_) => Vec::new(),
-    }
-}
-
-fn resolve_port_target_positions(
-    candidates: &[LayoutCandidate],
-    placed_modules: &[PlacedModule],
-    target: &GraphModulePortTarget,
-) -> Vec<ResolvedPortTarget> {
-    match target {
-        GraphModulePortTarget::Module(module_name, port_name) => {
-            resolve_port_targets(candidates, placed_modules, module_name, port_name)
-        }
-        GraphModulePortTarget::Wire(targets) => targets
-            .iter()
-            .flat_map(|(module_name, port_name)| {
-                resolve_port_targets(candidates, placed_modules, module_name, port_name)
             })
             .collect(),
         GraphModulePortTarget::Node(_) => Vec::new(),
