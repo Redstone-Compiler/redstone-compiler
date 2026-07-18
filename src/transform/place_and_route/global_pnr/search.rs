@@ -1,4 +1,5 @@
-use std::collections::HashSet;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashSet};
 
 use crate::transform::place_and_route::global_pnr::ir::LayoutCandidate;
 use crate::transform::place_and_route::global_pnr::placer::PlacedModule;
@@ -113,15 +114,30 @@ pub fn layout_combinations(pools: &[ChildCandidatePool], limit: usize) -> Vec<Ve
     }
 
     let base = vec![0; pools.len()];
-    let mut combinations = vec![base.clone()];
-    for (pool_index, pool) in pools.iter().enumerate() {
-        for candidate_index in 1..pool.candidates.len() {
-            if combinations.len() >= limit {
-                return combinations;
+    let mut frontier = BinaryHeap::new();
+    let mut queued = HashSet::new();
+    let mut sequence = 0usize;
+    frontier.push(Reverse((0usize, sequence, base.clone())));
+    queued.insert(base);
+
+    let mut combinations = Vec::with_capacity(limit);
+    while let Some(Reverse((_rank_sum, _sequence, selection))) = frontier.pop() {
+        combinations.push(selection.clone());
+        if combinations.len() >= limit {
+            break;
+        }
+
+        for (pool_index, pool) in pools.iter().enumerate() {
+            if selection[pool_index] + 1 >= pool.candidates.len() {
+                continue;
             }
-            let mut combination = base.clone();
-            combination[pool_index] = candidate_index;
-            combinations.push(combination);
+            let mut neighbor = selection.clone();
+            neighbor[pool_index] += 1;
+            if queued.insert(neighbor.clone()) {
+                sequence += 1;
+                let rank_sum = neighbor.iter().sum();
+                frontier.push(Reverse((rank_sum, sequence, neighbor)));
+            }
         }
     }
     combinations
@@ -256,6 +272,29 @@ mod tests {
             layout_combinations(&pools, 3),
             vec![vec![0, 0], vec![1, 0], vec![0, 1]]
         );
+    }
+
+    #[test]
+    fn layout_combinations_cover_multi_child_interactions() {
+        let pools = (0..3)
+            .map(|index| ChildCandidatePool {
+                instance_name: format!("child_{index}"),
+                candidates: vec![
+                    candidate("child", 1, 1, Position(0, 0, 0)),
+                    candidate("child", 2, 2, Position(1, 0, 0)),
+                ],
+            })
+            .collect::<Vec<_>>();
+
+        let combinations = layout_combinations(&pools, 8);
+        assert_eq!(combinations.len(), 8);
+        assert_eq!(combinations[0], vec![0, 0, 0]);
+        assert!(combinations.contains(&vec![1, 1, 0]));
+        assert!(combinations.contains(&vec![1, 0, 1]));
+        assert!(combinations.contains(&vec![0, 1, 1]));
+        assert!(combinations.contains(&vec![1, 1, 1]));
+        assert_eq!(combinations, layout_combinations(&pools, 8));
+        assert_eq!(combinations.iter().collect::<HashSet<_>>().len(), 8);
     }
 
     #[test]

@@ -11,6 +11,7 @@ const DEFAULT_TRACE_LIMIT: usize = 0;
 // not exact game ticks or redstone ticks.
 const TORCH_BURNOUT_WINDOW_CYCLES: usize = 60;
 const TORCH_BURNOUT_TOGGLE_LIMIT: usize = 8;
+pub const MANUAL_INPUT_IDLE_CYCLES: usize = TORCH_BURNOUT_WINDOW_CYCLES + 1;
 // Torch support changes are evaluated after a small simulator delay, then
 // rechecked at application time so short transient power does not force a
 // stale torch state transition.
@@ -84,6 +85,7 @@ pub struct Simulator {
     event_id_count: usize,
     soft_power_sources: HashSet<(Position, Position)>,
     hard_power_sources: HashSet<(Position, Position)>,
+    redstone_power_sources: HashSet<(Position, Position)>,
     torch_toggle_cycles: HashMap<Position, VecDeque<usize>>,
     burned_out_torches: HashSet<Position>,
     trace: Vec<SimulationTraceEntry>,
@@ -418,6 +420,7 @@ impl Simulator {
             event_id_count: 0,
             soft_power_sources: HashSet::new(),
             hard_power_sources: HashSet::new(),
+            redstone_power_sources: HashSet::new(),
             torch_toggle_cycles: HashMap::new(),
             burned_out_torches: HashSet::new(),
             trace: Vec::new(),
@@ -535,6 +538,15 @@ impl Simulator {
 
     pub fn world(&self) -> &World3D {
         &self.world
+    }
+
+    pub fn advance_idle_cycles(&mut self, cycles: usize) -> eyre::Result<()> {
+        eyre::ensure!(
+            self.queue.is_empty(),
+            "cannot advance idle time while simulator events are pending"
+        );
+        self.cycle = self.cycle.saturating_add(cycles);
+        Ok(())
     }
 
     pub fn trace(&self) -> &[SimulationTraceEntry] {
@@ -783,6 +795,7 @@ impl Simulator {
                 any_changed = true;
             }
         }
+
         any_changed
     }
 
@@ -1200,6 +1213,19 @@ impl Simulator {
             | EventType::RepeaterOn { .. }
             | EventType::RepeaterOff { .. } => {}
             EventType::TorchOn | EventType::HardOn => {
+                let source_position = event
+                    .target_position
+                    .walk(event.direction)
+                    .unwrap_or(event.target_position);
+                let source_key = (event.target_position, source_position);
+                if !self.redstone_power_sources.insert(source_key) {
+                    return Ok(());
+                }
+                let source_count = self
+                    .redstone_power_sources
+                    .iter()
+                    .filter(|(target, _)| *target == event.target_position)
+                    .count();
                 let BlockKind::Redstone {
                     on_count, strength, ..
                 } = &mut block.kind
@@ -1207,7 +1233,7 @@ impl Simulator {
                     eyre::bail!("unreachable");
                 };
 
-                *on_count += 1;
+                *on_count = source_count;
 
                 if *on_count == 1 {
                     *strength = 15;
@@ -1236,6 +1262,19 @@ impl Simulator {
                 }
             }
             EventType::TorchOff | EventType::HardOff => {
+                let source_position = event
+                    .target_position
+                    .walk(event.direction)
+                    .unwrap_or(event.target_position);
+                let source_key = (event.target_position, source_position);
+                if !self.redstone_power_sources.remove(&source_key) {
+                    return Ok(());
+                }
+                let source_count = self
+                    .redstone_power_sources
+                    .iter()
+                    .filter(|(target, _)| *target == event.target_position)
+                    .count();
                 let BlockKind::Redstone {
                     on_count, strength, ..
                 } = &mut block.kind
@@ -1243,11 +1282,7 @@ impl Simulator {
                     eyre::bail!("unreachable");
                 };
 
-                if *on_count == 0 {
-                    return Ok(());
-                }
-
-                *on_count -= 1;
+                *on_count = source_count;
 
                 if *on_count == 0 {
                     *strength = 0;
@@ -1523,10 +1558,7 @@ impl Simulator {
         tracing::debug!("consume repeater event: {:?}", block);
 
         let BlockKind::Repeater {
-            is_on,
-            is_locked,
-            delay,
-            ..
+            is_locked, delay, ..
         } = block.kind
         else {
             unreachable!()
@@ -1555,7 +1587,7 @@ impl Simulator {
 
                         tracing::info!("trigger repeater event: {event:?}, {block:?}");
                     }
-                } else if !is_on {
+                } else {
                     self.push_event_to_next_tick(Event {
                         id: None,
                         from_id: event.id,
@@ -1575,7 +1607,7 @@ impl Simulator {
 
                         tracing::info!("trigger repeater event: {event:?}, {block:?}");
                     }
-                } else if is_on {
+                } else {
                     self.push_event_to_next_tick(Event {
                         id: None,
                         from_id: event.id,
@@ -1687,7 +1719,11 @@ mod test {
 
     #[test]
     fn simulator_counts_through_full_two_bit_cycle() -> eyre::Result<()> {
-        let nbt = NBTRoot::from_nbt_bytes(&std::fs::read("test/counter-global-smoke.nbt")?)?;
+        let nbt_path = std::env::var("COUNTER_NBT_PATH")
+            .unwrap_or_else(|_| "test/counter-global-smoke.nbt".to_owned());
+        let outputs_path = std::env::var("COUNTER_OUTPUTS_PATH")
+            .unwrap_or_else(|_| "test/counter-global-smoke.outputs.json".to_owned());
+        let nbt = NBTRoot::from_nbt_bytes(&std::fs::read(nbt_path)?)?;
         let world = nbt.to_world();
         let clock = world
             .blocks
@@ -1696,7 +1732,7 @@ mod test {
                 matches!(block.kind, BlockKind::Switch { .. }).then_some(*position)
             })
             .expect("counter should contain a clock switch");
-        let metadata = OutputMetadata::load("test/counter-global-smoke.outputs.json")?;
+        let metadata = OutputMetadata::load(outputs_path)?;
         let output_position = |name: &str| {
             metadata
                 .outputs
@@ -1717,13 +1753,26 @@ mod test {
             };
             usize::from(powered(q0)) | (usize::from(powered(q1)) << 1)
         };
-
         assert_eq!(output(&sim), 0);
-        for expected in [1, 2, 3, 0] {
+        for (edge, expected) in [1, 2, 3, 0, 1, 2, 3, 0].into_iter().enumerate() {
             sim.change_state_with_limits(vec![(clock, true)], 256, 50_000)?;
-            assert_eq!(output(&sim), expected);
+            assert_eq!(
+                output(&sim),
+                expected,
+                "rising edge {} burned_out_torches={:?}",
+                edge + 1,
+                sim.burned_out_torches
+            );
+            sim.advance_idle_cycles(MANUAL_INPUT_IDLE_CYCLES)?;
             sim.change_state_with_limits(vec![(clock, false)], 256, 50_000)?;
-            assert_eq!(output(&sim), expected);
+            assert_eq!(
+                output(&sim),
+                expected,
+                "falling edge {} burned_out_torches={:?}",
+                edge + 1,
+                sim.burned_out_torches
+            );
+            sim.advance_idle_cycles(MANUAL_INPUT_IDLE_CYCLES)?;
         }
 
         Ok(())
@@ -2084,6 +2133,24 @@ mod test {
             "burnout is a simulator-session stabilization state and should not recover by age"
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn simulator_idle_cycles_age_torch_toggle_history_before_burnout() -> eyre::Result<()> {
+        let torch = Position(1, 1, 1);
+        let mut sim = Simulator::new(
+            &World {
+                size: DimSize(3, 3, 2),
+                blocks: Vec::new(),
+            },
+            DEFAULT_TRACE_LIMIT,
+        );
+        for _ in 0..16 {
+            assert!(!sim.record_torch_toggle(torch));
+            sim.advance_idle_cycles(TORCH_BURNOUT_WINDOW_CYCLES + 1)?;
+        }
+        assert_eq!(sim.torch_toggle_cycles[&torch].len(), 1);
         Ok(())
     }
 
@@ -2846,5 +2913,112 @@ mod test {
         };
 
         assert!(strength > 0);
+    }
+
+    #[test]
+    fn redstone_direct_power_tracks_unique_sources() -> eyre::Result<()> {
+        let target = Position(1, 1, 1);
+        let world = World {
+            size: DimSize(3, 3, 3),
+            blocks: vec![
+                (
+                    target,
+                    Block {
+                        kind: BlockKind::Redstone {
+                            on_count: 0,
+                            state: 0,
+                            strength: 0,
+                        },
+                        direction: Direction::None,
+                    },
+                ),
+                (
+                    Position(1, 1, 0),
+                    Block {
+                        kind: BlockKind::Cobble {
+                            on_count: 0,
+                            on_base_count: 0,
+                        },
+                        direction: Direction::None,
+                    },
+                ),
+            ],
+        };
+        let mut sim = Simulator::new(&world, 0);
+        sim.queue.push_back(VecDeque::new());
+        let mut block = sim.world[target];
+        let event = |event_type| Event {
+            id: None,
+            from_id: None,
+            event_type,
+            target_position: target,
+            direction: Direction::West,
+        };
+
+        sim.propagate_redstone_event(&mut block, &event(EventType::TorchOn))?;
+        sim.propagate_redstone_event(&mut block, &event(EventType::TorchOn))?;
+        assert!(matches!(
+            block.kind,
+            BlockKind::Redstone {
+                on_count: 1,
+                strength: 15,
+                ..
+            }
+        ));
+
+        sim.propagate_redstone_event(&mut block, &event(EventType::TorchOff))?;
+        assert!(matches!(
+            block.kind,
+            BlockKind::Redstone {
+                on_count: 0,
+                strength: 0,
+                ..
+            }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn repeater_queues_off_while_on_transition_is_pending() -> eyre::Result<()> {
+        let target = Position(1, 1, 1);
+        let direction = Direction::West;
+        let world = World {
+            size: DimSize(3, 3, 3),
+            blocks: vec![(
+                target,
+                Block {
+                    kind: BlockKind::Repeater {
+                        is_on: false,
+                        is_locked: false,
+                        delay: 1,
+                        lock_input1: None,
+                        lock_input2: None,
+                    },
+                    direction,
+                },
+            )],
+        };
+        let mut sim = Simulator::new(&world, 0);
+        sim.queue.push_back(VecDeque::new());
+        let mut block = sim.world[target];
+        let event = |event_type| Event {
+            id: None,
+            from_id: None,
+            event_type,
+            target_position: target,
+            direction,
+        };
+
+        sim.propgate_repeater_event(&mut block, &event(EventType::SoftOn))?;
+        sim.propgate_repeater_event(&mut block, &event(EventType::SoftOff))?;
+
+        let queued = sim.queue.back().expect("event queue should exist");
+        assert!(queued
+            .iter()
+            .any(|event| matches!(event.event_type, EventType::RepeaterOn { .. })));
+        assert!(queued
+            .iter()
+            .any(|event| matches!(event.event_type, EventType::RepeaterOff { .. })));
+        Ok(())
     }
 }

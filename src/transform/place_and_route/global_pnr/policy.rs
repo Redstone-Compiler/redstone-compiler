@@ -16,6 +16,11 @@ pub enum GlobalPnrPreset {
 pub struct GlobalSearchBudget {
     pub max_candidates_per_child: usize,
     pub max_layout_combinations: usize,
+    /// Maximum number of probe-ranked placement/order pairs promoted to the
+    /// detailed routing strategy for each local-layout combination.
+    pub max_detailed_routing_attempts: usize,
+    pub max_refined_routing_attempts: usize,
+    pub max_refinement_rounds: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -33,6 +38,9 @@ pub enum PlacementHeuristic {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Free3DPlacementConfig {
+    /// Selects a deterministic initial assignment of modules to 3D seed cells.
+    /// This is a global-placement search decision and never changes local layouts.
+    pub seed: u64,
     pub iterations: usize,
     pub step_size: f64,
     pub attraction: f64,
@@ -46,6 +54,7 @@ pub struct Free3DPlacementConfig {
 impl Default for Free3DPlacementConfig {
     fn default() -> Self {
         Self {
+            seed: 0,
             iterations: 80,
             step_size: 0.5,
             attraction: 0.08,
@@ -173,14 +182,23 @@ impl GlobalPnrPreset {
             Self::Fast => GlobalSearchBudget {
                 max_candidates_per_child: 2,
                 max_layout_combinations: 4,
+                max_detailed_routing_attempts: 4,
+                max_refined_routing_attempts: 2,
+                max_refinement_rounds: 1,
             },
             Self::Balanced => GlobalSearchBudget {
                 max_candidates_per_child: 4,
                 max_layout_combinations: 16,
+                max_detailed_routing_attempts: 16,
+                max_refined_routing_attempts: 4,
+                max_refinement_rounds: 2,
             },
             Self::Thorough => GlobalSearchBudget {
                 max_candidates_per_child: 8,
                 max_layout_combinations: 64,
+                max_detailed_routing_attempts: 64,
+                max_refined_routing_attempts: 16,
+                max_refinement_rounds: 3,
             },
         };
         let mut policies = GlobalPnrPolicies::balanced();
@@ -205,7 +223,9 @@ impl GlobalPnrPreset {
         let mut config = GlobalPnrConfig {
             candidate: UnitCandidateConfig::default(),
             placement: GlobalPlacementConfig::default(),
+            routing_probe: None,
             routing: GlobalRoutingConfig::default(),
+            routing_refinement: None,
             search: self.search_config(),
             show_progress: true,
             verifier: None,

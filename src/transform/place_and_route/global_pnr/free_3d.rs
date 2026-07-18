@@ -1,3 +1,7 @@
+use rand::rngs::StdRng;
+use rand::seq::SliceRandom;
+use rand::SeedableRng;
+
 use crate::graph::module::GraphModule;
 use crate::transform::place_and_route::global_pnr::ir::LayoutCandidate;
 use crate::transform::place_and_route::global_pnr::placer::PlacedModule;
@@ -45,7 +49,7 @@ pub(crate) fn place_free_3d(
         return None;
     }
 
-    let mut bodies = seed_bodies(candidates, config.clearance);
+    let mut bodies = seed_bodies(candidates, config.clearance, config.seed);
     relax(&mut bodies, module, candidates, config);
     let mut origins = snap_origins(&bodies);
     legalize(&mut origins, candidates, config.clearance)?;
@@ -69,7 +73,7 @@ pub(crate) fn place_free_3d(
     )
 }
 
-fn seed_bodies(candidates: &[LayoutCandidate], clearance: usize) -> Vec<Body> {
+fn seed_bodies(candidates: &[LayoutCandidate], clearance: usize, seed: u64) -> Vec<Body> {
     let side = (1..)
         .find(|side| side * side * side >= candidates.len())
         .unwrap_or(1);
@@ -94,6 +98,13 @@ fn seed_bodies(candidates: &[LayoutCandidate], clearance: usize) -> Vec<Body> {
             + clearance,
     ];
 
+    let mut cells = (0..candidates.len())
+        .map(|index| [index % side, (index / side) % side, index / (side * side)])
+        .collect::<Vec<_>>();
+    if seed != 0 {
+        cells.shuffle(&mut StdRng::seed_from_u64(seed));
+    }
+
     candidates
         .iter()
         .enumerate()
@@ -103,7 +114,7 @@ fn seed_bodies(candidates: &[LayoutCandidate], clearance: usize) -> Vec<Body> {
                 candidate.bbox.depth() as f64,
                 candidate.bbox.height() as f64,
             ];
-            let cell = [index % side, (index / side) % side, index / (side * side)];
+            let cell = cells[index];
             Body {
                 center: Vec3 {
                     x: (cell[0] * stride[0]) as f64 + size[0] / 2.0,
@@ -413,6 +424,41 @@ mod tests {
         .unwrap();
 
         assert!(squared_center_distance(&with, 0, 3) < squared_center_distance(&without, 0, 3));
+    }
+
+    #[test]
+    fn placement_seed_changes_only_global_origins_and_remains_legal() {
+        let candidates = (0..8).map(candidate).collect::<Vec<_>>();
+        let module = GraphModule::default();
+        let base = Free3DPlacementConfig {
+            iterations: 0,
+            ..Default::default()
+        };
+        let first = place_free_3d(
+            &module,
+            &candidates,
+            Free3DPlacementConfig { seed: 1, ..base },
+        )
+        .unwrap();
+        let second = place_free_3d(
+            &module,
+            &candidates,
+            Free3DPlacementConfig { seed: 2, ..base },
+        )
+        .unwrap();
+
+        assert_ne!(
+            first.iter().map(|item| item.origin).collect::<Vec<_>>(),
+            second.iter().map(|item| item.origin).collect::<Vec<_>>()
+        );
+        for placed in [&first, &second] {
+            assert!(placed.iter().enumerate().all(|(left_index, left)| {
+                placed
+                    .iter()
+                    .skip(left_index + 1)
+                    .all(|right| !overlaps(left, right, base.clearance))
+            }));
+        }
     }
 }
 use std::collections::HashMap;

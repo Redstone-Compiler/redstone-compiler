@@ -26,6 +26,7 @@ pub struct UnitCandidateConfig {
     pub local_config: LocalPlacerConfig,
     pub input_constraints: LocalPlacerInputConstraints,
     pub max_candidates: usize,
+    pub combinational_sampling_limit: Option<usize>,
 }
 
 impl Default for UnitCandidateConfig {
@@ -35,6 +36,7 @@ impl Default for UnitCandidateConfig {
             local_config: LocalPlacerConfig::default(),
             input_constraints: LocalPlacerInputConstraints::default(),
             max_candidates: 16,
+            combinational_sampling_limit: None,
         }
     }
 }
@@ -161,6 +163,35 @@ fn candidate_matches_truth_table(
                 return Ok(false);
             }
         }
+    }
+
+    // A candidate is used as a persistent child inside a routed design, so
+    // matching each truth-table row from a freshly initialized world is not
+    // sufficient. Exercise both directions in one simulator as well; this
+    // rejects layouts whose redstone network powers correctly from reset but
+    // fails to release after an input transition.
+    let mut sim = Simulator::from_with_limits_and_trace(&world, 256, 50_000, 0)
+        .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
+    let mask_count = 1usize << inputs.len();
+    for mask in (0..mask_count).chain((0..mask_count).rev()) {
+        sim.change_state_with_limits(
+            inputs
+                .iter()
+                .enumerate()
+                .map(|(index, position)| (*position, (mask & (1 << index)) != 0))
+                .collect(),
+            256,
+            50_000,
+        )?;
+        for (output_name, output_position) in &outputs {
+            let Some(expected_output) = expected.output_tables.get(*output_name) else {
+                return Ok(false);
+            };
+            if sim.world()[*output_position].kind.is_powered() != expected_output[mask] {
+                return Ok(false);
+            }
+        }
+        sim.advance_idle_cycles(crate::world::simulator::MANUAL_INPUT_IDLE_CYCLES)?;
     }
 
     Ok(true)
@@ -480,6 +511,7 @@ pub fn d_latch_child_candidate_config(local_config: LocalPlacerConfig) -> UnitCa
             .with_input_positions("d", [Position(0, 2, 1)])
             .with_input_positions("en", [Position(0, 6, 1)]),
         max_candidates: 1,
+        combinational_sampling_limit: None,
     }
 }
 

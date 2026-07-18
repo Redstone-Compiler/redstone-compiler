@@ -14,13 +14,35 @@ pub enum EvaluationStage {
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum GlobalFailure {
-    IllegalPlacement { reason: String },
-    RouteSearchExhausted { net: String, source: Position, sink: Position },
-    ForbiddenSignalContact { net: String, position: Position },
-    PoweredPositionContract { net: String, source: Position, sink: Position },
-    Assembly { reason: String },
-    SemanticMismatch { phase: String, step: usize, expected: usize, actual: usize },
-    BudgetExhausted { stage: EvaluationStage },
+    IllegalPlacement {
+        reason: String,
+    },
+    RouteSearchExhausted {
+        net: String,
+        source: Position,
+        sink: Position,
+    },
+    ForbiddenSignalContact {
+        net: String,
+        position: Position,
+    },
+    PoweredPositionContract {
+        net: String,
+        source: Position,
+        sink: Position,
+    },
+    Assembly {
+        reason: String,
+    },
+    SemanticMismatch {
+        phase: String,
+        step: usize,
+        expected: usize,
+        actual: usize,
+    },
+    BudgetExhausted {
+        stage: EvaluationStage,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -67,7 +89,9 @@ impl GlobalSearchReport {
     pub fn stage_timings(&self) -> BTreeMap<EvaluationStage, StageTimingSummary> {
         let mut summaries = BTreeMap::new();
         for timing in self.attempts.iter().flat_map(|attempt| &attempt.timings) {
-            let summary = summaries.entry(timing.stage).or_insert_with(StageTimingSummary::default);
+            let summary = summaries
+                .entry(timing.stage)
+                .or_insert_with(StageTimingSummary::default);
             summary.count += 1;
             summary.total += timing.elapsed;
         }
