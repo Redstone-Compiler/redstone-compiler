@@ -23,7 +23,9 @@ use serde_json::{json, Value};
 
 use crate::graph::module::{GraphModule, GraphModuleContext, GraphModuleDesign};
 use crate::graph::GraphNodeKind;
-use crate::ir::{LogicalDesign, RoutableDesign};
+use crate::ir::{
+    LogicalDesign, RoutableDesign, RoutableModule, RoutableModuleBody, RoutablePortDirection,
+};
 use crate::nbt::ToNBT;
 use crate::output::{OutputEndpoint, PlacedWorld};
 use crate::snapshot::{
@@ -32,7 +34,8 @@ use crate::snapshot::{
 };
 use crate::transform::place_and_route::global_pnr::assembly::assemble_world;
 use crate::transform::place_and_route::global_pnr::candidate::{
-    generate_graph_module_candidates_with_progress_label, UnitCandidateConfig,
+    generate_graph_module_candidates_with_progress_label,
+    generate_routable_module_candidates_with_progress_label, UnitCandidateConfig,
 };
 pub use crate::transform::place_and_route::global_pnr::heuristics::GlobalHeuristicHooks;
 use crate::transform::place_and_route::global_pnr::ir::{LayoutCandidate, PhysicalPortDirection};
@@ -152,12 +155,9 @@ enum PreparedPnrBody {
 
 /// The owned boundary between local candidate generation and global PnR.
 ///
-/// The current implementation temporarily retains a legacy `GraphModule`
-/// topology. Keeping it private lets the representation migrate to a resolved
-/// Routable topology without changing callers of the prepare/run API.
 #[derive(Clone, Debug)]
 pub struct PreparedPnrDesign {
-    module: GraphModule,
+    module_name: String,
     topology: ResolvedPnrTopology,
     prepare_config: PnrPrepareConfig,
     body: PreparedPnrBody,
@@ -167,7 +167,7 @@ pub struct PreparedPnrDesign {
 
 impl PreparedPnrDesign {
     pub fn module_name(&self) -> &str {
-        &self.module.name
+        &self.module_name
     }
 
     pub fn summary(&self) -> &PnrPreparationSummary {
@@ -187,7 +187,7 @@ impl PreparedPnrDesign {
     pub fn parity_signature(&self) -> Value {
         let candidate_sets = match &self.body {
             PreparedPnrBody::Leaf { candidates } => vec![json!({
-                "instance": self.module.name,
+                "instance": self.module_name,
                 "preferred_index": 0,
                 "candidate_hashes": candidates.iter().map(candidate_parity_hash).collect::<Vec<_>>(),
             })],
@@ -208,9 +208,8 @@ impl PreparedPnrDesign {
                 .collect(),
         };
         json!({
-            "format": "redstone-compiler.prepared-pnr-parity.v1",
-            "module": self.module.name,
-            "legacy_topology_hash": debug_parity_hash(&self.module),
+            "format": "redstone-compiler.prepared-pnr-parity.v2",
+            "module": self.module_name,
             "resolved_topology_hash": debug_parity_hash(&self.topology),
             "candidate_sets": candidate_sets,
         })
@@ -713,13 +712,10 @@ pub fn prepare_routable_design_for_global_pnr(
 ) -> eyre::Result<PreparedPnrDesign> {
     design.validate()?;
     let topology = ResolvedPnrTopology::from_routable(design)?;
-    let graph_design = design.to_graph_module_design()?;
-    prepare_module_with_topology(
-        &graph_design.context,
-        graph_design.top_module(),
-        topology,
-        config,
-    )
+    let module = design
+        .module(&design.top)
+        .with_context(|| format!("missing top Routable module `{}`", design.top))?;
+    prepare_routable_module_with_topology(design, module, topology, config)
 }
 
 pub fn place_and_route_routable_design(
@@ -814,7 +810,7 @@ fn prepare_module_with_topology(
             started.elapsed()
         ));
         let prepared = PreparedPnrDesign {
-            module: module.clone(),
+            module_name: module.name.clone(),
             topology,
             prepare_config: config.clone(),
             body: PreparedPnrBody::Leaf { candidates },
@@ -830,7 +826,65 @@ fn prepare_module_with_topology(
         prepare_child_candidate_sets(context, module, config, &progress)?;
     summary.elapsed_ms = duration_ms(started.elapsed());
     let prepared = PreparedPnrDesign {
-        module: module.clone(),
+        module_name: module.name.clone(),
+        topology,
+        prepare_config: config.clone(),
+        body: PreparedPnrBody::Composite {
+            candidate_sets,
+            instance_bindings,
+        },
+        summary,
+        snapshot_intent: None,
+    };
+    emit_prepared_pnr_snapshot(&prepared)?;
+    Ok(prepared)
+}
+
+fn prepare_routable_module_with_topology(
+    design: &RoutableDesign,
+    module: &RoutableModule,
+    topology: ResolvedPnrTopology,
+    config: &PnrPrepareConfig,
+) -> eyre::Result<PreparedPnrDesign> {
+    let started = Instant::now();
+    let progress = GlobalPnrProgress::new(config.show_progress, module.name.clone());
+    if matches!(module.body, RoutableModuleBody::Leaf { .. }) {
+        progress.stage(1, 4, "generate leaf layout candidates");
+        let candidates = generate_routable_module_candidates_with_progress_label(
+            module,
+            &config.candidate,
+            config.show_progress.then_some(module.name.as_str()),
+        )?;
+        if candidates.is_empty() {
+            eyre::bail!("Routable leaf module produced no layout candidates");
+        }
+        let summary = PnrPreparationSummary {
+            module: module.name.clone(),
+            instances: 1,
+            unique_candidate_sets: 1,
+            reused_candidate_sets: 0,
+            candidates: candidates.len(),
+            candidate_references: candidates.len(),
+            elapsed_ms: duration_ms(started.elapsed()),
+        };
+        let prepared = PreparedPnrDesign {
+            module_name: module.name.clone(),
+            topology,
+            prepare_config: config.clone(),
+            body: PreparedPnrBody::Leaf { candidates },
+            summary,
+            snapshot_intent: None,
+        };
+        emit_prepared_pnr_snapshot(&prepared)?;
+        return Ok(prepared);
+    }
+
+    progress.stage(1, 4, "generate child layout candidates");
+    let (candidate_sets, instance_bindings, mut summary) =
+        prepare_routable_child_candidate_sets(design, module, config, &progress)?;
+    summary.elapsed_ms = duration_ms(started.elapsed());
+    let prepared = PreparedPnrDesign {
+        module_name: module.name.clone(),
         topology,
         prepare_config: config.clone(),
         body: PreparedPnrBody::Composite {
@@ -862,8 +916,7 @@ pub fn run_prepared_pnr_with_visualization(
         intent.validate(&prepared.topology)?;
     }
     let started = Instant::now();
-    let module = &prepared.module;
-    let progress = GlobalPnrProgress::new(config.show_progress, module.name.clone());
+    let progress = GlobalPnrProgress::new(config.show_progress, prepared.module_name.clone());
     progress.summary(format!(
         "reusing prepared local candidates: candidate_sets={} stored_candidates={} instance_references={}",
         prepared.summary.unique_candidate_sets,
@@ -933,7 +986,7 @@ pub fn run_prepared_pnr_with_visualization(
 pub fn emit_prepared_pnr_snapshot(prepared: &PreparedPnrDesign) -> eyre::Result<()> {
     let candidate_sets = match &prepared.body {
         PreparedPnrBody::Leaf { candidates } => {
-            vec![(prepared.module.name.clone(), candidates.len(), 0)]
+            vec![(prepared.module_name.clone(), candidates.len(), 0)]
         }
         PreparedPnrBody::Composite {
             candidate_sets,
@@ -1597,6 +1650,144 @@ fn run_prepared_leaf(
 }
 
 // 하위 모듈마다 local placer를 실행해서 global PnR이 배치할 layout 후보를 하나씩 뽑는다.
+fn prepare_routable_child_candidate_sets(
+    design: &RoutableDesign,
+    module: &RoutableModule,
+    config: &PnrPrepareConfig,
+    progress: &GlobalPnrProgress,
+) -> eyre::Result<(
+    Vec<PreparedCandidateSet>,
+    Vec<PreparedInstanceCandidateBinding>,
+    PnrPreparationSummary,
+)> {
+    let RoutableModuleBody::Composite { instances, .. } = &module.body else {
+        eyre::bail!("module `{}` is not composite", module.name);
+    };
+    let started = Instant::now();
+    let mut bindings = Vec::new();
+    let mut cache = ChildCandidateCache::default();
+    let mut reused = 0usize;
+    let mut candidate_references = 0usize;
+    for (index, instance) in instances.iter().enumerate() {
+        progress.item(
+            index + 1,
+            instances.len(),
+            format!("generate `{}` candidate", instance.name),
+        );
+        let child = design.module(&instance.module).with_context(|| {
+            format!(
+                "instance `{}` references missing Routable module `{}`",
+                instance.name, instance.module
+            )
+        })?;
+        if !matches!(child.body, RoutableModuleBody::Leaf { .. }) {
+            eyre::bail!("Routable child module `{}` is not a leaf", child.name);
+        }
+        let child_config = candidate_config_for_routable_child(child, &config.candidate);
+        let persistent_key = routable_candidate_shape_fingerprint(child, &child_config);
+        let persistent_hit = std::cell::Cell::new(false);
+        let candidate_started = Instant::now();
+        let (candidate_set_index, cache_hit) =
+            cache.get_or_generate_index(&persistent_key, || {
+                if let Some(root) = config.candidate_cache_dir.as_deref() {
+                    match candidate_cache::load(root, &persistent_key, &child.name) {
+                        Ok(Some(candidates)) => {
+                            persistent_hit.set(true);
+                            return Ok(candidates);
+                        }
+                        Ok(None) => {}
+                        Err(error) => progress.detail(format!(
+                            "ignored invalid candidate cache entry `{persistent_key}`: {error}"
+                        )),
+                    }
+                }
+                let candidates = generate_routable_module_candidates_with_progress_label(
+                    child,
+                    &child_config,
+                    config.show_progress.then_some(instance.name.as_str()),
+                )?;
+                if let Some(root) = config.candidate_cache_dir.as_deref()
+                    && let Err(error) = candidate_cache::store(root, &persistent_key, &candidates)
+                {
+                    progress.detail(format!(
+                        "could not store candidate cache entry `{persistent_key}`: {error}"
+                    ));
+                }
+                Ok(candidates)
+            })?;
+        let child_candidates = &cache.entries[candidate_set_index].candidates;
+        if cache_hit || persistent_hit.get() {
+            reused += 1;
+            let source = if cache_hit { "memory" } else { "persistent" };
+            progress.detail(format!("`{}` reused {source} candidates", instance.name));
+        }
+        progress.detail(format!(
+            "`{}` produced {} candidate(s) in {:.2?}",
+            instance.name,
+            child_candidates.len(),
+            candidate_started.elapsed()
+        ));
+        if child_candidates.is_empty() {
+            eyre::bail!("module instance `{}` produced no candidates", instance.name);
+        }
+        candidate_references += child_candidates.len();
+        let preferred_index = if routable_input_port_count(child) > 1 {
+            child_candidates
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, candidate)| {
+                    (candidate.cost.bbox_volume, candidate.cost.block_count)
+                })
+                .map(|(index, _)| index)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        bindings.push(PreparedInstanceCandidateBinding {
+            instance_name: instance.name.clone(),
+            candidate_set_index,
+            preferred_index,
+        });
+    }
+    let unique_candidates = cache
+        .entries
+        .iter()
+        .map(|entry| entry.candidates.len())
+        .sum();
+    let unique_candidate_sets = cache.entries.len();
+    progress.summary(format!(
+        "child candidates completed: instances={} unique_sets={} reused={} stored_candidates={} candidate_references={} elapsed={:.2?}",
+        instances.len(), unique_candidate_sets, reused, unique_candidates, candidate_references, started.elapsed()
+    ));
+    record_snapshot(SnapshotEvent::CandidateSummary {
+        instances: instances.len(),
+        unique: unique_candidate_sets,
+        reused,
+        candidates: unique_candidates,
+        elapsed_ms: duration_ms(started.elapsed()),
+    });
+    let candidate_sets = cache
+        .entries
+        .into_iter()
+        .map(|entry| PreparedCandidateSet {
+            candidates: entry.candidates,
+        })
+        .collect();
+    Ok((
+        candidate_sets,
+        bindings,
+        PnrPreparationSummary {
+            module: module.name.clone(),
+            instances: instances.len(),
+            unique_candidate_sets,
+            reused_candidate_sets: reused,
+            candidates: unique_candidates,
+            candidate_references,
+            elapsed_ms: duration_ms(started.elapsed()),
+        },
+    ))
+}
+
 fn prepare_child_candidate_sets(
     context: &GraphModuleContext,
     module: &GraphModule,
@@ -1624,7 +1815,7 @@ fn prepare_child_candidate_sets(
         let persistent_hit = std::cell::Cell::new(false);
         let candidate_started = Instant::now();
         let (candidate_set_index, cache_hit) =
-            cache.get_or_generate_index(child, &child_config, || {
+            cache.get_or_generate_index(&persistent_key, || {
                 if let Some(root) = config.candidate_cache_dir.as_deref() {
                     match candidate_cache::load(root, &persistent_key, &child.name) {
                         Ok(Some(candidates)) => {
@@ -1736,29 +1927,24 @@ struct ChildCandidateCache {
 }
 
 struct ChildCandidateCacheEntry {
-    module: GraphModule,
-    config: UnitCandidateConfig,
+    key: String,
     candidates: Vec<LayoutCandidate>,
 }
 
 impl ChildCandidateCache {
     fn get_or_generate_index(
         &mut self,
-        module: &GraphModule,
-        config: &UnitCandidateConfig,
+        key: &str,
         generate: impl FnOnce() -> eyre::Result<Vec<LayoutCandidate>>,
     ) -> eyre::Result<(usize, bool)> {
-        if let Some(index) = self.entries.iter().position(|entry| {
-            entry.config == *config && modules_have_same_candidate_shape(&entry.module, module)
-        }) {
+        if let Some(index) = self.entries.iter().position(|entry| entry.key == key) {
             return Ok((index, true));
         }
 
         let candidates = generate()?;
         let index = self.entries.len();
         self.entries.push(ChildCandidateCacheEntry {
-            module: module.clone(),
-            config: config.clone(),
+            key: key.to_owned(),
             candidates,
         });
         Ok((index, false))
@@ -1771,7 +1957,8 @@ impl ChildCandidateCache {
         config: &UnitCandidateConfig,
         generate: impl FnOnce() -> eyre::Result<Vec<LayoutCandidate>>,
     ) -> eyre::Result<(Vec<LayoutCandidate>, bool)> {
-        let (index, reused) = self.get_or_generate_index(module, config, generate)?;
+        let key = candidate_shape_fingerprint(module, config);
+        let (index, reused) = self.get_or_generate_index(&key, generate)?;
         Ok((
             relabel_candidates(&self.entries[index].candidates, &module.name),
             reused,
@@ -1790,45 +1977,51 @@ fn relabel_candidates(candidates: &[LayoutCandidate], module_name: &str) -> Vec<
         .collect()
 }
 
-fn modules_have_same_candidate_shape(left: &GraphModule, right: &GraphModule) -> bool {
-    match (&left.graph, &right.graph) {
-        (Some(left_graph), Some(right_graph)) => {
-            let left_nodes = left_graph.nodes.iter().collect::<Vec<_>>();
-            let right_nodes = right_graph.nodes.iter().collect::<Vec<_>>();
-            if left_nodes.len() != right_nodes.len()
-                || left_nodes.iter().zip(&right_nodes).any(|(left, right)| {
-                    left.id != right.id
-                        || left.kind != right.kind
-                        || left.inputs != right.inputs
-                        || left.outputs != right.outputs
-                })
-            {
-                return false;
-            }
-        }
-        (None, None) => {}
-        _ => return false,
-    }
-
-    left.ports == right.ports
-}
-
 fn candidate_shape_fingerprint(module: &GraphModule, config: &UnitCandidateConfig) -> String {
     let nodes = module.graph.as_ref().map(|graph| {
-        graph
-            .nodes
+        let mut ordered = graph.nodes.iter().collect::<Vec<_>>();
+        ordered.sort_by_key(|node| node.id);
+        let canonical_ids = ordered
             .iter()
+            .enumerate()
+            .map(|(canonical, node)| (node.id, canonical))
+            .collect::<std::collections::HashMap<_, _>>();
+        ordered
+            .into_iter()
             .map(|node| {
                 (
-                    node.id,
-                    node.kind.clone(),
-                    node.inputs.clone(),
-                    node.outputs.clone(),
+                    stable_graph_node_kind_signature(&node.kind),
+                    node.inputs
+                        .iter()
+                        .map(|input| canonical_ids[input])
+                        .collect::<Vec<_>>(),
                 )
             })
             .collect::<Vec<_>>()
     });
     debug_parity_hash(&("local-candidate-cache-v1", nodes, &module.ports, config))
+}
+
+fn stable_graph_node_kind_signature(kind: &GraphNodeKind) -> String {
+    match kind {
+        GraphNodeKind::Sequential(sequential) => format!(
+            "Sequential({:?},{:?},{:?})",
+            sequential.sequential_type, sequential.input_ports, sequential.output_ports
+        ),
+        _ => kind.name(),
+    }
+}
+
+fn routable_candidate_shape_fingerprint(
+    module: &RoutableModule,
+    config: &UnitCandidateConfig,
+) -> String {
+    debug_parity_hash(&(
+        "routable-local-candidate-cache-v1",
+        &module.ports,
+        &module.body,
+        config,
+    ))
 }
 
 fn search_layout_combinations(
@@ -1926,6 +2119,41 @@ fn candidate_config_for_child(
         }
     }
     config
+}
+
+fn candidate_config_for_routable_child(
+    child: &RoutableModule,
+    base_config: &UnitCandidateConfig,
+) -> UnitCandidateConfig {
+    let mut config = base_config.clone();
+    if routable_module_is_combinational(child) {
+        if routable_input_port_count(child) > 1 {
+            config.local_config = multi_input_combinational_local_config(config.local_config);
+        }
+        if let Some(limit) = config.combinational_sampling_limit {
+            config.local_config.step_sampling_policy = SamplingPolicy::Random(limit);
+            config.local_config.not_route_step_sampling_policy = SamplingPolicy::Random(limit);
+            config.local_config.route_step_sampling_policy = SamplingPolicy::Random(limit);
+        }
+    }
+    config
+}
+
+fn routable_module_is_combinational(module: &RoutableModule) -> bool {
+    match &module.body {
+        RoutableModuleBody::Leaf { nodes } => nodes
+            .iter()
+            .all(|node| !matches!(node.kind, crate::ir::RoutableNodeKind::Sequential { .. })),
+        RoutableModuleBody::Composite { .. } => false,
+    }
+}
+
+fn routable_input_port_count(module: &RoutableModule) -> usize {
+    module
+        .ports
+        .iter()
+        .filter(|port| port.direction == RoutablePortDirection::Input)
+        .count()
 }
 
 fn graph_module_is_combinational(module: &GraphModule) -> bool {
@@ -2057,6 +2285,35 @@ mod tests {
             cache.get_or_generate(&different_port, &config, || generate(&different_port))?;
         assert!(!port_hit);
         assert_eq!(calls.get(), 3);
+        Ok(())
+    }
+
+    #[test]
+    fn routable_leaf_candidate_generation_matches_graph_module_path() -> eyre::Result<()> {
+        let mut module: GraphModule = LogicGraph::from_stmt("~a", "q")?.graph.into();
+        module.name = "candidate_parity".to_owned();
+        let design =
+            GraphModuleDesign::with_top_module(GraphModuleContext::default(), module.clone());
+        let routable = RoutableDesign::from_graph_module_design(&design)?;
+        let routable_module = routable.module(&routable.top).unwrap();
+        let config = UnitCandidateConfig {
+            dim: DimSize(8, 8, 4),
+            max_candidates: 2,
+            ..Default::default()
+        };
+
+        let legacy = generate_graph_module_candidates_with_progress_label(&module, &config, None)?;
+        let direct = generate_routable_module_candidates_with_progress_label(
+            routable_module,
+            &config,
+            None,
+        )?;
+
+        assert!(!legacy.is_empty());
+        assert_eq!(
+            legacy.iter().map(candidate_parity_hash).collect::<Vec<_>>(),
+            direct.iter().map(candidate_parity_hash).collect::<Vec<_>>()
+        );
         Ok(())
     }
 
@@ -2203,6 +2460,36 @@ mod tests {
         assert_eq!(prepared.summary().reused_candidate_sets, 1);
         assert_eq!(prepared.summary().candidates, 1);
         assert_eq!(prepared.summary().candidate_references, 2);
+
+        let routable: RoutableDesign = r#"
+            rcir 2;
+            stage routable;
+            target "redstone-v1";
+            top "direct_duplicate_top";
+            module "direct_duplicate_top" {
+              port input "a";
+              port output "y";
+              instance "first" : "inv";
+              instance "second" : "inv";
+              net "a" class io driver self."a" sinks ["first"."a"];
+              net "mid" class data driver "first"."y" sinks ["second"."a"];
+              net "y" class io driver "second"."y" sinks [self."y"];
+            }
+            leaf "inv" {
+              port input "a";
+              port output "y";
+              node 0 input "a" inputs [];
+              node 1 logic not inputs [0];
+              node 2 output "y" inputs [1];
+            }
+        "#
+        .parse()?;
+        let direct = prepare_routable_design_for_global_pnr(&routable, &config)?;
+        assert_eq!(direct.summary().instances, 2);
+        assert_eq!(direct.summary().unique_candidate_sets, 1);
+        assert_eq!(direct.summary().reused_candidate_sets, 1);
+        assert_eq!(direct.summary().candidates, 1);
+        assert_eq!(direct.summary().candidate_references, 2);
         Ok(())
     }
 

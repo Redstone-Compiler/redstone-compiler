@@ -247,6 +247,31 @@ fn graph_module_from_leaf(
     module: &RoutableModule,
     instance_name: &str,
 ) -> eyre::Result<GraphModule> {
+    let graph = graph_from_routable_leaf(module)?;
+
+    Ok(GraphModule {
+        name: instance_name.to_owned(),
+        graph: Some(graph),
+        instances: Vec::new(),
+        vars: Vec::new(),
+        ports: module
+            .ports
+            .iter()
+            .map(|port| GraphModulePort {
+                name: port.name.clone(),
+                port_type: graph_port_type(port.direction),
+                target: GraphModulePortTarget::Node(port.name.clone()),
+            })
+            .collect(),
+    })
+}
+
+/// Lowers a Routable leaf to the logic graph consumed by the local placer.
+///
+/// This deliberately stops below `GraphModule`: Routable ports and hierarchy
+/// remain the source of truth while the node graph is adapted only at the
+/// local-placement boundary.
+pub(crate) fn graph_from_routable_leaf(module: &RoutableModule) -> eyre::Result<Graph> {
     let RoutableModuleBody::Leaf { nodes } = &module.body else {
         eyre::bail!("module `{}` is not a leaf", module.name);
     };
@@ -269,22 +294,7 @@ fn graph_module_from_leaf(
     graph.build_producers();
     graph.build_consumers();
     graph.verify()?;
-
-    Ok(GraphModule {
-        name: instance_name.to_owned(),
-        graph: Some(graph),
-        instances: Vec::new(),
-        vars: Vec::new(),
-        ports: module
-            .ports
-            .iter()
-            .map(|port| GraphModulePort {
-                name: port.name.clone(),
-                port_type: graph_port_type(port.direction),
-                target: GraphModulePortTarget::Node(port.name.clone()),
-            })
-            .collect(),
-    })
+    Ok(graph)
 }
 
 fn graph_module_from_composite(

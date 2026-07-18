@@ -11,7 +11,7 @@ use super::{
     candidate_parity_hash, debug_parity_hash, PnrPreparationSummary, PnrPrepareConfig,
     PreparedCandidateSet, PreparedInstanceCandidateBinding, PreparedPnrBody, PreparedPnrDesign,
 };
-use crate::ir::RoutableDesign;
+use crate::ir::{RoutableDesign, RoutableModuleBody};
 use crate::nbt::{NBTRoot, ToNBT};
 use crate::snapshot::{emit_json, emit_nbt as snapshot_emit_nbt};
 use crate::transform::place_and_route::global_pnr::topology::ResolvedPnrTopology;
@@ -166,7 +166,11 @@ pub fn load_prepared_pnr_snapshot(
         .wrap_err("snapshot Routable IR is not UTF-8")?;
     let routable: RoutableDesign = routable_source.parse()?;
     let topology = ResolvedPnrTopology::from_routable(&routable)?;
-    let graph_design = routable.to_graph_module_design()?;
+    let top = routable
+        .module(&routable.top)
+        .with_context(|| format!("missing top Routable module `{}`", routable.top))?;
+    let module_name = top.name.clone();
+    let is_leaf = matches!(top.body, RoutableModuleBody::Leaf { .. });
     let snapshot_intent = source
         .read_optional("intent/resolved.json")?
         .map(|bytes| serde_json::from_slice::<ResolvedPhysicalIntent>(&bytes))
@@ -253,7 +257,7 @@ pub fn load_prepared_pnr_snapshot(
         })
         .collect::<eyre::Result<Vec<_>>>()?;
 
-    let body = if graph_design.top_module().graph.is_some() {
+    let body = if is_leaf {
         let candidates = candidate_sets
             .into_iter()
             .next()
@@ -267,7 +271,7 @@ pub fn load_prepared_pnr_snapshot(
         }
     };
     Ok(PreparedPnrDesign {
-        module: graph_design.top_module().clone(),
+        module_name,
         topology,
         prepare_config: config.clone(),
         body,

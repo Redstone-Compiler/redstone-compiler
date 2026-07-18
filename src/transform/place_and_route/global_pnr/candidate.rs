@@ -5,7 +5,8 @@ use eyre::ContextCompat;
 
 use crate::graph::logic::LogicGraph;
 use crate::graph::module::{GraphModule, GraphModulePortTarget, GraphModulePortType};
-use crate::graph::GraphNodeKind;
+use crate::graph::{Graph, GraphNodeKind};
+use crate::ir::{graph_from_routable_leaf, RoutableModule, RoutablePortDirection};
 use crate::output::{OutputEndpoint, PlacedWorld};
 use crate::transform::place_and_route::detailed_router;
 use crate::transform::place_and_route::global_pnr::ir::{
@@ -57,6 +58,77 @@ pub fn generate_graph_module_candidates_with_progress_label(
         .graph
         .clone()
         .context("only graph-backed GraphModule can generate unit layout candidates")?;
+    let ports = module
+        .ports
+        .iter()
+        .map(|port| match (&port.port_type, &port.target) {
+            (GraphModulePortType::InputNet, GraphModulePortTarget::Node(target)) => Some(
+                CandidatePort::new(&port.name, target, PhysicalPortDirection::Input),
+            ),
+            (GraphModulePortType::OutputNet, GraphModulePortTarget::Node(target)) => Some(
+                CandidatePort::new(&port.name, target, PhysicalPortDirection::Output),
+            ),
+            _ => None,
+        })
+        .map(|port| {
+            port.with_context(|| {
+                format!(
+                    "graph-backed module `{}` has a non-node or unsupported candidate port",
+                    module.name
+                )
+            })
+        })
+        .collect::<eyre::Result<Vec<_>>>()?;
+    generate_unit_candidates(&module.name, graph, ports, config, progress_label)
+}
+
+pub fn generate_routable_module_candidates_with_progress_label(
+    module: &RoutableModule,
+    config: &UnitCandidateConfig,
+    progress_label: Option<&str>,
+) -> eyre::Result<Vec<LayoutCandidate>> {
+    let graph = graph_from_routable_leaf(module)?;
+    let ports = module
+        .ports
+        .iter()
+        .map(|port| {
+            CandidatePort::new(
+                &port.name,
+                &port.name,
+                match port.direction {
+                    RoutablePortDirection::Input => PhysicalPortDirection::Input,
+                    RoutablePortDirection::Output => PhysicalPortDirection::Output,
+                },
+            )
+        })
+        .collect();
+    generate_unit_candidates(&module.name, graph, ports, config, progress_label)
+}
+
+#[derive(Clone, Debug)]
+struct CandidatePort {
+    name: String,
+    target: String,
+    direction: PhysicalPortDirection,
+}
+
+impl CandidatePort {
+    fn new(name: &str, target: &str, direction: PhysicalPortDirection) -> Self {
+        Self {
+            name: name.to_owned(),
+            target: target.to_owned(),
+            direction,
+        }
+    }
+}
+
+fn generate_unit_candidates(
+    module_name: &str,
+    graph: Graph,
+    ports: Vec<CandidatePort>,
+    config: &UnitCandidateConfig,
+    progress_label: Option<&str>,
+) -> eyre::Result<Vec<LayoutCandidate>> {
     let graph = LogicGraph { graph }.prepare_place()?;
     let placer = LocalPlacer::new(graph.clone(), config.local_config)?;
 
@@ -67,7 +139,12 @@ pub fn generate_graph_module_candidates_with_progress_label(
         progress_label,
     );
 
-    let validate_truth_table = graph_is_combinational(module);
+    let contains_sequential = graph
+        .graph
+        .nodes
+        .iter()
+        .any(|node| matches!(node.kind, GraphNodeKind::Sequential(_)));
+    let validate_truth_table = !contains_sequential;
     let mut candidates = Vec::new();
     for placed in placed {
         if candidates.len() >= config.max_candidates {
@@ -76,39 +153,30 @@ pub fn generate_graph_module_candidates_with_progress_label(
         if validate_truth_table && !candidate_matches_truth_table(&graph, &placed)? {
             continue;
         }
-        let (world, ports) = switchless_candidate_layout(
-            module,
+        let (world, physical_ports) = switchless_candidate_layout(
+            &ports,
+            contains_sequential,
             &config.input_constraints,
             placed.world,
             &placed.inputs,
             &placed.outputs,
         );
-        if !candidate_ports_cover_module_ports(module, &ports) {
+        if !candidate_ports_cover_module_ports(&ports, &physical_ports) {
             continue;
         }
         candidates.push(LayoutCandidate::from_world(
-            module.name.clone(),
+            module_name.to_owned(),
             world,
-            ports,
+            physical_ports,
         )?);
     }
     Ok(candidates)
 }
 
-fn candidate_ports_cover_module_ports(module: &GraphModule, ports: &[PhysicalPort]) -> bool {
-    module
-        .ports
+fn candidate_ports_cover_module_ports(expected: &[CandidatePort], actual: &[PhysicalPort]) -> bool {
+    expected
         .iter()
-        .all(|module_port| ports.iter().any(|port| port.name == module_port.name))
-}
-
-fn graph_is_combinational(module: &GraphModule) -> bool {
-    module.graph.as_ref().is_some_and(|graph| {
-        graph
-            .nodes
-            .iter()
-            .all(|node| !matches!(node.kind, GraphNodeKind::Sequential(_)))
-    })
+        .all(|expected| actual.iter().any(|port| port.name == expected.name))
 }
 
 fn candidate_matches_truth_table(
@@ -203,7 +271,8 @@ fn candidate_matches_truth_table(
 // TODO(high-level): make LocalPlacer produce either standalone layouts with switches
 // or child-module layouts with PhysicalPort metadata, instead of rewriting switches here.
 fn switchless_candidate_layout(
-    module: &GraphModule,
+    module_ports: &[CandidatePort],
+    contains_sequential: bool,
     input_constraints: &LocalPlacerInputConstraints,
     mut world: World3D,
     inputs: &[OutputEndpoint],
@@ -212,14 +281,19 @@ fn switchless_candidate_layout(
     let mut ports = Vec::new();
     // Sequential child layout은 내부 feedback/state signal이 외부 route와 직접
     // 합쳐지면 back-power 때문에 latch 상태가 깨질 수 있어서 diode 연결을 요구한다.
-    let contains_sequential = module_contains_sequential(module);
     let needs_output_isolation = contains_sequential;
     let needs_input_isolation = contains_sequential;
-    let use_direct_input_ports = !contains_sequential && module_input_port_count(module) > 1;
+    let use_direct_input_ports = !contains_sequential
+        && module_ports
+            .iter()
+            .filter(|port| port.direction == PhysicalPortDirection::Input)
+            .count()
+            > 1;
     let preserve_switch_position_inputs = contains_sequential || use_direct_input_ports;
-    for port in &module.ports {
-        match (&port.port_type, &port.target) {
-            (GraphModulePortType::InputNet, GraphModulePortTarget::Node(input_name)) => {
+    for port in module_ports {
+        match port.direction {
+            PhysicalPortDirection::Input => {
+                let input_name = &port.target;
                 let position = inputs
                     .iter()
                     .find(|input| input.name == *input_name)
@@ -252,7 +326,8 @@ fn switchless_candidate_layout(
                     });
                 }
             }
-            (GraphModulePortType::OutputNet, GraphModulePortTarget::Node(output_name)) => {
+            PhysicalPortDirection::Output => {
+                let output_name = &port.target;
                 if let Some(output) = outputs.iter().find(|output| output.name == *output_name) {
                     let position = output.position();
                     let access_points = expose_routeable_output_ports(&world, position);
@@ -271,7 +346,6 @@ fn switchless_candidate_layout(
                     });
                 }
             }
-            _ => {}
         }
     }
     for input in inputs {
@@ -286,23 +360,6 @@ fn switchless_candidate_layout(
     ports.sort_by(|a, b| a.name.cmp(&b.name));
     world.initialize_redstone_states();
     (world, ports)
-}
-
-fn module_contains_sequential(module: &GraphModule) -> bool {
-    module.graph.as_ref().is_some_and(|graph| {
-        graph
-            .nodes
-            .iter()
-            .any(|node| matches!(node.kind, GraphNodeKind::Sequential(_)))
-    })
-}
-
-fn module_input_port_count(module: &GraphModule) -> usize {
-    module
-        .ports
-        .iter()
-        .filter(|port| port.port_type.is_input())
-        .count()
 }
 
 fn remove_local_input_switches(world: &mut World3D) {

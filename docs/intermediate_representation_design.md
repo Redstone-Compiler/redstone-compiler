@@ -436,11 +436,9 @@ deduplicated local candidate sets. Snapshot archives persist both, so a later
 run can change global placement, routing, and search settings without invoking
 the local placer again.
 
-Global routing connectivity now originates from the resolved topology. A small
-`GraphModule` adapter is materialized from typed nets only because the current
-physical router implementation still consumes that shape internally. Every
+Global routing connectivity originates from the resolved topology. Every
 physical route branch carries its `NetId` and typed source/sink endpoints, so
-snapshots and diagnostics no longer need to recover identity from labels.
+snapshots and diagnostics do not need to recover identity from labels.
 
 Placement candidate ordering, Free3D attraction, layered assignment, and
 wire/congestion cost now also receive connectivity reconstructed from the
@@ -448,12 +446,15 @@ resolved topology rather than from the original legacy module. Routing retry
 feedback groups branches by `NetId`; labels remain presentation metadata and a
 compatibility fallback only.
 
-The physical placer/router implementations still consume a temporary
-`GraphModule`-shaped adapter internally. Replacing that adapter with native
-typed placement and routing plan structs is the final IR-boundary migration.
+Routable preparation no longer reconstructs a `GraphModuleDesign`. At the local
+placement boundary, each Routable leaf supplies only its node graph and typed
+ports; the node graph is lowered directly to the `LogicGraph` consumed by the
+local placer. Composite hierarchy, candidate binding, global placement, and
+routing continue to use Routable definitions and `ResolvedPnrTopology`.
 
-Prepared/replayed global execution no longer reads the retained legacy module
-for connectivity or interface discovery. Top-level input switches and output
-observation points are collected from typed top-port endpoints. The retained
-module is now limited to preparation compatibility/parity metadata and the
-physical adapter implementation.
+Prepared/replayed global execution stores only the module name, resolved typed
+topology, candidate sets, and preparation metadata. Snapshot replay determines
+leaf/composite shape from the saved Routable IR and does not restore a legacy
+module. The public `GraphModule` preparation APIs remain as compatibility
+entry points for older callers, but the Logical/Routable pipeline does not pass
+through them.
