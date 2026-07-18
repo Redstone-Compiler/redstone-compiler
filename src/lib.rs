@@ -2,6 +2,7 @@
 
 pub mod cluster;
 pub mod graph;
+pub mod ir;
 pub mod logic;
 pub mod nbt;
 pub mod output;

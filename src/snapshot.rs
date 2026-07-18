@@ -208,6 +208,10 @@ pub fn emit_json(path: impl Into<PathBuf>, value: impl Serialize) -> eyre::Resul
     })
 }
 
+pub fn emit_text(path: impl Into<PathBuf>, text: impl Into<String>) -> eyre::Result<()> {
+    emit_bytes(path, text.into().into_bytes())
+}
+
 pub fn is_active() -> bool {
     CURRENT_RUN.get().is_some()
 }

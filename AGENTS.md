@@ -3,6 +3,9 @@
 ## Documentation
 
 - Verilog RTL interface design notes: `docs/verilog_rtl_interface_design.md`
+- RCIR language and lowering design: `docs/intermediate_representation_design.md`
+- Physical design intent and local-cell recipes: `docs/physical_design_intent.md`
+- Physical design intent and local cell recipes: `docs/physical_design_intent.md`
 - PnR logging and observability: `docs/pnr_logging.md`
 - Compilation snapshot artifacts: `docs/compilation_snapshots.md`
 

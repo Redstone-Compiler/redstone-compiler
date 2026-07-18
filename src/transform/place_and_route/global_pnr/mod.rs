@@ -17,6 +17,7 @@ use serde_json::{json, Value};
 
 use crate::graph::module::{GraphModule, GraphModuleContext, GraphModuleDesign};
 use crate::graph::GraphNodeKind;
+use crate::ir::{LogicalDesign, RoutableDesign};
 use crate::nbt::ToNBT;
 use crate::output::{OutputEndpoint, PlacedWorld};
 use crate::snapshot::{
@@ -419,7 +420,63 @@ pub fn place_and_route_design_with_visualization(
     design: &GraphModuleDesign,
     config: &GlobalPnrConfig,
 ) -> eyre::Result<GlobalPnrResult> {
+    if crate::snapshot::is_active() {
+        let routable = RoutableDesign::from_graph_module_design(design)?;
+        crate::snapshot::emit_text("ir/routable.rcir", routable.to_string())?;
+        crate::snapshot::emit_json("ir/routable.json", &routable)?;
+    }
     place_and_route_module_with_visualization(&design.context, design.top_module(), config)
+}
+
+pub fn place_and_route_routable_design_with_visualization(
+    design: &RoutableDesign,
+    config: &GlobalPnrConfig,
+) -> eyre::Result<GlobalPnrResult> {
+    design.validate()?;
+    if crate::snapshot::is_active() {
+        crate::snapshot::emit_text("ir/routable.rcir", design.to_string())?;
+        crate::snapshot::emit_json("ir/routable.json", design)?;
+    }
+    let graph_design = design.to_graph_module_design()?;
+    place_and_route_module_with_visualization(
+        &graph_design.context,
+        graph_design.top_module(),
+        config,
+    )
+}
+
+pub fn place_and_route_routable_design(
+    design: &RoutableDesign,
+    config: &GlobalPnrConfig,
+) -> eyre::Result<World3D> {
+    Ok(
+        place_and_route_routable_design_with_visualization(design, config)?
+            .placed_world
+            .world,
+    )
+}
+
+pub fn place_and_route_logical_design_with_visualization(
+    design: &LogicalDesign,
+    config: &GlobalPnrConfig,
+) -> eyre::Result<GlobalPnrResult> {
+    design.validate()?;
+    if crate::snapshot::is_active() {
+        crate::snapshot::emit_text("ir/logical.rcir", design.to_string())?;
+        crate::snapshot::emit_json("ir/logical.json", design)?;
+    }
+    place_and_route_routable_design_with_visualization(&design.lower_to_routable()?, config)
+}
+
+pub fn place_and_route_logical_design(
+    design: &LogicalDesign,
+    config: &GlobalPnrConfig,
+) -> eyre::Result<World3D> {
+    Ok(
+        place_and_route_logical_design_with_visualization(design, config)?
+            .placed_world
+            .world,
+    )
 }
 
 pub fn place_and_route_module_with_visualization(
@@ -1566,7 +1623,8 @@ mod tests {
               end
             endmodule
             "#;
-        let design = lower_design_modules(&parse_modules(source)?)?;
+        let logical_input = LogicalDesign::from_verilog_modules(&parse_modules(source)?)?;
+        let logical_input: LogicalDesign = logical_input.to_string().parse()?;
         let sampling_limit = std::env::var("COUNTER_SAMPLING_LIMIT")
             .ok()
             .and_then(|value| value.parse().ok())
@@ -1645,12 +1703,24 @@ mod tests {
             verifier: Some(assert_two_bit_counter_behavior),
             ..Default::default()
         };
-
         let result = compile_with_snapshot(
             SnapshotOptions::new("test/counter.snapshot", "counter")
                 .with_source_text("counter.v", source),
-            || place_and_route_design_with_visualization(&design, &config),
+            || place_and_route_logical_design_with_visualization(&logical_input, &config),
         )?;
+        let logical_source = std::fs::read_to_string("test/counter.snapshot/ir/logical.rcir")?;
+        let logical: LogicalDesign = logical_source.parse()?;
+        assert_eq!(logical.top, "counter");
+        assert!(logical.module("counter").unwrap().cells.iter().any(|cell| {
+            matches!(
+                cell.kind,
+                crate::ir::LogicalCellKind::Register { width: 2, .. }
+            )
+        }));
+        let routable_source = std::fs::read_to_string("test/counter.snapshot/ir/routable.rcir")?;
+        let routable: RoutableDesign = routable_source.parse()?;
+        assert_eq!(routable.top, "counter");
+        assert!(routable.modules.len() > 1);
         let placed = result.placed_world;
 
         assert!(!placed.world.iter_block().is_empty());

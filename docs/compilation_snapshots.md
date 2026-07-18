@@ -5,20 +5,33 @@ at the root so it is easy to find; the manifest is the machine-readable index.
 
 ```text
 counter.snapshot/
-├── counter.nbt
-├── counter.v
-├── manifest.json
-├── summary.json
-├── interface.json
-├── placement-bboxes.nbt
-├── instances/<index>-<name>/
-│   ├── circuit.nbt
-│   └── instance.json
-├── routes/
-│   ├── routes.nbt
-│   └── routes.json
-└── pnr/config.json
+|-- counter.nbt
+|-- counter.v
+|-- manifest.json
+|-- summary.json
+|-- interface.json
+|-- placement-bboxes.nbt
+|-- ir/
+|   |-- logical.rcir
+|   |-- logical.json
+|   |-- routable.rcir
+|   `-- routable.json
+|-- instances/<index>-<name>/
+|   |-- circuit.nbt
+|   `-- instance.json
+|-- routes/
+|   |-- routes.nbt
+|   `-- routes.json
+`-- pnr/config.json
 ```
+
+`ir/logical.rcir` preserves bus-level operations and state intent such as
+`inc` and `register`. It is emitted for Verilog and logical-IR inputs.
+`ir/routable.rcir` is the scalar, target-mapped IR accepted by global PnR.
+The matching JSON files contain the same experimental data for tools that
+prefer a structured format. Each IR artifact is emitted immediately after its
+stage completes, so it remains available when later lowering, placement, or
+routing fails.
 
 `summary.json` records status, total elapsed time, selected placement and route
 metrics, and typed compilation events. Failed compilation scopes still write a
@@ -61,3 +74,10 @@ by `token.in_scope(...)`; ordinary compiler functions still carry no reporter.
 The existing positional output remains accepted. An output such as
 `build/adder.nbt` now creates `build/adder.snapshot/adder.nbt`; passing a path
 that already ends in `.snapshot` uses that directory directly.
+
+Logical and Routable IR files can both be compiled through the same
+snapshot-producing path. The `stage` header selects the path:
+
+```text
+redstone-compiler design.rcir build/design.snapshot
+```
