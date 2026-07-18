@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
+use std::time::{Duration, Instant};
 
 use super::block::{Block, BlockKind, Direction};
 use super::position::Position;
@@ -81,6 +82,10 @@ struct Event {
 pub struct Simulator {
     queue: VecDeque<VecDeque<Event>>,
     world: World3D,
+    redstone_positions: Vec<Position>,
+    cobble_positions: Vec<Position>,
+    torch_positions: Vec<Position>,
+    power_source_positions: Vec<Position>,
     cycle: usize,
     event_id_count: usize,
     soft_power_sources: HashSet<(Position, Position)>,
@@ -91,6 +96,54 @@ pub struct Simulator {
     trace: Vec<SimulationTraceEntry>,
     snapshots: Vec<SimulationSnapshot>,
     trace_limit: usize,
+    profile: Option<SimulationProfile>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SimulationProfile {
+    pub fill_event_ids_time: Duration,
+    pub event_processing_time: Duration,
+    pub redstone_normalization_time: Duration,
+    pub cobble_normalization_time: Duration,
+    pub torch_reevaluation_time: Duration,
+    pub fill_event_ids_calls: usize,
+    pub event_batches: usize,
+    pub events_processed: usize,
+    pub redstone_normalization_calls: usize,
+    pub redstone_relaxation_passes: usize,
+    pub redstone_targets_evaluated: usize,
+    pub cobble_normalization_calls: usize,
+    pub cobble_targets_evaluated: usize,
+    pub torch_reevaluation_calls: usize,
+    pub torches_evaluated: usize,
+}
+
+impl SimulationProfile {
+    pub fn measured_time(&self) -> Duration {
+        self.event_processing_time
+            + self.redstone_normalization_time
+            + self.cobble_normalization_time
+            + self.torch_reevaluation_time
+    }
+
+    #[cfg(test)]
+    fn accumulate(&mut self, other: &Self) {
+        self.fill_event_ids_time += other.fill_event_ids_time;
+        self.event_processing_time += other.event_processing_time;
+        self.redstone_normalization_time += other.redstone_normalization_time;
+        self.cobble_normalization_time += other.cobble_normalization_time;
+        self.torch_reevaluation_time += other.torch_reevaluation_time;
+        self.fill_event_ids_calls += other.fill_event_ids_calls;
+        self.event_batches += other.event_batches;
+        self.events_processed += other.events_processed;
+        self.redstone_normalization_calls += other.redstone_normalization_calls;
+        self.redstone_relaxation_passes += other.redstone_relaxation_passes;
+        self.redstone_targets_evaluated += other.redstone_targets_evaluated;
+        self.cobble_normalization_calls += other.cobble_normalization_calls;
+        self.cobble_targets_evaluated += other.cobble_targets_evaluated;
+        self.torch_reevaluation_calls += other.torch_reevaluation_calls;
+        self.torches_evaluated += other.torches_evaluated;
+    }
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -413,9 +466,41 @@ impl Simulator {
     }
 
     fn new(world: &World, trace_limit: usize) -> Self {
+        let world = World3D::from(world);
+        // Signal state changes during simulation, but block kinds do not, so
+        // these position sets remain valid for the simulator's lifetime.
+        let mut redstone_positions = Vec::new();
+        let mut cobble_positions = Vec::new();
+        let mut torch_positions = Vec::new();
+        let mut power_source_positions = Vec::new();
+        for (position, block) in world.iter_block() {
+            if block.kind.is_redstone() {
+                redstone_positions.push(position);
+            }
+            if block.kind.is_cobble() {
+                cobble_positions.push(position);
+            }
+            if block.kind.is_torch() {
+                torch_positions.push(position);
+            }
+            if matches!(
+                block.kind,
+                BlockKind::Torch { .. }
+                    | BlockKind::Switch { .. }
+                    | BlockKind::Redstone { .. }
+                    | BlockKind::RedstoneBlock
+                    | BlockKind::Repeater { .. }
+            ) {
+                power_source_positions.push(position);
+            }
+        }
         Self {
             queue: VecDeque::new(),
-            world: world.into(),
+            world,
+            redstone_positions,
+            cobble_positions,
+            torch_positions,
+            power_source_positions,
             cycle: 0,
             event_id_count: 0,
             soft_power_sources: HashSet::new(),
@@ -426,10 +511,26 @@ impl Simulator {
             trace: Vec::new(),
             snapshots: Vec::new(),
             trace_limit,
+            profile: None,
         }
     }
 
+    pub fn set_profiling_enabled(&mut self, enabled: bool) {
+        self.profile = enabled.then(SimulationProfile::default);
+    }
+
+    pub fn reset_profile(&mut self) {
+        if let Some(profile) = &mut self.profile {
+            *profile = SimulationProfile::default();
+        }
+    }
+
+    pub fn profile(&self) -> Option<&SimulationProfile> {
+        self.profile.as_ref()
+    }
+
     fn fill_event_id(&mut self) {
+        let started = self.profile.as_ref().map(|_| Instant::now());
         let mut event_id = self.event_id_count;
         for events in &mut self.queue {
             for event in events {
@@ -440,6 +541,10 @@ impl Simulator {
             }
         }
         self.event_id_count = event_id;
+        if let (Some(profile), Some(started)) = (&mut self.profile, started) {
+            profile.fill_event_ids_time += started.elapsed();
+            profile.fill_event_ids_calls += 1;
+        }
     }
 
     pub fn change_state(&mut self, states: Vec<(Position, bool)>) -> eyre::Result<()> {
@@ -633,10 +738,8 @@ impl Simulator {
     }
 
     fn normalize_torches_on(&mut self) {
-        for pos in self.world.iter_pos() {
-            if matches!(self.world[pos].kind, BlockKind::Torch { .. }) {
-                self.world[pos].kind = BlockKind::Torch { is_on: true };
-            }
+        for pos in self.torch_positions.iter().copied() {
+            self.world[pos].kind = BlockKind::Torch { is_on: true };
         }
     }
 
@@ -691,14 +794,15 @@ impl Simulator {
     }
 
     fn enqueue_torch_reevaluations(&mut self) {
+        let started = self.profile.as_ref().map(|_| Instant::now());
+        let mut torches_evaluated = 0;
         let events = self
-            .world
-            .iter_block()
-            .into_iter()
-            .filter_map(|(pos, block)| {
-                if !matches!(block.kind, BlockKind::Torch { .. }) {
-                    return None;
-                }
+            .torch_positions
+            .iter()
+            .copied()
+            .filter_map(|pos| {
+                let block = self.world[pos];
+                torches_evaluated += 1;
                 let support = pos.walk(block.direction)?;
                 if !self.world.size.bound_on(support) || !self.world[support].kind.is_cobble() {
                     return None;
@@ -720,6 +824,11 @@ impl Simulator {
 
         for event in events {
             self.schedule_event(TORCH_UPDATE_DELAY_CYCLES, event);
+        }
+        if let (Some(profile), Some(started)) = (&mut self.profile, started) {
+            profile.torch_reevaluation_time += started.elapsed();
+            profile.torch_reevaluation_calls += 1;
+            profile.torches_evaluated += torches_evaluated;
         }
     }
 
@@ -762,21 +871,27 @@ impl Simulator {
     }
 
     fn normalize_redstone_strengths(&mut self) -> bool {
+        let started = self.profile.as_ref().map(|_| Instant::now());
+        let mut relaxation_passes = 0;
+        let mut targets_evaluated = 0;
         let mut any_changed = false;
         let mut changed = true;
         while changed {
+            relaxation_passes += 1;
             changed = false;
             let next_strengths = self
-                .world
-                .iter_block()
-                .into_iter()
-                .filter_map(|(pos, block)| {
+                .redstone_positions
+                .iter()
+                .copied()
+                .filter_map(|pos| {
+                    let block = self.world[pos];
                     let BlockKind::Redstone {
                         on_count, strength, ..
                     } = block.kind
                     else {
                         return None;
                     };
+                    targets_evaluated += 1;
                     let next_strength = if on_count > 0 {
                         15
                     } else {
@@ -796,17 +911,25 @@ impl Simulator {
             }
         }
 
+        if let (Some(profile), Some(started)) = (&mut self.profile, started) {
+            profile.redstone_normalization_time += started.elapsed();
+            profile.redstone_normalization_calls += 1;
+            profile.redstone_relaxation_passes += relaxation_passes;
+            profile.redstone_targets_evaluated += targets_evaluated;
+        }
+
         any_changed
     }
 
     fn redstone_input_strength(&self, target: Position) -> usize {
-        self.world
-            .iter_block()
-            .into_iter()
-            .filter_map(|(source_pos, source_block)| {
+        self.redstone_positions
+            .iter()
+            .copied()
+            .filter_map(|source_pos| {
                 if source_pos == target {
                     return None;
                 }
+                let source_block = self.world[source_pos];
                 let BlockKind::Redstone {
                     state,
                     strength: source_strength,
@@ -828,11 +951,14 @@ impl Simulator {
     }
 
     fn normalize_cobble_power_counts(&mut self) -> bool {
+        let started = self.profile.as_ref().map(|_| Instant::now());
+        let mut targets_evaluated = 0;
         let updates = self
-            .world
-            .iter_block()
-            .into_iter()
-            .filter_map(|(pos, block)| {
+            .cobble_positions
+            .iter()
+            .copied()
+            .filter_map(|pos| {
+                let block = self.world[pos];
                 let BlockKind::Cobble {
                     on_count,
                     on_base_count,
@@ -840,6 +966,7 @@ impl Simulator {
                 else {
                     return None;
                 };
+                targets_evaluated += 1;
                 let (next_on_count, next_on_base_count) = self.cobble_power_counts(pos);
                 (next_on_count != on_count || next_on_base_count != on_base_count).then_some((
                     pos,
@@ -856,6 +983,11 @@ impl Simulator {
                 on_base_count: next_on_base_count,
             };
         }
+        if let (Some(profile), Some(started)) = (&mut self.profile, started) {
+            profile.cobble_normalization_time += started.elapsed();
+            profile.cobble_normalization_calls += 1;
+            profile.cobble_targets_evaluated += targets_evaluated;
+        }
         changed
     }
 
@@ -868,7 +1000,8 @@ impl Simulator {
         let mut sources = HashSet::new();
         let mut hard_sources = HashSet::new();
 
-        for (source_pos, source_block) in self.world.iter_block() {
+        for source_pos in self.power_source_positions.iter().copied() {
+            let source_block = self.world[source_pos];
             match source_block.kind {
                 BlockKind::Torch { is_on } if is_on => {
                     let soft_targets = match source_block.direction {
@@ -982,6 +1115,8 @@ impl Simulator {
         max_events: Option<usize>,
         local_events: &mut usize,
     ) -> eyre::Result<()> {
+        let started = self.profile.as_ref().map(|_| Instant::now());
+        let events_before = *local_events;
         self.cycle += 1;
 
         self.queue.push_back(VecDeque::new());
@@ -1030,6 +1165,12 @@ impl Simulator {
 
         if self.queue.back().unwrap().is_empty() {
             self.queue.pop_back();
+        }
+
+        if let (Some(profile), Some(started)) = (&mut self.profile, started) {
+            profile.event_processing_time += started.elapsed();
+            profile.event_batches += 1;
+            profile.events_processed += *local_events - events_before;
         }
 
         Ok(())
@@ -1775,6 +1916,136 @@ mod test {
             sim.advance_idle_cycles(MANUAL_INPUT_IDLE_CYCLES)?;
         }
 
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "manual release-mode simulator performance profile"]
+    fn profile_counter_switch_latency() -> eyre::Result<()> {
+        let nbt_path = std::env::var("COUNTER_NBT_PATH")
+            .unwrap_or_else(|_| "test/counter-global-smoke.nbt".to_owned());
+        let cycles = std::env::var("COUNTER_PROFILE_CYCLES")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(8);
+        let profiling_enabled =
+            std::env::var("COUNTER_PROFILE_ENABLED").map_or(true, |value| value != "0");
+        let nbt = NBTRoot::from_nbt_bytes(&std::fs::read(nbt_path)?)?;
+        let world = nbt.to_world();
+        let clock = world
+            .blocks
+            .iter()
+            .find_map(|(position, block)| {
+                matches!(block.kind, BlockKind::Switch { .. }).then_some(*position)
+            })
+            .expect("counter should contain a clock switch");
+        let volume = world.size.0 * world.size.1 * world.size.2;
+        let non_air_blocks = world.blocks.len();
+        let redstones = world
+            .blocks
+            .iter()
+            .filter(|(_, block)| block.kind.is_redstone())
+            .count();
+        let cobbles = world
+            .blocks
+            .iter()
+            .filter(|(_, block)| block.kind.is_cobble())
+            .count();
+        let torches = world
+            .blocks
+            .iter()
+            .filter(|(_, block)| block.kind.is_torch())
+            .count();
+
+        let init_started = Instant::now();
+        let mut sim =
+            Simulator::from_preserving_torch_states_with_limits_and_trace(&world, 256, 50_000, 0)
+                .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
+        let init_time = init_started.elapsed();
+        sim.set_profiling_enabled(profiling_enabled);
+
+        let mut aggregate = SimulationProfile::default();
+        let mut toggle_times = Vec::with_capacity(cycles * 2);
+        let mut nbt_conversion_time = Duration::ZERO;
+        for edge in 0..cycles * 2 {
+            let is_on = edge % 2 == 0;
+            sim.reset_profile();
+            let toggle_started = Instant::now();
+            sim.change_state_with_limits(vec![(clock, is_on)], 256, 50_000)?;
+            let toggle_time = toggle_started.elapsed();
+            toggle_times.push(toggle_time);
+            let profile = sim.profile().cloned().unwrap_or_default();
+            aggregate.accumulate(&profile);
+
+            let nbt_started = Instant::now();
+            let _: NBTRoot = sim.world().into();
+            nbt_conversion_time += nbt_started.elapsed();
+
+            println!(
+                "COUNTER_PROFILE_EDGE edge={} state={} total_ms={:.3} events={} batches={} redstone_passes={}",
+                edge + 1,
+                is_on,
+                toggle_time.as_secs_f64() * 1_000.0,
+                profile.events_processed,
+                profile.event_batches,
+                profile.redstone_relaxation_passes,
+            );
+        }
+
+        let toggles = toggle_times.len();
+        let toggle_total = toggle_times.iter().copied().sum::<Duration>();
+        let toggle_min = toggle_times.iter().copied().min().unwrap_or_default();
+        let toggle_max = toggle_times.iter().copied().max().unwrap_or_default();
+        let measured = aggregate.measured_time();
+        let unaccounted = toggle_total.saturating_sub(measured);
+        let millis = |duration: Duration| duration.as_secs_f64() * 1_000.0;
+        let percent = |duration: Duration| {
+            if toggle_total.is_zero() {
+                0.0
+            } else {
+                duration.as_secs_f64() * 100.0 / toggle_total.as_secs_f64()
+            }
+        };
+
+        println!(
+            "COUNTER_PROFILE_WORLD volume={volume} non_air={non_air_blocks} redstones={redstones} cobbles={cobbles} torches={torches}"
+        );
+        println!(
+            "COUNTER_PROFILE_SUMMARY toggles={toggles} init_ms={:.3} total_ms={:.3} avg_ms={:.3} min_ms={:.3} max_ms={:.3} nbt_avg_ms={:.3}",
+            millis(init_time),
+            millis(toggle_total),
+            millis(toggle_total) / toggles as f64,
+            millis(toggle_min),
+            millis(toggle_max),
+            millis(nbt_conversion_time) / toggles as f64,
+        );
+        println!(
+            "COUNTER_PROFILE_STAGE event_ms={:.3} event_pct={:.2} redstone_ms={:.3} redstone_pct={:.2} cobble_ms={:.3} cobble_pct={:.2} torch_ms={:.3} torch_pct={:.2} other_ms={:.3} other_pct={:.2}",
+            millis(aggregate.event_processing_time),
+            percent(aggregate.event_processing_time),
+            millis(aggregate.redstone_normalization_time),
+            percent(aggregate.redstone_normalization_time),
+            millis(aggregate.cobble_normalization_time),
+            percent(aggregate.cobble_normalization_time),
+            millis(aggregate.torch_reevaluation_time),
+            percent(aggregate.torch_reevaluation_time),
+            millis(unaccounted),
+            percent(unaccounted),
+        );
+        println!(
+            "COUNTER_PROFILE_COUNTS events={} event_batches={} fill_event_ids_calls={} fill_event_ids_ms={:.3} redstone_calls={} redstone_passes={} redstone_targets={} cobble_calls={} cobble_targets={} torch_calls={} torches={}",
+            aggregate.events_processed,
+            aggregate.event_batches,
+            aggregate.fill_event_ids_calls,
+            millis(aggregate.fill_event_ids_time),
+            aggregate.redstone_normalization_calls,
+            aggregate.redstone_relaxation_passes,
+            aggregate.redstone_targets_evaluated,
+            aggregate.cobble_normalization_calls,
+            aggregate.cobble_targets_evaluated,
+            aggregate.torch_reevaluation_calls,
+            aggregate.torches_evaluated,
+        );
         Ok(())
     }
 
