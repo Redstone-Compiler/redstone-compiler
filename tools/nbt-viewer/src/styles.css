@@ -870,6 +870,10 @@ input {
   white-space: nowrap;
 }
 
+.graph-tag-toggle.hidden {
+  display: none;
+}
+
 .graph-tag-toggle input {
   width: 14px;
   height: 14px;
