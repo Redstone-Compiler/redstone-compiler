@@ -113,3 +113,18 @@ Candidate-affecting settings must match the preparation fingerprint. Placement,
 routing, and global search settings may change without regenerating candidates.
 When a snapshot contains resolved physical intent, replay reuses it unless a
 new `--intent` file is supplied explicitly.
+
+For separate fresh compilations, a persistent local-candidate cache can avoid
+rerunning the local placer for an identical normalized child graph, port
+contract, and candidate configuration:
+
+```text
+redstone-compiler counter.v build/counter.snapshot \
+  --candidate-cache target/redstone-candidate-cache
+```
+
+The cache is opt-in. Entries are content-hash checked while loading; a corrupt
+or stale entry is reported as a progress detail and regenerated instead of
+failing the compilation. Global placement, routing, physical intent, and search
+knobs are deliberately excluded from the key because they consume candidates
+rather than change how candidates are generated.

@@ -230,6 +230,7 @@ impl GlobalPnrPreset {
             show_progress: true,
             verifier: None,
             physical_intent: None,
+            candidate_cache_dir: None,
             heuristic_hooks: Default::default(),
         };
         if self == Self::Thorough {

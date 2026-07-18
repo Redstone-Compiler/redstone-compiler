@@ -1,5 +1,6 @@
 pub mod assembly;
 pub mod candidate;
+mod candidate_cache;
 pub mod diagnostics;
 mod free_3d;
 pub mod heuristics;
@@ -79,6 +80,8 @@ pub struct GlobalPnrConfig {
     /// Optional per-design physical constraints resolved against the stable
     /// typed topology. Search knobs remain separate from this design intent.
     pub physical_intent: Option<ResolvedPhysicalIntent>,
+    /// Optional cross-process cache for structurally keyed local candidates.
+    pub candidate_cache_dir: Option<std::path::PathBuf>,
     /// Experimental extension points. Hooks are named and recorded in
     /// snapshots; function pointers keep ownership/configuration lightweight.
     pub heuristic_hooks: GlobalHeuristicHooks,
@@ -98,6 +101,7 @@ pub struct GlobalSearchConfig {
 pub struct PnrPrepareConfig {
     pub candidate: UnitCandidateConfig,
     pub show_progress: bool,
+    pub candidate_cache_dir: Option<std::path::PathBuf>,
 }
 
 impl From<&GlobalPnrConfig> for PnrPrepareConfig {
@@ -105,6 +109,7 @@ impl From<&GlobalPnrConfig> for PnrPrepareConfig {
         Self {
             candidate: config.candidate.clone(),
             show_progress: config.show_progress,
+            candidate_cache_dir: config.candidate_cache_dir.clone(),
         }
     }
 }
@@ -563,6 +568,7 @@ fn global_pnr_config_snapshot(config: &GlobalPnrConfig) -> Value {
             ],
             "max_candidates": config.candidate.max_candidates,
             "combinational_sampling_limit": config.candidate.combinational_sampling_limit,
+            "persistent_cache_enabled": config.candidate_cache_dir.is_some(),
             "input_constraints": format!("{:?}", config.candidate.input_constraints),
             "local_placer": {
                 "random_seed": local.random_seed,
@@ -636,6 +642,7 @@ impl Default for GlobalPnrConfig {
             show_progress: true,
             verifier: None,
             physical_intent: None,
+            candidate_cache_dir: None,
             heuristic_hooks: GlobalHeuristicHooks::default(),
         }
     }
@@ -1613,21 +1620,42 @@ fn prepare_child_candidate_sets(
         );
         let child = &context[instance.as_str()];
         let child_config = candidate_config_for_child(child, &config.candidate);
+        let persistent_key = candidate_shape_fingerprint(child, &child_config);
+        let persistent_hit = std::cell::Cell::new(false);
         let candidate_started = Instant::now();
         let (candidate_set_index, cache_hit) =
             cache.get_or_generate_index(child, &child_config, || {
-                generate_graph_module_candidates_with_progress_label(
+                if let Some(root) = config.candidate_cache_dir.as_deref() {
+                    match candidate_cache::load(root, &persistent_key, &child.name) {
+                        Ok(Some(candidates)) => {
+                            persistent_hit.set(true);
+                            return Ok(candidates);
+                        }
+                        Ok(None) => {}
+                        Err(error) => progress.detail(format!(
+                            "ignored invalid candidate cache entry `{persistent_key}`: {error}"
+                        )),
+                    }
+                }
+                let candidates = generate_graph_module_candidates_with_progress_label(
                     child,
                     &child_config,
                     config.show_progress.then_some(instance.as_str()),
-                )
+                )?;
+                if let Some(root) = config.candidate_cache_dir.as_deref()
+                    && let Err(error) = candidate_cache::store(root, &persistent_key, &candidates)
+                {
+                    progress.detail(format!(
+                        "could not store candidate cache entry `{persistent_key}`: {error}"
+                    ));
+                }
+                Ok(candidates)
             })?;
         let child_candidates = &cache.entries[candidate_set_index].candidates;
-        if cache_hit {
+        if cache_hit || persistent_hit.get() {
             reused += 1;
-            progress.detail(format!(
-                "`{instance}` reused structurally identical candidates"
-            ));
+            let source = if cache_hit { "memory" } else { "persistent" };
+            progress.detail(format!("`{instance}` reused {source} candidates"));
         }
         progress.detail(format!(
             "`{instance}` produced {} candidate(s) in {:.2?}",
@@ -1783,6 +1811,24 @@ fn modules_have_same_candidate_shape(left: &GraphModule, right: &GraphModule) ->
     }
 
     left.ports == right.ports
+}
+
+fn candidate_shape_fingerprint(module: &GraphModule, config: &UnitCandidateConfig) -> String {
+    let nodes = module.graph.as_ref().map(|graph| {
+        graph
+            .nodes
+            .iter()
+            .map(|node| {
+                (
+                    node.id,
+                    node.kind.clone(),
+                    node.inputs.clone(),
+                    node.outputs.clone(),
+                )
+            })
+            .collect::<Vec<_>>()
+    });
+    debug_parity_hash(&("local-candidate-cache-v1", nodes, &module.ports, config))
 }
 
 fn search_layout_combinations(
@@ -2147,6 +2193,7 @@ mod tests {
                 ..Default::default()
             },
             show_progress: false,
+            candidate_cache_dir: None,
         };
 
         let prepared = prepare_module_for_global_pnr(&context, &module, &config)?;

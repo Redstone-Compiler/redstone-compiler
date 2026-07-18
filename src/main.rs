@@ -27,6 +27,10 @@ pub struct CompilerOption {
     /// Optional per-design floorplan and routing intent.
     #[structopt(long, parse(from_os_str))]
     pub intent: Option<PathBuf>,
+
+    /// Reuse structurally identical local-placement candidates across runs.
+    #[structopt(long, parse(from_os_str))]
+    pub candidate_cache: Option<PathBuf>,
 }
 
 fn main() -> eyre::Result<()> {
@@ -42,7 +46,8 @@ fn main() -> eyre::Result<()> {
 }
 
 fn replay_snapshot_input(opt: CompilerOption) -> eyre::Result<()> {
-    let base_config = GlobalPnrConfig::default();
+    let mut base_config = GlobalPnrConfig::default();
+    base_config.candidate_cache_dir = opt.candidate_cache.clone();
     let prepare_config = PnrPrepareConfig::from(&base_config);
     let Some(output) = opt.output else {
         let prepared = load_prepared_pnr_snapshot(&opt.input, &prepare_config)?;
@@ -115,6 +120,7 @@ fn compile_verilog_input(opt: CompilerOption) -> eyre::Result<()> {
     let (physical_intent, intent_source) = bind_physical_intent(opt.intent.as_deref(), &topology)?;
     let mut config = GlobalPnrConfig::default();
     config.physical_intent = physical_intent;
+    config.candidate_cache_dir = opt.candidate_cache.clone();
     compile_with_snapshot(options, || {
         emit_intent_source(intent_source.as_ref())?;
         place_and_route_logical_design_with_visualization(&logical, &config)
@@ -158,6 +164,7 @@ fn compile_rcir_input(opt: CompilerOption) -> eyre::Result<()> {
     let (physical_intent, intent_source) = bind_physical_intent(opt.intent.as_deref(), &topology)?;
     let mut config = GlobalPnrConfig::default();
     config.physical_intent = physical_intent;
+    config.candidate_cache_dir = opt.candidate_cache.clone();
     match &ir {
         CircuitIr::Logical(design) => compile_with_snapshot(options, || {
             emit_intent_source(intent_source.as_ref())?;
