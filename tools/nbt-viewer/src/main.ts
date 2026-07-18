@@ -104,6 +104,7 @@ type SnapshotRoute = {
   sink: [number, number, number];
   sinkLabel: string;
   path: Array<[number, number, number]>;
+  blocks: Array<[number, number, number]>;
   pathLength: number;
   blockCount: number;
 };
@@ -481,6 +482,8 @@ let selectedGraphShowTags = true;
 let selectedGraphZoom = 1;
 let currentSnapshot: LoadedSnapshot | undefined;
 let currentSnapshotPath: string | undefined;
+let isolatedSnapshotBoxId: string | undefined;
+let isolatedSnapshotRouteId: string | undefined;
 let blocksVisible = true;
 let gridVisible = true;
 let snapshotBoxesVisible = true;
@@ -530,6 +533,13 @@ toggleGridButton.addEventListener('click', () => {
   viewer.setGridVisible(gridVisible);
   toggleGridButton.classList.toggle('active', gridVisible);
   toggleGridButton.setAttribute('aria-pressed', String(gridVisible));
+});
+
+window.addEventListener('keydown', event => {
+  if (event.key !== 'Escape' || (!isolatedSnapshotBoxId && !isolatedSnapshotRouteId)) return;
+  event.preventDefault();
+  setSnapshotRouteIsolation(undefined);
+  setSnapshotBoxIsolation(undefined);
 });
 
 toggleSnapshotRoutesButton.addEventListener('click', () => {
@@ -1893,6 +1903,9 @@ function parseSnapshotRoutes(value: unknown): SnapshotRoute[] {
     const path = Array.isArray(route?.path)
       ? route.path.map(readNumberTuple).filter((point): point is [number, number, number] => Boolean(point))
       : [];
+    const blocks = Array.isArray(route?.blocks)
+      ? route.blocks.map(readNumberTuple).filter((point): point is [number, number, number] => Boolean(point))
+      : [];
     const index = Number(route?.index);
     const pathLength = Number(route?.path_length);
     const blockCount = Number(route?.block_count);
@@ -1914,6 +1927,7 @@ function parseSnapshotRoutes(value: unknown): SnapshotRoute[] {
       sink,
       sinkLabel: route.sink_label,
       path,
+      blocks,
       pathLength: Number.isFinite(pathLength) ? pathLength : path.length,
       blockCount: Number.isFinite(blockCount) ? blockCount : 0,
     });
@@ -2072,8 +2086,11 @@ function updateSnapshotBoxes(): void {
   viewer.setBoundingBoxes(
     boxes,
     box => {
-      const instance = currentSnapshot?.instances.find(candidate => candidate.artifactPath === box.id);
-      if (instance) void openSnapshotInstance(instance);
+      if (!box || isolatedSnapshotBoxId === box.id) {
+        setSnapshotBoxIsolation(undefined);
+      } else {
+        setSnapshotBoxIsolation(box);
+      }
     },
     renderSnapshotBoxHover,
   );
@@ -2083,6 +2100,40 @@ function updateSnapshotBoxes(): void {
   toggleSnapshotBoxesButton.setAttribute('aria-pressed', String(visible));
 }
 
+function setSnapshotBoxIsolation(box: {
+  id: string;
+  label: string;
+  min: [number, number, number];
+  max: [number, number, number];
+} | undefined): void {
+  isolatedSnapshotBoxId = box?.id;
+  viewer.setIsolatedBoundingBox(box);
+  viewer.setRelatedRouteIds(relatedRouteIdsForBox(box?.id));
+
+  if (!box) return;
+  const instance = currentSnapshot?.instances.find(candidate => candidate.artifactPath === box.id);
+  if (!instance) return;
+  selectedBlock = undefined;
+  toggleSwitchButton.classList.add('hidden');
+  inspector.textContent = [
+    `isolated: ${instance.instance}`,
+    `module: ${instance.module}`,
+    `blocks: ${instance.blockCount ?? 'unknown'}`,
+    'click again, empty space, or press Esc to restore',
+  ].join('\n');
+}
+
+function relatedRouteIdsForBox(boxId: string | undefined): string[] {
+  const instance = boxId
+    ? currentSnapshot?.instances.find(candidate => candidate.artifactPath === boxId)
+    : undefined;
+  if (!instance) return [];
+  const prefix = `${instance.instance}.`;
+  return currentSnapshot?.routes
+    .filter(route => route.sourceLabel.startsWith(prefix) || route.sinkLabel.startsWith(prefix))
+    .map(route => route.id) ?? [];
+}
+
 function updateSnapshotRoutes(): void {
   const snapshot = currentSnapshot;
   const available = Boolean(
@@ -2090,7 +2141,9 @@ function updateSnapshotRoutes(): void {
   );
   const visible = available && snapshotRoutesVisible;
   const routes = visible
-    ? snapshot!.routes.map(route => ({
+    ? snapshot!.routes
+      .filter(route => !isolatedSnapshotRouteId || route.id === isolatedSnapshotRouteId)
+      .map(route => ({
         id: route.id,
         sourceLabel: route.sourceLabel,
         sinkLabel: route.sinkLabel,
@@ -2104,13 +2157,43 @@ function updateSnapshotRoutes(): void {
     : [];
   viewer.setRoutes(
     routes,
-    route => renderSnapshotRouteSelection(route.id),
+    route => {
+      if (!route) {
+        if (isolatedSnapshotRouteId) setSnapshotRouteIsolation(undefined);
+      } else if (isolatedSnapshotRouteId === route.id) {
+        setSnapshotRouteIsolation(undefined);
+      } else {
+        setSnapshotRouteIsolation(route.id);
+      }
+    },
     renderSnapshotRouteHover,
   );
   toggleSnapshotRoutesButton.classList.toggle('hidden', !available);
   toggleSnapshotRoutesButton.classList.toggle('active', visible);
   toggleSnapshotRoutesButton.textContent = snapshot ? `Routes: ${snapshot.routes.length}` : 'Routes';
   toggleSnapshotRoutesButton.setAttribute('aria-pressed', String(visible));
+}
+
+function setSnapshotRouteIsolation(routeId: string | undefined): void {
+  isolatedSnapshotRouteId = routeId;
+  const route = routeId
+    ? currentSnapshot?.routes.find(candidate => candidate.id === routeId)
+    : undefined;
+  viewer.setIsolatedBlockPositions(route ? routeBlockPositions(route) : undefined);
+  updateSnapshotRoutes();
+  viewer.setSelectedRouteId(routeId);
+  if (routeId) {
+    renderSnapshotRouteSelection(routeId);
+  } else {
+    renderSelection(undefined);
+  }
+}
+
+function routeBlockPositions(route: SnapshotRoute): Array<[number, number, number]> {
+  const compilerPositions = route.blocks.length > 0
+    ? route.blocks
+    : route.path.flatMap(([x, y, z]) => [[x, y, z], [x, y, z - 1]] as Array<[number, number, number]>);
+  return compilerPositions.map(compilerPositionToNbt);
 }
 
 function routePoints(route: SnapshotRoute): Array<[number, number, number]> {
@@ -2177,7 +2260,7 @@ function renderSnapshotBoxHover(
     ? currentSnapshot?.instances.find(candidate => candidate.artifactPath === box.id)
     : undefined;
   if (!instance) {
-    viewer.setRelatedRouteIds([]);
+    viewer.setRelatedRouteIds(relatedRouteIdsForBox(isolatedSnapshotBoxId));
     return;
   }
 
@@ -2227,6 +2310,11 @@ function showSnapshotTooltip(clientX: number, clientY: number): void {
 function leaveSnapshotMode(): void {
   currentSnapshot = undefined;
   currentSnapshotPath = undefined;
+  isolatedSnapshotBoxId = undefined;
+  isolatedSnapshotRouteId = undefined;
+  viewer.setIsolatedBoundingBox(undefined);
+  viewer.setIsolatedBlockPositions(undefined);
+  viewer.setSelectedRouteId(undefined);
   snapshotBoxesVisible = true;
   snapshotRoutesVisible = true;
   updateSnapshotBoxes();
@@ -2370,6 +2458,11 @@ async function openFile(
     graphLogicModeValue = 'raw';
     graphHighLevelLogic = false;
     currentSnapshotPath = snapshotPath;
+    isolatedSnapshotBoxId = undefined;
+    isolatedSnapshotRouteId = undefined;
+    viewer.setIsolatedBoundingBox(undefined);
+    viewer.setIsolatedBlockPositions(undefined);
+    viewer.setSelectedRouteId(undefined);
 
     markSelectedFile(selectedEntry);
 

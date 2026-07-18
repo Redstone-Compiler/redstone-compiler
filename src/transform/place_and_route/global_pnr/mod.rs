@@ -183,6 +183,7 @@ impl SnapshotProduct for GlobalPnrResult {
                     "path": route.path.iter().copied().map(position_json).collect::<Vec<_>>(),
                     "path_length": route.path.len(),
                     "block_count": route.blocks.len(),
+                    "blocks": route.blocks.iter().map(|(position, _)| position_json(*position)).collect::<Vec<_>>(),
                     "required_powered_positions": route.required_powered_positions.iter().copied().map(position_json).collect::<Vec<_>>(),
                     "required_released_positions": route.required_released_positions.iter().copied().map(position_json).collect::<Vec<_>>(),
                 })

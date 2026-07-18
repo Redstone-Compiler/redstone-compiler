@@ -7,13 +7,13 @@ import { BoundingBoxRenderer, type ViewerBoundingBox } from './BoundingBoxRender
 import { RouteRenderer, type ViewerRoute } from './RouteRenderer';
 
 type SelectionHandler = (block: StructureBlock | undefined) => void;
-type BoundingBoxSelectionHandler = (box: ViewerBoundingBox) => void;
+type BoundingBoxSelectionHandler = (box: ViewerBoundingBox | undefined) => void;
 type BoundingBoxHoverHandler = (
   box: ViewerBoundingBox | undefined,
   clientX: number,
   clientY: number,
 ) => void;
-type RouteSelectionHandler = (route: ViewerRoute) => void;
+type RouteSelectionHandler = (route: ViewerRoute | undefined) => void;
 type RouteHoverHandler = (
   route: ViewerRoute | undefined,
   clientX: number,
@@ -26,6 +26,7 @@ type SetStructureOptions = {
 };
 
 const ROTATION_DRAG_SCALE = 300;
+const CLICK_DRAG_THRESHOLD_PX = 5;
 const KEYBOARD_MOVE_SPEED = 0.0008;
 const PAN_MOVE_SPEED = 0.001;
 
@@ -57,6 +58,8 @@ export class StructureViewer {
   private structure = Structure.EMPTY;
   private model?: StructureModel;
   private selectedBlock?: vec3;
+  private isolatedBox?: ViewerBoundingBox;
+  private isolatedBlockKeys?: Set<string>;
   private blocksVisible = true;
   private gridVisible = true;
   private traceHighlights: vec3[] = [];
@@ -68,6 +71,9 @@ export class StructureViewer {
   private frame = 0;
   private dragMode?: DragMode;
   private dragPos?: vec2;
+  private clickPointerId?: number;
+  private clickStart?: vec2;
+  private clickDragged = false;
   private readonly activePointers = new Map<number, vec2>();
   private lastFrameTime = 0;
   private readonly movement = new Set<string>();
@@ -135,6 +141,27 @@ export class StructureViewer {
     if (this.routeRenderer.setRelatedIds(ids)) this.render();
   }
 
+  setSelectedRouteId(id: string | undefined): void {
+    if (this.routeRenderer.setSelectedId(id)) this.render();
+  }
+
+  setIsolatedBoundingBox(box: ViewerBoundingBox | undefined): void {
+    this.isolatedBox = box;
+    this.boundingBoxRenderer.setSelectedId(box?.id);
+    this.selectedBlock = undefined;
+    this.onSelect(undefined);
+    this.applyVisibleStructure();
+  }
+
+  setIsolatedBlockPositions(positions: Array<[number, number, number]> | undefined): void {
+    this.isolatedBlockKeys = positions
+      ? new Set(positions.map(position => position.join(',')))
+      : undefined;
+    this.selectedBlock = undefined;
+    this.onSelect(undefined);
+    this.applyVisibleStructure();
+  }
+
   setBlocksVisible(visible: boolean): void {
     if (this.blocksVisible === visible) return;
     this.blocksVisible = visible;
@@ -153,7 +180,12 @@ export class StructureViewer {
 
   async setStructure(model: StructureModel, options: SetStructureOptions = {}): Promise<void> {
     this.model = model;
-    this.structure = createDeepslateStructure(model);
+    if (!options.preserveView) {
+      this.isolatedBox = undefined;
+      this.isolatedBlockKeys = undefined;
+      this.boundingBoxRenderer.setSelectedId(undefined);
+    }
+    this.structure = createDeepslateStructure(this.visibleModel(model));
 
     if (!this.renderer) {
       const resources = await this.resourcesPromise;
@@ -175,6 +207,28 @@ export class StructureViewer {
     }
 
     this.traceHighlights = [];
+    this.render();
+  }
+
+  private visibleModel(model: StructureModel): StructureModel {
+    const box = this.isolatedBox;
+    const blockKeys = this.isolatedBlockKeys;
+    if (!box && !blockKeys) return model;
+    return {
+      ...model,
+      blocks: model.blocks.filter(block => {
+        const insideBox = !box || block.pos.every(
+          (value, axis) => value >= box.min[axis] && value < box.max[axis],
+        );
+        return insideBox && (!blockKeys || blockKeys.has(block.pos.join(',')));
+      }),
+    };
+  }
+
+  private applyVisibleStructure(): void {
+    if (!this.model) return;
+    this.structure = createDeepslateStructure(this.visibleModel(this.model));
+    this.renderer?.setStructure(this.structure);
     this.render();
   }
 
@@ -211,13 +265,15 @@ export class StructureViewer {
     if (this.activePointers.size === 1) {
       this.dragMode = event.button === 2 ? 'move' : 'rotate';
       this.dragPos = vec2.clone(pos);
+      if (event.button === 0) {
+        this.clickPointerId = event.pointerId;
+        this.clickStart = vec2.clone(pos);
+        this.clickDragged = false;
+      }
     } else {
       this.dragMode = 'move';
       this.dragPos = undefined;
-    }
-
-    if (event.button === 0 && this.activePointers.size === 1) {
-      this.selectBlock(event.offsetX, event.offsetY);
+      this.clearClickCandidate();
     }
   }
 
@@ -229,6 +285,13 @@ export class StructureViewer {
 
     const currentPos = this.activePointers.get(event.pointerId);
     if (!currentPos) return;
+
+    if (this.clickPointerId === event.pointerId && this.clickStart) {
+      const pointerPos = vec2.fromValues(event.clientX, event.clientY);
+      if (vec2.distance(this.clickStart, pointerPos) >= CLICK_DRAG_THRESHOLD_PX) {
+        this.clickDragged = true;
+      }
+    }
 
     event.preventDefault();
 
@@ -270,6 +333,12 @@ export class StructureViewer {
   }
 
   private onPointerUp(event: PointerEvent): void {
+    const shouldSelect = event.type === 'pointerup'
+      && this.clickPointerId === event.pointerId
+      && !this.clickDragged
+      && this.activePointers.size === 1;
+    if (this.clickPointerId === event.pointerId) this.clearClickCandidate();
+
     this.activePointers.delete(event.pointerId);
     if (this.canvas.hasPointerCapture(event.pointerId)) {
       this.canvas.releasePointerCapture(event.pointerId);
@@ -277,6 +346,7 @@ export class StructureViewer {
 
     if (this.activePointers.size === 0) {
       this.endDrag();
+      if (shouldSelect) this.selectBlock(event.offsetX, event.offsetY);
       return;
     }
 
@@ -291,6 +361,12 @@ export class StructureViewer {
     this.activePointers.clear();
     this.dragMode = undefined;
     this.dragPos = undefined;
+  }
+
+  private clearClickCandidate(): void {
+    this.clickPointerId = undefined;
+    this.clickStart = undefined;
+    this.clickDragged = false;
   }
 
   private getTouchGesture(): [vec2, vec2] | undefined {
@@ -337,7 +413,7 @@ export class StructureViewer {
     const selectedRoute = this.pickRoute(x, y);
     if (selectedRoute) {
       this.routeRenderer.setSelectedId(selectedRoute.id);
-      this.boundingBoxRenderer.setSelectedId(undefined);
+      this.boundingBoxRenderer.setSelectedId(this.isolatedBox?.id);
       this.clearOverlayHover();
       this.selectedBlock = undefined;
       this.onSelect(undefined);
@@ -347,6 +423,7 @@ export class StructureViewer {
     }
 
     this.routeRenderer.setSelectedId(undefined);
+    this.onRouteSelect(undefined);
     const selectedBox = this.pickBoundingBox(x, y);
     if (selectedBox) {
       this.boundingBoxRenderer.setSelectedId(selectedBox.id);
@@ -359,6 +436,7 @@ export class StructureViewer {
     }
 
     this.boundingBoxRenderer.setSelectedId(undefined);
+    this.onBoundingBoxSelect(undefined);
     if (!this.blocksVisible) {
       this.selectedBlock = undefined;
       this.onSelect(undefined);
