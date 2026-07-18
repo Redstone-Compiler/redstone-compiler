@@ -16,13 +16,21 @@ counter.snapshot/
 |   |-- logical.json
 |   |-- routable.rcir
 |   `-- routable.json
+|-- candidates/
+|   |-- index.json
+|   `-- set-<index>/
+|       |-- candidate-<index>.nbt
+|       `-- candidate-<index>.json
 |-- instances/<index>-<name>/
 |   |-- circuit.nbt
 |   `-- instance.json
 |-- routes/
 |   |-- routes.nbt
 |   `-- routes.json
-`-- pnr/config.json
+`-- pnr/
+    |-- config.json
+    |-- preparation.json
+    `-- topology.json
 ```
 
 `ir/logical.rcir` preserves bus-level operations and state intent such as
@@ -32,6 +40,13 @@ The matching JSON files contain the same experimental data for tools that
 prefer a structured format. Each IR artifact is emitted immediately after its
 stage completes, so it remains available when later lowering, placement, or
 routing fails.
+
+`candidates/` contains every verified local candidate retained by the prepared
+design, deduplicated by structural candidate set rather than copied once per
+instance. `pnr/topology.json` assigns typed definition, instance, port, and net
+IDs. `pnr/preparation.json` records candidate bindings and a migration parity
+signature. Together these files make the snapshot a replayable boundary
+between local preparation and global PnR.
 
 `summary.json` records status, total elapsed time, selected placement and route
 metrics, and typed compilation events. Failed compilation scopes still write a
@@ -81,3 +96,14 @@ snapshot-producing path. The `stage` header selects the path:
 ```text
 redstone-compiler design.rcir build/design.snapshot
 ```
+
+A snapshot directory or its portable `.rsnap` archive can be used as input.
+This reloads the verified candidate library and reruns only global placement
+and routing; the local placer is not invoked:
+
+```text
+redstone-compiler build/design.rsnap build/design-rerun.snapshot
+```
+
+Candidate-affecting settings must match the preparation fingerprint. Placement,
+routing, and global search settings may change without regenerating candidates.

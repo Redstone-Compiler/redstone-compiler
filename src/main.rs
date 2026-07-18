@@ -4,8 +4,10 @@ use mimalloc::MiMalloc;
 use redstone_compiler::ir::{CircuitIr, LogicalDesign};
 use redstone_compiler::snapshot::{compile_with_snapshot, SnapshotOptions};
 use redstone_compiler::transform::place_and_route::global_pnr::{
+    emit_prepared_pnr_snapshot, load_prepared_pnr_snapshot,
     place_and_route_logical_design_with_visualization,
-    place_and_route_routable_design_with_visualization, GlobalPnrConfig,
+    place_and_route_routable_design_with_visualization, run_prepared_pnr_with_visualization,
+    GlobalPnrConfig, PnrPrepareConfig,
 };
 use structopt::StructOpt;
 
@@ -28,9 +30,43 @@ fn main() -> eyre::Result<()> {
 
     match opt.input.extension().and_then(|ext| ext.to_str()) {
         Some("rcir") => compile_rcir_input(opt),
+        Some("rsnap" | "snapshot") => replay_snapshot_input(opt),
         Some("v") => compile_verilog_input(opt),
         _ => eyre::bail!("unsupported input file extension: {:?}", opt.input),
     }
+}
+
+fn replay_snapshot_input(opt: CompilerOption) -> eyre::Result<()> {
+    let config = GlobalPnrConfig::default();
+    let prepare_config = PnrPrepareConfig::from(&config);
+    let Some(output) = opt.output else {
+        let prepared = load_prepared_pnr_snapshot(&opt.input, &prepare_config)?;
+        println!(
+            "loaded prepared PnR: module={} instances={} candidate_sets={} candidates={}",
+            prepared.module_name(),
+            prepared.summary().instances,
+            prepared.summary().unique_candidate_sets,
+            prepared.summary().candidates,
+        );
+        return Ok(());
+    };
+
+    let (snapshot_dir, snapshot_archive, options) =
+        snapshot_options_without_source(&opt.input, &output);
+    compile_with_snapshot(options, || {
+        let prepared = load_prepared_pnr_snapshot(&opt.input, &prepare_config)?;
+        emit_prepared_pnr_snapshot(&prepared)?;
+        run_prepared_pnr_with_visualization(&prepared, &config)
+    })?;
+    println!(
+        "replayed global PnR without local placement: path={}",
+        snapshot_dir.display()
+    );
+    println!(
+        "exported snapshot archive: path={}",
+        snapshot_archive.display()
+    );
+    Ok(())
 }
 
 fn compile_verilog_input(opt: CompilerOption) -> eyre::Result<()> {
@@ -122,6 +158,22 @@ fn snapshot_options(
         .unwrap_or("design")
         .to_owned();
     let options = SnapshotOptions::new(&snapshot_dir, design_name).with_source(input);
+    (snapshot_dir, snapshot_archive, options)
+}
+
+fn snapshot_options_without_source(
+    input: &std::path::Path,
+    output: &std::path::Path,
+) -> (PathBuf, PathBuf, SnapshotOptions) {
+    let snapshot_dir = snapshot_output_dir(output);
+    let snapshot_archive = snapshot_dir.with_extension("rsnap");
+    let design_name = output
+        .file_stem()
+        .or_else(|| input.file_stem())
+        .and_then(|name| name.to_str())
+        .unwrap_or("design")
+        .to_owned();
+    let options = SnapshotOptions::new(&snapshot_dir, design_name);
     (snapshot_dir, snapshot_archive, options)
 }
 

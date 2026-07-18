@@ -427,3 +427,16 @@ The first implementation is not complete until all of the following hold:
    Verilog, Logical RCIR, and Routable RCIR inputs.
 8. Snapshot provenance can navigate from the logical increment/register to all
    generated Routable cells and physical objects.
+
+## Implementation status
+
+The first replay boundary now exists alongside the IR pipeline. A
+`PreparedPnrDesign` owns the resolved typed topology and structurally
+deduplicated local candidate sets. Snapshot archives persist both, so a later
+run can change global placement, routing, and search settings without invoking
+the local placer again.
+
+The current placement and routing algorithms still execute through the legacy
+`GraphModule` connectivity representation. The typed topology is resolved,
+validated, archived, and used for stable snapshot identities, but making it
+the algorithms' sole connectivity source remains the next migration step.

@@ -5,14 +5,17 @@ mod free_3d;
 pub mod ir;
 pub mod placer;
 pub mod policy;
+mod prepared_snapshot;
 pub mod progress;
 pub mod router;
 pub mod search;
+pub mod topology;
 pub mod visualize;
 
 use std::time::{Duration, Instant};
 
 use eyre::ContextCompat;
+pub use prepared_snapshot::load_prepared_pnr_snapshot;
 use serde_json::{json, Value};
 
 use crate::graph::module::{GraphModule, GraphModuleContext, GraphModuleDesign};
@@ -46,6 +49,7 @@ use crate::transform::place_and_route::global_pnr::search::{
     layout_combinations, rank_child_candidates_with_preferred, select_layout_combination,
     ChildCandidatePool,
 };
+use crate::transform::place_and_route::global_pnr::topology::ResolvedPnrTopology;
 use crate::transform::place_and_route::global_pnr::visualize::placement_bbox_wireframe_world;
 use crate::transform::place_and_route::local_placer::{LocalPlacerConfig, NotRouteStrategy};
 use crate::transform::place_and_route::sampling::SamplingPolicy;
@@ -72,6 +76,189 @@ pub struct GlobalSearchConfig {
     pub policies: GlobalPnrPolicies,
 }
 
+/// Configuration that affects local candidate preparation.
+///
+/// A prepared design may be reused with different placement, routing, and
+/// global search settings as long as this configuration remains unchanged.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PnrPrepareConfig {
+    pub candidate: UnitCandidateConfig,
+    pub show_progress: bool,
+}
+
+impl From<&GlobalPnrConfig> for PnrPrepareConfig {
+    fn from(config: &GlobalPnrConfig) -> Self {
+        Self {
+            candidate: config.candidate.clone(),
+            show_progress: config.show_progress,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PnrPreparationSummary {
+    pub module: String,
+    pub instances: usize,
+    pub unique_candidate_sets: usize,
+    pub reused_candidate_sets: usize,
+    /// Number of unique candidates physically retained by the prepared design.
+    pub candidates: usize,
+    /// Candidate references after expanding each set across its instances.
+    pub candidate_references: usize,
+    pub elapsed_ms: u64,
+}
+
+#[derive(Clone, Debug)]
+struct PreparedCandidateSet {
+    candidates: Vec<LayoutCandidate>,
+}
+
+#[derive(Clone, Debug)]
+struct PreparedInstanceCandidateBinding {
+    instance_name: String,
+    candidate_set_index: usize,
+    preferred_index: usize,
+}
+
+#[derive(Clone, Debug)]
+enum PreparedPnrBody {
+    Leaf {
+        candidates: Vec<LayoutCandidate>,
+    },
+    Composite {
+        candidate_sets: Vec<PreparedCandidateSet>,
+        instance_bindings: Vec<PreparedInstanceCandidateBinding>,
+    },
+}
+
+/// The owned boundary between local candidate generation and global PnR.
+///
+/// The current implementation temporarily retains a legacy `GraphModule`
+/// topology. Keeping it private lets the representation migrate to a resolved
+/// Routable topology without changing callers of the prepare/run API.
+#[derive(Clone, Debug)]
+pub struct PreparedPnrDesign {
+    module: GraphModule,
+    topology: ResolvedPnrTopology,
+    prepare_config: PnrPrepareConfig,
+    body: PreparedPnrBody,
+    summary: PnrPreparationSummary,
+}
+
+impl PreparedPnrDesign {
+    pub fn module_name(&self) -> &str {
+        &self.module.name
+    }
+
+    pub fn summary(&self) -> &PnrPreparationSummary {
+        &self.summary
+    }
+
+    pub fn topology(&self) -> &ResolvedPnrTopology {
+        &self.topology
+    }
+
+    /// A deterministic, migration-only observation point for candidate and
+    /// topology parity. It is deliberately not a persistent cache key.
+    pub fn parity_signature(&self) -> Value {
+        let candidate_sets = match &self.body {
+            PreparedPnrBody::Leaf { candidates } => vec![json!({
+                "instance": self.module.name,
+                "preferred_index": 0,
+                "candidate_hashes": candidates.iter().map(candidate_parity_hash).collect::<Vec<_>>(),
+            })],
+            PreparedPnrBody::Composite {
+                candidate_sets,
+                instance_bindings,
+            } => instance_bindings
+                .iter()
+                .map(|binding| {
+                    let set = &candidate_sets[binding.candidate_set_index];
+                    json!({
+                        "instance": binding.instance_name,
+                        "candidate_set_index": binding.candidate_set_index,
+                        "preferred_index": binding.preferred_index,
+                        "candidate_hashes": set.candidates.iter().map(candidate_parity_hash).collect::<Vec<_>>(),
+                    })
+                })
+                .collect(),
+        };
+        json!({
+            "format": "redstone-compiler.prepared-pnr-parity.v1",
+            "module": self.module.name,
+            "legacy_topology_hash": debug_parity_hash(&self.module),
+            "resolved_topology_hash": debug_parity_hash(&self.topology),
+            "candidate_sets": candidate_sets,
+        })
+    }
+
+    fn ensure_compatible(&self, config: &GlobalPnrConfig) -> eyre::Result<()> {
+        if self.prepare_config.candidate != config.candidate {
+            eyre::bail!(
+                "prepared PnR candidate configuration does not match; regenerate local candidates"
+            );
+        }
+        Ok(())
+    }
+
+    fn ranked_candidate_pools(&self, limit: usize) -> Vec<ChildCandidatePool> {
+        let PreparedPnrBody::Composite {
+            candidate_sets,
+            instance_bindings,
+        } = &self.body
+        else {
+            return Vec::new();
+        };
+        instance_bindings
+            .iter()
+            .map(|binding| {
+                let candidates = relabel_candidates(
+                    &candidate_sets[binding.candidate_set_index].candidates,
+                    &binding.instance_name,
+                );
+                rank_child_candidates_with_preferred(
+                    &binding.instance_name,
+                    candidates,
+                    limit.max(1),
+                    binding.preferred_index,
+                )
+            })
+            .collect()
+    }
+}
+
+fn debug_parity_hash(value: &impl std::fmt::Debug) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in format!("{value:?}").bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("fnv1a64:{hash:016x}")
+}
+
+fn candidate_parity_hash(candidate: &LayoutCandidate) -> String {
+    let mut blocks = candidate.world.iter_block();
+    blocks.sort_by_key(|(position, _)| *position);
+    let mut ports = candidate.ports.clone();
+    ports.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then(left.position.cmp(&right.position))
+    });
+    let mut occupied_cells = candidate.occupied_cells.iter().copied().collect::<Vec<_>>();
+    occupied_cells.sort();
+    let mut blocked_cells = candidate.blocked_cells.iter().copied().collect::<Vec<_>>();
+    blocked_cells.sort();
+    debug_parity_hash(&(
+        candidate.bbox,
+        blocks,
+        ports,
+        occupied_cells,
+        blocked_cells,
+        &candidate.cost,
+    ))
+}
+
 impl Default for GlobalSearchConfig {
     fn default() -> Self {
         GlobalPnrPreset::Balanced.search_config()
@@ -79,6 +266,7 @@ impl Default for GlobalSearchConfig {
 }
 
 pub struct GlobalPnrResult {
+    pub topology: ResolvedPnrTopology,
     pub placed_world: PlacedWorld,
     pub placement_bbox_world: World3D,
     pub selected_candidates: Vec<LayoutCandidate>,
@@ -110,6 +298,9 @@ impl SnapshotProduct for GlobalPnrResult {
             let Some(candidate) = self.selected_candidates.get(placed.candidate_index) else {
                 continue;
             };
+            let resolved_instance = self.topology.instance_by_name(&placed.module_name);
+            let resolved_definition = resolved_instance
+                .and_then(|instance| self.topology.definition(instance.definition));
             let directory = format!(
                 "instances/{index:02}-{}",
                 snapshot_artifact_name(&placed.module_name)
@@ -146,6 +337,10 @@ impl SnapshotProduct for GlobalPnrResult {
                 json!({
                     "instance": placed.module_name,
                     "module": candidate.module_name,
+                    "instance_id": resolved_instance.map(|instance| instance.id.0),
+                    "instance_key": resolved_instance.map(|instance| &instance.key),
+                    "definition_id": resolved_definition.map(|definition| definition.id.0),
+                    "definition_key": resolved_definition.map(|definition| &definition.key),
                     "candidate_index": placed.candidate_index,
                     "global_origin": position_json(placed.origin),
                     "global_bbox": {
@@ -175,8 +370,21 @@ impl SnapshotProduct for GlobalPnrResult {
             .iter()
             .enumerate()
             .map(|(index, route)| {
+                let resolved_net = route
+                    .source_label
+                    .as_deref()
+                    .and_then(|label| self.topology.net_by_driver_label(label));
+                let resolved_sink = resolved_net.and_then(|net| {
+                    route
+                        .sink_label
+                        .as_deref()
+                        .and_then(|label| self.topology.sink_by_label(net, label))
+                });
                 json!({
                     "index": index,
+                    "net_id": resolved_net.map(|net| net.id.0),
+                    "net_key": resolved_net.map(|net| &net.key),
+                    "sink_endpoint": resolved_sink,
                     "source_label": route.source_label,
                     "sink_label": route.sink_label,
                     "source": position_json(route.source),
@@ -217,6 +425,11 @@ impl SnapshotProduct for GlobalPnrResult {
                 "interface": {
                     "inputs": self.placed_world.inputs.len(),
                     "outputs": self.placed_world.outputs.len(),
+                },
+                "topology": {
+                    "definitions": self.topology.definitions.len(),
+                    "instances": self.topology.instances.len(),
+                    "nets": self.topology.nets.len(),
                 },
                 "placement": {
                     "instances": self.placed_modules.len(),
@@ -437,10 +650,21 @@ pub fn place_and_route_routable_design_with_visualization(
         crate::snapshot::emit_text("ir/routable.rcir", design.to_string())?;
         crate::snapshot::emit_json("ir/routable.json", design)?;
     }
+    let prepared = prepare_routable_design_for_global_pnr(design, &PnrPrepareConfig::from(config))?;
+    run_prepared_pnr_with_visualization(&prepared, config)
+}
+
+pub fn prepare_routable_design_for_global_pnr(
+    design: &RoutableDesign,
+    config: &PnrPrepareConfig,
+) -> eyre::Result<PreparedPnrDesign> {
+    design.validate()?;
+    let topology = ResolvedPnrTopology::from_routable(design)?;
     let graph_design = design.to_graph_module_design()?;
-    place_and_route_module_with_visualization(
+    prepare_module_with_topology(
         &graph_design.context,
         graph_design.top_module(),
+        topology,
         config,
     )
 }
@@ -484,14 +708,124 @@ pub fn place_and_route_module_with_visualization(
     module: &GraphModule,
     config: &GlobalPnrConfig,
 ) -> eyre::Result<GlobalPnrResult> {
+    let prepared = prepare_module_for_global_pnr(context, module, &PnrPrepareConfig::from(config))?;
+    run_prepared_pnr_with_visualization(&prepared, config)
+}
+
+pub fn prepare_design_for_global_pnr(
+    design: &GraphModuleDesign,
+    config: &PnrPrepareConfig,
+) -> eyre::Result<PreparedPnrDesign> {
+    prepare_module_for_global_pnr(&design.context, design.top_module(), config)
+}
+
+pub fn prepare_module_for_global_pnr(
+    context: &GraphModuleContext,
+    module: &GraphModule,
+    config: &PnrPrepareConfig,
+) -> eyre::Result<PreparedPnrDesign> {
+    let topology = ResolvedPnrTopology::from_legacy_graph_module(context, module)?;
+    prepare_module_with_topology(context, module, topology, config)
+}
+
+fn prepare_module_with_topology(
+    context: &GraphModuleContext,
+    module: &GraphModule,
+    topology: ResolvedPnrTopology,
+    config: &PnrPrepareConfig,
+) -> eyre::Result<PreparedPnrDesign> {
     let started = Instant::now();
     let progress = GlobalPnrProgress::new(config.show_progress, module.name.clone());
     if module.graph.is_some() {
-        return place_graph_backed_module(module, config, &progress);
+        progress.stage(1, 4, "generate leaf layout candidates");
+        let candidates = generate_graph_module_candidates_with_progress_label(
+            module,
+            &config.candidate,
+            config.show_progress.then_some(module.name.as_str()),
+        )?;
+        if candidates.is_empty() {
+            eyre::bail!("graph-backed module produced no layout candidates");
+        }
+        let summary = PnrPreparationSummary {
+            module: module.name.clone(),
+            instances: 1,
+            unique_candidate_sets: 1,
+            reused_candidate_sets: 0,
+            candidates: candidates.len(),
+            candidate_references: candidates.len(),
+            elapsed_ms: duration_ms(started.elapsed()),
+        };
+        progress.summary(format!(
+            "local preparation completed: candidate_sets=1 candidates={} elapsed={:.2?}",
+            candidates.len(),
+            started.elapsed()
+        ));
+        let prepared = PreparedPnrDesign {
+            module: module.clone(),
+            topology,
+            prepare_config: config.clone(),
+            body: PreparedPnrBody::Leaf { candidates },
+            summary,
+        };
+        emit_prepared_pnr_snapshot(&prepared)?;
+        return Ok(prepared);
     }
 
     progress.stage(1, 4, "generate child layout candidates");
-    let candidate_pools = generate_child_candidate_pools(context, module, config, &progress)?;
+    let (candidate_sets, instance_bindings, mut summary) =
+        prepare_child_candidate_sets(context, module, config, &progress)?;
+    summary.elapsed_ms = duration_ms(started.elapsed());
+    let prepared = PreparedPnrDesign {
+        module: module.clone(),
+        topology,
+        prepare_config: config.clone(),
+        body: PreparedPnrBody::Composite {
+            candidate_sets,
+            instance_bindings,
+        },
+        summary,
+    };
+    emit_prepared_pnr_snapshot(&prepared)?;
+    Ok(prepared)
+}
+
+pub fn run_prepared_pnr(
+    prepared: &PreparedPnrDesign,
+    config: &GlobalPnrConfig,
+) -> eyre::Result<World3D> {
+    Ok(run_prepared_pnr_with_visualization(prepared, config)?
+        .placed_world
+        .world)
+}
+
+pub fn run_prepared_pnr_with_visualization(
+    prepared: &PreparedPnrDesign,
+    config: &GlobalPnrConfig,
+) -> eyre::Result<GlobalPnrResult> {
+    prepared.ensure_compatible(config)?;
+    let started = Instant::now();
+    let module = &prepared.module;
+    let progress = GlobalPnrProgress::new(config.show_progress, module.name.clone());
+    progress.summary(format!(
+        "reusing prepared local candidates: candidate_sets={} stored_candidates={} instance_references={}",
+        prepared.summary.unique_candidate_sets,
+        prepared.summary.candidates,
+        prepared.summary.candidate_references,
+    ));
+
+    if let PreparedPnrBody::Leaf { candidates } = &prepared.body {
+        return run_prepared_leaf(
+            module,
+            &prepared.topology,
+            candidates,
+            config,
+            &progress,
+            started,
+        );
+    }
+
+    let candidate_pools =
+        prepared.ranked_candidate_pools(config.search.budget.max_candidates_per_child);
 
     progress.stage(2, 4, "search child layouts, placements, and routes");
     let (candidates, placed, routed_nets) =
@@ -513,13 +847,15 @@ pub fn place_and_route_module_with_visualization(
 
     progress.stage(4, 4, "complete");
     progress.summary(format!(
-        "global PnR completed: outputs={} routes={} elapsed={:.2?}",
+        "global PnR completed: outputs={} routes={} global_elapsed={:.2?} preparation_elapsed={}ms",
         placed_world.outputs.len(),
         routed_nets.len(),
-        started.elapsed()
+        started.elapsed(),
+        prepared.summary.elapsed_ms,
     ));
 
     Ok(GlobalPnrResult {
+        topology: prepared.topology.clone(),
         placed_world,
         placement_bbox_world,
         selected_candidates: candidates,
@@ -529,6 +865,65 @@ pub fn place_and_route_module_with_visualization(
         weighted_placement_cost,
         config_snapshot: global_pnr_config_snapshot(config),
     })
+}
+
+pub fn emit_prepared_pnr_snapshot(prepared: &PreparedPnrDesign) -> eyre::Result<()> {
+    let candidate_sets = match &prepared.body {
+        PreparedPnrBody::Leaf { candidates } => {
+            vec![(prepared.module.name.clone(), candidates.len(), 0)]
+        }
+        PreparedPnrBody::Composite {
+            candidate_sets,
+            instance_bindings,
+        } => instance_bindings
+            .iter()
+            .map(|binding| {
+                (
+                    binding.instance_name.clone(),
+                    candidate_sets[binding.candidate_set_index].candidates.len(),
+                    binding.preferred_index,
+                )
+            })
+            .collect(),
+    };
+    emit_preparation_summary(
+        &prepared.summary,
+        &candidate_sets,
+        prepared.parity_signature(),
+        &prepared.topology,
+    )?;
+    prepared_snapshot::emit_candidate_library(prepared)
+}
+
+fn emit_preparation_summary(
+    summary: &PnrPreparationSummary,
+    candidate_sets: &[(String, usize, usize)],
+    parity_signature: Value,
+    topology: &ResolvedPnrTopology,
+) -> eyre::Result<()> {
+    if !crate::snapshot::is_active() {
+        return Ok(());
+    }
+    emit_json("pnr/topology.json", topology)?;
+    emit_json(
+        "pnr/preparation.json",
+        json!({
+            "format": "redstone-compiler.prepared-pnr.v1",
+            "module": summary.module,
+            "instances": summary.instances,
+            "unique_candidate_sets": summary.unique_candidate_sets,
+            "reused_candidate_sets": summary.reused_candidate_sets,
+            "candidates": summary.candidates,
+            "candidate_references": summary.candidate_references,
+            "elapsed_ms": summary.elapsed_ms,
+            "parity_signature": parity_signature,
+            "candidate_sets": candidate_sets.iter().map(|(instance, candidates, preferred_index)| json!({
+                "instance": instance,
+                "candidates": candidates,
+                "preferred_index": preferred_index,
+            })).collect::<Vec<_>>(),
+        }),
+    )
 }
 
 #[derive(Clone)]
@@ -995,19 +1390,17 @@ fn save_failed_route_base_world(
     let _ = world.metadata().save(metadata_path);
 }
 
-fn place_graph_backed_module(
+fn run_prepared_leaf(
     module: &GraphModule,
+    topology: &ResolvedPnrTopology,
+    prepared_candidates: &[LayoutCandidate],
     config: &GlobalPnrConfig,
     progress: &GlobalPnrProgress,
+    started: Instant,
 ) -> eyre::Result<GlobalPnrResult> {
-    progress.stage(1, 4, "generate leaf layout candidates");
-    let candidates = generate_graph_module_candidates_with_progress_label(
-        module,
-        &config.candidate,
-        config.show_progress.then_some(module.name.as_str()),
-    )?;
-    let candidate = candidates
-        .into_iter()
+    let candidate = prepared_candidates
+        .iter()
+        .cloned()
         .next()
         .context("graph-backed module produced no layout candidates")?;
     progress.detail(format!(
@@ -1033,7 +1426,12 @@ fn place_graph_backed_module(
     let weighted_placement_cost = placement_cost.weighted_total(config.placement.cost_weights);
 
     progress.stage(4, 4, "complete");
+    progress.summary(format!(
+        "global PnR completed: outputs=0 routes=0 global_elapsed={:.2?}",
+        started.elapsed()
+    ));
     Ok(GlobalPnrResult {
+        topology: topology.clone(),
         placed_world: PlacedWorld {
             world,
             inputs,
@@ -1050,17 +1448,21 @@ fn place_graph_backed_module(
 }
 
 // 하위 모듈마다 local placer를 실행해서 global PnR이 배치할 layout 후보를 하나씩 뽑는다.
-fn generate_child_candidate_pools(
+fn prepare_child_candidate_sets(
     context: &GraphModuleContext,
     module: &GraphModule,
-    config: &GlobalPnrConfig,
+    config: &PnrPrepareConfig,
     progress: &GlobalPnrProgress,
-) -> eyre::Result<Vec<ChildCandidatePool>> {
+) -> eyre::Result<(
+    Vec<PreparedCandidateSet>,
+    Vec<PreparedInstanceCandidateBinding>,
+    PnrPreparationSummary,
+)> {
     let started = Instant::now();
-    let mut pools = Vec::new();
+    let mut bindings = Vec::new();
     let mut cache = ChildCandidateCache::default();
     let mut reused = 0usize;
-    let mut total_candidates = 0usize;
+    let mut candidate_references = 0usize;
     for (index, instance) in module.instances.iter().enumerate() {
         progress.item(
             index + 1,
@@ -1070,13 +1472,15 @@ fn generate_child_candidate_pools(
         let child = &context[instance.as_str()];
         let child_config = candidate_config_for_child(child, &config.candidate);
         let candidate_started = Instant::now();
-        let (child_candidates, cache_hit) = cache.get_or_generate(child, &child_config, || {
-            generate_graph_module_candidates_with_progress_label(
-                child,
-                &child_config,
-                config.show_progress.then_some(instance.as_str()),
-            )
-        })?;
+        let (candidate_set_index, cache_hit) =
+            cache.get_or_generate_index(child, &child_config, || {
+                generate_graph_module_candidates_with_progress_label(
+                    child,
+                    &child_config,
+                    config.show_progress.then_some(instance.as_str()),
+                )
+            })?;
+        let child_candidates = &cache.entries[candidate_set_index].candidates;
         if cache_hit {
             reused += 1;
             progress.detail(format!(
@@ -1093,7 +1497,7 @@ fn generate_child_candidate_pools(
                 "module instance `{instance}` produced no candidates"
             ));
         }
-        total_candidates += child_candidates.len();
+        candidate_references += child_candidates.len();
         let preferred_index = if graph_module_input_port_count(child) > 1 {
             child_candidates
                 .iter()
@@ -1106,29 +1510,54 @@ fn generate_child_candidate_pools(
         } else {
             0
         };
-        pools.push(rank_child_candidates_with_preferred(
-            instance,
-            child_candidates,
-            config.search.budget.max_candidates_per_child.max(1),
+        bindings.push(PreparedInstanceCandidateBinding {
+            instance_name: instance.clone(),
+            candidate_set_index,
             preferred_index,
-        ));
+        });
     }
+    let unique_candidates = cache
+        .entries
+        .iter()
+        .map(|entry| entry.candidates.len())
+        .sum();
+    let unique_candidate_sets = cache.entries.len();
     progress.summary(format!(
-        "child candidates completed: instances={} unique={} reused={} candidates={} elapsed={:.2?}",
+        "child candidates completed: instances={} unique_sets={} reused={} stored_candidates={} candidate_references={} elapsed={:.2?}",
         module.instances.len(),
-        module.instances.len().saturating_sub(reused),
+        unique_candidate_sets,
         reused,
-        total_candidates,
+        unique_candidates,
+        candidate_references,
         started.elapsed()
     ));
     record_snapshot(SnapshotEvent::CandidateSummary {
         instances: module.instances.len(),
-        unique: module.instances.len().saturating_sub(reused),
+        unique: unique_candidate_sets,
         reused,
-        candidates: total_candidates,
+        candidates: unique_candidates,
         elapsed_ms: duration_ms(started.elapsed()),
     });
-    Ok(pools)
+    let candidate_sets = cache
+        .entries
+        .into_iter()
+        .map(|entry| PreparedCandidateSet {
+            candidates: entry.candidates,
+        })
+        .collect();
+    Ok((
+        candidate_sets,
+        bindings,
+        PnrPreparationSummary {
+            module: module.name.clone(),
+            instances: module.instances.len(),
+            unique_candidate_sets,
+            reused_candidate_sets: reused,
+            candidates: unique_candidates,
+            candidate_references,
+            elapsed_ms: duration_ms(started.elapsed()),
+        },
+    ))
 }
 
 #[derive(Default)]
@@ -1143,25 +1572,40 @@ struct ChildCandidateCacheEntry {
 }
 
 impl ChildCandidateCache {
+    fn get_or_generate_index(
+        &mut self,
+        module: &GraphModule,
+        config: &UnitCandidateConfig,
+        generate: impl FnOnce() -> eyre::Result<Vec<LayoutCandidate>>,
+    ) -> eyre::Result<(usize, bool)> {
+        if let Some(index) = self.entries.iter().position(|entry| {
+            entry.config == *config && modules_have_same_candidate_shape(&entry.module, module)
+        }) {
+            return Ok((index, true));
+        }
+
+        let candidates = generate()?;
+        let index = self.entries.len();
+        self.entries.push(ChildCandidateCacheEntry {
+            module: module.clone(),
+            config: config.clone(),
+            candidates,
+        });
+        Ok((index, false))
+    }
+
+    #[cfg(test)]
     fn get_or_generate(
         &mut self,
         module: &GraphModule,
         config: &UnitCandidateConfig,
         generate: impl FnOnce() -> eyre::Result<Vec<LayoutCandidate>>,
     ) -> eyre::Result<(Vec<LayoutCandidate>, bool)> {
-        if let Some(entry) = self.entries.iter().find(|entry| {
-            entry.config == *config && modules_have_same_candidate_shape(&entry.module, module)
-        }) {
-            return Ok((relabel_candidates(&entry.candidates, &module.name), true));
-        }
-
-        let candidates = generate()?;
-        self.entries.push(ChildCandidateCacheEntry {
-            module: module.clone(),
-            config: config.clone(),
-            candidates: candidates.clone(),
-        });
-        Ok((relabel_candidates(&candidates, &module.name), false))
+        let (index, reused) = self.get_or_generate_index(module, config, generate)?;
+        Ok((
+            relabel_candidates(&self.entries[index].candidates, &module.name),
+            reused,
+        ))
     }
 }
 
@@ -1479,6 +1923,145 @@ mod tests {
         assert_eq!(placed.outputs[0].name, "q");
         let output_position = placed.outputs[0].position();
         assert_ne!(placed.world[output_position].kind, BlockKind::Air);
+        Ok(())
+    }
+
+    #[test]
+    fn prepared_pnr_reuses_local_candidates_across_global_runs() -> eyre::Result<()> {
+        let mut context = GraphModuleContext::default();
+        context.append(not_clk_module());
+        let module = GraphModule {
+            name: "prepared_top".to_owned(),
+            instances: vec!["not_clk".to_owned()],
+            ports: vec![GraphModulePort {
+                name: "q".to_owned(),
+                port_type: GraphModulePortType::OutputNet,
+                target: GraphModulePortTarget::Module("not_clk".to_owned(), "clk_n".to_owned()),
+            }],
+            ..Default::default()
+        };
+        let config = GlobalPnrConfig {
+            candidate: UnitCandidateConfig {
+                dim: DimSize(8, 8, 4),
+                max_candidates: 1,
+                ..Default::default()
+            },
+            placement: GlobalPlacementConfig::default(),
+            show_progress: false,
+            ..Default::default()
+        };
+
+        let prepared =
+            prepare_module_for_global_pnr(&context, &module, &PnrPrepareConfig::from(&config))?;
+        let signature = prepared.parity_signature();
+        assert_eq!(prepared.summary().instances, 1);
+        assert_eq!(prepared.summary().candidates, 1);
+
+        let first = run_prepared_pnr_with_visualization(&prepared, &config)?;
+        let mut replay_config = config.clone();
+        replay_config.placement.spacing += 3;
+        replay_config.search.budget.max_candidates_per_child = 1;
+        let replay = run_prepared_pnr_with_visualization(&prepared, &replay_config)?;
+
+        assert_eq!(prepared.parity_signature(), signature);
+        assert_eq!(first.placed_world.outputs.len(), 1);
+        assert_eq!(replay.placed_world.outputs.len(), 1);
+        assert_eq!(
+            first.placed_world.outputs[0].position(),
+            replay.placed_world.outputs[0].position()
+        );
+        assert_eq!(
+            candidate_parity_hash(&first.selected_candidates[0]),
+            candidate_parity_hash(&replay.selected_candidates[0])
+        );
+
+        let mut incompatible = replay_config;
+        incompatible.candidate.max_candidates += 1;
+        let error = run_prepared_pnr(&prepared, &incompatible).unwrap_err();
+        assert!(error.to_string().contains("regenerate local candidates"));
+        Ok(())
+    }
+
+    #[test]
+    fn prepared_pnr_stores_structurally_identical_candidates_once() -> eyre::Result<()> {
+        let mut first: GraphModule = LogicGraph::from_stmt("~a", "y")?.graph.into();
+        first.name = "first".to_owned();
+        let mut second = first.clone();
+        second.name = "second".to_owned();
+        let mut context = GraphModuleContext::default();
+        context.append(first);
+        context.append(second);
+        let module = GraphModule {
+            name: "duplicate_top".to_owned(),
+            instances: vec!["first".to_owned(), "second".to_owned()],
+            ..Default::default()
+        };
+        let config = PnrPrepareConfig {
+            candidate: UnitCandidateConfig {
+                dim: DimSize(8, 8, 4),
+                max_candidates: 1,
+                ..Default::default()
+            },
+            show_progress: false,
+        };
+
+        let prepared = prepare_module_for_global_pnr(&context, &module, &config)?;
+
+        assert_eq!(prepared.summary().instances, 2);
+        assert_eq!(prepared.summary().unique_candidate_sets, 1);
+        assert_eq!(prepared.summary().reused_candidate_sets, 1);
+        assert_eq!(prepared.summary().candidates, 1);
+        assert_eq!(prepared.summary().candidate_references, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn prepared_pnr_round_trips_through_snapshot_directory_and_archive() -> eyre::Result<()> {
+        let output = std::path::PathBuf::from(format!(
+            "target/prepared-pnr-round-trip-{}.snapshot",
+            std::process::id()
+        ));
+        let archive = output.with_extension("rsnap");
+        let _ = std::fs::remove_dir_all(&output);
+        let _ = std::fs::remove_file(&archive);
+
+        let mut module: GraphModule = LogicGraph::from_stmt("~a", "q")?.graph.into();
+        module.name = "prepared_snapshot_top".to_owned();
+        let design = GraphModuleDesign::with_top_module(GraphModuleContext::default(), module);
+        let config = GlobalPnrConfig {
+            candidate: UnitCandidateConfig {
+                dim: DimSize(8, 8, 4),
+                max_candidates: 1,
+                ..Default::default()
+            },
+            show_progress: false,
+            ..Default::default()
+        };
+        let prepare_config = PnrPrepareConfig::from(&config);
+
+        let original = compile_with_snapshot(
+            SnapshotOptions::new(&output, "prepared_snapshot_top"),
+            || place_and_route_design_with_visualization(&design, &config),
+        )?;
+        let from_directory = load_prepared_pnr_snapshot(&output, &prepare_config)?;
+        let directory_result = run_prepared_pnr_with_visualization(&from_directory, &config)?;
+        let from_archive = load_prepared_pnr_snapshot(&archive, &prepare_config)?;
+        let archive_result = run_prepared_pnr_with_visualization(&from_archive, &config)?;
+
+        let expected_candidate = candidate_parity_hash(&original.selected_candidates[0]);
+        assert_eq!(
+            candidate_parity_hash(&directory_result.selected_candidates[0]),
+            expected_candidate
+        );
+        assert_eq!(
+            candidate_parity_hash(&archive_result.selected_candidates[0]),
+            expected_candidate
+        );
+        assert_eq!(directory_result.placed_world.outputs.len(), 0);
+        assert_eq!(archive_result.placed_world.outputs.len(), 0);
+
+        let _ = std::fs::remove_dir_all(output);
+        let _ = std::fs::remove_file(archive);
         Ok(())
     }
 
