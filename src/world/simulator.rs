@@ -78,6 +78,12 @@ struct Event {
     direction: Direction,
 }
 
+#[derive(Copy, Clone, Debug)]
+struct CobblePowerInput {
+    source: Position,
+    hard: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct Simulator {
     queue: VecDeque<VecDeque<Event>>,
@@ -86,6 +92,8 @@ pub struct Simulator {
     cobble_positions: Vec<Position>,
     torch_positions: Vec<Position>,
     power_source_positions: Vec<Position>,
+    redstone_inputs: Vec<Vec<Position>>,
+    cobble_power_inputs: Vec<Vec<CobblePowerInput>>,
     cycle: usize,
     event_id_count: usize,
     soft_power_sources: HashSet<(Position, Position)>,
@@ -391,6 +399,7 @@ impl Simulator {
 
         sim.queue.push_back(VecDeque::new());
         sim.world.initialize_redstone_states();
+        sim.rebuild_connectivity_cache();
         sim.normalize_torches_on();
         sim.init();
 
@@ -425,6 +434,7 @@ impl Simulator {
 
         sim.queue.push_back(VecDeque::new());
         sim.world.initialize_redstone_states();
+        sim.rebuild_connectivity_cache();
         sim.init();
         sim.enqueue_torch_reevaluations();
 
@@ -454,6 +464,7 @@ impl Simulator {
 
         sim.queue.push_back(VecDeque::new());
         sim.world.initialize_redstone_states();
+        sim.rebuild_connectivity_cache();
         sim.normalize_torches_on();
         sim.init();
 
@@ -494,13 +505,16 @@ impl Simulator {
                 power_source_positions.push(position);
             }
         }
-        Self {
+        let volume = world.size.0 * world.size.1 * world.size.2;
+        let mut sim = Self {
             queue: VecDeque::new(),
             world,
             redstone_positions,
             cobble_positions,
             torch_positions,
             power_source_positions,
+            redstone_inputs: vec![Vec::new(); volume],
+            cobble_power_inputs: vec![Vec::new(); volume],
             cycle: 0,
             event_id_count: 0,
             soft_power_sources: HashSet::new(),
@@ -512,7 +526,91 @@ impl Simulator {
             snapshots: Vec::new(),
             trace_limit,
             profile: None,
+        };
+        sim.rebuild_connectivity_cache();
+        sim
+    }
+
+    fn rebuild_connectivity_cache(&mut self) {
+        let volume = self.world.size.0 * self.world.size.1 * self.world.size.2;
+        let mut redstone_inputs = vec![Vec::new(); volume];
+        for source in self.redstone_positions.iter().copied() {
+            let BlockKind::Redstone { state, .. } = self.world[source].kind else {
+                continue;
+            };
+            for target in self.redstone_propagate_targets(source, state) {
+                if !self.world.size.bound_on(target) || !self.world[target].kind.is_redstone() {
+                    continue;
+                }
+                let inputs = &mut redstone_inputs[target.index(&self.world.size).0];
+                if !inputs.contains(&source) {
+                    inputs.push(source);
+                }
+            }
         }
+
+        let mut cobble_power_inputs = vec![Vec::<CobblePowerInput>::new(); volume];
+        for source in self.power_source_positions.iter().copied() {
+            let source_block = self.world[source];
+            let mut targets = Vec::new();
+            match source_block.kind {
+                BlockKind::Torch { .. } => {
+                    let soft_targets = match source_block.direction {
+                        Direction::Bottom => source.cardinal(),
+                        Direction::East | Direction::West | Direction::South | Direction::North => {
+                            let mut positions = source.cardinal_except(source_block.direction);
+                            positions.extend(source.down());
+                            positions
+                        }
+                        _ => Vec::new(),
+                    };
+                    targets.extend(soft_targets.into_iter().map(|target| (target, false)));
+                    targets.push((source.up(), true));
+                }
+                BlockKind::Switch { .. } => {
+                    targets.extend(
+                        source
+                            .forwards_except(source_block.direction)
+                            .into_iter()
+                            .map(|target| (target, false)),
+                    );
+                    if let Some(target) = source.walk(source_block.direction) {
+                        targets.push((target, true));
+                    }
+                }
+                BlockKind::Redstone { state, .. } => {
+                    targets.extend(
+                        self.redstone_propagate_targets(source, state)
+                            .into_iter()
+                            .map(|target| (target, false)),
+                    );
+                }
+                BlockKind::RedstoneBlock => {
+                    targets.extend(source.forwards().into_iter().map(|target| (target, false)));
+                }
+                BlockKind::Repeater { .. } => {
+                    if let Some(target) = source.walk(source_block.direction.inverse()) {
+                        targets.push((target, true));
+                    }
+                }
+                _ => {}
+            }
+
+            for (target, hard) in targets {
+                if !self.world.size.bound_on(target) || !self.world[target].kind.is_cobble() {
+                    continue;
+                }
+                let inputs = &mut cobble_power_inputs[target.index(&self.world.size).0];
+                if let Some(existing) = inputs.iter_mut().find(|input| input.source == source) {
+                    existing.hard |= hard;
+                } else {
+                    inputs.push(CobblePowerInput { source, hard });
+                }
+            }
+        }
+
+        self.redstone_inputs = redstone_inputs;
+        self.cobble_power_inputs = cobble_power_inputs;
     }
 
     pub fn set_profiling_enabled(&mut self, enabled: bool) {
@@ -922,16 +1020,12 @@ impl Simulator {
     }
 
     fn redstone_input_strength(&self, target: Position) -> usize {
-        self.redstone_positions
+        self.redstone_inputs[target.index(&self.world.size).0]
             .iter()
             .copied()
             .filter_map(|source_pos| {
-                if source_pos == target {
-                    return None;
-                }
                 let source_block = self.world[source_pos];
                 let BlockKind::Redstone {
-                    state,
                     strength: source_strength,
                     ..
                 } = source_block.kind
@@ -941,10 +1035,7 @@ impl Simulator {
                 if source_strength <= 1 {
                     return None;
                 }
-                self.redstone_propagate_targets(source_pos, state)
-                    .into_iter()
-                    .any(|position| position == target)
-                    .then_some(source_strength - 1)
+                Some(source_strength - 1)
             })
             .max()
             .unwrap_or(0)
@@ -992,79 +1083,22 @@ impl Simulator {
     }
 
     fn cobble_power_counts(&self, target: Position) -> (usize, usize) {
-        let (sources, hard_sources) = self.cobble_power_sources(target);
-        (sources.len(), hard_sources.len())
-    }
-
-    fn cobble_power_sources(&self, target: Position) -> (HashSet<Position>, HashSet<Position>) {
-        let mut sources = HashSet::new();
-        let mut hard_sources = HashSet::new();
-
-        for source_pos in self.power_source_positions.iter().copied() {
-            let source_block = self.world[source_pos];
-            match source_block.kind {
-                BlockKind::Torch { is_on } if is_on => {
-                    let soft_targets = match source_block.direction {
-                        Direction::Bottom => source_pos.cardinal(),
-                        Direction::East | Direction::West | Direction::South | Direction::North => {
-                            let mut positions = source_pos.cardinal_except(source_block.direction);
-                            positions.extend(source_pos.down());
-                            positions
-                        }
-                        _ => Vec::new(),
-                    };
-                    for position in soft_targets {
-                        if position == target {
-                            sources.insert(source_pos);
-                        }
-                    }
-                    if source_pos.up() == target {
-                        sources.insert(source_pos);
-                        hard_sources.insert(source_pos);
-                    }
-                }
-                BlockKind::Switch { is_on } if is_on => {
-                    for position in source_pos.forwards_except(source_block.direction) {
-                        if position == target {
-                            sources.insert(source_pos);
-                        }
-                    }
-                    if source_pos.walk(source_block.direction) == Some(target) {
-                        sources.insert(source_pos);
-                        hard_sources.insert(source_pos);
-                    }
-                }
-                BlockKind::Redstone {
-                    state, strength, ..
-                } if strength > 0 => {
-                    if self
-                        .redstone_propagate_targets(source_pos, state)
-                        .into_iter()
-                        .any(|position| position == target)
-                    {
-                        sources.insert(source_pos);
-                    }
-                }
-                BlockKind::RedstoneBlock => {
-                    if source_pos
-                        .forwards()
-                        .into_iter()
-                        .any(|position| position == target)
-                    {
-                        sources.insert(source_pos);
-                    }
-                }
-                BlockKind::Repeater { is_on: true, .. } => {
-                    let output = source_pos.walk(source_block.direction.inverse());
-                    if output == Some(target) {
-                        sources.insert(source_pos);
-                        hard_sources.insert(source_pos);
-                    }
-                }
-                _ => {}
+        let mut sources = 0;
+        let mut hard_sources = 0;
+        for input in &self.cobble_power_inputs[target.index(&self.world.size).0] {
+            let active = match self.world[input.source].kind {
+                BlockKind::Torch { is_on }
+                | BlockKind::Switch { is_on }
+                | BlockKind::Repeater { is_on, .. } => is_on,
+                BlockKind::Redstone { strength, .. } => strength > 0,
+                BlockKind::RedstoneBlock => true,
+                _ => false,
+            };
+            if active {
+                sources += 1;
+                hard_sources += usize::from(input.hard);
             }
         }
-
         (sources, hard_sources)
     }
 
