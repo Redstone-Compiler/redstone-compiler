@@ -41,9 +41,9 @@ use crate::transform::place_and_route::global_pnr::policy::{
 };
 use crate::transform::place_and_route::global_pnr::progress::GlobalPnrProgress;
 use crate::transform::place_and_route::global_pnr::router::{
-    collect_module_input_endpoints, collect_module_output_endpoints, first_invalid_active_route,
-    route_resolved_topology_with_order_from_prefix, GlobalRoutingConfig, NetOrderStrategy,
-    RoutedNet,
+    collect_topology_input_endpoints, collect_topology_output_endpoints,
+    first_invalid_active_route, route_resolved_topology_with_order_from_prefix,
+    GlobalRoutingConfig, NetOrderStrategy, RoutedNet,
 };
 use crate::transform::place_and_route::global_pnr::search::{
     layout_combinations, rank_child_candidates_with_preferred, select_layout_combination,
@@ -831,17 +831,12 @@ pub fn run_prepared_pnr_with_visualization(
         prepared.ranked_candidate_pools(config.search.budget.max_candidates_per_child);
 
     progress.stage(2, 4, "search child layouts, placements, and routes");
-    let (candidates, placed, routed_nets) = search_layout_combinations(
-        &prepared.topology,
-        module,
-        &candidate_pools,
-        config,
-        &progress,
-    )?;
+    let (candidates, placed, routed_nets) =
+        search_layout_combinations(&prepared.topology, &candidate_pools, config, &progress)?;
 
     progress.stage(3, 4, "assemble world and collect outputs");
-    let inputs = collect_module_input_endpoints(module, &routed_nets);
-    let outputs = collect_module_output_endpoints(module, &candidates, &placed);
+    let inputs = collect_topology_input_endpoints(&prepared.topology, &routed_nets);
+    let outputs = collect_topology_output_endpoints(&prepared.topology, &candidates, &placed);
     let world = assemble_world(&candidates, &placed, &routed_nets)?;
     let placed_world = PlacedWorld {
         world,
@@ -1108,7 +1103,6 @@ fn reroute_untried_source_groups(
 
 fn route_first_successful_placement(
     topology: &ResolvedPnrTopology,
-    module: &GraphModule,
     candidates: &[LayoutCandidate],
     placement_attempts: Vec<Vec<PlacedModule>>,
     config: &GlobalPnrConfig,
@@ -1247,7 +1241,7 @@ fn route_first_successful_placement(
                             semantic_feedback_nets: decision.semantic_feedback_nets.clone(),
                         });
                     }
-                    save_failed_route_base_world(module, attempt_serial, candidates, placed);
+                    save_failed_route_base_world(topology, attempt_serial, candidates, placed);
                     progress.detail(format!(
                         "placement attempt {attempt_serial} failed: {}",
                         failure.error
@@ -1259,7 +1253,8 @@ fn route_first_successful_placement(
             };
             routing_progress.observe_routes(routed_nets.len());
 
-            let world = match placed_world_from_routing(module, candidates, placed, &routed_nets) {
+            let world = match placed_world_from_routing(topology, candidates, placed, &routed_nets)
+            {
                 Ok(world) => world,
                 Err(error) => {
                     routing_progress.assembly_failures += 1;
@@ -1303,7 +1298,12 @@ fn route_first_successful_placement(
             if let Some(verifier) = config.verifier {
                 if let Err(error) = verifier(&world) {
                     routing_progress.verifier_failures += 1;
-                    save_failed_verifier_world(module, attempt_serial, &world, &routed_nets);
+                    save_failed_verifier_world(
+                        &topology.definitions[topology.top.0].display_name,
+                        attempt_serial,
+                        &world,
+                        &routed_nets,
+                    );
                     progress.detail(format!(
                         "placement attempt {attempt_serial} failed verifier: {error}"
                     ));
@@ -1364,20 +1364,20 @@ fn route_first_successful_placement(
 }
 
 fn placed_world_from_routing(
-    module: &GraphModule,
+    topology: &ResolvedPnrTopology,
     candidates: &[LayoutCandidate],
     placed: &[PlacedModule],
     routed_nets: &[RoutedNet],
 ) -> eyre::Result<PlacedWorld> {
     Ok(PlacedWorld {
         world: assemble_world(candidates, placed, routed_nets)?,
-        inputs: collect_module_input_endpoints(module, routed_nets),
-        outputs: collect_module_output_endpoints(module, candidates, placed),
+        inputs: collect_topology_input_endpoints(topology, routed_nets),
+        outputs: collect_topology_output_endpoints(topology, candidates, placed),
     })
 }
 
 fn save_failed_verifier_world(
-    module: &GraphModule,
+    module_name: &str,
     attempt: usize,
     world: &PlacedWorld,
     routed_nets: &[RoutedNet],
@@ -1386,11 +1386,11 @@ fn save_failed_verifier_world(
         return;
     }
 
-    let path = format!("test/{}-failed-attempt-{attempt}.nbt", module.name);
+    let path = format!("test/{module_name}-failed-attempt-{attempt}.nbt");
     world.world.to_nbt().save(path);
-    let metadata_path = format!("test/{}-failed-attempt-{attempt}.outputs.json", module.name);
+    let metadata_path = format!("test/{module_name}-failed-attempt-{attempt}.outputs.json");
     let _ = world.metadata().save(metadata_path);
-    let routes_path = format!("test/{}-failed-attempt-{attempt}.routes.txt", module.name);
+    let routes_path = format!("test/{module_name}-failed-attempt-{attempt}.routes.txt");
     let routes = routed_nets
         .iter()
         .map(|route| {
@@ -1409,7 +1409,7 @@ fn save_failed_verifier_world(
 }
 
 fn save_failed_route_base_world(
-    module: &GraphModule,
+    topology: &ResolvedPnrTopology,
     attempt: usize,
     candidates: &[LayoutCandidate],
     placed: &[PlacedModule],
@@ -1418,15 +1418,13 @@ fn save_failed_route_base_world(
         return;
     }
 
-    let Ok(world) = placed_world_from_routing(module, candidates, placed, &[]) else {
+    let Ok(world) = placed_world_from_routing(topology, candidates, placed, &[]) else {
         return;
     };
-    let path = format!("test/{}-route-failed-attempt-{attempt}.nbt", module.name);
+    let module_name = &topology.definitions[topology.top.0].display_name;
+    let path = format!("test/{module_name}-route-failed-attempt-{attempt}.nbt");
     world.world.to_nbt().save(path);
-    let metadata_path = format!(
-        "test/{}-route-failed-attempt-{attempt}.outputs.json",
-        module.name
-    );
+    let metadata_path = format!("test/{module_name}-route-failed-attempt-{attempt}.outputs.json");
     let _ = world.metadata().save(metadata_path);
 }
 
@@ -1688,7 +1686,6 @@ fn modules_have_same_candidate_shape(left: &GraphModule, right: &GraphModule) ->
 
 fn search_layout_combinations(
     topology: &ResolvedPnrTopology,
-    module: &GraphModule,
     pools: &[ChildCandidatePool],
     config: &GlobalPnrConfig,
     progress: &GlobalPnrProgress,
@@ -1718,7 +1715,6 @@ fn search_layout_combinations(
         ));
         match route_first_successful_placement(
             topology,
-            module,
             &candidates,
             placement_attempts,
             config,

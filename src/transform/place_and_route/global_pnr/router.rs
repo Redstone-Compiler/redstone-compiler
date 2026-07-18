@@ -1971,6 +1971,66 @@ pub fn collect_module_input_endpoints(
         .collect()
 }
 
+pub fn collect_topology_output_endpoints(
+    topology: &ResolvedPnrTopology,
+    candidates: &[LayoutCandidate],
+    placed_modules: &[PlacedModule],
+) -> Vec<OutputEndpoint> {
+    topology
+        .nets
+        .iter()
+        .flat_map(|net| {
+            net.sinks.iter().filter_map(|sink| {
+                let ResolvedEndpoint::TopPort { port } = sink else {
+                    return None;
+                };
+                let output = topology.port(*port)?;
+                let ResolvedEndpoint::InstancePort {
+                    instance,
+                    port: source_port,
+                } = &net.driver
+                else {
+                    return None;
+                };
+                let instance = topology.instances.get(instance.0)?;
+                let source_port = topology.port(*source_port)?;
+                let position = resolve_observable_port_position(
+                    candidates,
+                    placed_modules,
+                    &instance.display_name,
+                    &source_port.name,
+                )?;
+                Some(OutputEndpoint::new(output.name.clone(), position))
+            })
+        })
+        .collect()
+}
+
+pub fn collect_topology_input_endpoints(
+    topology: &ResolvedPnrTopology,
+    routed_nets: &[RoutedNet],
+) -> Vec<OutputEndpoint> {
+    routed_nets
+        .iter()
+        .filter(|route| {
+            route.source == route.sink
+                && route
+                    .blocks
+                    .first()
+                    .is_some_and(|(_, block)| block.kind.is_switch())
+        })
+        .filter_map(|route| {
+            let ResolvedEndpoint::TopPort { port } = route.source_endpoint.as_ref()? else {
+                return None;
+            };
+            Some(OutputEndpoint::new(
+                topology.port(*port)?.name.clone(),
+                route.source,
+            ))
+        })
+        .collect()
+}
+
 fn resolve_observable_port_target_positions(
     candidates: &[LayoutCandidate],
     placed_modules: &[PlacedModule],

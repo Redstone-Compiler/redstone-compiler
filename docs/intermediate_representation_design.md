@@ -451,3 +451,9 @@ compatibility fallback only.
 The physical placer/router implementations still consume a temporary
 `GraphModule`-shaped adapter internally. Replacing that adapter with native
 typed placement and routing plan structs is the final IR-boundary migration.
+
+Prepared/replayed global execution no longer reads the retained legacy module
+for connectivity or interface discovery. Top-level input switches and output
+observation points are collected from typed top-port endpoints. The retained
+module is now limited to preparation compatibility/parity metadata and the
+physical adapter implementation.
