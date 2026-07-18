@@ -86,6 +86,7 @@ type SnapshotManifest = {
   artifacts: SnapshotArtifact[];
 };
 type SnapshotInstance = {
+  instanceId?: number;
   instance: string;
   module: string;
   artifactPath: string;
@@ -99,6 +100,7 @@ type SnapshotInstance = {
 type SnapshotRoute = {
   id: string;
   index: number;
+  netId?: number;
   source: [number, number, number];
   sourceLabel: string;
   sink: [number, number, number];
@@ -108,11 +110,19 @@ type SnapshotRoute = {
   pathLength: number;
   blockCount: number;
 };
+type SnapshotConstraint = {
+  id: string;
+  status: 'satisfied' | 'violated' | 'not_evaluated';
+  detail: string;
+  instanceIds: number[];
+  netIds: number[];
+};
 type LoadedSnapshot = {
   manifest: SnapshotManifest;
   filesByPath: Map<string, File>;
   instances: SnapshotInstance[];
   routes: SnapshotRoute[];
+  constraints: SnapshotConstraint[];
   interfaceJson?: string;
 };
 
@@ -1858,7 +1868,21 @@ async function parseSnapshot(files: File[]): Promise<LoadedSnapshot | undefined>
       }
     }
 
-    return { manifest, filesByPath, instances, routes, interfaceJson };
+    const reportFile = filesByPath.get('intent/report.json');
+    const resolvedIntentFile = filesByPath.get('intent/resolved.json');
+    let constraints: SnapshotConstraint[] = [];
+    if (reportFile && resolvedIntentFile) {
+      try {
+        constraints = parseSnapshotConstraints(
+          JSON.parse(await reportFile.text()),
+          JSON.parse(await resolvedIntentFile.text()),
+        );
+      } catch (error) {
+        console.warn('Skipping invalid physical intent metadata.', error);
+      }
+    }
+
+    return { manifest, filesByPath, instances, routes, constraints, interfaceJson };
   }
 
   return undefined;
@@ -1876,6 +1900,7 @@ function parseSnapshotInstance(value: unknown, artifactPath: string): SnapshotIn
   const cost = asRecord(record.cost);
   const blockCount = Number(cost?.blocks);
   return {
+    instanceId: Number.isInteger(Number(record.instance_id)) ? Number(record.instance_id) : undefined,
     instance: record.instance,
     module: record.module,
     artifactPath,
@@ -1922,6 +1947,7 @@ function parseSnapshotRoutes(value: unknown): SnapshotRoute[] {
     routes.push({
       id: `route-${index}`,
       index,
+      netId: Number.isInteger(Number(route.net_id)) ? Number(route.net_id) : undefined,
       source,
       sourceLabel: route.source_label,
       sink,
@@ -1933,6 +1959,40 @@ function parseSnapshotRoutes(value: unknown): SnapshotRoute[] {
     });
   }
   return routes.sort((left, right) => left.index - right.index);
+}
+
+function parseSnapshotConstraints(reportValue: unknown, resolvedValue: unknown): SnapshotConstraint[] {
+  const report = Array.isArray(reportValue) ? reportValue : [];
+  const resolved = asRecord(resolvedValue)?.constraints;
+  const links = new Map<string, { instanceIds: number[]; netIds: number[] }>();
+  if (Array.isArray(resolved)) {
+    for (const value of resolved) {
+      const constraint = asRecord(value);
+      if (!constraint || typeof constraint.id !== 'string') continue;
+      const instanceIds = ['instance', 'first', 'second']
+        .map(key => Number(constraint[key]))
+        .filter((id): id is number => Number.isInteger(id));
+      const netIds = [Number(constraint.net)].filter((id): id is number => Number.isInteger(id));
+      links.set(constraint.id, { instanceIds: [...new Set(instanceIds)], netIds });
+    }
+  }
+
+  return report.flatMap(value => {
+    const item = asRecord(value);
+    if (
+      !item
+      || typeof item.id !== 'string'
+      || typeof item.detail !== 'string'
+      || !['satisfied', 'violated', 'not_evaluated'].includes(String(item.status))
+    ) return [];
+    const related = links.get(item.id) ?? { instanceIds: [], netIds: [] };
+    return [{
+      id: item.id,
+      status: item.status as SnapshotConstraint['status'],
+      detail: item.detail,
+      ...related,
+    }];
+  });
 }
 
 function renderSnapshotBrowser(snapshot: LoadedSnapshot): void {
@@ -1956,6 +2016,19 @@ function renderSnapshotBrowser(snapshot: LoadedSnapshot): void {
       button.dataset.snapshotPath = instance.circuitPath;
       button.dataset.snapshotInstance = instance.artifactPath;
       button.addEventListener('click', () => void openSnapshotInstance(instance));
+      filesList.append(button);
+    }
+  }
+
+  if (snapshot.constraints.length > 0) {
+    appendSnapshotSection('Constraints');
+    for (const constraint of snapshot.constraints) {
+      const related = constraintRelatedLabel(snapshot, constraint);
+      const button = createFileEntry(constraint.id, `${constraint.status}${related ? ` · ${related}` : ''}`);
+      button.classList.add('constraint-entry', `constraint-${constraint.status}`);
+      button.dataset.snapshotConstraint = constraint.id;
+      button.querySelector('.file-entry-size')?.classList.add('constraint-entry-status');
+      button.addEventListener('click', () => focusSnapshotConstraint(constraint));
       filesList.append(button);
     }
   }
@@ -2003,7 +2076,7 @@ function appendSnapshotNbtEntry(label: string, path: string, target: 'main'): vo
   filesList.append(button);
 }
 
-function createFileEntry(label: string, detail: string, size: number): HTMLButtonElement {
+function createFileEntry(label: string, detail: string, size?: number): HTMLButtonElement {
   const button = document.createElement('button');
   button.className = 'file-entry';
   button.type = 'button';
@@ -2013,9 +2086,58 @@ function createFileEntry(label: string, detail: string, size: number): HTMLButto
   name.title = label;
   const metadata = document.createElement('span');
   metadata.className = 'file-entry-size snapshot-entry-detail';
-  metadata.textContent = `${detail} · ${formatBytes(size)}`;
+  metadata.textContent = size === undefined ? detail : `${detail} · ${formatBytes(size)}`;
   button.append(name, metadata);
   return button;
+}
+
+function constraintRelatedLabel(snapshot: LoadedSnapshot, constraint: SnapshotConstraint): string {
+  const instances = constraint.instanceIds
+    .map(id => snapshot.instances.find(instance => instance.instanceId === id)?.instance)
+    .filter((name): name is string => Boolean(name));
+  const nets = constraint.netIds.map(id => {
+    const route = snapshot.routes.find(candidate => candidate.netId === id);
+    return route ? `net ${id}: ${route.sourceLabel}` : `net ${id}`;
+  });
+  return [...instances, ...nets].join(', ');
+}
+
+function focusSnapshotConstraint(constraint: SnapshotConstraint): void {
+  const snapshot = currentSnapshot;
+  if (!snapshot) return;
+
+  setSnapshotRouteIsolation(undefined);
+  setSnapshotBoxIsolation(undefined);
+  const instances = constraint.instanceIds
+    .map(id => snapshot.instances.find(instance => instance.instanceId === id))
+    .filter((instance): instance is SnapshotInstance => Boolean(instance));
+  const routes = snapshot.routes.filter(route =>
+    route.netId !== undefined && constraint.netIds.includes(route.netId));
+
+  if (instances.length === 1) {
+    const instance = instances[0];
+    setSnapshotBoxIsolation({
+      id: instance.artifactPath,
+      label: instance.instance,
+      min: compilerPositionToNbt(instance.global_bbox.min),
+      max: compilerPositionToNbt(instance.global_bbox.max).map(value => value + 1) as [number, number, number],
+    });
+  } else if (routes.length === 1) {
+    setSnapshotRouteIsolation(routes[0].id);
+  } else if (routes.length > 1) {
+    viewer.setRelatedRouteIds(routes.map(route => route.id));
+  }
+
+  filesList.querySelectorAll('.file-entry.selected').forEach(entry => entry.classList.remove('selected'));
+  filesList.querySelector<HTMLElement>(`[data-snapshot-constraint="${CSS.escape(constraint.id)}"]`)
+    ?.classList.add('selected');
+  selectedBlock = undefined;
+  toggleSwitchButton.classList.add('hidden');
+  inspector.textContent = [
+    `${constraint.status}: ${constraint.id}`,
+    constraintRelatedLabel(snapshot, constraint) || 'no linked instance or net',
+    constraint.detail,
+  ].join('\n');
 }
 
 async function openSnapshotNbt(path: string, selectedEntry?: Element | null): Promise<void> {

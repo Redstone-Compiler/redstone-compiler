@@ -335,6 +335,30 @@ input {
   text-overflow: ellipsis;
 }
 
+.constraint-entry {
+  box-shadow: inset 2px 0 transparent;
+}
+
+.constraint-entry.constraint-satisfied {
+  box-shadow: inset 2px 0 #55c98a;
+}
+
+.constraint-entry.constraint-violated {
+  box-shadow: inset 2px 0 #ef6464;
+}
+
+.constraint-entry.constraint-not_evaluated {
+  box-shadow: inset 2px 0 #8c98a3;
+}
+
+.constraint-satisfied .constraint-entry-status {
+  color: #83d9aa;
+}
+
+.constraint-violated .constraint-entry-status {
+  color: #ff8e8e;
+}
+
 .file-entry,
 .switch-entry {
   display: flex;
