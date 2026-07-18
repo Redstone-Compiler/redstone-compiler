@@ -130,6 +130,33 @@ impl PhysicalIntent {
                     region: region.clone(),
                 }
             }
+            PhysicalConstraint::PreferInside {
+                id,
+                instance,
+                region,
+                strength,
+            } => {
+                if !self.regions.contains_key(region) {
+                    eyre::bail!("constraint `{id}` references unknown region `{region}`");
+                }
+                ResolvedPhysicalConstraint::PreferInside {
+                    id: id.clone(),
+                    instance: resolve_instance(instance)?,
+                    region: region.clone(),
+                    strength: *strength,
+                }
+            }
+            PhysicalConstraint::SameLayer {
+                id,
+                first,
+                second,
+                strength,
+            } => ResolvedPhysicalConstraint::SameLayer {
+                id: id.clone(),
+                first: resolve_instance(first)?,
+                second: resolve_instance(second)?,
+                strength: *strength,
+            },
         })
     }
 }
@@ -187,6 +214,18 @@ pub enum PhysicalConstraint {
         net: String,
         region: String,
     },
+    PreferInside {
+        id: String,
+        instance: String,
+        region: String,
+        strength: PreferenceStrength,
+    },
+    SameLayer {
+        id: String,
+        first: String,
+        second: String,
+        strength: PreferenceStrength,
+    },
 }
 
 impl PhysicalConstraint {
@@ -196,7 +235,9 @@ impl PhysicalConstraint {
             | Self::LayerRange { id, .. }
             | Self::FixedOrigin { id, .. }
             | Self::NetPriority { id, .. }
-            | Self::NetAvoid { id, .. } => id,
+            | Self::NetAvoid { id, .. }
+            | Self::PreferInside { id, .. }
+            | Self::SameLayer { id, .. } => id,
         }
     }
 }
@@ -286,6 +327,33 @@ impl ResolvedPhysicalIntent {
                         eyre::bail!("constraint `{id}` has an unknown region `{region}`");
                     }
                 }
+                ResolvedPhysicalConstraint::PreferInside {
+                    id,
+                    instance,
+                    region,
+                    ..
+                } => {
+                    topology
+                        .instances
+                        .get(instance.0)
+                        .with_context(|| format!("constraint `{id}` has an unknown instance"))?;
+                    if !self.regions.contains_key(region) {
+                        eyre::bail!("constraint `{id}` has an unknown region `{region}`");
+                    }
+                }
+                ResolvedPhysicalConstraint::SameLayer {
+                    id, first, second, ..
+                } => {
+                    topology.instances.get(first.0).with_context(|| {
+                        format!("constraint `{id}` has an unknown first instance")
+                    })?;
+                    topology.instances.get(second.0).with_context(|| {
+                        format!("constraint `{id}` has an unknown second instance")
+                    })?;
+                    if first == second {
+                        eyre::bail!("constraint `{id}` compares an instance with itself");
+                    }
+                }
             }
         }
         Ok(())
@@ -295,15 +363,18 @@ impl ResolvedPhysicalIntent {
         &self,
         instance: InstanceId,
     ) -> impl Iterator<Item = &ResolvedPhysicalConstraint> {
-        self.constraints.iter().filter(move |constraint| {
-            matches!(
-                constraint,
+        self.constraints
+            .iter()
+            .filter(move |constraint| match constraint {
                 ResolvedPhysicalConstraint::Inside { instance: id, .. }
-                    | ResolvedPhysicalConstraint::LayerRange { instance: id, .. }
-                    | ResolvedPhysicalConstraint::FixedOrigin { instance: id, .. }
-                    if *id == instance
-            )
-        })
+                | ResolvedPhysicalConstraint::LayerRange { instance: id, .. }
+                | ResolvedPhysicalConstraint::FixedOrigin { instance: id, .. }
+                | ResolvedPhysicalConstraint::PreferInside { instance: id, .. } => *id == instance,
+                ResolvedPhysicalConstraint::SameLayer { first, second, .. } => {
+                    *first == instance || *second == instance
+                }
+                _ => false,
+            })
     }
 
     pub fn net_priority(&self, net: NetId) -> usize {
@@ -317,6 +388,61 @@ impl ResolvedPhysicalIntent {
             })
             .max()
             .unwrap_or(0)
+    }
+
+    pub fn placement_preference_cost(
+        &self,
+        topology: &ResolvedPnrTopology,
+        candidates: &[LayoutCandidate],
+        placed: &[PlacedModule],
+    ) -> PreferenceCost {
+        let mut cost = PreferenceCost::default();
+        for constraint in &self.constraints {
+            match constraint {
+                ResolvedPhysicalConstraint::PreferInside {
+                    instance,
+                    region,
+                    strength,
+                    ..
+                } => {
+                    let Some((min, max)) = placed_bounds(topology, candidates, placed, *instance)
+                    else {
+                        cost.add(*strength, usize::MAX / 4);
+                        continue;
+                    };
+                    let Some(region) = self.regions.get(region) else {
+                        cost.add(*strength, usize::MAX / 4);
+                        continue;
+                    };
+                    let distance = (0..3)
+                        .map(|axis| {
+                            region.min[axis].saturating_sub(min[axis])
+                                + max[axis].saturating_sub(region.max[axis])
+                        })
+                        .sum();
+                    cost.add(*strength, distance);
+                }
+                ResolvedPhysicalConstraint::SameLayer {
+                    first,
+                    second,
+                    strength,
+                    ..
+                } => {
+                    let first =
+                        placed_bounds(topology, candidates, placed, *first).map(|(min, _)| min[2]);
+                    let second =
+                        placed_bounds(topology, candidates, placed, *second).map(|(min, _)| min[2]);
+                    cost.add(
+                        *strength,
+                        first
+                            .zip(second)
+                            .map_or(usize::MAX / 4, |(left, right)| left.abs_diff(right)),
+                    );
+                }
+                _ => {}
+            }
+        }
+        cost
     }
 
     pub fn evaluate(
@@ -394,6 +520,51 @@ impl ResolvedPhysicalIntent {
                             format!(
                                 "net {:?} has {intersections} path point(s) in avoid region",
                                 net
+                            ),
+                        )
+                    }
+                    ResolvedPhysicalConstraint::PreferInside {
+                        instance,
+                        region,
+                        strength,
+                        ..
+                    } => {
+                        let value = placed_bounds(topology, candidates, placed, *instance)
+                            .zip(self.regions.get(region))
+                            .map_or(usize::MAX, |((min, max), region)| {
+                                (0..3)
+                                    .map(|axis| {
+                                        region.min[axis].saturating_sub(min[axis])
+                                            + max[axis].saturating_sub(region.max[axis])
+                                    })
+                                    .sum()
+                            });
+                        (
+                            value == 0,
+                            format!(
+                                "instance {:?} preferred inside `{region}` at {strength:?} strength; aggregate penalty={value}",
+                                instance
+                            ),
+                        )
+                    }
+                    ResolvedPhysicalConstraint::SameLayer {
+                        first,
+                        second,
+                        strength,
+                        ..
+                    } => {
+                        let first_z = placed_bounds(topology, candidates, placed, *first)
+                            .map(|(min, _)| min[2]);
+                        let second_z = placed_bounds(topology, candidates, placed, *second)
+                            .map(|(min, _)| min[2]);
+                        let distance = first_z
+                            .zip(second_z)
+                            .map_or(usize::MAX, |(left, right)| left.abs_diff(right));
+                        (
+                            distance == 0,
+                            format!(
+                                "instances {:?} and {:?} preferred same layer at {strength:?} strength; z distance={distance}",
+                                first, second
                             ),
                         )
                     }
@@ -489,6 +660,18 @@ pub enum ResolvedPhysicalConstraint {
         net: NetId,
         region: String,
     },
+    PreferInside {
+        id: String,
+        instance: InstanceId,
+        region: String,
+        strength: PreferenceStrength,
+    },
+    SameLayer {
+        id: String,
+        first: InstanceId,
+        second: InstanceId,
+        strength: PreferenceStrength,
+    },
 }
 
 impl ResolvedPhysicalConstraint {
@@ -498,7 +681,34 @@ impl ResolvedPhysicalConstraint {
             | Self::LayerRange { id, .. }
             | Self::FixedOrigin { id, .. }
             | Self::NetPriority { id, .. }
-            | Self::NetAvoid { id, .. } => id,
+            | Self::NetAvoid { id, .. }
+            | Self::PreferInside { id, .. }
+            | Self::SameLayer { id, .. } => id,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreferenceStrength {
+    Strong,
+    Medium,
+    Weak,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct PreferenceCost {
+    pub strong: usize,
+    pub medium: usize,
+    pub weak: usize,
+}
+
+impl PreferenceCost {
+    fn add(&mut self, strength: PreferenceStrength, value: usize) {
+        match strength {
+            PreferenceStrength::Strong => self.strong = self.strong.saturating_add(value),
+            PreferenceStrength::Medium => self.medium = self.medium.saturating_add(value),
+            PreferenceStrength::Weak => self.weak = self.weak.saturating_add(value),
         }
     }
 }
@@ -593,6 +803,22 @@ fn parse_physical_intent(source: &str) -> eyre::Result<PhysicalIntent> {
                     region: (*region).to_owned(),
                 });
             }
+            ["prefer", "instance", instance, "inside", region, "strength", strength] => {
+                constraints.push(PhysicalConstraint::PreferInside {
+                    id: generated_id(&mut next_id),
+                    instance: (*instance).to_owned(),
+                    region: (*region).to_owned(),
+                    strength: parse_strength(strength)?,
+                });
+            }
+            ["prefer", "instances", first, second, "same_layer", "strength", strength] => {
+                constraints.push(PhysicalConstraint::SameLayer {
+                    id: generated_id(&mut next_id),
+                    first: (*first).to_owned(),
+                    second: (*second).to_owned(),
+                    strength: parse_strength(strength)?,
+                });
+            }
             _ => eyre::bail!("unsupported physical-intent statement `{statement}`"),
         }
     }
@@ -623,6 +849,15 @@ fn parse_usize(value: &str) -> eyre::Result<usize> {
         .with_context(|| format!("expected non-negative integer, got `{value}`"))
 }
 
+fn parse_strength(value: &str) -> eyre::Result<PreferenceStrength> {
+    match value {
+        "strong" => Ok(PreferenceStrength::Strong),
+        "medium" => Ok(PreferenceStrength::Medium),
+        "weak" => Ok(PreferenceStrength::Weak),
+        _ => eyre::bail!("unknown preference strength `{value}`"),
+    }
+}
+
 fn generated_id(next_id: &mut usize) -> String {
     let id = format!("c{}", *next_id);
     *next_id += 1;
@@ -644,6 +879,8 @@ mod tests {
             require instance q_0_master layer 2..6;
             lock instance q_0_slave at 20 10 4;
             priority net clk 100;
+            prefer instance q_0_master inside state strength strong;
+            prefer instances q_0_master q_0_slave same_layer strength medium;
         "#
         .parse()?;
         let logical = LogicalDesign::from_verilog_source(
@@ -665,7 +902,7 @@ mod tests {
             .find(|net| net.display_name == "clk")
             .context("counter clock net")?;
 
-        assert_eq!(resolved.constraints.len(), 4);
+        assert_eq!(resolved.constraints.len(), 6);
         assert_eq!(resolved.net_priority(clock_net.id), 100);
         assert!(resolved.constraints.iter().any(|constraint| matches!(
             constraint,

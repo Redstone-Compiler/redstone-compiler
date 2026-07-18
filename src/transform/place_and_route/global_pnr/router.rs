@@ -9,6 +9,7 @@ use crate::transform::place_and_route::detailed_router::{
     self, PlaceRedstoneResult, PlaceRepeaterResult,
 };
 use crate::transform::place_and_route::global_pnr::assembly::reset_dynamic_power_states;
+use crate::transform::place_and_route::global_pnr::heuristics::GlobalHeuristicHooks;
 use crate::transform::place_and_route::global_pnr::ir::{
     LayoutCandidate, PhysicalPort, PhysicalPortDirection,
 };
@@ -216,6 +217,7 @@ impl RoutedNet {
 pub fn route_resolved_topology_with_order_from_prefix(
     topology: &ResolvedPnrTopology,
     intent: Option<&ResolvedPhysicalIntent>,
+    hooks: &GlobalHeuristicHooks,
     candidates: &[LayoutCandidate],
     placed_modules: &[PlacedModule],
     config: &GlobalRoutingConfig,
@@ -232,6 +234,7 @@ pub fn route_resolved_topology_with_order_from_prefix(
     match route_module_variables_with_order_from_prefix_impl(
         Some(topology),
         intent,
+        hooks,
         &module,
         candidates,
         placed_modules,
@@ -397,9 +400,11 @@ pub fn route_module_variables_with_order_from_prefix(
     progress: &GlobalPnrProgress,
     prefix: &[RoutedNet],
 ) -> Result<Vec<RoutedNet>, PartialRoutingFailure> {
+    let hooks = GlobalHeuristicHooks::default();
     route_module_variables_with_order_from_prefix_impl(
         None,
         None,
+        &hooks,
         module,
         candidates,
         placed_modules,
@@ -413,6 +418,7 @@ pub fn route_module_variables_with_order_from_prefix(
 fn route_module_variables_with_order_from_prefix_impl(
     topology: Option<&ResolvedPnrTopology>,
     intent: Option<&ResolvedPhysicalIntent>,
+    hooks: &GlobalHeuristicHooks,
     module: &GraphModule,
     candidates: &[LayoutCandidate],
     placed_modules: &[PlacedModule],
@@ -450,14 +456,18 @@ fn route_module_variables_with_order_from_prefix_impl(
         .filter_map(|route| Some((route.net_id?, route.sink_endpoint.clone()?)))
         .collect::<HashSet<_>>();
     let mut ordered_vars = ordered_module_variables(&module.vars, order_strategy);
-    if let (Some(topology), Some(intent)) = (topology, intent) {
+    if let Some(topology) = topology {
         ordered_vars.sort_by_key(|var| {
             let label = format!("{}.{}", var.source.0, var.source.1);
-            std::cmp::Reverse(
-                topology
-                    .net_by_driver_label(&label)
-                    .map_or(0, |net| intent.net_priority(net.id)),
-            )
+            let priority = topology.net_by_driver_label(&label).map_or(0, |net| {
+                intent.map_or(0, |intent| intent.net_priority(net.id))
+                    + hooks
+                        .net_priority_terms
+                        .iter()
+                        .map(|hook| (hook.evaluate)(topology, net.id, intent))
+                        .sum::<usize>()
+            });
+            std::cmp::Reverse(priority)
         });
     }
     let vars = ordered_vars
@@ -5044,6 +5054,7 @@ mod tests {
         let routes = route_resolved_topology_with_order_from_prefix(
             &topology,
             None,
+            &GlobalHeuristicHooks::default(),
             &candidates,
             &placed,
             &GlobalRoutingConfig::default(),

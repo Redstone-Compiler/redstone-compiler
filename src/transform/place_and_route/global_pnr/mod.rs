@@ -2,6 +2,7 @@ pub mod assembly;
 pub mod candidate;
 pub mod diagnostics;
 mod free_3d;
+pub mod heuristics;
 pub mod ir;
 pub mod physical_intent;
 pub mod placer;
@@ -32,6 +33,7 @@ use crate::transform::place_and_route::global_pnr::assembly::assemble_world;
 use crate::transform::place_and_route::global_pnr::candidate::{
     generate_graph_module_candidates_with_progress_label, UnitCandidateConfig,
 };
+pub use crate::transform::place_and_route::global_pnr::heuristics::GlobalHeuristicHooks;
 use crate::transform::place_and_route::global_pnr::ir::{LayoutCandidate, PhysicalPortDirection};
 pub use crate::transform::place_and_route::global_pnr::physical_intent::{
     ConstraintSatisfaction, PhysicalIntent, ResolvedPhysicalIntent,
@@ -77,6 +79,9 @@ pub struct GlobalPnrConfig {
     /// Optional per-design physical constraints resolved against the stable
     /// typed topology. Search knobs remain separate from this design intent.
     pub physical_intent: Option<ResolvedPhysicalIntent>,
+    /// Experimental extension points. Hooks are named and recorded in
+    /// snapshots; function pointers keep ownership/configuration lightweight.
+    pub heuristic_hooks: GlobalHeuristicHooks,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -615,6 +620,7 @@ fn global_pnr_config_snapshot(config: &GlobalPnrConfig) -> Value {
             "regions": intent.regions.len(),
             "constraints": intent.constraints.len(),
         })),
+        "experimental_hooks": config.heuristic_hooks.names(),
     })
 }
 
@@ -630,6 +636,7 @@ impl Default for GlobalPnrConfig {
             show_progress: true,
             verifier: None,
             physical_intent: None,
+            heuristic_hooks: GlobalHeuristicHooks::default(),
         }
     }
 }
@@ -1252,6 +1259,7 @@ fn route_first_successful_placement(
             let routed_nets = match route_resolved_topology_with_order_from_prefix(
                 topology,
                 config.physical_intent.as_ref(),
+                &config.heuristic_hooks,
                 candidates,
                 placed,
                 routing_config,
@@ -1312,6 +1320,26 @@ fn route_first_successful_placement(
                 }
                 progress.detail(format!(
                     "routing attempt {attempt_serial} violated physical intent: {error}"
+                ));
+                last_error = Some(error);
+                routing_progress.maybe_report(progress, attempt_serial, total_attempts);
+                continue;
+            }
+            if let Some((hook_name, error)) = config
+                .heuristic_hooks
+                .route_validators
+                .iter()
+                .find_map(|hook| {
+                    (hook.validate)(topology, &routed_nets)
+                        .err()
+                        .map(|error| (hook.name, error))
+                })
+            {
+                routing_progress.contract_failures += 1;
+                let error =
+                    eyre::eyre!("route validator hook `{hook_name}` rejected attempt: {error}");
+                progress.detail(format!(
+                    "routing attempt {attempt_serial} failed experimental validator: {error}"
                 ));
                 last_error = Some(error);
                 routing_progress.maybe_report(progress, attempt_serial, total_attempts);
@@ -1778,6 +1806,7 @@ fn search_layout_combinations(
         let placement_attempts = placement_candidates_resolved(
             topology,
             config.physical_intent.as_ref(),
+            &config.heuristic_hooks,
             &candidates,
             &config.placement,
             &config.search.policies.placement_heuristics,

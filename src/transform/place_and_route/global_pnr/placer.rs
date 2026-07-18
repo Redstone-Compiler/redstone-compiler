@@ -1,10 +1,13 @@
 use std::collections::{HashMap, HashSet};
 
-use eyre::ContextCompat;
+use eyre::{ContextCompat, WrapErr};
 
 use crate::graph::module::{GraphModule, GraphModulePortTarget};
 use crate::transform::place_and_route::estimate::BoundingBox;
 use crate::transform::place_and_route::global_pnr::free_3d::place_free_3d;
+use crate::transform::place_and_route::global_pnr::heuristics::{
+    GlobalHeuristicHooks, PlacementHeuristicContext,
+};
 use crate::transform::place_and_route::global_pnr::ir::LayoutCandidate;
 use crate::transform::place_and_route::global_pnr::physical_intent::{
     ResolvedPhysicalConstraint, ResolvedPhysicalIntent,
@@ -215,20 +218,32 @@ pub fn placement_candidates(
 pub fn placement_candidates_resolved(
     topology: &ResolvedPnrTopology,
     intent: Option<&ResolvedPhysicalIntent>,
+    hooks: &GlobalHeuristicHooks,
     candidates: &[LayoutCandidate],
     config: &GlobalPlacementConfig,
     heuristics: &[PlacementHeuristic],
 ) -> eyre::Result<Vec<Vec<PlacedModule>>> {
     let adapter = topology.legacy_routing_adapter()?;
-    let placements = placement_candidates(&adapter, candidates, config, heuristics);
-    let Some(intent) = intent else {
-        return Ok(placements);
+    let mut placements = placement_candidates(&adapter, candidates, config, heuristics);
+    let context = PlacementHeuristicContext {
+        topology,
+        candidates,
+        intent,
     };
+    for hook in &hooks.placement_transforms {
+        (hook.apply)(&context, &mut placements)
+            .with_context(|| format!("placement transform hook `{}` failed", hook.name))?;
+    }
 
     let mut constrained = Vec::new();
     let mut last_error = None;
     for mut placed in placements {
-        match apply_placement_intent(topology, intent, candidates, &mut placed) {
+        let result = if let Some(intent) = intent {
+            apply_placement_intent(topology, intent, candidates, &mut placed)
+        } else {
+            validate_no_placement_overlap(&placed)
+        };
+        match result {
             Ok(()) => push_unique_placement(&mut constrained, placed),
             Err(error) => last_error = Some(error),
         }
@@ -239,8 +254,22 @@ pub fn placement_candidates_resolved(
         }));
     }
     constrained.sort_by_key(|placed| {
-        placement_cost_breakdown(&adapter, candidates, placed, config.congestion)
-            .weighted_total(config.cost_weights)
+        let preference = intent.map_or(Default::default(), |intent| {
+            intent.placement_preference_cost(topology, candidates, placed)
+        });
+        let hook_cost = hooks
+            .placement_cost_terms
+            .iter()
+            .map(|hook| (hook.evaluate)(&context, placed))
+            .sum::<usize>();
+        (
+            preference.strong,
+            preference.medium,
+            preference.weak,
+            hook_cost,
+            placement_cost_breakdown(&adapter, candidates, placed, config.congestion)
+                .weighted_total(config.cost_weights),
+        )
     });
     constrained.truncate(config.max_attempts.max(1));
     Ok(constrained)
@@ -1367,7 +1396,10 @@ fn translate_candidate_position(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     use super::*;
+    use crate::transform::place_and_route::global_pnr::heuristics::PlacementTransformHook;
     use crate::transform::place_and_route::global_pnr::ir::{
         LayoutCandidateCost, PhysicalPort, PhysicalPortDirection, PortConnection,
     };
@@ -1433,8 +1465,19 @@ mod tests {
         .expect("port y")
     }
 
+    static PLACEMENT_TRANSFORM_CALLED: AtomicBool = AtomicBool::new(false);
+
+    fn observe_placement_transform(
+        _context: &PlacementHeuristicContext<'_>,
+        _placements: &mut Vec<Vec<PlacedModule>>,
+    ) -> eyre::Result<()> {
+        PLACEMENT_TRANSFORM_CALLED.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
     #[test]
     fn resolved_placement_applies_fixed_origin_and_region_constraints() -> eyre::Result<()> {
+        PLACEMENT_TRANSFORM_CALLED.store(false, Ordering::SeqCst);
         let candidates = vec![test_candidate("child", &[])];
         let topology = ResolvedPnrTopology {
             top: DefinitionId(0),
@@ -1497,15 +1540,24 @@ mod tests {
             ],
         };
 
+        let hooks = GlobalHeuristicHooks {
+            placement_transforms: vec![PlacementTransformHook {
+                name: "test-observer",
+                apply: observe_placement_transform,
+            }],
+            ..Default::default()
+        };
         let placements = placement_candidates_resolved(
             &topology,
             Some(&intent),
+            &hooks,
             &candidates,
             &GlobalPlacementConfig::default(),
             &[PlacementHeuristic::Shelf],
         )?;
 
         assert!(!placements.is_empty());
+        assert!(PLACEMENT_TRANSFORM_CALLED.load(Ordering::SeqCst));
         assert_eq!(placements[0][0].origin, Position(12, 14, 3));
         Ok(())
     }
