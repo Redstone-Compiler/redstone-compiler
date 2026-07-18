@@ -44,6 +44,7 @@ fn main() -> eyre::Result<()> {
     };
 
     let snapshot_dir = snapshot_output_dir(&output);
+    let snapshot_archive = snapshot_dir.with_extension("rsnap");
     let design_name = output
         .file_stem()
         .or_else(|| opt.input.file_stem())
@@ -81,6 +82,10 @@ fn main() -> eyre::Result<()> {
     )?;
 
     println!("exported Verilog snapshot: path={}", snapshot_dir.display());
+    println!(
+        "exported snapshot archive: path={}",
+        snapshot_archive.display()
+    );
 
     Ok(())
 }

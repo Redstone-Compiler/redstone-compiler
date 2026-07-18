@@ -1,5 +1,6 @@
 import './styles.css';
 import type { Viz } from '@viz-js/viz';
+import { unzipSync } from 'fflate';
 import { loadNbtFile, stringifyNbt } from './nbt/loadNbt';
 import { toStructureModel } from './nbt/toStructure';
 import { StructureViewer } from './render/StructureViewer';
@@ -67,10 +68,39 @@ type GraphEdgeInfo = {
   target: string;
 };
 type ExampleFile = {
+  kind: 'nbt' | 'snapshot';
   name: string;
   path: string;
   size: number;
   outputsPath?: string;
+};
+type SnapshotArtifact = {
+  kind: string;
+  path: string;
+};
+type SnapshotManifest = {
+  format: 'redstone-compiler.snapshot.v1';
+  status: 'success' | 'failed' | 'aborted';
+  top_module?: string;
+  final_nbt?: string;
+  artifacts: SnapshotArtifact[];
+};
+type SnapshotInstance = {
+  instance: string;
+  module: string;
+  artifactPath: string;
+  circuitPath: string;
+  global_bbox: {
+    min: [number, number, number];
+    max: [number, number, number];
+  };
+  blockCount?: number;
+};
+type LoadedSnapshot = {
+  manifest: SnapshotManifest;
+  filesByPath: Map<string, File>;
+  instances: SnapshotInstance[];
+  interfaceJson?: string;
 };
 
 const TRACE_ANIMATION_INTERVAL_MS = 50;
@@ -93,8 +123,16 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
     <section id="drop-zone" class="workspace">
       <section class="viewer-panel">
         <canvas id="structure-canvas"></canvas>
+        <div id="bbox-tooltip" class="bbox-tooltip hidden" role="tooltip" aria-hidden="true">
+          <strong id="bbox-tooltip-title"></strong>
+          <span id="bbox-tooltip-detail"></span>
+        </div>
         <div class="floating-actions">
           <div class="file-actions-row">
+            <label class="file-button">
+              Open Snapshot
+              <input id="snapshot-input" type="file" accept=".rsnap" />
+            </label>
             <label class="file-button">
               Open Folder
               <input id="folder-input" type="file" multiple />
@@ -104,6 +142,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
               <input id="file-input" type="file" accept=".nbt,.dat,.schem,.schematic,.litematic,.mcstructure" />
             </label>
           </div>
+          <button id="toggle-snapshot-boxes" class="file-button graph-button snapshot-box-button hidden" type="button">Boxes</button>
           <button id="open-graphs" class="file-button graph-button" type="button">Graphs</button>
         </div>
         <details id="switches-panel" class="floating-panel switches-panel" open>
@@ -262,7 +301,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
     <dialog id="selected-nbt-dialog" class="graph-dialog selected-nbt-dialog">
       <div class="graph-dialog-surface selected-nbt-dialog-surface">
         <header class="graph-dialog-header">
-          <strong>Selected NBT</strong>
+          <strong id="selected-nbt-title">Selected NBT</strong>
           <button id="close-selected-nbt" class="panel-action" type="button">Close</button>
         </header>
         <div id="selected-nbt-status" class="graph-status">Select world graph nodes to open focused NBT.</div>
@@ -271,16 +310,29 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
         </div>
       </div>
     </dialog>
+    <dialog id="artifact-dialog" class="graph-dialog artifact-dialog">
+      <div class="graph-dialog-surface artifact-dialog-surface">
+        <header class="graph-dialog-header">
+          <strong id="artifact-title">Snapshot artifact</strong>
+          <button id="close-artifact" class="panel-action" type="button">Close</button>
+        </header>
+        <pre id="artifact-content" class="artifact-content"></pre>
+      </div>
+    </dialog>
   </main>
 `;
 
 const input = document.querySelector<HTMLInputElement>('#file-input')!;
+const snapshotInput = document.querySelector<HTMLInputElement>('#snapshot-input')!;
 const folderInput = document.querySelector<HTMLInputElement>('#folder-input')!;
 const dropZone = document.querySelector<HTMLElement>('#drop-zone')!;
 const filesPanel = document.querySelector<HTMLDetailsElement>('#files-panel')!;
 const filesList = document.querySelector<HTMLElement>('#files-list')!;
 const filesCount = document.querySelector<HTMLElement>('#files-count')!;
 const canvas = document.querySelector<HTMLCanvasElement>('#structure-canvas')!;
+const bboxTooltip = document.querySelector<HTMLElement>('#bbox-tooltip')!;
+const bboxTooltipTitle = document.querySelector<HTMLElement>('#bbox-tooltip-title')!;
+const bboxTooltipDetail = document.querySelector<HTMLElement>('#bbox-tooltip-detail')!;
 const viewerEmpty = document.querySelector<HTMLElement>('#viewer-empty')!;
 const inspectorPanel = document.querySelector<HTMLElement>('.inspector-panel')!;
 const inspector = document.querySelector<HTMLElement>('#inspector')!;
@@ -309,6 +361,7 @@ const traceSimulationToggle = document.querySelector<HTMLLabelElement>('#trace-s
 const traceSimulationEnabledInput = document.querySelector<HTMLInputElement>('#trace-simulation-enabled')!;
 const traceSimulationState = document.querySelector<HTMLElement>('#trace-simulation-state')!;
 const openGraphsButton = document.querySelector<HTMLButtonElement>('#open-graphs')!;
+const toggleSnapshotBoxesButton = document.querySelector<HTMLButtonElement>('#toggle-snapshot-boxes')!;
 const closeGraphsButton = document.querySelector<HTMLButtonElement>('#close-graphs')!;
 const graphDialog = document.querySelector<HTMLDialogElement>('#graph-dialog')!;
 const graphWorldTab = document.querySelector<HTMLButtonElement>('#graph-world-tab')!;
@@ -353,9 +406,14 @@ const selectedGraphZoomInButton = document.querySelector<HTMLButtonElement>('#se
 const selectedGraphStatus = document.querySelector<HTMLElement>('#selected-graph-status')!;
 const selectedGraphOutput = document.querySelector<HTMLElement>('#selected-graph-output')!;
 const selectedNbtDialog = document.querySelector<HTMLDialogElement>('#selected-nbt-dialog')!;
+const selectedNbtTitle = document.querySelector<HTMLElement>('#selected-nbt-title')!;
 const closeSelectedNbtButton = document.querySelector<HTMLButtonElement>('#close-selected-nbt')!;
 const selectedNbtStatus = document.querySelector<HTMLElement>('#selected-nbt-status')!;
 const selectedNbtCanvas = document.querySelector<HTMLCanvasElement>('#selected-nbt-canvas')!;
+const artifactDialog = document.querySelector<HTMLDialogElement>('#artifact-dialog')!;
+const closeArtifactButton = document.querySelector<HTMLButtonElement>('#close-artifact')!;
+const artifactTitle = document.querySelector<HTMLElement>('#artifact-title')!;
+const artifactContent = document.querySelector<HTMLElement>('#artifact-content')!;
 
 const viewer = new StructureViewer(canvas);
 viewer.setSelectionHandler(renderSelection);
@@ -403,6 +461,9 @@ let selectedGraphLogicModeValue: GraphLogicMode = 'raw';
 let selectedGraphHighLevelLogic = false;
 let selectedGraphShowTags = true;
 let selectedGraphZoom = 1;
+let currentSnapshot: LoadedSnapshot | undefined;
+let currentSnapshotPath: string | undefined;
+let snapshotBoxesVisible = true;
 
 folderInput.setAttribute('webkitdirectory', '');
 folderInput.setAttribute('directory', '');
@@ -411,11 +472,29 @@ void loadExamples();
 
 input.addEventListener('change', () => {
   const file = input.files?.[0];
-  if (file) void openFile(file);
+  if (file) {
+    leaveSnapshotMode();
+    void openFile(file);
+  }
+});
+
+snapshotInput.addEventListener('change', () => {
+  const file = snapshotInput.files?.[0];
+  if (!file) return;
+  void openSnapshot([file]).catch(error => {
+    inspector.textContent = error instanceof Error ? error.message : String(error);
+  });
 });
 
 folderInput.addEventListener('change', () => {
-  renderFileBrowser(Array.from(folderInput.files ?? []));
+  void openSnapshot(Array.from(folderInput.files ?? [])).catch(error => {
+    inspector.textContent = error instanceof Error ? error.message : String(error);
+  });
+});
+
+toggleSnapshotBoxesButton.addEventListener('click', () => {
+  snapshotBoxesVisible = !snapshotBoxesVisible;
+  updateSnapshotBoxes();
 });
 
 toggleSwitchButton.addEventListener('click', () => {
@@ -607,6 +686,14 @@ selectedNbtDialog.addEventListener('click', event => {
   if (event.target === selectedNbtDialog) {
     selectedNbtDialog.close();
   }
+});
+
+closeArtifactButton.addEventListener('click', () => {
+  artifactDialog.close();
+});
+
+artifactDialog.addEventListener('click', event => {
+  if (event.target === artifactDialog) artifactDialog.close();
 });
 
 selectedGraphWorldTab.addEventListener('click', () => {
@@ -988,6 +1075,7 @@ async function openSelectedNbtView(): Promise<void> {
   const nodeIds = selectedWorldGraphNodeIds(sourceSvg);
   if (nodeIds.length === 0 || !currentNbtBytes) return;
 
+  selectedNbtTitle.textContent = 'Selected NBT';
   if (!selectedNbtDialog.open) selectedNbtDialog.showModal();
   selectedNbtStatus.textContent = 'Generating selected NBT...';
 
@@ -1471,8 +1559,9 @@ dropZone.addEventListener('drop', event => {
 async function handleDrop(event: DragEvent): Promise<void> {
   const dropped = await collectDroppedFiles(event.dataTransfer);
   if (dropped.containsDirectory || dropped.files.length > 1) {
-    renderFileBrowser(dropped.files);
+    if (!(await tryOpenSnapshot(dropped.files))) renderFileBrowser(dropped.files);
   } else if (dropped.files[0]) {
+    leaveSnapshotMode();
     void openFile(dropped.files[0]);
   }
 }
@@ -1606,7 +1695,361 @@ function setDroppedFilePath(file: File, path: string): void {
   }
 }
 
+async function openSnapshot(files: File[]): Promise<void> {
+  if (!(await tryOpenSnapshot(files))) {
+    throw new Error('This input does not contain a redstone-compiler snapshot manifest.');
+  }
+}
+
+async function tryOpenSnapshot(files: File[]): Promise<boolean> {
+  const snapshot = await parseSnapshot(await expandSnapshotFiles(files));
+  if (!snapshot) return false;
+
+  currentSnapshot = snapshot;
+  currentSnapshotPath = undefined;
+  snapshotBoxesVisible = true;
+  renderSnapshotBrowser(snapshot);
+  updateSnapshotBoxes();
+
+  const finalPath = snapshot.manifest.final_nbt;
+  if (finalPath && snapshot.filesByPath.has(finalPath)) {
+    await openSnapshotNbt(finalPath, findSnapshotEntry(finalPath));
+  } else {
+    viewerEmpty.classList.remove('hidden');
+    inspector.textContent = `Snapshot ${snapshot.manifest.status}: no final NBT was emitted.`;
+  }
+  return true;
+}
+
+async function expandSnapshotFiles(files: File[]): Promise<File[]> {
+  const expanded = files.filter(file => !isSnapshotArchive(file));
+  for (const archive of files.filter(isSnapshotArchive)) {
+    expanded.push(...await unpackSnapshotArchive(archive));
+  }
+  return expanded;
+}
+
+function isSnapshotArchive(file: File): boolean {
+  return file.name.toLowerCase().endsWith('.rsnap');
+}
+
+async function unpackSnapshotArchive(archive: File): Promise<File[]> {
+  const entries = Object.entries(unzipSync(new Uint8Array(await archive.arrayBuffer())))
+    .filter(([path]) => !path.endsWith('/'))
+    .sort(([left], [right]) => left.localeCompare(right));
+  if (entries.length > 4096) throw new Error('Snapshot archive contains too many files.');
+
+  let totalSize = 0;
+  const files: File[] = [];
+  for (const [rawPath, bytes] of entries) {
+    const path = normalizePath(rawPath);
+    if (!isSafeArchivePath(path)) throw new Error(`Snapshot archive contains an unsafe path: ${rawPath}`);
+    totalSize += bytes.byteLength;
+    if (totalSize > 256 * 1024 * 1024) throw new Error('Snapshot archive expands beyond 256 MiB.');
+
+    const name = path.split('/').pop() ?? path;
+    const file = new File([bytes], name, { type: 'application/octet-stream' });
+    setDroppedFilePath(file, path);
+    files.push(file);
+  }
+  return files;
+}
+
+function isSafeArchivePath(path: string): boolean {
+  return path.length > 0
+    && !path.startsWith('/')
+    && !/^[a-z]:/i.test(path)
+    && path.split('/').every(segment => segment.length > 0 && segment !== '.' && segment !== '..');
+}
+
+async function parseSnapshot(files: File[]): Promise<LoadedSnapshot | undefined> {
+  for (const manifestFile of files.filter(file => /(^|\/)manifest\.json$/i.test(normalizePath(getDisplayPath(file))))) {
+    let manifest: SnapshotManifest;
+    try {
+      manifest = JSON.parse(await manifestFile.text()) as SnapshotManifest;
+    } catch {
+      continue;
+    }
+    if (manifest.format !== 'redstone-compiler.snapshot.v1' || !Array.isArray(manifest.artifacts)) continue;
+
+    const manifestPath = normalizePath(getDisplayPath(manifestFile));
+    const rootPrefix = manifestPath.slice(0, -'manifest.json'.length);
+    const filesByPath = new Map<string, File>();
+    for (const file of files) {
+      const path = normalizePath(getDisplayPath(file));
+      if (!path.startsWith(rootPrefix)) continue;
+      filesByPath.set(path.slice(rootPrefix.length), file);
+    }
+
+    const interfaceJson = await filesByPath.get('interface.json')?.text();
+    const instances: SnapshotInstance[] = [];
+    for (const artifact of manifest.artifacts) {
+      if (!/^instances\/[^/]+\/instance\.json$/i.test(artifact.path)) continue;
+      const file = filesByPath.get(artifact.path);
+      if (!file) continue;
+      try {
+        const instance = parseSnapshotInstance(JSON.parse(await file.text()), artifact.path);
+        if (instance) instances.push(instance);
+      } catch (error) {
+        console.warn(`Skipping invalid snapshot instance metadata: ${artifact.path}`, error);
+      }
+    }
+    instances.sort((a, b) => a.instance.localeCompare(b.instance));
+
+    return { manifest, filesByPath, instances, interfaceJson };
+  }
+
+  return undefined;
+}
+
+function parseSnapshotInstance(value: unknown, artifactPath: string): SnapshotInstance | undefined {
+  const record = asRecord(value);
+  const bbox = asRecord(record?.global_bbox);
+  const min = readNumberTuple(bbox?.min);
+  const max = readNumberTuple(bbox?.max);
+  if (!record || typeof record.instance !== 'string' || typeof record.module !== 'string' || !min || !max) {
+    return undefined;
+  }
+
+  const cost = asRecord(record.cost);
+  const blockCount = Number(cost?.blocks);
+  return {
+    instance: record.instance,
+    module: record.module,
+    artifactPath,
+    circuitPath: artifactPath.replace(/instance\.json$/i, 'circuit.nbt'),
+    global_bbox: { min, max },
+    blockCount: Number.isFinite(blockCount) ? blockCount : undefined,
+  };
+}
+
+function readNumberTuple(value: unknown): [number, number, number] | undefined {
+  if (!Array.isArray(value) || value.length < 3) return undefined;
+  const tuple = value.slice(0, 3).map(Number);
+  return tuple.every(Number.isFinite) ? [tuple[0], tuple[1], tuple[2]] : undefined;
+}
+
+function renderSnapshotBrowser(snapshot: LoadedSnapshot): void {
+  filesList.replaceChildren();
+  filesList.className = 'files-list snapshot-files-list';
+  filesCount.textContent = `${snapshot.manifest.top_module ?? 'snapshot'} · ${snapshot.instances.length} boxes`;
+  filesPanel.open = true;
+
+  const finalPath = snapshot.manifest.final_nbt;
+  if (finalPath && snapshot.filesByPath.has(finalPath)) {
+    appendSnapshotSection('Final');
+    appendSnapshotNbtEntry(finalPath, finalPath, 'main');
+  }
+
+  if (snapshot.instances.length > 0) {
+    appendSnapshotSection('Instances');
+    for (const instance of snapshot.instances) {
+      const file = snapshot.filesByPath.get(instance.circuitPath);
+      if (!file) continue;
+      const button = createFileEntry(instance.instance, instance.module, file.size);
+      button.dataset.snapshotPath = instance.circuitPath;
+      button.dataset.snapshotInstance = instance.artifactPath;
+      button.addEventListener('click', () => void openSnapshotInstance(instance));
+      filesList.append(button);
+    }
+  }
+
+  const diagnosticPaths = ['placement-bboxes.nbt', 'routes/routes.nbt'].filter(path => snapshot.filesByPath.has(path));
+  if (diagnosticPaths.length > 0) {
+    appendSnapshotSection('PnR diagnostics');
+    for (const path of diagnosticPaths) {
+      const segments = path.split('/');
+      appendSnapshotNbtEntry(segments[segments.length - 1] ?? path, path, 'main');
+    }
+  }
+
+  const metadata = snapshot.manifest.artifacts.filter(
+    artifact =>
+      artifact.kind !== 'nbt' &&
+      !/^instances\/[^/]+\/instance\.json$/i.test(artifact.path) &&
+      snapshot.filesByPath.has(artifact.path),
+  );
+  if (metadata.length > 0) {
+    appendSnapshotSection('Metadata');
+    for (const artifact of metadata) {
+      const file = snapshot.filesByPath.get(artifact.path)!;
+      const button = createFileEntry(artifact.path, artifact.kind, file.size);
+      button.dataset.snapshotPath = artifact.path;
+      button.addEventListener('click', () => void openTextArtifact(artifact.path));
+      filesList.append(button);
+    }
+  }
+}
+
+function appendSnapshotSection(label: string): void {
+  const heading = document.createElement('div');
+  heading.className = 'snapshot-section-title';
+  heading.textContent = label;
+  filesList.append(heading);
+}
+
+function appendSnapshotNbtEntry(label: string, path: string, target: 'main'): void {
+  const file = currentSnapshot?.filesByPath.get(path);
+  if (!file || target !== 'main') return;
+  const button = createFileEntry(label, 'NBT', file.size);
+  button.dataset.snapshotPath = path;
+  button.addEventListener('click', () => void openSnapshotNbt(path, button));
+  filesList.append(button);
+}
+
+function createFileEntry(label: string, detail: string, size: number): HTMLButtonElement {
+  const button = document.createElement('button');
+  button.className = 'file-entry';
+  button.type = 'button';
+  const name = document.createElement('span');
+  name.className = 'file-entry-name';
+  name.textContent = label;
+  name.title = label;
+  const metadata = document.createElement('span');
+  metadata.className = 'file-entry-size snapshot-entry-detail';
+  metadata.textContent = `${detail} · ${formatBytes(size)}`;
+  button.append(name, metadata);
+  return button;
+}
+
+async function openSnapshotNbt(path: string, selectedEntry?: Element | null): Promise<void> {
+  const snapshot = currentSnapshot;
+  const file = snapshot?.filesByPath.get(path);
+  if (!snapshot || !file) throw new Error(`Snapshot artifact is missing: ${path}`);
+  const outputMetadataJson = path === snapshot.manifest.final_nbt ? snapshot.interfaceJson : undefined;
+  await openFile(file, selectedEntry, outputMetadataJson, path);
+}
+
+async function openSnapshotInstance(instance: SnapshotInstance): Promise<void> {
+  const file = currentSnapshot?.filesByPath.get(instance.circuitPath);
+  if (!file) throw new Error(`Instance NBT is missing: ${instance.circuitPath}`);
+
+  selectedNbtTitle.textContent = instance.instance;
+  selectedNbtStatus.textContent = `Loading ${instance.module}...`;
+  if (!selectedNbtDialog.open) selectedNbtDialog.showModal();
+
+  try {
+    const parsed = await loadNbtFile(file);
+    const structure = toStructureModel(parsed.root);
+    if (!structure) throw new Error('Instance artifact is not a Minecraft structure.');
+    await selectedNbtViewer.setStructure(structure);
+    const { min, max } = instance.global_bbox;
+    selectedNbtStatus.textContent = [
+      instance.module,
+      `${structure.blocks.length} blocks`,
+      `global bbox (${min.join(', ')}) → (${max.join(', ')})`,
+    ].join(' · ');
+  } catch (error) {
+    selectedNbtStatus.textContent = error instanceof Error ? error.message : String(error);
+  }
+}
+
+async function openTextArtifact(path: string): Promise<void> {
+  const file = currentSnapshot?.filesByPath.get(path);
+  if (!file) throw new Error(`Snapshot artifact is missing: ${path}`);
+  const text = await file.text();
+  artifactTitle.textContent = path;
+  try {
+    artifactContent.textContent = JSON.stringify(JSON.parse(text), null, 2);
+  } catch {
+    artifactContent.textContent = text;
+  }
+  if (!artifactDialog.open) artifactDialog.showModal();
+}
+
+function findSnapshotEntry(path: string): Element | null {
+  return Array.from(filesList.querySelectorAll<HTMLElement>('[data-snapshot-path]')).find(
+    entry => entry.dataset.snapshotPath === path,
+  ) ?? null;
+}
+
+function updateSnapshotBoxes(): void {
+  const snapshot = currentSnapshot;
+  const available = Boolean(
+    snapshot && currentSnapshotPath === snapshot.manifest.final_nbt && snapshot.instances.length > 0,
+  );
+  const visible = available && snapshotBoxesVisible;
+  const boxes = visible
+    ? snapshot!.instances.map(instance => ({
+        id: instance.artifactPath,
+        label: instance.instance,
+        min: compilerPositionToNbt(instance.global_bbox.min),
+        max: compilerPositionToNbt(instance.global_bbox.max).map(value => value + 1) as [number, number, number],
+      }))
+    : [];
+  viewer.setBoundingBoxes(
+    boxes,
+    box => {
+      const instance = currentSnapshot?.instances.find(candidate => candidate.artifactPath === box.id);
+      if (instance) void openSnapshotInstance(instance);
+    },
+    renderSnapshotBoxHover,
+  );
+  toggleSnapshotBoxesButton.classList.toggle('hidden', !available);
+  toggleSnapshotBoxesButton.classList.toggle('active', visible);
+  toggleSnapshotBoxesButton.textContent = snapshot ? `Boxes: ${snapshot.instances.length}` : 'Boxes';
+  toggleSnapshotBoxesButton.setAttribute('aria-pressed', String(visible));
+}
+
+function renderSnapshotBoxHover(
+  box: { id: string } | undefined,
+  clientX: number,
+  clientY: number,
+): void {
+  filesList.querySelectorAll('.file-entry.bbox-hover').forEach(entry => entry.classList.remove('bbox-hover'));
+
+  const instance = box
+    ? currentSnapshot?.instances.find(candidate => candidate.artifactPath === box.id)
+    : undefined;
+  if (!instance) {
+    bboxTooltip.classList.add('hidden');
+    bboxTooltip.setAttribute('aria-hidden', 'true');
+    return;
+  }
+
+  const entry = Array.from(filesList.querySelectorAll<HTMLElement>('[data-snapshot-instance]')).find(
+    candidate => candidate.dataset.snapshotInstance === instance.artifactPath,
+  );
+  entry?.classList.add('bbox-hover');
+
+  const { min, max } = instance.global_bbox;
+  const size = min.map((value, index) => max[index] - value + 1);
+  const modulePrefix = instance.module === instance.instance ? '' : `${instance.module} · `;
+  bboxTooltipTitle.textContent = instance.instance;
+  bboxTooltipDetail.textContent = `${modulePrefix}size ${size.join(' × ')} · origin (${min.join(', ')})`;
+  bboxTooltip.classList.remove('hidden');
+  bboxTooltip.setAttribute('aria-hidden', 'false');
+
+  const bounds = bboxTooltip.getBoundingClientRect();
+  const gap = 14;
+  const viewportPadding = 8;
+  const left = clientX + gap + bounds.width <= window.innerWidth - viewportPadding
+    ? clientX + gap
+    : clientX - gap - bounds.width;
+  const top = clientY + gap + bounds.height <= window.innerHeight - viewportPadding
+    ? clientY + gap
+    : clientY - gap - bounds.height;
+  bboxTooltip.style.left = `${Math.max(viewportPadding, left)}px`;
+  bboxTooltip.style.top = `${Math.max(viewportPadding, top)}px`;
+}
+
+function leaveSnapshotMode(): void {
+  currentSnapshot = undefined;
+  currentSnapshotPath = undefined;
+  snapshotBoxesVisible = true;
+  updateSnapshotBoxes();
+}
+
+function normalizePath(path: string): string {
+  return path.replace(/\\/g, '/').replace(/^\.\//, '');
+}
+
+function compilerPositionToNbt(position: [number, number, number]): [number, number, number] {
+  return [position[1], position[2], position[0]];
+}
+
 function renderFileBrowser(files: File[]): void {
+  leaveSnapshotMode();
   const nbtFiles = files
     .filter(isSupportedFile)
     .sort((a, b) => getDisplayPath(a).localeCompare(getDisplayPath(b)));
@@ -1645,8 +2088,9 @@ async function loadExamples(): Promise<void> {
     if (!response.ok) throw new Error(`Failed to load examples: ${response.status}`);
     const examples = (await response.json()) as ExampleFile[];
     renderExampleBrowser(examples);
-    if (examples[0]) {
-      await openExample(examples[0], filesList.querySelector('.file-entry'));
+    const initialExample = examples.find(example => example.kind === 'nbt');
+    if (initialExample) {
+      await openExample(initialExample, findExampleEntry(initialExample.path));
     }
   } catch (error) {
     filesList.classList.add('empty');
@@ -1665,26 +2109,44 @@ function renderExampleBrowser(examples: ExampleFile[]): void {
     return;
   }
 
-  for (const example of examples) {
-    const button = document.createElement('button');
-    button.className = 'file-entry';
-    button.type = 'button';
-    const name = document.createElement('span');
-    name.className = 'file-entry-name';
-    name.textContent = example.name;
-    const size = document.createElement('span');
-    size.className = 'file-entry-size';
-    size.textContent = formatBytes(example.size);
-    button.append(name, size);
-    button.addEventListener('click', () => void openExample(example, button));
-    filesList.append(button);
+  for (const [kind, label] of [['snapshot', 'Snapshots'], ['nbt', 'NBT Examples']] as const) {
+    const groupedExamples = examples.filter(example => example.kind === kind);
+    if (groupedExamples.length === 0) continue;
+    appendSnapshotSection(label);
+    for (const example of groupedExamples) appendExampleEntry(example);
   }
+}
+
+function appendExampleEntry(example: ExampleFile): void {
+  const button = document.createElement('button');
+  button.className = 'file-entry';
+  button.type = 'button';
+  button.dataset.examplePath = example.path;
+  const name = document.createElement('span');
+  name.className = 'file-entry-name';
+  name.textContent = example.name;
+  const size = document.createElement('span');
+  size.className = 'file-entry-size';
+  size.textContent = formatBytes(example.size);
+  button.append(name, size);
+  button.addEventListener('click', () => void openExample(example, button));
+  filesList.append(button);
+}
+
+function findExampleEntry(path: string): Element | null {
+  return Array.from(filesList.querySelectorAll<HTMLElement>('[data-example-path]')).find(
+    entry => entry.dataset.examplePath === path,
+  ) ?? null;
 }
 
 async function openExample(example: ExampleFile, selectedEntry?: Element | null): Promise<void> {
   const response = await fetch(resolveAssetPath(example.path));
   if (!response.ok) throw new Error(`Failed to load ${example.path}: ${response.status}`);
   const file = new File([await response.arrayBuffer()], example.name, { type: 'application/octet-stream' });
+  if (example.kind === 'snapshot') {
+    await openSnapshot([file]);
+    return;
+  }
   const outputMetadataJson = example.outputsPath ? await loadExampleMetadata(example.outputsPath) : undefined;
   await openFile(file, selectedEntry, outputMetadataJson);
 }
@@ -1696,7 +2158,12 @@ async function loadExampleMetadata(path: string): Promise<string | undefined> {
   return response.text();
 }
 
-async function openFile(file: File, selectedEntry?: Element | null, outputMetadataJson?: string): Promise<void> {
+async function openFile(
+  file: File,
+  selectedEntry?: Element | null,
+  outputMetadataJson?: string,
+  snapshotPath?: string,
+): Promise<void> {
   try {
     const parsed = await loadNbtFile(file);
     const structure = toStructureModel(parsed.root);
@@ -1709,6 +2176,7 @@ async function openFile(file: File, selectedEntry?: Element | null, outputMetada
     graphWorldModeValue = 'raw';
     graphLogicModeValue = 'raw';
     graphHighLevelLogic = false;
+    currentSnapshotPath = snapshotPath;
 
     markSelectedFile(selectedEntry);
 
@@ -1728,6 +2196,7 @@ async function openFile(file: File, selectedEntry?: Element | null, outputMetada
       renderSwitches();
       renderTrace([], [], emptyWaveform, undefined);
     }
+    updateSnapshotBoxes();
   } catch (error) {
     simulation = undefined;
     currentNbtBytes = undefined;
@@ -1738,12 +2207,14 @@ async function openFile(file: File, selectedEntry?: Element | null, outputMetada
     graphWorldModeValue = 'raw';
     graphLogicModeValue = 'raw';
     graphHighLevelLogic = false;
+    currentSnapshotPath = snapshotPath;
     selectedBlock = undefined;
     toggleSwitchButton.classList.add('hidden');
     viewerEmpty.classList.remove('hidden');
     inspector.textContent = error instanceof Error ? error.message : String(error);
     renderSwitches();
     renderTrace([], [], emptyWaveform, undefined);
+    updateSnapshotBoxes();
   }
 }
 

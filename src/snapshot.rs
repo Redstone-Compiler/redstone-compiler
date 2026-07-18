@@ -1,6 +1,7 @@
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::fs;
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -10,6 +11,8 @@ use std::time::Instant;
 
 use serde::Serialize;
 use serde_json::{json, Value};
+use zip::write::SimpleFileOptions;
+use zip::{CompressionMethod, ZipWriter};
 
 use crate::nbt::NBTRoot;
 
@@ -27,6 +30,7 @@ thread_local! {
 #[derive(Clone, Debug)]
 pub struct SnapshotOptions {
     pub output_dir: PathBuf,
+    pub archive_path: Option<PathBuf>,
     pub design_name: String,
     pub source_path: Option<PathBuf>,
     pub source_text: Option<(String, String)>,
@@ -34,12 +38,24 @@ pub struct SnapshotOptions {
 
 impl SnapshotOptions {
     pub fn new(output_dir: impl Into<PathBuf>, design_name: impl Into<String>) -> Self {
+        let output_dir = output_dir.into();
         Self {
-            output_dir: output_dir.into(),
+            archive_path: Some(output_dir.with_extension("rsnap")),
+            output_dir,
             design_name: design_name.into(),
             source_path: None,
             source_text: None,
         }
+    }
+
+    pub fn with_archive_path(mut self, archive_path: impl Into<PathBuf>) -> Self {
+        self.archive_path = Some(archive_path.into());
+        self
+    }
+
+    pub fn without_archive(mut self) -> Self {
+        self.archive_path = None;
+        self
     }
 
     pub fn with_source(mut self, source_path: impl Into<PathBuf>) -> Self {
@@ -119,7 +135,7 @@ pub fn compile_with_snapshot<T>(
 where
     T: SnapshotProduct,
 {
-    let session = SnapshotSession::start(&options.output_dir)?;
+    let session = SnapshotSession::start(&options)?;
     let _scope = SnapshotScope::enter(session.run_id);
     let started = Instant::now();
 
@@ -262,12 +278,22 @@ impl Drop for SnapshotScope {
 
 struct SnapshotSession {
     run_id: RunId,
+    output_dir: PathBuf,
+    archive_path: Option<PathBuf>,
     sender: Option<Sender<WriterMessage>>,
     writer: Option<JoinHandle<eyre::Result<()>>>,
 }
 
 impl SnapshotSession {
-    fn start(output_dir: &Path) -> eyre::Result<Self> {
+    fn start(options: &SnapshotOptions) -> eyre::Result<Self> {
+        let output_dir = &options.output_dir;
+        if options
+            .archive_path
+            .as_ref()
+            .is_some_and(|archive_path| archive_path.starts_with(output_dir))
+        {
+            eyre::bail!("snapshot archive must be outside the snapshot directory");
+        }
         fs::create_dir_all(output_dir)?;
         for generated_index in ["manifest.json", "summary.json"] {
             let path = output_dir.join(generated_index);
@@ -282,11 +308,14 @@ impl SnapshotSession {
             .map_err(|_| eyre::eyre!("snapshot hub lock is poisoned"))?
             .insert(run_id, sender.clone());
         let output_dir = output_dir.to_owned();
+        let writer_output_dir = output_dir.clone();
         let writer = thread::Builder::new()
             .name(format!("snapshot-writer-{run_id}"))
-            .spawn(move || writer_loop(&output_dir, receiver))?;
+            .spawn(move || writer_loop(&writer_output_dir, receiver))?;
         Ok(Self {
             run_id,
+            output_dir,
+            archive_path: options.archive_path.clone(),
             sender: Some(sender),
             writer: Some(writer),
         })
@@ -310,7 +339,11 @@ impl SnapshotSession {
             .take()
             .ok_or_else(|| eyre::eyre!("snapshot writer was already joined"))?
             .join()
-            .map_err(|_| eyre::eyre!("snapshot writer panicked"))?
+            .map_err(|_| eyre::eyre!("snapshot writer panicked"))??;
+        if let Some(archive_path) = self.archive_path.as_deref() {
+            write_snapshot_archive(&self.output_dir, archive_path)?;
+        }
+        Ok(())
     }
 }
 
@@ -417,6 +450,63 @@ fn write_file(output_dir: &Path, relative: &Path, bytes: &[u8]) -> eyre::Result<
     Ok(())
 }
 
+pub fn write_snapshot_archive(snapshot_dir: &Path, archive_path: &Path) -> eyre::Result<()> {
+    if archive_path.starts_with(snapshot_dir) {
+        eyre::bail!("snapshot archive must be outside the snapshot directory");
+    }
+
+    let manifest_path = snapshot_dir.join("manifest.json");
+    let manifest_bytes = fs::read(&manifest_path)?;
+    let manifest: Value = serde_json::from_slice(&manifest_bytes)?;
+    let mut entries = vec![PathBuf::from("manifest.json")];
+    for artifact in manifest["artifacts"]
+        .as_array()
+        .ok_or_else(|| eyre::eyre!("snapshot manifest has no artifacts array"))?
+    {
+        let path = artifact["path"]
+            .as_str()
+            .ok_or_else(|| eyre::eyre!("snapshot manifest artifact has no path"))?;
+        entries.push(checked_relative_path(PathBuf::from(path))?);
+    }
+    entries.sort_by(|left, right| {
+        left.to_string_lossy()
+            .replace('\\', "/")
+            .cmp(&right.to_string_lossy().replace('\\', "/"))
+    });
+    entries.dedup();
+
+    if let Some(parent) = archive_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let temporary_path = archive_path.with_extension("rsnap.tmp");
+    if temporary_path.is_file() {
+        fs::remove_file(&temporary_path)?;
+    }
+
+    let archive_file = fs::File::create(&temporary_path)?;
+    let mut archive = ZipWriter::new(archive_file);
+    let options = SimpleFileOptions::default()
+        .compression_method(CompressionMethod::Deflated)
+        .last_modified_time(zip::DateTime::default())
+        .unix_permissions(0o644);
+    for relative_path in entries {
+        let entry_name = relative_path.to_string_lossy().replace('\\', "/");
+        let source_path = snapshot_dir.join(&relative_path);
+        if !source_path.is_file() {
+            eyre::bail!("snapshot artifact is missing: {}", source_path.display());
+        }
+        archive.start_file(entry_name, options)?;
+        archive.write_all(&fs::read(source_path)?)?;
+    }
+    archive.finish()?;
+
+    if archive_path.is_file() {
+        fs::remove_file(archive_path)?;
+    }
+    fs::rename(temporary_path, archive_path)?;
+    Ok(())
+}
+
 fn artifact_entry(path: &Path, kind: &'static str) -> ArtifactEntry {
     ArtifactEntry {
         path: path.to_string_lossy().replace('\\', "/"),
@@ -485,7 +575,13 @@ mod tests {
         assert_eq!(summary["events"].as_array().map(Vec::len), Some(1));
         assert!(output.join("manifest.json").is_file());
         assert!(output.join("product.json").is_file());
+        let archive = output.with_extension("rsnap");
+        assert!(archive.is_file());
+        let first_archive = fs::read(&archive)?;
+        write_snapshot_archive(&output, &archive)?;
+        assert_eq!(fs::read(&archive)?, first_archive);
         fs::remove_dir_all(output)?;
+        fs::remove_file(archive)?;
         Ok(())
     }
 
@@ -503,7 +599,10 @@ mod tests {
         assert!(summary["error"]
             .as_str()
             .is_some_and(|error| error.contains("expected failure")));
+        let archive = output.with_extension("rsnap");
+        assert!(archive.is_file());
         fs::remove_dir_all(output)?;
+        fs::remove_file(archive)?;
         Ok(())
     }
 

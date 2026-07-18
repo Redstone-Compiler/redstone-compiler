@@ -3,8 +3,15 @@ import { BlockState, Structure } from 'deepslate/core';
 import { StructureRenderer } from 'deepslate/render';
 import type { StructureBlock, StructureModel } from '../types';
 import { MinecraftResources } from './mcmeta';
+import { BoundingBoxRenderer, type ViewerBoundingBox } from './BoundingBoxRenderer';
 
 type SelectionHandler = (block: StructureBlock | undefined) => void;
+type BoundingBoxSelectionHandler = (box: ViewerBoundingBox) => void;
+type BoundingBoxHoverHandler = (
+  box: ViewerBoundingBox | undefined,
+  clientX: number,
+  clientY: number,
+) => void;
 type DragMode = 'move' | 'rotate';
 type SetStructureOptions = {
   preserveView?: boolean;
@@ -37,12 +44,15 @@ function createDeepslateStructure(model: StructureModel): Structure {
 export class StructureViewer {
   private readonly gl: WebGLRenderingContext;
   private readonly resourcesPromise = MinecraftResources.load();
+  private readonly boundingBoxRenderer: BoundingBoxRenderer;
   private renderer?: StructureRenderer;
   private structure = Structure.EMPTY;
   private model?: StructureModel;
   private selectedBlock?: vec3;
   private traceHighlights: vec3[] = [];
   private onSelect: SelectionHandler = () => undefined;
+  private onBoundingBoxSelect: BoundingBoxSelectionHandler = () => undefined;
+  private onBoundingBoxHover: BoundingBoxHoverHandler = () => undefined;
   private frame = 0;
   private dragMode?: DragMode;
   private dragPos?: vec2;
@@ -61,13 +71,17 @@ export class StructureViewer {
     });
     if (!gl) throw new Error('WebGL is unavailable.');
     this.gl = gl;
+    this.boundingBoxRenderer = new BoundingBoxRenderer(gl);
 
     canvas.addEventListener('contextmenu', event => event.preventDefault());
     canvas.addEventListener('pointerdown', event => this.onPointerDown(event));
     canvas.addEventListener('pointermove', event => this.onPointerMove(event));
     canvas.addEventListener('pointerup', event => this.onPointerUp(event));
     canvas.addEventListener('pointercancel', event => this.onPointerUp(event));
-    canvas.addEventListener('pointerleave', event => this.onPointerUp(event));
+    canvas.addEventListener('pointerleave', event => {
+      this.clearBoundingBoxHover();
+      this.onPointerUp(event);
+    });
     canvas.addEventListener('wheel', event => this.onWheel(event), { passive: false });
     window.addEventListener('keydown', event => this.onKeyDown(event));
     window.addEventListener('keyup', event => this.onKeyUp(event));
@@ -78,6 +92,18 @@ export class StructureViewer {
 
   setSelectionHandler(handler: SelectionHandler): void {
     this.onSelect = handler;
+  }
+
+  setBoundingBoxes(
+    boxes: ViewerBoundingBox[],
+    handler?: BoundingBoxSelectionHandler,
+    hoverHandler?: BoundingBoxHoverHandler,
+  ): void {
+    this.clearBoundingBoxHover();
+    this.boundingBoxRenderer.setBoxes(boxes);
+    this.onBoundingBoxSelect = handler ?? (() => undefined);
+    this.onBoundingBoxHover = hoverHandler ?? (() => undefined);
+    this.render();
   }
 
   async setStructure(model: StructureModel, options: SetStructureOptions = {}): Promise<void> {
@@ -151,6 +177,11 @@ export class StructureViewer {
   }
 
   private onPointerMove(event: PointerEvent): void {
+    if (event.pointerType === 'mouse' && this.activePointers.size === 0) {
+      this.updateBoundingBoxHover(event.offsetX, event.offsetY, event.clientX, event.clientY);
+      return;
+    }
+
     const currentPos = this.activePointers.get(event.pointerId);
     if (!currentPos) return;
 
@@ -258,6 +289,18 @@ export class StructureViewer {
     if (!this.renderer || !this.model) return;
 
     this.resize();
+    const selectedBox = this.pickBoundingBox(x, y);
+    if (selectedBox) {
+      this.boundingBoxRenderer.setSelectedId(selectedBox.id);
+      this.clearBoundingBoxHover();
+      this.selectedBlock = undefined;
+      this.onSelect(undefined);
+      this.onBoundingBoxSelect(selectedBox);
+      this.render();
+      return;
+    }
+
+    this.boundingBoxRenderer.setSelectedId(undefined);
     this.clearFrame();
     this.renderer.drawColoredStructure(this.getViewMatrix());
 
@@ -273,6 +316,32 @@ export class StructureViewer {
     }
 
     this.render();
+  }
+
+  private updateBoundingBoxHover(x: number, y: number, clientX: number, clientY: number): void {
+    if (!this.renderer || !this.model) return;
+
+    this.resize();
+    const hoveredBox = this.pickBoundingBox(x, y);
+    this.canvas.style.cursor = hoveredBox ? 'pointer' : '';
+    this.onBoundingBoxHover(hoveredBox, clientX, clientY);
+    if (this.boundingBoxRenderer.setHoveredId(hoveredBox?.id)) this.render();
+  }
+
+  private clearBoundingBoxHover(): void {
+    this.canvas.style.cursor = '';
+    this.onBoundingBoxHover(undefined, 0, 0);
+    if (this.boundingBoxRenderer.setHoveredId(undefined)) this.render();
+  }
+
+  private pickBoundingBox(x: number, y: number): ViewerBoundingBox | undefined {
+    return this.boundingBoxRenderer.pick(
+      x,
+      y,
+      this.getViewMatrix(),
+      this.canvas.clientWidth,
+      this.canvas.clientHeight,
+    );
   }
 
   private getViewMatrix(): mat4 {
@@ -299,6 +368,7 @@ export class StructureViewer {
     }
 
     this.renderer.setViewport(0, 0, this.canvas.width, this.canvas.height);
+    this.boundingBoxRenderer.setViewport(0, 0, this.canvas.width, this.canvas.height);
   }
 
   private render(): void {
@@ -314,6 +384,7 @@ export class StructureViewer {
       const viewMatrix = this.getViewMatrix();
       this.renderer.drawGrid(viewMatrix);
       this.renderer.drawStructure(viewMatrix);
+      this.boundingBoxRenderer.draw(viewMatrix);
       for (const block of this.traceHighlights) {
         this.renderer.drawOutline(viewMatrix, block);
       }

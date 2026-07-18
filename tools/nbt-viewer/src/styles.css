@@ -84,6 +84,16 @@ input {
   background: rgb(38 47 55 / 88%);
 }
 
+.file-button.hidden {
+  display: none;
+}
+
+.snapshot-box-button.active {
+  border-color: rgb(255 129 112 / 65%);
+  background: rgb(211 50 50 / 28%);
+  color: #ffe4df;
+}
+
 .file-button input {
   display: none;
 }
@@ -306,6 +316,25 @@ input {
   text-align: center;
 }
 
+.snapshot-section-title {
+  margin: 8px 7px 3px;
+  color: #87939d;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.snapshot-section-title:first-child {
+  margin-top: 2px;
+}
+
+.snapshot-entry-detail {
+  max-width: 48%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .file-entry,
 .switch-entry {
   display: flex;
@@ -347,6 +376,16 @@ input {
   background: rgb(255 255 255 / 7%);
 }
 
+.file-entry.bbox-hover:not(.selected) {
+  background: rgb(255 216 96 / 14%);
+  box-shadow: inset 2px 0 #ffd860;
+  color: #fff;
+}
+
+.file-entry.bbox-hover:not(.selected) .file-entry-size {
+  color: #ffe8a6;
+}
+
 .file-entry.selected,
 .switch-entry.selected {
   background: rgb(211 50 50 / 24%);
@@ -356,6 +395,39 @@ input {
 .file-entry.selected .file-entry-size,
 .switch-entry.selected .switch-entry-state {
   color: #ffd0d0;
+}
+
+.bbox-tooltip {
+  position: fixed;
+  z-index: 40;
+  display: grid;
+  gap: 3px;
+  max-width: min(320px, calc(100vw - 16px));
+  padding: 8px 10px;
+  border: 1px solid rgb(255 216 96 / 48%);
+  border-radius: 6px;
+  background: rgb(15 19 23 / 94%);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 36%);
+  color: #f8fafb;
+  font: 11px/1.35 "Cascadia Mono", Consolas, monospace;
+  pointer-events: none;
+}
+
+.bbox-tooltip.hidden {
+  display: none;
+}
+
+.bbox-tooltip strong {
+  overflow: hidden;
+  color: #ffe38a;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bbox-tooltip span {
+  color: #aeb9c2;
+  white-space: nowrap;
 }
 
 .inspector-panel {
@@ -995,6 +1067,21 @@ input {
   display: block;
   width: 100%;
   height: 100%;
+}
+
+.artifact-dialog-surface {
+  grid-template-rows: auto 1fr;
+}
+
+.artifact-content {
+  min-height: 0;
+  margin: 0;
+  padding: 16px;
+  overflow: auto;
+  color: #dce3e7;
+  background: #101317;
+  font: 12px/1.55 "Cascadia Mono", Consolas, monospace;
+  white-space: pre;
 }
 
 .graph-output svg g.node {
