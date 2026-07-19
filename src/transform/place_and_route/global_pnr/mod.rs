@@ -25,8 +25,6 @@ pub use rcir::{
 };
 use serde_json::{json, Value};
 
-use crate::graph::module::{GraphModule, GraphModuleContext, GraphModuleDesign};
-use crate::graph::GraphNodeKind;
 use crate::ir::{
     LogicalDesign, PnrSpec, RoutableDesign, RoutableModule, RoutableModuleBody,
     RoutablePortDirection,
@@ -39,7 +37,6 @@ use crate::snapshot::{
 };
 use crate::transform::place_and_route::global_pnr::assembly::assemble_world;
 use crate::transform::place_and_route::global_pnr::candidate::{
-    generate_graph_module_candidates_with_progress_label,
     generate_routable_module_candidates_with_progress_label, CandidatePolicySet,
     UnitCandidateConfig,
 };
@@ -592,53 +589,6 @@ impl Default for GlobalPnrConfig {
     }
 }
 
-pub fn place_and_route_module(
-    context: &GraphModuleContext,
-    module: &GraphModule,
-    config: &GlobalPnrConfig,
-) -> eyre::Result<World3D> {
-    Ok(place_and_route_module_with_outputs(context, module, config)?.world)
-}
-
-pub fn place_and_route_design(
-    design: &GraphModuleDesign,
-    config: &GlobalPnrConfig,
-) -> eyre::Result<World3D> {
-    Ok(place_and_route_design_with_outputs(design, config)?.world)
-}
-
-pub fn place_and_route_design_with_outputs(
-    design: &GraphModuleDesign,
-    config: &GlobalPnrConfig,
-) -> eyre::Result<PlacedWorld> {
-    let GlobalPnrResult { placed_world, .. } =
-        place_and_route_design_with_visualization(design, config)?;
-    Ok(placed_world)
-}
-
-pub fn place_and_route_module_with_outputs(
-    context: &GraphModuleContext,
-    module: &GraphModule,
-    config: &GlobalPnrConfig,
-) -> eyre::Result<PlacedWorld> {
-    let GlobalPnrResult { placed_world, .. } =
-        place_and_route_module_with_visualization(context, module, config)?;
-    Ok(placed_world)
-}
-
-pub fn place_and_route_design_with_visualization(
-    design: &GraphModuleDesign,
-    config: &GlobalPnrConfig,
-) -> eyre::Result<GlobalPnrResult> {
-    if crate::snapshot::is_active() {
-        let routable = RoutableDesign::from_graph_module_design(design)?;
-        let document = routable_document_from_config(&routable, config)?;
-        crate::snapshot::emit_text("ir/routable.rcir", document.to_string())?;
-        crate::snapshot::emit_json("ir/routable.json", &routable)?;
-    }
-    place_and_route_module_with_visualization(&design.context, design.top_module(), config)
-}
-
 pub fn place_and_route_routable_design_with_visualization(
     design: &RoutableDesign,
     config: &GlobalPnrConfig,
@@ -703,98 +653,6 @@ pub fn place_and_route_logical_design(
             .placed_world
             .world,
     )
-}
-
-pub fn place_and_route_module_with_visualization(
-    context: &GraphModuleContext,
-    module: &GraphModule,
-    config: &GlobalPnrConfig,
-) -> eyre::Result<GlobalPnrResult> {
-    let prepared = prepare_module_for_global_pnr(context, module, &PnrPrepareConfig::from(config))?;
-    run_prepared_pnr_with_visualization(&prepared, config)
-}
-
-pub fn prepare_design_for_global_pnr(
-    design: &GraphModuleDesign,
-    config: &PnrPrepareConfig,
-) -> eyre::Result<PreparedPnrDesign> {
-    prepare_module_for_global_pnr(&design.context, design.top_module(), config)
-}
-
-pub fn prepare_module_for_global_pnr(
-    context: &GraphModuleContext,
-    module: &GraphModule,
-    config: &PnrPrepareConfig,
-) -> eyre::Result<PreparedPnrDesign> {
-    let topology = ResolvedPnrTopology::from_legacy_graph_module(context, module)?;
-    prepare_module_with_topology(context, module, topology, config)
-}
-
-fn prepare_module_with_topology(
-    context: &GraphModuleContext,
-    module: &GraphModule,
-    topology: ResolvedPnrTopology,
-    config: &PnrPrepareConfig,
-) -> eyre::Result<PreparedPnrDesign> {
-    let started = Instant::now();
-    let progress = GlobalPnrProgress::new(config.show_progress, module.name.clone());
-    if module.graph.is_some() {
-        progress.stage(1, 4, "generate leaf layout candidates");
-        let candidate_config = config.candidate.effective_for_definition(&module.name);
-        let candidate_config = candidate_config_for_child(module, &candidate_config);
-        let candidates = generate_graph_module_candidates_with_progress_label(
-            module,
-            &candidate_config,
-            config.show_progress.then_some(module.name.as_str()),
-        )?;
-        if candidates.is_empty() {
-            eyre::bail!("graph-backed module produced no layout candidates");
-        }
-        let summary = PnrPreparationSummary {
-            module: module.name.clone(),
-            instances: 1,
-            unique_candidate_sets: 1,
-            reused_candidate_sets: 0,
-            candidates: candidates.len(),
-            candidate_references: candidates.len(),
-            elapsed_ms: duration_ms(started.elapsed()),
-        };
-        progress.summary(format!(
-            "local preparation completed: candidate_sets=1 candidates={} elapsed={:.2?}",
-            candidates.len(),
-            started.elapsed()
-        ));
-        let prepared = PreparedPnrDesign {
-            module_name: module.name.clone(),
-            topology,
-            prepare_config: config.clone(),
-            body: PreparedPnrBody::Leaf { candidates },
-            summary,
-            snapshot_intent: None,
-            snapshot_pnr: None,
-        };
-        emit_prepared_pnr_snapshot(&prepared)?;
-        return Ok(prepared);
-    }
-
-    progress.stage(1, 4, "generate child layout candidates");
-    let (candidate_sets, instance_bindings, mut summary) =
-        prepare_child_candidate_sets(context, module, config, &progress)?;
-    summary.elapsed_ms = duration_ms(started.elapsed());
-    let prepared = PreparedPnrDesign {
-        module_name: module.name.clone(),
-        topology,
-        prepare_config: config.clone(),
-        body: PreparedPnrBody::Composite {
-            candidate_sets,
-            instance_bindings,
-        },
-        summary,
-        snapshot_intent: None,
-        snapshot_pnr: None,
-    };
-    emit_prepared_pnr_snapshot(&prepared)?;
-    Ok(prepared)
 }
 
 fn prepare_routable_module_with_topology(
@@ -1750,140 +1608,6 @@ fn prepare_routable_child_candidate_sets(
     ))
 }
 
-fn prepare_child_candidate_sets(
-    context: &GraphModuleContext,
-    module: &GraphModule,
-    config: &PnrPrepareConfig,
-    progress: &GlobalPnrProgress,
-) -> eyre::Result<(
-    Vec<PreparedCandidateSet>,
-    Vec<PreparedInstanceCandidateBinding>,
-    PnrPreparationSummary,
-)> {
-    let started = Instant::now();
-    let mut bindings = Vec::new();
-    let mut cache = ChildCandidateCache::default();
-    let mut reused = 0usize;
-    let mut candidate_references = 0usize;
-    for (index, instance) in module.instances.iter().enumerate() {
-        progress.item(
-            index + 1,
-            module.instances.len(),
-            format!("generate `{instance}` candidate"),
-        );
-        let child = &context[instance.as_str()];
-        let base_config = config.candidate.effective_for_definition(&child.name);
-        let child_config = candidate_config_for_child(child, &base_config);
-        let persistent_key = candidate_shape_fingerprint(child, &child_config);
-        let persistent_hit = std::cell::Cell::new(false);
-        let candidate_started = Instant::now();
-        let (candidate_set_index, cache_hit) =
-            cache.get_or_generate_index(&persistent_key, || {
-                if let Some(root) = config.candidate_cache_dir.as_deref() {
-                    match candidate_cache::load(root, &persistent_key, &child.name) {
-                        Ok(Some(candidates)) => {
-                            persistent_hit.set(true);
-                            return Ok(candidates);
-                        }
-                        Ok(None) => {}
-                        Err(error) => progress.detail(format!(
-                            "ignored invalid candidate cache entry `{persistent_key}`: {error}"
-                        )),
-                    }
-                }
-                let candidates = generate_graph_module_candidates_with_progress_label(
-                    child,
-                    &child_config,
-                    config.show_progress.then_some(instance.as_str()),
-                )?;
-                if let Some(root) = config.candidate_cache_dir.as_deref()
-                    && let Err(error) = candidate_cache::store(root, &persistent_key, &candidates)
-                {
-                    progress.detail(format!(
-                        "could not store candidate cache entry `{persistent_key}`: {error}"
-                    ));
-                }
-                Ok(candidates)
-            })?;
-        let child_candidates = &cache.entries[candidate_set_index].candidates;
-        if cache_hit || persistent_hit.get() {
-            reused += 1;
-            let source = if cache_hit { "memory" } else { "persistent" };
-            progress.detail(format!("`{instance}` reused {source} candidates"));
-        }
-        progress.detail(format!(
-            "`{instance}` produced {} candidate(s) in {:.2?}",
-            child_candidates.len(),
-            candidate_started.elapsed()
-        ));
-        if child_candidates.is_empty() {
-            return Err(eyre::eyre!(
-                "module instance `{instance}` produced no candidates"
-            ));
-        }
-        candidate_references += child_candidates.len();
-        let preferred_index = if graph_module_input_port_count(child) > 1 {
-            child_candidates
-                .iter()
-                .enumerate()
-                .min_by_key(|(_, candidate)| {
-                    (candidate.cost.bbox_volume, candidate.cost.block_count)
-                })
-                .map(|(index, _)| index)
-                .unwrap_or(0)
-        } else {
-            0
-        };
-        bindings.push(PreparedInstanceCandidateBinding {
-            instance_name: instance.clone(),
-            candidate_set_index,
-            preferred_index,
-        });
-    }
-    let unique_candidates = cache
-        .entries
-        .iter()
-        .map(|entry| entry.candidates.len())
-        .sum();
-    let unique_candidate_sets = cache.entries.len();
-    progress.summary(format!(
-        "child candidates completed: instances={} unique_sets={} reused={} stored_candidates={} candidate_references={} elapsed={:.2?}",
-        module.instances.len(),
-        unique_candidate_sets,
-        reused,
-        unique_candidates,
-        candidate_references,
-        started.elapsed()
-    ));
-    record_snapshot(SnapshotEvent::CandidateSummary {
-        instances: module.instances.len(),
-        unique: unique_candidate_sets,
-        reused,
-        candidates: unique_candidates,
-        elapsed_ms: duration_ms(started.elapsed()),
-    });
-    let candidate_sets = cache
-        .entries
-        .into_iter()
-        .map(|entry| PreparedCandidateSet {
-            candidates: entry.candidates,
-        })
-        .collect();
-    Ok((
-        candidate_sets,
-        bindings,
-        PnrPreparationSummary {
-            module: module.name.clone(),
-            instances: module.instances.len(),
-            unique_candidate_sets,
-            reused_candidate_sets: reused,
-            candidates: unique_candidates,
-            candidate_references,
-            elapsed_ms: duration_ms(started.elapsed()),
-        },
-    ))
-}
-
 #[derive(Default)]
 struct ChildCandidateCache {
     entries: Vec<ChildCandidateCacheEntry>,
@@ -1916,11 +1640,11 @@ impl ChildCandidateCache {
     #[cfg(test)]
     fn get_or_generate(
         &mut self,
-        module: &GraphModule,
+        module: &RoutableModule,
         config: &UnitCandidateConfig,
         generate: impl FnOnce() -> eyre::Result<Vec<LayoutCandidate>>,
     ) -> eyre::Result<(Vec<LayoutCandidate>, bool)> {
-        let key = candidate_shape_fingerprint(module, config);
+        let key = routable_candidate_shape_fingerprint(module, config);
         let (index, reused) = self.get_or_generate_index(&key, generate)?;
         Ok((
             relabel_candidates(&self.entries[index].candidates, &module.name),
@@ -1938,41 +1662,6 @@ fn relabel_candidates(candidates: &[LayoutCandidate], module_name: &str) -> Vec<
             candidate
         })
         .collect()
-}
-
-fn candidate_shape_fingerprint(module: &GraphModule, config: &UnitCandidateConfig) -> String {
-    let nodes = module.graph.as_ref().map(|graph| {
-        let mut ordered = graph.nodes.iter().collect::<Vec<_>>();
-        ordered.sort_by_key(|node| node.id);
-        let canonical_ids = ordered
-            .iter()
-            .enumerate()
-            .map(|(canonical, node)| (node.id, canonical))
-            .collect::<std::collections::HashMap<_, _>>();
-        ordered
-            .into_iter()
-            .map(|node| {
-                (
-                    stable_graph_node_kind_signature(&node.kind),
-                    node.inputs
-                        .iter()
-                        .map(|input| canonical_ids[input])
-                        .collect::<Vec<_>>(),
-                )
-            })
-            .collect::<Vec<_>>()
-    });
-    debug_parity_hash(&("local-candidate-cache-v1", nodes, &module.ports, config))
-}
-
-fn stable_graph_node_kind_signature(kind: &GraphNodeKind) -> String {
-    match kind {
-        GraphNodeKind::Sequential(sequential) => format!(
-            "Sequential({:?},{:?},{:?})",
-            sequential.sequential_type, sequential.input_ports, sequential.output_ports
-        ),
-        _ => kind.name(),
-    }
 }
 
 fn routable_candidate_shape_fingerprint(
@@ -2066,24 +1755,6 @@ fn search_layout_combinations(
     Err(last_error.unwrap_or_else(|| eyre::eyre!("no child layout combinations generated")))
 }
 
-fn candidate_config_for_child(
-    child: &GraphModule,
-    base_config: &UnitCandidateConfig,
-) -> UnitCandidateConfig {
-    let mut config = base_config.clone();
-    if graph_module_is_combinational(child) {
-        if graph_module_input_port_count(child) > 1 {
-            config.local_config = multi_input_combinational_local_config(config.local_config);
-        }
-        if let Some(limit) = config.combinational_sampling_limit {
-            config.local_config.step_sampling_policy = SamplingPolicy::Random(limit);
-            config.local_config.not_route_step_sampling_policy = SamplingPolicy::Random(limit);
-            config.local_config.route_step_sampling_policy = SamplingPolicy::Random(limit);
-        }
-    }
-    config
-}
-
 fn candidate_config_for_routable_child(
     child: &RoutableModule,
     base_config: &UnitCandidateConfig,
@@ -2119,15 +1790,6 @@ fn routable_input_port_count(module: &RoutableModule) -> usize {
         .count()
 }
 
-fn graph_module_is_combinational(module: &GraphModule) -> bool {
-    module.graph.as_ref().is_some_and(|graph| {
-        graph
-            .nodes
-            .iter()
-            .all(|node| !matches!(node.kind, GraphNodeKind::Sequential(_)))
-    })
-}
-
 fn multi_input_combinational_local_config(mut config: LocalPlacerConfig) -> LocalPlacerConfig {
     config.leak_sampling = false;
     config.not_route_strategy = NotRouteStrategy::DirectAndRedstone;
@@ -2138,22 +1800,9 @@ fn multi_input_combinational_local_config(mut config: LocalPlacerConfig) -> Loca
     config
 }
 
-fn graph_module_input_port_count(module: &GraphModule) -> usize {
-    module
-        .ports
-        .iter()
-        .filter(|port| port.port_type.is_input())
-        .count()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::logic::LogicGraph;
-    use crate::graph::module::{
-        GraphModule, GraphModuleContext, GraphModuleDesign, GraphModulePort, GraphModulePortTarget,
-        GraphModulePortType, GraphModuleVariable,
-    };
     use crate::graph::GraphNodeKind;
     use crate::nbt::{NBTRoot, ToNBT};
     use crate::snapshot::{compile_with_snapshot, SnapshotOptions};
@@ -2167,7 +1816,6 @@ mod tests {
     };
     use crate::transform::place_and_route::sampling::SamplingPolicy;
     use crate::transform::place_and_route::utils::world_to_logic_with_outputs;
-    use crate::verilog::synth::d_latch_graph_module;
     use crate::world::block::BlockKind;
     use crate::world::position::{DimSize, Position};
     use crate::world::simulator::{Simulator, MANUAL_INPUT_IDLE_CYCLES};
@@ -2193,10 +1841,21 @@ mod tests {
         }
     }
 
+    fn test_d_latch_module(name: &str) -> eyre::Result<RoutableModule> {
+        let source = format!(
+            "module {name}(d, en, q); input d, en; output reg q; always @(*) begin if (en) begin q <= d; end end endmodule"
+        );
+        let design = LogicalDesign::from_verilog_source(&source)?.lower_to_routable()?;
+        design
+            .module(name)
+            .cloned()
+            .with_context(|| format!("missing test D latch module `{name}`"))
+    }
+
     #[test]
     fn child_candidate_cache_reuses_identical_module_structure() -> eyre::Result<()> {
-        let first = d_latch_graph_module("q_0_master", "d", "en", "q");
-        let second = d_latch_graph_module("q_1_slave", "d", "en", "q");
+        let first = test_d_latch_module("q_0_master")?;
+        let second = test_d_latch_module("q_1_slave")?;
         let config = UnitCandidateConfig {
             dim: DimSize(3, 3, 3),
             max_candidates: 1,
@@ -2204,7 +1863,7 @@ mod tests {
         };
         let mut cache = ChildCandidateCache::default();
         let calls = std::cell::Cell::new(0);
-        let generate = |module: &GraphModule| {
+        let generate = |module: &RoutableModule| {
             calls.set(calls.get() + 1);
             let mut world = World3D::new(DimSize(3, 3, 3));
             world[Position(1, 1, 1)] = crate::world::block::Block {
@@ -2246,334 +1905,6 @@ mod tests {
             cache.get_or_generate(&different_port, &config, || generate(&different_port))?;
         assert!(!port_hit);
         assert_eq!(calls.get(), 3);
-        Ok(())
-    }
-
-    #[test]
-    fn routable_leaf_candidate_generation_matches_graph_module_path() -> eyre::Result<()> {
-        let mut module: GraphModule = LogicGraph::from_stmt("~a", "q")?.graph.into();
-        module.name = "candidate_parity".to_owned();
-        let design =
-            GraphModuleDesign::with_top_module(GraphModuleContext::default(), module.clone());
-        let routable = RoutableDesign::from_graph_module_design(&design)?;
-        let routable_module = routable.module(&routable.top).unwrap();
-        let config = UnitCandidateConfig {
-            dim: DimSize(8, 8, 4),
-            max_candidates: 2,
-            ..Default::default()
-        };
-
-        let legacy = generate_graph_module_candidates_with_progress_label(&module, &config, None)?;
-        let direct = generate_routable_module_candidates_with_progress_label(
-            routable_module,
-            &config,
-            None,
-        )?;
-
-        assert!(!legacy.is_empty());
-        assert_eq!(
-            legacy.iter().map(candidate_parity_hash).collect::<Vec<_>>(),
-            direct.iter().map(candidate_parity_hash).collect::<Vec<_>>()
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn graph_backed_module_generates_world_with_global_pnr_api() -> eyre::Result<()> {
-        let mut module: GraphModule = LogicGraph::from_stmt("~a", "not_a")?.graph.into();
-        module.name = "not_gate".to_owned();
-        let context = GraphModuleContext::default();
-        let design = GraphModuleDesign::with_top_module(context, module);
-        let config = GlobalPnrConfig {
-            candidate: UnitCandidateConfig {
-                dim: DimSize(8, 8, 4),
-                max_candidates: 1,
-                ..Default::default()
-            }
-            .into(),
-            placement: GlobalPlacementConfig::default(),
-            ..Default::default()
-        };
-
-        let world = place_and_route_design(&design, &config)?;
-
-        assert!(!world.iter_block().is_empty());
-        Ok(())
-    }
-
-    #[test]
-    fn module_outputs_point_to_placed_child_ports_without_extra_routes() -> eyre::Result<()> {
-        let mut context = GraphModuleContext::default();
-        context.append(not_clk_module());
-        let module = GraphModule {
-            name: "top".to_owned(),
-            instances: vec!["not_clk".to_owned()],
-            ports: vec![GraphModulePort {
-                name: "q".to_owned(),
-                port_type: GraphModulePortType::OutputNet,
-                target: GraphModulePortTarget::Module("not_clk".to_owned(), "clk_n".to_owned()),
-            }],
-            ..Default::default()
-        };
-        let design = GraphModuleDesign::with_top_module(context, module);
-        let config = GlobalPnrConfig {
-            candidate: UnitCandidateConfig {
-                dim: DimSize(8, 8, 4),
-                max_candidates: 1,
-                ..Default::default()
-            }
-            .into(),
-            placement: GlobalPlacementConfig::default(),
-            ..Default::default()
-        };
-
-        let placed = place_and_route_design_with_outputs(&design, &config)?;
-
-        assert_eq!(placed.outputs.len(), 1);
-        assert_eq!(placed.outputs[0].name, "q");
-        let output_position = placed.outputs[0].position();
-        assert_ne!(placed.world[output_position].kind, BlockKind::Air);
-        Ok(())
-    }
-
-    #[test]
-    fn prepared_pnr_reuses_local_candidates_across_global_runs() -> eyre::Result<()> {
-        let mut context = GraphModuleContext::default();
-        context.append(not_clk_module());
-        let module = GraphModule {
-            name: "prepared_top".to_owned(),
-            instances: vec!["not_clk".to_owned()],
-            ports: vec![GraphModulePort {
-                name: "q".to_owned(),
-                port_type: GraphModulePortType::OutputNet,
-                target: GraphModulePortTarget::Module("not_clk".to_owned(), "clk_n".to_owned()),
-            }],
-            ..Default::default()
-        };
-        let config = GlobalPnrConfig {
-            candidate: UnitCandidateConfig {
-                dim: DimSize(8, 8, 4),
-                max_candidates: 1,
-                ..Default::default()
-            }
-            .into(),
-            placement: GlobalPlacementConfig::default(),
-            show_progress: false,
-            ..Default::default()
-        };
-
-        let prepared =
-            prepare_module_for_global_pnr(&context, &module, &PnrPrepareConfig::from(&config))?;
-        let signature = prepared.parity_signature();
-        assert_eq!(prepared.summary().instances, 1);
-        assert_eq!(prepared.summary().candidates, 1);
-
-        let first = run_prepared_pnr_with_visualization(&prepared, &config)?;
-        let mut replay_config = config.clone();
-        replay_config.placement.spacing += 3;
-        replay_config.search.budget.max_candidates_per_child = 1;
-        let replay = run_prepared_pnr_with_visualization(&prepared, &replay_config)?;
-
-        assert_eq!(prepared.parity_signature(), signature);
-        assert_eq!(first.placed_world.outputs.len(), 1);
-        assert_eq!(replay.placed_world.outputs.len(), 1);
-        assert_eq!(
-            first.placed_world.outputs[0].position(),
-            replay.placed_world.outputs[0].position()
-        );
-        assert_eq!(
-            candidate_parity_hash(&first.selected_candidates[0]),
-            candidate_parity_hash(&replay.selected_candidates[0])
-        );
-
-        let mut incompatible = replay_config;
-        incompatible.candidate.max_candidates += 1;
-        let error = run_prepared_pnr(&prepared, &incompatible).unwrap_err();
-        assert!(error.to_string().contains("regenerate local candidates"));
-        Ok(())
-    }
-
-    #[test]
-    fn prepared_pnr_stores_structurally_identical_candidates_once() -> eyre::Result<()> {
-        let mut first: GraphModule = LogicGraph::from_stmt("~a", "y")?.graph.into();
-        first.name = "first".to_owned();
-        let mut second = first.clone();
-        second.name = "second".to_owned();
-        let mut context = GraphModuleContext::default();
-        context.append(first);
-        context.append(second);
-        let module = GraphModule {
-            name: "duplicate_top".to_owned(),
-            instances: vec!["first".to_owned(), "second".to_owned()],
-            ..Default::default()
-        };
-        let config = PnrPrepareConfig {
-            candidate: UnitCandidateConfig {
-                dim: DimSize(8, 8, 4),
-                max_candidates: 1,
-                ..Default::default()
-            }
-            .into(),
-            show_progress: false,
-            candidate_cache_dir: None,
-        };
-
-        let prepared = prepare_module_for_global_pnr(&context, &module, &config)?;
-
-        assert_eq!(prepared.summary().instances, 2);
-        assert_eq!(prepared.summary().unique_candidate_sets, 1);
-        assert_eq!(prepared.summary().reused_candidate_sets, 1);
-        assert_eq!(prepared.summary().candidates, 1);
-        assert_eq!(prepared.summary().candidate_references, 2);
-
-        let routable: RoutableDesign = r#"
-            rcir 1;
-            stage routable;
-            target "redstone-v1";
-            top "direct_duplicate_top";
-            module "direct_duplicate_top" {
-              port input "a";
-              port output "y";
-              instance "first" : "inv";
-              instance "second" : "inv";
-              net "a" class io driver self."a" sinks ["first"."a"];
-              net "mid" class data driver "first"."y" sinks ["second"."a"];
-              net "y" class io driver "second"."y" sinks [self."y"];
-            }
-            leaf "inv" {
-              port input "a";
-              port output "y";
-              node 0 input "a" inputs [];
-              node 1 logic not inputs [0];
-              node 2 output "y" inputs [1];
-            }
-        "#
-        .parse()?;
-        let direct = prepare_routable_design_for_global_pnr(&routable, &config)?;
-        assert_eq!(direct.summary().instances, 2);
-        assert_eq!(direct.summary().unique_candidate_sets, 1);
-        assert_eq!(direct.summary().reused_candidate_sets, 1);
-        assert_eq!(direct.summary().candidates, 1);
-        assert_eq!(direct.summary().candidate_references, 2);
-        Ok(())
-    }
-
-    #[test]
-    fn prepared_pnr_round_trips_through_snapshot_directory_and_archive() -> eyre::Result<()> {
-        let output = std::path::PathBuf::from(format!(
-            "target/prepared-pnr-round-trip-{}.snapshot",
-            std::process::id()
-        ));
-        let archive = output.with_extension("rsnap");
-        let _ = std::fs::remove_dir_all(&output);
-        let _ = std::fs::remove_file(&archive);
-
-        let mut module: GraphModule = LogicGraph::from_stmt("~a", "q")?.graph.into();
-        module.name = "prepared_snapshot_top".to_owned();
-        let design = GraphModuleDesign::with_top_module(GraphModuleContext::default(), module);
-        let config = GlobalPnrConfig {
-            candidate: UnitCandidateConfig {
-                dim: DimSize(8, 8, 4),
-                max_candidates: 1,
-                ..Default::default()
-            }
-            .into(),
-            show_progress: false,
-            physical_intent: Some(ResolvedPhysicalIntent {
-                format: physical_intent::PHYSICAL_INTENT_FORMAT.to_owned(),
-                design: "prepared_snapshot_top".to_owned(),
-                regions: Default::default(),
-                constraints: Vec::new(),
-            }),
-            ..Default::default()
-        };
-        let prepare_config = PnrPrepareConfig::from(&config);
-
-        let original = compile_with_snapshot(
-            SnapshotOptions::new(&output, "prepared_snapshot_top"),
-            || place_and_route_design_with_visualization(&design, &config),
-        )?;
-        let from_directory = load_prepared_pnr_snapshot(&output, &prepare_config)?;
-        assert!(from_directory.snapshot_intent().is_some());
-        let directory_result = run_prepared_pnr_with_visualization(&from_directory, &config)?;
-        let from_archive = load_prepared_pnr_snapshot(&archive, &prepare_config)?;
-        assert!(from_archive.snapshot_intent().is_some());
-        let archive_result = run_prepared_pnr_with_visualization(&from_archive, &config)?;
-
-        let expected_candidate = candidate_parity_hash(&original.selected_candidates[0]);
-        assert_eq!(
-            candidate_parity_hash(&directory_result.selected_candidates[0]),
-            expected_candidate
-        );
-        assert_eq!(
-            candidate_parity_hash(&archive_result.selected_candidates[0]),
-            expected_candidate
-        );
-        assert_eq!(directory_result.placed_world.outputs.len(), 0);
-        assert_eq!(archive_result.placed_world.outputs.len(), 0);
-
-        let _ = std::fs::remove_dir_all(output);
-        let _ = std::fs::remove_file(archive);
-        Ok(())
-    }
-
-    #[test]
-    fn layered_global_pnr_routes_connected_children_across_z_layers() -> eyre::Result<()> {
-        let mut first: GraphModule = LogicGraph::from_stmt("~a", "x")?.graph.into();
-        first.name = "first".to_owned();
-        let mut second: GraphModule = LogicGraph::from_stmt("~x", "y")?.graph.into();
-        second.name = "second".to_owned();
-        let mut context = GraphModuleContext::default();
-        context.append(first);
-        context.append(second);
-        let top = GraphModule {
-            name: "layered_top".to_owned(),
-            instances: vec!["first".to_owned(), "second".to_owned()],
-            vars: vec![GraphModuleVariable {
-                var_type: GraphModulePortType::InputNet,
-                source: ("first".to_owned(), "x".to_owned()),
-                target: ("second".to_owned(), "x".to_owned()),
-            }],
-            ports: vec![GraphModulePort {
-                name: "y".to_owned(),
-                port_type: GraphModulePortType::OutputNet,
-                target: GraphModulePortTarget::Module("second".to_owned(), "y".to_owned()),
-            }],
-            ..Default::default()
-        };
-        let mut config = GlobalPnrPreset::Fast.config();
-        config.candidate.max_candidates = 1;
-        config.candidate.dim = DimSize(8, 8, 4);
-        config.search.policies.placement_heuristics = vec![
-            crate::transform::place_and_route::global_pnr::policy::PlacementHeuristic::Layered3D(
-                crate::transform::place_and_route::global_pnr::policy::LayeredPlacementConfig {
-                    layers: 2,
-                    layer_spacing: 4,
-                    assignment: crate::transform::place_and_route::global_pnr::policy::LayerAssignmentStrategy::Alternating,
-                },
-            ),
-        ];
-
-        let result = place_and_route_module_with_visualization(&context, &top, &config)?;
-        let bbox_positions = result
-            .placement_bbox_world
-            .iter_block()
-            .into_iter()
-            .map(|(position, _)| position)
-            .collect::<Vec<_>>();
-        let min_z = bbox_positions
-            .iter()
-            .map(|position| position.2)
-            .min()
-            .unwrap();
-        let max_z = bbox_positions
-            .iter()
-            .map(|position| position.2)
-            .max()
-            .unwrap();
-
-        assert!(max_z > min_z + 4);
-        assert_eq!(result.placed_world.outputs.len(), 1);
         Ok(())
     }
 
@@ -2991,11 +2322,5 @@ mod tests {
             BlockKind::RedstoneBlock => true,
             BlockKind::Air | BlockKind::Piston { .. } => false,
         }
-    }
-
-    fn not_clk_module() -> GraphModule {
-        let mut module: GraphModule = LogicGraph::from_stmt("~clk", "clk_n").unwrap().graph.into();
-        module.name = "not_clk".to_owned();
-        module
     }
 }

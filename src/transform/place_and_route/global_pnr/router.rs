@@ -3,9 +3,6 @@ use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 
 use eyre::ContextCompat;
 
-use crate::graph::module::{
-    GraphModule, GraphModulePortTarget, GraphModulePortType, GraphModuleVariable,
-};
 use crate::output::OutputEndpoint;
 use crate::transform::place_and_route::detailed_router::{
     self, PlaceRedstoneResult, PlaceRepeaterResult,
@@ -42,28 +39,19 @@ struct RoutingTopInput {
     targets: Vec<(String, String)>,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct RoutingConnection {
+    pub(crate) source: (String, String),
+    pub(crate) target: (String, String),
+}
+
 #[derive(Clone, Debug, Default)]
 struct RoutingPlan {
     top_inputs: Vec<RoutingTopInput>,
-    vars: Vec<GraphModuleVariable>,
+    vars: Vec<RoutingConnection>,
 }
 
 impl RoutingPlan {
-    fn from_legacy(module: &GraphModule) -> Self {
-        Self {
-            top_inputs: module
-                .ports
-                .iter()
-                .filter(|port| port.port_type.is_input())
-                .map(|port| RoutingTopInput {
-                    name: port.name.clone(),
-                    targets: legacy_target_pairs(&port.target),
-                })
-                .collect(),
-            vars: module.vars.clone(),
-        }
-    }
-
     fn from_resolved(topology: &ResolvedPnrTopology) -> eyre::Result<Self> {
         let mut plan = Self::default();
         for net in &topology.nets {
@@ -91,8 +79,7 @@ impl RoutingPlan {
                         let Some(target) = resolved_instance_port_pair(topology, sink) else {
                             continue;
                         };
-                        plan.vars.push(GraphModuleVariable {
-                            var_type: GraphModulePortType::InputNet,
+                        plan.vars.push(RoutingConnection {
                             source: source.clone(),
                             target,
                         });
@@ -117,13 +104,6 @@ fn resolved_instance_port_pair(
     ))
 }
 
-fn legacy_target_pairs(target: &GraphModulePortTarget) -> Vec<(String, String)> {
-    match target {
-        GraphModulePortTarget::Module(module, port) => vec![(module.clone(), port.clone())],
-        GraphModulePortTarget::Wire(targets) => targets.clone(),
-        GraphModulePortTarget::Node(_) => Vec::new(),
-    }
-}
 const SIGNAL_CONTACT_SEARCH_RADIUS: usize = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -419,90 +399,10 @@ pub enum RouteFailure {
     Unreachable { source: Position, sink: Position },
 }
 
-pub fn route_module_variables(
-    module: &GraphModule,
-    candidates: &[LayoutCandidate],
-    placed_modules: &[PlacedModule],
-    config: &GlobalRoutingConfig,
-    progress: &GlobalPnrProgress,
-) -> eyre::Result<Vec<RoutedNet>> {
-    route_module_variables_with_order(
-        module,
-        candidates,
-        placed_modules,
-        config,
-        NetOrderStrategy::Criticality,
-        progress,
-    )
-}
-
-pub fn route_module_variables_with_order(
-    module: &GraphModule,
-    candidates: &[LayoutCandidate],
-    placed_modules: &[PlacedModule],
-    config: &GlobalRoutingConfig,
-    order_strategy: NetOrderStrategy,
-    progress: &GlobalPnrProgress,
-) -> eyre::Result<Vec<RoutedNet>> {
-    route_module_variables_with_order_partial(
-        module,
-        candidates,
-        placed_modules,
-        config,
-        order_strategy,
-        progress,
-    )
-    .map_err(|failure| failure.error)
-}
-
 #[derive(Debug)]
 pub struct PartialRoutingFailure {
     pub error: eyre::Report,
     pub routed_nets: Vec<RoutedNet>,
-}
-
-pub fn route_module_variables_with_order_partial(
-    module: &GraphModule,
-    candidates: &[LayoutCandidate],
-    placed_modules: &[PlacedModule],
-    config: &GlobalRoutingConfig,
-    order_strategy: NetOrderStrategy,
-    progress: &GlobalPnrProgress,
-) -> Result<Vec<RoutedNet>, PartialRoutingFailure> {
-    route_module_variables_with_order_from_prefix(
-        module,
-        candidates,
-        placed_modules,
-        config,
-        order_strategy,
-        progress,
-        &[],
-    )
-}
-
-pub fn route_module_variables_with_order_from_prefix(
-    module: &GraphModule,
-    candidates: &[LayoutCandidate],
-    placed_modules: &[PlacedModule],
-    config: &GlobalRoutingConfig,
-    order_strategy: NetOrderStrategy,
-    progress: &GlobalPnrProgress,
-    prefix: &[RoutedNet],
-) -> Result<Vec<RoutedNet>, PartialRoutingFailure> {
-    let hooks = GlobalHeuristicHooks::default();
-    let plan = RoutingPlan::from_legacy(module);
-    route_module_variables_with_order_from_prefix_impl(
-        None,
-        None,
-        &hooks,
-        &plan,
-        candidates,
-        placed_modules,
-        config,
-        order_strategy,
-        progress,
-        prefix,
-    )
 }
 
 fn route_module_variables_with_order_from_prefix_impl(
@@ -654,9 +554,9 @@ fn route_module_variables_with_order_from_prefix_impl(
 }
 
 pub(crate) fn ordered_module_variables(
-    vars: &[GraphModuleVariable],
+    vars: &[RoutingConnection],
     strategy: NetOrderStrategy,
-) -> Vec<&GraphModuleVariable> {
+) -> Vec<&RoutingConnection> {
     let mut ordered = vars.iter().collect::<Vec<_>>();
     match strategy {
         NetOrderStrategy::Criticality => {
@@ -683,7 +583,7 @@ pub(crate) fn ordered_module_variables(
 }
 
 fn route_internal_module_nets(
-    vars: &[&GraphModuleVariable],
+    vars: &[&RoutingConnection],
     candidates: &[LayoutCandidate],
     placed_modules: &[PlacedModule],
     config: &GlobalRoutingConfig,
@@ -863,9 +763,9 @@ fn route_internal_module_nets(
 }
 
 fn group_vars_by_source_ordered<'a>(
-    vars: &[&'a GraphModuleVariable],
-) -> Vec<Vec<&'a GraphModuleVariable>> {
-    let mut groups = Vec::<Vec<&GraphModuleVariable>>::new();
+    vars: &[&'a RoutingConnection],
+) -> Vec<Vec<&'a RoutingConnection>> {
+    let mut groups = Vec::<Vec<&RoutingConnection>>::new();
     for &var in vars {
         if groups
             .last()
@@ -1097,7 +997,7 @@ fn sort_top_input_sinks_by_current_tree(
 }
 
 fn sort_internal_sink_targets_by_current_tree(
-    sinks: &mut [(&GraphModuleVariable, ResolvedPortTarget)],
+    sinks: &mut [(&RoutingConnection, ResolvedPortTarget)],
     route_sources: &[PoweredRouteSource],
 ) {
     sinks.sort_by_key(|(var, sink)| {
@@ -1318,7 +1218,7 @@ fn block_is_powered(world: &World3D, position: Position) -> bool {
 }
 
 fn route_variable_priority(
-    var: &GraphModuleVariable,
+    var: &RoutingConnection,
 ) -> (usize, usize, usize, &str, &str, &str, &str) {
     let is_clock_route =
         var.source.1.contains("clk") || var.target.1.contains("clk") || var.target.1 == "en";
@@ -1353,28 +1253,28 @@ fn route_variable_priority(
     )
 }
 
-fn is_master_to_slave_data_route(var: &GraphModuleVariable) -> bool {
+fn is_master_to_slave_data_route(var: &RoutingConnection) -> bool {
     var.source.0.ends_with("_master")
         && var.source.1 == "q"
         && var.target.0.ends_with("_slave")
         && var.target.1 == "d"
 }
 
-fn is_next_to_master_data_route(var: &GraphModuleVariable) -> bool {
+fn is_next_to_master_data_route(var: &RoutingConnection) -> bool {
     var.source.0.ends_with("_next")
         && var.source.1 == "d"
         && var.target.0.ends_with("_master")
         && var.target.1 == "d"
 }
 
-fn is_clock_inverter_to_master_enable_route(var: &GraphModuleVariable) -> bool {
+fn is_clock_inverter_to_master_enable_route(var: &RoutingConnection) -> bool {
     var.source.0.ends_with("_clk_inv")
         && var.source.1.ends_with("_n")
         && var.target.0.ends_with("_master")
         && var.target.1 == "en"
 }
 
-fn is_cross_bit_next_input_route(var: &GraphModuleVariable) -> bool {
+fn is_cross_bit_next_input_route(var: &RoutingConnection) -> bool {
     let Some(source_bit) = register_module_bit(&var.source.0, "_slave") else {
         return false;
     };
@@ -2050,43 +1950,6 @@ fn place_support_cobble_if_needed(world: &mut World3D, position: Position) -> Op
     Some(())
 }
 
-pub fn collect_module_output_endpoints(
-    module: &GraphModule,
-    candidates: &[LayoutCandidate],
-    placed_modules: &[PlacedModule],
-) -> Vec<OutputEndpoint> {
-    module
-        .ports
-        .iter()
-        .filter(|port| port.port_type.is_output())
-        .flat_map(|port| {
-            resolve_observable_port_target_positions(candidates, placed_modules, &port.target)
-                .into_iter()
-                .map(|position| OutputEndpoint::new(port.name.clone(), position))
-        })
-        .collect()
-}
-
-pub fn collect_module_input_endpoints(
-    module: &GraphModule,
-    routed_nets: &[RoutedNet],
-) -> Vec<OutputEndpoint> {
-    let input_ports = module.ports.iter().filter(|port| port.port_type.is_input());
-    let input_switches = routed_nets.iter().filter_map(|route| {
-        (route.source == route.sink
-            && route
-                .blocks
-                .first()
-                .is_some_and(|(_, block)| block.kind.is_switch()))
-        .then_some(route.source)
-    });
-
-    input_ports
-        .zip(input_switches)
-        .map(|(port, position)| OutputEndpoint::new(port.name.clone(), position))
-        .collect()
-}
-
 pub fn collect_topology_output_endpoints(
     topology: &ResolvedPnrTopology,
     candidates: &[LayoutCandidate],
@@ -2145,27 +2008,6 @@ pub fn collect_topology_input_endpoints(
             ))
         })
         .collect()
-}
-
-fn resolve_observable_port_target_positions(
-    candidates: &[LayoutCandidate],
-    placed_modules: &[PlacedModule],
-    target: &GraphModulePortTarget,
-) -> Vec<Position> {
-    match target {
-        GraphModulePortTarget::Module(module_name, port_name) => {
-            resolve_observable_port_position(candidates, placed_modules, module_name, port_name)
-                .into_iter()
-                .collect()
-        }
-        GraphModulePortTarget::Wire(targets) => targets
-            .iter()
-            .filter_map(|(module_name, port_name)| {
-                resolve_observable_port_position(candidates, placed_modules, module_name, port_name)
-            })
-            .collect(),
-        GraphModulePortTarget::Node(_) => Vec::new(),
-    }
 }
 
 fn external_input_sources(
@@ -3854,10 +3696,6 @@ fn added_route_blocks(before: &World3D, after: &World3D) -> Vec<(Position, Block
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::module::{
-        GraphModule, GraphModulePort, GraphModulePortTarget, GraphModulePortType,
-        GraphModuleVariable,
-    };
     use crate::ir::{NetClass, RoutablePortDirection};
     use crate::transform::place_and_route::global_pnr::ir::{
         LayoutCandidate, PhysicalPort, PhysicalPortDirection, PortConnection,
@@ -4745,13 +4583,11 @@ mod tests {
 
     #[test]
     fn route_priority_routes_high_bit_feedback_first() {
-        let q0_feedback = GraphModuleVariable {
-            var_type: GraphModulePortType::InputNet,
+        let q0_feedback = RoutingConnection {
             source: ("q_0_slave".to_owned(), "q".to_owned()),
             target: ("q_0_next".to_owned(), "q_0".to_owned()),
         };
-        let q1_feedback = GraphModuleVariable {
-            var_type: GraphModulePortType::InputNet,
+        let q1_feedback = RoutingConnection {
             source: ("q_1_slave".to_owned(), "q".to_owned()),
             target: ("q_1_next".to_owned(), "q_1".to_owned()),
         };
@@ -4761,13 +4597,11 @@ mod tests {
 
     #[test]
     fn route_priority_routes_cross_bit_next_input_before_own_bit_feedback() {
-        let q0_to_own_bit = GraphModuleVariable {
-            var_type: GraphModulePortType::InputNet,
+        let q0_to_own_bit = RoutingConnection {
             source: ("q_0_slave".to_owned(), "q".to_owned()),
             target: ("q_0_next".to_owned(), "q_0".to_owned()),
         };
-        let q0_to_next_bit = GraphModuleVariable {
-            var_type: GraphModulePortType::InputNet,
+        let q0_to_next_bit = RoutingConnection {
             source: ("q_0_slave".to_owned(), "q".to_owned()),
             target: ("q_1_next".to_owned(), "q_0".to_owned()),
         };
@@ -4777,13 +4611,11 @@ mod tests {
 
     #[test]
     fn route_priority_routes_cross_bit_next_input_before_next_to_master_output() {
-        let fanin_to_next = GraphModuleVariable {
-            var_type: GraphModulePortType::InputNet,
+        let fanin_to_next = RoutingConnection {
             source: ("q_0_slave".to_owned(), "q".to_owned()),
             target: ("q_1_next".to_owned(), "q_0".to_owned()),
         };
-        let next_to_master = GraphModuleVariable {
-            var_type: GraphModulePortType::InputNet,
+        let next_to_master = RoutingConnection {
             source: ("q_1_next".to_owned(), "d".to_owned()),
             target: ("q_1_master".to_owned(), "d".to_owned()),
         };
@@ -4793,13 +4625,11 @@ mod tests {
 
     #[test]
     fn route_priority_routes_next_to_master_output_before_self_feedback() {
-        let self_feedback = GraphModuleVariable {
-            var_type: GraphModulePortType::InputNet,
+        let self_feedback = RoutingConnection {
             source: ("q_1_slave".to_owned(), "q".to_owned()),
             target: ("q_1_next".to_owned(), "q_1".to_owned()),
         };
-        let next_to_master = GraphModuleVariable {
-            var_type: GraphModulePortType::InputNet,
+        let next_to_master = RoutingConnection {
             source: ("q_1_next".to_owned(), "d".to_owned()),
             target: ("q_1_master".to_owned(), "d".to_owned()),
         };
@@ -4809,13 +4639,11 @@ mod tests {
 
     #[test]
     fn route_priority_routes_master_to_slave_handoff_before_feedback() {
-        let master_to_slave = GraphModuleVariable {
-            var_type: GraphModulePortType::InputNet,
+        let master_to_slave = RoutingConnection {
             source: ("q_0_master".to_owned(), "q".to_owned()),
             target: ("q_0_slave".to_owned(), "d".to_owned()),
         };
-        let self_feedback = GraphModuleVariable {
-            var_type: GraphModulePortType::InputNet,
+        let self_feedback = RoutingConnection {
             source: ("q_0_slave".to_owned(), "q".to_owned()),
             target: ("q_0_next".to_owned(), "q_0".to_owned()),
         };
@@ -4827,13 +4655,11 @@ mod tests {
 
     #[test]
     fn route_priority_routes_clock_inverter_enable_before_self_feedback() {
-        let clock_to_master = GraphModuleVariable {
-            var_type: GraphModulePortType::InputNet,
+        let clock_to_master = RoutingConnection {
             source: ("q_0_clk_inv".to_owned(), "clk_n".to_owned()),
             target: ("q_0_master".to_owned(), "en".to_owned()),
         };
-        let self_feedback = GraphModuleVariable {
-            var_type: GraphModulePortType::InputNet,
+        let self_feedback = RoutingConnection {
             source: ("q_0_slave".to_owned(), "q".to_owned()),
             target: ("q_0_next".to_owned(), "q_0".to_owned()),
         };
@@ -4845,13 +4671,11 @@ mod tests {
 
     #[test]
     fn route_priority_routes_cross_bit_next_input_before_clock_enable() {
-        let cross_bit = GraphModuleVariable {
-            var_type: GraphModulePortType::InputNet,
+        let cross_bit = RoutingConnection {
             source: ("q_0_slave".to_owned(), "q".to_owned()),
             target: ("q_1_next".to_owned(), "q_0".to_owned()),
         };
-        let clock_to_master = GraphModuleVariable {
-            var_type: GraphModulePortType::InputNet,
+        let clock_to_master = RoutingConnection {
             source: ("q_0_clk_inv".to_owned(), "clk_n".to_owned()),
             target: ("q_0_master".to_owned(), "en".to_owned()),
         };
@@ -4861,13 +4685,11 @@ mod tests {
 
     #[test]
     fn route_priority_routes_cross_bit_next_input_before_master_to_slave_handoff() {
-        let cross_bit = GraphModuleVariable {
-            var_type: GraphModulePortType::InputNet,
+        let cross_bit = RoutingConnection {
             source: ("q_0_slave".to_owned(), "q".to_owned()),
             target: ("q_1_next".to_owned(), "q_0".to_owned()),
         };
-        let master_to_slave = GraphModuleVariable {
-            var_type: GraphModulePortType::InputNet,
+        let master_to_slave = RoutingConnection {
             source: ("q_0_master".to_owned(), "q".to_owned()),
             target: ("q_0_slave".to_owned(), "d".to_owned()),
         };
@@ -4877,13 +4699,11 @@ mod tests {
 
     #[test]
     fn route_priority_routes_next_to_master_data_before_clock_enable() {
-        let next_to_master = GraphModuleVariable {
-            var_type: GraphModulePortType::InputNet,
+        let next_to_master = RoutingConnection {
             source: ("q_1_next".to_owned(), "d".to_owned()),
             target: ("q_1_master".to_owned(), "d".to_owned()),
         };
-        let clock_to_master = GraphModuleVariable {
-            var_type: GraphModulePortType::InputNet,
+        let clock_to_master = RoutingConnection {
             source: ("q_1_clk_inv".to_owned(), "clk_n".to_owned()),
             target: ("q_1_master".to_owned(), "en".to_owned()),
         };
@@ -4899,13 +4719,11 @@ mod tests {
             position: Position(0, 1, 0),
             strength: MAX_REDSTONE_STRENGTH,
         };
-        let far_var = GraphModuleVariable {
-            var_type: GraphModulePortType::InputNet,
+        let far_var = RoutingConnection {
             source: ("q_0_slave".to_owned(), "q".to_owned()),
             target: ("q_1_next".to_owned(), "q_0".to_owned()),
         };
-        let near_var = GraphModuleVariable {
-            var_type: GraphModulePortType::InputNet,
+        let near_var = RoutingConnection {
             source: ("q_0_slave".to_owned(), "q".to_owned()),
             target: ("q_0_next".to_owned(), "q_0".to_owned()),
         };
@@ -4929,18 +4747,15 @@ mod tests {
 
     #[test]
     fn route_var_grouping_preserves_sorted_priority_boundaries() {
-        let q0_to_own_bit = GraphModuleVariable {
-            var_type: GraphModulePortType::InputNet,
+        let q0_to_own_bit = RoutingConnection {
             source: ("q_0_slave".to_owned(), "q".to_owned()),
             target: ("q_0_next".to_owned(), "q_0".to_owned()),
         };
-        let q1_feedback = GraphModuleVariable {
-            var_type: GraphModulePortType::InputNet,
+        let q1_feedback = RoutingConnection {
             source: ("q_1_slave".to_owned(), "q".to_owned()),
             target: ("q_1_next".to_owned(), "q_1".to_owned()),
         };
-        let q0_to_next_bit = GraphModuleVariable {
-            var_type: GraphModulePortType::InputNet,
+        let q0_to_next_bit = RoutingConnection {
             source: ("q_0_slave".to_owned(), "q".to_owned()),
             target: ("q_1_next".to_owned(), "q_0".to_owned()),
         };
@@ -4956,13 +4771,11 @@ mod tests {
 
     #[test]
     fn route_var_grouping_keeps_adjacent_same_source_fanout_together() {
-        let q0_to_own_bit = GraphModuleVariable {
-            var_type: GraphModulePortType::InputNet,
+        let q0_to_own_bit = RoutingConnection {
             source: ("q_0_slave".to_owned(), "q".to_owned()),
             target: ("q_0_next".to_owned(), "q_0".to_owned()),
         };
-        let q0_to_next_bit = GraphModuleVariable {
-            var_type: GraphModulePortType::InputNet,
+        let q0_to_next_bit = RoutingConnection {
             source: ("q_0_slave".to_owned(), "q".to_owned()),
             target: ("q_1_next".to_owned(), "q_0".to_owned()),
         };
@@ -4978,53 +4791,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![q0_to_own_bit.target, q0_to_next_bit.target]
         );
-    }
-
-    #[test]
-    fn route_module_variables_connects_placed_candidate_ports() -> eyre::Result<()> {
-        let module = GraphModule {
-            vars: vec![GraphModuleVariable {
-                var_type: GraphModulePortType::InputNet,
-                source: ("left".to_owned(), "out".to_owned()),
-                target: ("right".to_owned(), "in".to_owned()),
-            }],
-            ..Default::default()
-        };
-        let candidates = vec![
-            candidate(
-                "left",
-                Position(0, 0, 1),
-                "out",
-                PhysicalPortDirection::Output,
-            ),
-            candidate(
-                "right",
-                Position(0, 0, 1),
-                "in",
-                PhysicalPortDirection::Input,
-            ),
-        ];
-        let placed = place_candidates_on_shelves(
-            &candidates,
-            &GlobalPlacementConfig {
-                spacing: 3,
-                shelf_width: 16,
-                ..Default::default()
-            },
-        );
-
-        let progress = silent_progress();
-        let routes = route_module_variables(
-            &module,
-            &candidates,
-            &placed,
-            &GlobalRoutingConfig::default(),
-            &progress,
-        )?;
-
-        assert_eq!(routes.len(), 1);
-        assert!(!routes[0].blocks.is_empty());
-        Ok(())
     }
 
     #[test]
@@ -5139,103 +4905,6 @@ mod tests {
         assert_eq!(routes[0].net_id, Some(NetId(0)));
         assert_eq!(routes[0].source_endpoint, Some(left_endpoint));
         assert_eq!(routes[0].sink_endpoint, Some(right_endpoint));
-        Ok(())
-    }
-
-    #[test]
-    fn route_module_variables_routes_top_inputs_before_internal_nets() -> eyre::Result<()> {
-        let module = GraphModule {
-            ports: vec![GraphModulePort {
-                name: "clk".to_owned(),
-                port_type: GraphModulePortType::InputNet,
-                target: GraphModulePortTarget::Module("clocked".to_owned(), "clk".to_owned()),
-            }],
-            vars: vec![GraphModuleVariable {
-                var_type: GraphModulePortType::InputNet,
-                source: ("left".to_owned(), "out".to_owned()),
-                target: ("right".to_owned(), "in".to_owned()),
-            }],
-            ..Default::default()
-        };
-        let candidates = vec![
-            candidate(
-                "clocked",
-                Position(0, 0, 1),
-                "clk",
-                PhysicalPortDirection::Input,
-            ),
-            candidate(
-                "left",
-                Position(0, 0, 1),
-                "out",
-                PhysicalPortDirection::Output,
-            ),
-            candidate(
-                "right",
-                Position(0, 0, 1),
-                "in",
-                PhysicalPortDirection::Input,
-            ),
-        ];
-        let placed = place_candidates_on_shelves(
-            &candidates,
-            &GlobalPlacementConfig {
-                spacing: 3,
-                shelf_width: 16,
-                ..Default::default()
-            },
-        );
-
-        let progress = silent_progress();
-        let routes = route_module_variables(
-            &module,
-            &candidates,
-            &placed,
-            &GlobalRoutingConfig::default(),
-            &progress,
-        )?;
-
-        assert!(
-            routes
-                .first()
-                .is_some_and(|route| route.source == route.sink
-                    && route
-                        .blocks
-                        .first()
-                        .is_some_and(|(_, block)| block.kind.is_switch())),
-            "top-level input switch route should reserve the global input trunk before internal nets"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn route_module_variables_ignores_top_level_output_ports() -> eyre::Result<()> {
-        let module = GraphModule {
-            ports: vec![GraphModulePort {
-                name: "q".to_owned(),
-                port_type: GraphModulePortType::OutputNet,
-                target: GraphModulePortTarget::Module("left".to_owned(), "out".to_owned()),
-            }],
-            ..Default::default()
-        };
-        let candidates = vec![candidate(
-            "left",
-            Position(0, 0, 1),
-            "out",
-            PhysicalPortDirection::Output,
-        )];
-        let placed = place_candidates_on_shelves(&candidates, &GlobalPlacementConfig::default());
-
-        let progress = silent_progress();
-        let routes = route_module_variables(
-            &module,
-            &candidates,
-            &placed,
-            &GlobalRoutingConfig::default(),
-            &progress,
-        )?;
-
-        assert!(routes.is_empty());
         Ok(())
     }
 

@@ -2,7 +2,6 @@ use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
 
-use crate::graph::module::GraphModule;
 use crate::transform::place_and_route::global_pnr::ir::LayoutCandidate;
 use crate::transform::place_and_route::global_pnr::placer::PlacedModule;
 use crate::transform::place_and_route::global_pnr::policy::Free3DPlacementConfig;
@@ -38,28 +37,6 @@ struct Body {
     center: Vec3,
     velocity: Vec3,
     size: [f64; 3],
-}
-
-pub(crate) fn place_free_3d(
-    module: &GraphModule,
-    candidates: &[LayoutCandidate],
-    config: Free3DPlacementConfig,
-) -> Option<Vec<PlacedModule>> {
-    let candidate_by_name = candidates
-        .iter()
-        .enumerate()
-        .map(|(index, candidate)| (candidate.module_name.as_str(), index))
-        .collect::<HashMap<_, _>>();
-    let edges = module
-        .vars
-        .iter()
-        .filter_map(|var| {
-            let source = *candidate_by_name.get(var.source.0.as_str())?;
-            let target = *candidate_by_name.get(var.target.0.as_str())?;
-            (source != target).then_some((source, target))
-        })
-        .collect::<Vec<_>>();
-    place_free_3d_with_edges(candidates, &edges, config)
 }
 
 pub(crate) fn place_free_3d_with_edges(
@@ -307,8 +284,7 @@ fn shift_into_positive_world(origins: &mut [[i64; 3]], margin: i64) {
 mod tests {
     use std::collections::HashSet;
 
-    use super::place_free_3d;
-    use crate::graph::module::{GraphModule, GraphModuleVariable};
+    use super::place_free_3d_with_edges;
     use crate::transform::place_and_route::estimate::BoundingBox;
     use crate::transform::place_and_route::global_pnr::ir::{LayoutCandidate, LayoutCandidateCost};
     use crate::transform::place_and_route::global_pnr::placer::PlacedModule;
@@ -355,8 +331,7 @@ mod tests {
         let candidates = (0..8).map(candidate).collect::<Vec<_>>();
         let config = Free3DPlacementConfig::default();
 
-        let placed =
-            place_free_3d(&GraphModule::default(), &candidates, config).expect("free 3D placement");
+        let placed = place_free_3d_with_edges(&candidates, &[], config).expect("free 3D placement");
 
         assert_eq!(placed.len(), candidates.len());
         assert!(
@@ -393,31 +368,24 @@ mod tests {
     #[test]
     fn attraction_reduces_connected_module_distance() {
         let candidates = (0..4).map(candidate).collect::<Vec<_>>();
-        let module = GraphModule {
-            vars: vec![GraphModuleVariable {
-                source: ("child_0".to_owned(), "out".to_owned()),
-                target: ("child_3".to_owned(), "in".to_owned()),
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
+        let edges = [(0, 3)];
         let base = Free3DPlacementConfig {
             compactness: 0.0,
             iterations: 40,
             ..Default::default()
         };
-        let without = place_free_3d(
-            &module,
+        let without = place_free_3d_with_edges(
             &candidates,
+            &edges,
             Free3DPlacementConfig {
                 attraction: 0.0,
                 ..base
             },
         )
         .unwrap();
-        let with = place_free_3d(
-            &module,
+        let with = place_free_3d_with_edges(
             &candidates,
+            &edges,
             Free3DPlacementConfig {
                 attraction: 0.08,
                 ..base
@@ -431,23 +399,16 @@ mod tests {
     #[test]
     fn placement_seed_changes_only_global_origins_and_remains_legal() {
         let candidates = (0..8).map(candidate).collect::<Vec<_>>();
-        let module = GraphModule::default();
         let base = Free3DPlacementConfig {
             iterations: 0,
             ..Default::default()
         };
-        let first = place_free_3d(
-            &module,
-            &candidates,
-            Free3DPlacementConfig { seed: 1, ..base },
-        )
-        .unwrap();
-        let second = place_free_3d(
-            &module,
-            &candidates,
-            Free3DPlacementConfig { seed: 2, ..base },
-        )
-        .unwrap();
+        let first =
+            place_free_3d_with_edges(&candidates, &[], Free3DPlacementConfig { seed: 1, ..base })
+                .unwrap();
+        let second =
+            place_free_3d_with_edges(&candidates, &[], Free3DPlacementConfig { seed: 2, ..base })
+                .unwrap();
 
         assert_ne!(
             first.iter().map(|item| item.origin).collect::<Vec<_>>(),
@@ -463,4 +424,3 @@ mod tests {
         }
     }
 }
-use std::collections::HashMap;
