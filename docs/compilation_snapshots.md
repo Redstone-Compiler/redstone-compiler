@@ -51,6 +51,11 @@ routing fails.
 
 `ir/source-map.json` links rendered line ranges across the original Verilog,
 Logical RCIR, and Routable RCIR through source, derived, and fused locations.
+Its `entities` table gives stable typed names, kinds, locations, and enclosing
+scopes to those objects, while `relations` records non-provenance edges such as
+an instance referencing its module definition. Keeping scope and reference
+edges separate prevents navigation from treating every use of a shared
+definition as the same lowering result.
 It is debug-only metadata and does not affect RCIR semantics or cache keys. The
 Viewer uses it for Godbolt-style hover highlighting and click-to-pin navigation
 between the three panes.

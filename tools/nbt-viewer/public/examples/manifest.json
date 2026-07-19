@@ -40,7 +40,7 @@
     "name": "counter.rsnap",
     "file": "counter.rsnap",
     "path": "examples/counter.rsnap",
-    "size": 35664
+    "size": 36505
   },
   {
     "kind": "nbt",
@@ -62,7 +62,7 @@
     "name": "d-flip-flop.rsnap",
     "file": "d-flip-flop.rsnap",
     "path": "examples/d-flip-flop.rsnap",
-    "size": 18017
+    "size": 18725
   },
   {
     "kind": "nbt",

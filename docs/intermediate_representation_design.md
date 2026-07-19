@@ -379,6 +379,20 @@ Verilog source span
   -> NBT block positions
 ```
 
+The sidecar also contains typed `entities` with `kind` and `parent_scope`
+metadata, plus typed `relations`. A derived location means “this object was
+produced from that location”; an
+`instantiates` relation instead means “this use references that definition.”
+These must not be collapsed into one undirected graph: selecting a lowering
+result follows its ancestors and its own descendants, but does not descend from
+an ancestor into sibling results. Definition references are shown as a
+separate one-hop navigation edge.
+
+Selecting a module definition may therefore render two layers: the exact
+module headers connected by provenance, and a lighter continuous band for all
+entities contained by those module scopes. Selecting a cell or node keeps the
+narrow provenance view and does not implicitly select its enclosing scope.
+
 The current implementation covers the first two arrows and lets the Viewer
 highlight corresponding Verilog, Logical RCIR, and Routable RCIR lines. It is
 deliberately debug information: locations are omitted from semantic JSON,

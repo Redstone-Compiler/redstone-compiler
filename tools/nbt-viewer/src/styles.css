@@ -1125,6 +1125,33 @@ input {
   grid-template-rows: auto minmax(0, 1fr);
 }
 
+.artifact-dialog-actions,
+.artifact-toggle {
+  display: flex;
+  align-items: center;
+}
+
+.artifact-dialog-actions {
+  gap: 12px;
+}
+
+.artifact-toggle {
+  gap: 6px;
+  color: #aeb8c0;
+  cursor: pointer;
+  font-size: 12px;
+  user-select: none;
+}
+
+.artifact-toggle.hidden {
+  display: none;
+}
+
+.artifact-toggle input {
+  margin: 0;
+  accent-color: #599fdf;
+}
+
 .artifact-content.hidden,
 .ir-comparison.hidden {
   display: none;
@@ -1230,9 +1257,44 @@ body.ir-pane-resizing {
   cursor: pointer;
 }
 
+.ir-code-line.ir-code-line-grouped {
+  background: hsl(var(--ir-location-hue) 58% 52% / 8%);
+  box-shadow: inset 2px 0 hsl(var(--ir-location-hue) 72% 64% / 42%);
+}
+
+.ir-code-line.ir-code-line-grouped:hover {
+  background: hsl(var(--ir-location-hue) 62% 55% / 15%);
+}
+
+.ir-comparison.ir-color-mapping-disabled
+  .ir-code-line.ir-code-line-grouped:not(.ir-location-related):not(.ir-location-scope):not(.ir-location-reference):not(.ir-location-reference-scope) {
+  background: transparent;
+  box-shadow: none;
+}
+
+.ir-comparison.ir-color-mapping-disabled
+  .ir-code-line.ir-code-line-grouped:not(.ir-location-related):not(.ir-location-scope):not(.ir-location-reference):not(.ir-location-reference-scope):hover {
+  background: rgb(255 255 255 / 4%);
+}
+
 .ir-code-line.ir-location-related {
   background: rgb(67 135 214 / 18%);
   box-shadow: inset 3px 0 rgb(89 166 255 / 70%);
+}
+
+.ir-code-line.ir-location-scope {
+  background: rgb(67 135 214 / 7%);
+  box-shadow: inset 2px 0 rgb(89 166 255 / 28%);
+}
+
+.ir-code-line.ir-location-reference {
+  background: rgb(162 106 222 / 16%);
+  box-shadow: inset 3px 0 rgb(188 128 255 / 75%);
+}
+
+.ir-code-line.ir-location-reference-scope {
+  background: rgb(162 106 222 / 6%);
+  box-shadow: inset 2px 0 rgb(188 128 255 / 26%);
 }
 
 .ir-code-line.ir-location-selected {
@@ -1257,9 +1319,45 @@ body.ir-pane-resizing {
   color: #9aa6af;
 }
 
+.ir-code-line.ir-code-line-grouped .ir-line-number {
+  background: hsl(var(--ir-location-hue) 32% 18% / 82%);
+  color: hsl(var(--ir-location-hue) 60% 76%);
+}
+
+.ir-code-line.ir-code-line-grouped:hover .ir-line-number {
+  background: hsl(var(--ir-location-hue) 38% 22% / 92%);
+}
+
+.ir-comparison.ir-color-mapping-disabled
+  .ir-code-line.ir-code-line-grouped:not(.ir-location-related):not(.ir-location-scope):not(.ir-location-reference):not(.ir-location-reference-scope) .ir-line-number {
+  background: #101317;
+  color: #53606a;
+}
+
+.ir-comparison.ir-color-mapping-disabled
+  .ir-code-line.ir-code-line-grouped:not(.ir-location-related):not(.ir-location-scope):not(.ir-location-reference):not(.ir-location-reference-scope):hover .ir-line-number {
+  background: #171c21;
+  color: #9aa6af;
+}
+
 .ir-code-line.ir-location-related .ir-line-number {
   background: #172638;
   color: #8fc2ff;
+}
+
+.ir-code-line.ir-location-scope .ir-line-number {
+  background: #131b24;
+  color: #708aa3;
+}
+
+.ir-code-line.ir-location-reference .ir-line-number {
+  background: #291d38;
+  color: #d5adff;
+}
+
+.ir-code-line.ir-location-reference-scope .ir-line-number {
+  background: #1b1622;
+  color: #8c779f;
 }
 
 .ir-code-line.ir-location-selected .ir-line-number {

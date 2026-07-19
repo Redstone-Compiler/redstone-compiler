@@ -33,7 +33,7 @@ pub(crate) fn lower_logical_to_routable(design: &LogicalDesign) -> eyre::Result<
 }
 
 fn attach_routable_debug_locations(design: &LogicalDesign, routable: &mut RoutableDesign) {
-    use super::debug::{logical_entity, routable_entity};
+    use super::debug::{logical_entity, routable_entity, DebugRelationKind};
     use super::routable::RoutableModuleBody;
 
     let Some(logical_top) = design.module(&design.top) else {
@@ -58,8 +58,56 @@ fn attach_routable_debug_locations(design: &LogicalDesign, routable: &mut Routab
                 .get(&logical_entity(&logical_top.name, "cell", &cell.name))
         });
 
+    for logical_module in &design.modules {
+        for instance in &logical_module.instances {
+            routable.debug.relate(
+                DebugRelationKind::Instantiates,
+                logical_entity(&logical_module.name, "instance", &instance.name),
+                logical_entity(&instance.module, "module", &instance.module),
+            );
+        }
+    }
+
     let modules = routable.modules.clone();
     for module in modules {
+        let logical_definition =
+            logical_definition_for_routable_module(design, logical_top, &module.name);
+        let module_parent = logical_definition
+            .and_then(|definition| {
+                design.debug.get(&logical_entity(
+                    &definition.name,
+                    "module",
+                    &definition.name,
+                ))
+            })
+            .or_else(|| location_for_generated_name(&module.name, increment, state));
+        if let Some(parent) = module_parent {
+            let entity = routable_entity(&module.name, "module", &module.name);
+            let location = routable.debug.derived(entity.clone(), parent);
+            routable.debug.bind(entity, location);
+        }
+        for port in &module.ports {
+            let parent = logical_definition
+                .and_then(|definition| {
+                    definition
+                        .ports
+                        .iter()
+                        .find(|candidate| candidate.name == port.name)
+                        .and_then(|candidate| {
+                            design.debug.get(&logical_entity(
+                                &definition.name,
+                                "net",
+                                &candidate.net,
+                            ))
+                        })
+                })
+                .or(module_parent);
+            let Some(parent) = parent else { continue };
+            let entity = routable_entity(&module.name, "port", &port.name);
+            let location = routable.debug.derived(entity.clone(), parent);
+            routable.debug.bind(entity, location);
+        }
+
         match module.body {
             RoutableModuleBody::Composite { instances, nets } => {
                 for instance in instances {
@@ -74,10 +122,16 @@ fn attach_routable_debug_locations(design: &LogicalDesign, routable: &mut Routab
                     let Some(parent) = parent else { continue };
                     let entity = routable_entity(&module.name, "instance", &instance.name);
                     let location = routable.debug.derived(entity.clone(), parent);
-                    routable.debug.bind(entity, location);
+                    routable.debug.bind(entity.clone(), location);
+                    routable.debug.relate(
+                        DebugRelationKind::Instantiates,
+                        entity,
+                        routable_entity(&instance.module, "module", &instance.module),
+                    );
                 }
                 for net in nets {
-                    let parent = logical_net_location(design, logical_top, &net.name)
+                    let parent = logical_net_location_from_endpoints(design, logical_top, &net)
+                        .or_else(|| logical_net_location(design, logical_top, &net.name))
                         .or_else(|| location_for_generated_name(&net.name, increment, state));
                     let Some(parent) = parent else { continue };
                     let entity = routable_entity(&module.name, "net", &net.name);
@@ -86,16 +140,11 @@ fn attach_routable_debug_locations(design: &LogicalDesign, routable: &mut Routab
                 }
             }
             RoutableModuleBody::Leaf { nodes } => {
-                let parent =
-                    location_for_generated_name(&module.name, increment, state).or_else(|| {
-                        design.debug.get(&logical_entity(
-                            &logical_top.name,
-                            "module",
-                            &logical_top.name,
-                        ))
-                    });
-                let Some(parent) = parent else { continue };
                 for node in nodes {
+                    let parent = logical_definition
+                        .and_then(|definition| logical_node_location(design, definition, &node))
+                        .or_else(|| location_for_generated_name(&module.name, increment, state));
+                    let Some(parent) = parent else { continue };
                     let entity = routable_entity(&module.name, "node", &node.id.to_string());
                     let location = routable.debug.derived(entity.clone(), parent);
                     routable.debug.bind(entity, location);
@@ -103,6 +152,98 @@ fn attach_routable_debug_locations(design: &LogicalDesign, routable: &mut Routab
             }
         }
     }
+}
+
+fn logical_definition_for_routable_module<'a>(
+    design: &'a LogicalDesign,
+    logical_top: &'a LogicalModule,
+    routable_module: &str,
+) -> Option<&'a LogicalModule> {
+    if logical_top.name == routable_module {
+        return Some(logical_top);
+    }
+    logical_top
+        .instances
+        .iter()
+        .find(|instance| instance.name == routable_module)
+        .and_then(|instance| design.module(&instance.module))
+}
+
+fn logical_node_location(
+    design: &LogicalDesign,
+    definition: &LogicalModule,
+    node: &super::routable::RoutableNode,
+) -> Option<usize> {
+    use super::debug::logical_entity;
+    use super::routable::RoutableNodeKind;
+
+    let net_location = |name: &str| {
+        let net = definition
+            .ports
+            .iter()
+            .find(|port| port.name == name)
+            .map_or(name, |port| port.net.as_str());
+        design
+            .debug
+            .get(&logical_entity(&definition.name, "net", net))
+    };
+
+    match &node.kind {
+        RoutableNodeKind::Input { name } | RoutableNodeKind::Output { name } => net_location(name),
+        RoutableNodeKind::Not
+        | RoutableNodeKind::And
+        | RoutableNodeKind::Or
+        | RoutableNodeKind::Xor => definition
+            .cells
+            .iter()
+            .find(|cell| cell.name == node.tag)
+            .and_then(|cell| {
+                design
+                    .debug
+                    .get(&logical_entity(&definition.name, "cell", &cell.name))
+            }),
+        RoutableNodeKind::Sequential { .. } => definition
+            .cells
+            .iter()
+            .find(|cell| cell.kind.is_sequential())
+            .and_then(|cell| {
+                design
+                    .debug
+                    .get(&logical_entity(&definition.name, "cell", &cell.name))
+            }),
+    }
+}
+
+fn logical_net_location_from_endpoints(
+    design: &LogicalDesign,
+    module: &LogicalModule,
+    net: &super::routable::RoutableNet,
+) -> Option<usize> {
+    use super::routable::Endpoint;
+
+    std::iter::once(&net.driver)
+        .chain(net.sinks.iter())
+        .find_map(|endpoint| {
+            let logical_net = match endpoint {
+                Endpoint::SelfPort { port } => module
+                    .ports
+                    .iter()
+                    .find(|candidate| candidate.name == *port)
+                    .map(|candidate| candidate.net.as_str()),
+                Endpoint::InstancePort { instance, port } => module
+                    .instances
+                    .iter()
+                    .find(|candidate| candidate.name == *instance)
+                    .and_then(|candidate| {
+                        candidate
+                            .bindings
+                            .iter()
+                            .find(|binding| binding.port == *port)
+                    })
+                    .map(|binding| binding.net.as_str()),
+            }?;
+            logical_net_location(design, module, logical_net)
+        })
 }
 
 fn location_for_generated_name(

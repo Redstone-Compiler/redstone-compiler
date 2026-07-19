@@ -136,9 +136,21 @@ type SnapshotDebugRange = {
   end_line: number;
   location: number;
 };
+type SnapshotDebugRelation = {
+  kind: 'instantiates' | 'canonicalized_to';
+  from: string;
+  to: string;
+};
+type SnapshotDebugEntity = {
+  location: number;
+  kind: 'module' | 'port' | 'net' | 'instance' | 'cell' | 'node' | 'other';
+  parent_scope?: string;
+};
 type SnapshotSourceMap = {
   format: 'redstone-compiler.source-map.v1';
   locations: SnapshotDebugLocation[];
+  entities: Record<string, SnapshotDebugEntity>;
+  relations: SnapshotDebugRelation[];
   documents: Record<string, SnapshotDebugRange[]>;
 };
 type LoadedSnapshot = {
@@ -161,6 +173,9 @@ const GRAPH_MINIMAP_MAX_WIDTH = 360;
 const GRAPH_MINIMAP_MAX_HEIGHT = 240;
 const GRAPH_MINIMAP_MIN_WIDTH = 150;
 const GRAPH_MINIMAP_MIN_HEIGHT = 48;
+const IR_LOCATION_HUES = [
+  210, 32, 145, 275, 55, 180, 345, 105, 235, 15, 165, 300,
+];
 
 function resolveAssetPath(path: string): string {
   return new URL(`${import.meta.env.BASE_URL}${path}`, window.location.origin).href;
@@ -365,7 +380,13 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
       <div class="graph-dialog-surface artifact-dialog-surface">
         <header class="graph-dialog-header">
           <strong id="artifact-title">Snapshot artifact</strong>
-          <button id="close-artifact" class="panel-action" type="button">Close</button>
+          <div class="artifact-dialog-actions">
+            <label id="ir-color-mapping-toggle" class="artifact-toggle hidden">
+              <input id="ir-color-mapping" type="checkbox" checked />
+              <span>Color mapping</span>
+            </label>
+            <button id="close-artifact" class="panel-action" type="button">Close</button>
+          </div>
         </header>
         <div id="ir-comparison" class="ir-comparison hidden"></div>
         <pre id="artifact-content" class="artifact-content"></pre>
@@ -470,6 +491,8 @@ const artifactDialog = document.querySelector<HTMLDialogElement>('#artifact-dial
 const closeArtifactButton = document.querySelector<HTMLButtonElement>('#close-artifact')!;
 const artifactTitle = document.querySelector<HTMLElement>('#artifact-title')!;
 const irComparison = document.querySelector<HTMLElement>('#ir-comparison')!;
+const irColorMappingToggle = document.querySelector<HTMLElement>('#ir-color-mapping-toggle')!;
+const irColorMappingInput = document.querySelector<HTMLInputElement>('#ir-color-mapping')!;
 const artifactContent = document.querySelector<HTMLElement>('#artifact-content')!;
 
 const viewer = new StructureViewer(canvas);
@@ -527,6 +550,8 @@ let gridVisible = true;
 let snapshotBoxesVisible = true;
 let snapshotRoutesVisible = true;
 let pinnedIrLocations: number[] | undefined;
+let pinnedIrEntities: string[] | undefined;
+const irLocationColorSlots = new Map<string, number>();
 
 folderInput.setAttribute('webkitdirectory', '');
 folderInput.setAttribute('directory', '');
@@ -579,7 +604,8 @@ window.addEventListener('keydown', event => {
   if (pinnedIrLocations) {
     event.preventDefault();
     pinnedIrLocations = undefined;
-    renderIrLocationHighlight(undefined);
+    pinnedIrEntities = undefined;
+    renderIrLocationHighlight(undefined, undefined);
     return;
   }
   if (!isolatedSnapshotBoxId && !isolatedSnapshotRouteId) return;
@@ -786,6 +812,10 @@ selectedNbtDialog.addEventListener('click', event => {
 
 closeArtifactButton.addEventListener('click', () => {
   artifactDialog.close();
+});
+
+irColorMappingInput.addEventListener('change', () => {
+  irComparison.classList.toggle('ir-color-mapping-disabled', !irColorMappingInput.checked);
 });
 
 artifactDialog.addEventListener('click', event => {
@@ -2280,6 +2310,7 @@ async function openTextArtifact(path: string): Promise<void> {
   if (!file) throw new Error(`Snapshot artifact is missing: ${path}`);
   irComparison.replaceChildren();
   irComparison.classList.add('hidden');
+  irColorMappingToggle.classList.add('hidden');
   artifactContent.classList.remove('hidden');
   artifactTitle.textContent = path;
   await renderArtifactContent(path);
@@ -2293,9 +2324,13 @@ async function openSnapshotIrViewer(paths: string[]): Promise<void> {
   artifactTitle.textContent = `${currentSnapshot?.manifest.top_module ?? 'Snapshot'} IR`;
   artifactContent.classList.add('hidden');
   irComparison.classList.remove('hidden');
+  irColorMappingToggle.classList.remove('hidden');
+  irComparison.classList.toggle('ir-color-mapping-disabled', !irColorMappingInput.checked);
   irComparison.replaceChildren();
   irComparison.style.removeProperty('grid-template-columns');
   pinnedIrLocations = undefined;
+  pinnedIrEntities = undefined;
+  irLocationColorSlots.clear();
 
   const sources = await Promise.all(orderedPaths.map(async path => {
     const file = currentSnapshot?.filesByPath.get(path);
@@ -2418,20 +2453,40 @@ function createIrComparisonPane(path: string, source: string): HTMLElement {
     row.dataset.irPath = path;
     row.dataset.irLine = String(index + 1);
     const locationIds = sourceMapLocationsForLine(path, index + 1);
+    const entityIds = sourceMapEntitiesForLine(path, index + 1);
     if (locationIds.length > 0) {
       row.classList.add('ir-code-line-linked');
       row.dataset.irLocations = locationIds.join(',');
+      row.dataset.irEntities = entityIds.join(',');
+      const colorGroup = sourceMapColorGroupForLine(path, index + 1);
+      if (colorGroup) {
+        let colorSlot = irLocationColorSlots.get(colorGroup);
+        if (colorSlot === undefined) {
+          colorSlot = irLocationColorSlots.size;
+          irLocationColorSlots.set(colorGroup, colorSlot);
+        }
+        row.classList.add('ir-code-line-grouped');
+        row.style.setProperty(
+          '--ir-location-hue',
+          String(IR_LOCATION_HUES[colorSlot % IR_LOCATION_HUES.length]),
+        );
+      }
       row.addEventListener('mouseenter', () => {
-        if (!pinnedIrLocations) renderIrLocationHighlight(locationIds, row);
+        if (!pinnedIrLocations) renderIrLocationHighlight(locationIds, entityIds, row);
       });
       row.addEventListener('mouseleave', () => {
-        if (!pinnedIrLocations) renderIrLocationHighlight(undefined);
+        if (!pinnedIrLocations) renderIrLocationHighlight(undefined, undefined);
       });
       row.addEventListener('click', () => {
         const sameSelection = pinnedIrLocations?.length === locationIds.length
           && pinnedIrLocations.every(location => locationIds.includes(location));
         pinnedIrLocations = sameSelection ? undefined : locationIds;
-        renderIrLocationHighlight(pinnedIrLocations, sameSelection ? undefined : row);
+        pinnedIrEntities = sameSelection ? undefined : entityIds;
+        renderIrLocationHighlight(
+          pinnedIrLocations,
+          pinnedIrEntities,
+          sameSelection ? undefined : row,
+        );
         if (!sameSelection) scrollRelatedIrPanesIntoView(row);
       });
     }
@@ -2455,40 +2510,84 @@ function createIrComparisonPane(path: string, source: string): HTMLElement {
   return pane;
 }
 
-function sourceMapLocationsForLine(path: string, line: number): number[] {
-  const ranges = currentSnapshot?.sourceMap?.documents[path]
+function sourceMapRangesForLine(path: string, line: number): SnapshotDebugRange[] {
+  return currentSnapshot?.sourceMap?.documents[path]
     ?.filter(range => range.start_line <= line && line <= range.end_line) ?? [];
+}
+
+function sourceMapLocationsForLine(path: string, line: number): number[] {
+  const ranges = sourceMapRangesForLine(path, line);
   if (ranges.length === 0) return [];
-  if (/\.v$/i.test(path)) return [...new Set(ranges.map(range => range.location))];
   const smallestSpan = Math.min(...ranges.map(range => range.end_line - range.start_line));
   return [...new Set(ranges
     .filter(range => range.end_line - range.start_line === smallestSpan)
     .map(range => range.location))];
 }
 
+function sourceMapEntitiesForLine(path: string, line: number): string[] {
+  const ranges = sourceMapRangesForLine(path, line);
+  if (ranges.length === 0) return [];
+  const smallestSpan = Math.min(...ranges.map(range => range.end_line - range.start_line));
+  return [...new Set(ranges
+    .filter(range => range.end_line - range.start_line === smallestSpan)
+    .map(range => range.entity))];
+}
+
+function sourceMapRootLocations(locationId: number, visiting = new Set<number>()): number[] {
+  if (visiting.has(locationId)) return [];
+  const location = currentSnapshot?.sourceMap?.locations[locationId];
+  if (!location || location.kind === 'source') return [locationId];
+
+  const nextVisiting = new Set(visiting).add(locationId);
+  if (location.kind === 'derived') {
+    return sourceMapRootLocations(location.parent, nextVisiting);
+  }
+  return location.parents.flatMap(parent => sourceMapRootLocations(parent, nextVisiting));
+}
+
+function sourceMapColorGroupForLine(path: string, line: number): string | undefined {
+  const ranges = sourceMapRangesForLine(path, line);
+  if (ranges.length === 0) return undefined;
+  const smallestSpan = Math.min(...ranges.map(range => range.end_line - range.start_line));
+  const roots = [...new Set(ranges
+    .filter(range => range.end_line - range.start_line === smallestSpan)
+    .flatMap(range => sourceMapRootLocations(range.location)))]
+    .sort((left, right) => left - right);
+  return roots.length > 0 ? roots.join(',') : undefined;
+}
+
 function relatedIrLocations(selected: number[]): Set<number> {
   const locations = currentSnapshot?.sourceMap?.locations ?? [];
-  const edges = new Map<number, Set<number>>();
-  const link = (left: number, right: number) => {
-    if (!edges.has(left)) edges.set(left, new Set());
-    if (!edges.has(right)) edges.set(right, new Set());
-    edges.get(left)!.add(right);
-    edges.get(right)!.add(left);
+  const parents = new Map<number, Set<number>>();
+  const children = new Map<number, Set<number>>();
+  const link = (child: number, parent: number) => {
+    if (!parents.has(child)) parents.set(child, new Set());
+    if (!children.has(parent)) children.set(parent, new Set());
+    parents.get(child)!.add(parent);
+    children.get(parent)!.add(child);
   };
   locations.forEach((location, index) => {
     if (location.kind === 'derived') link(index, location.parent);
     if (location.kind === 'fused') location.parents.forEach(parent => link(index, parent));
   });
   const related = new Set(selected);
-  const queue = [...selected];
-  while (queue.length > 0) {
-    const location = queue.shift()!;
-    for (const neighbor of edges.get(location) ?? []) {
-      if (related.has(neighbor)) continue;
-      related.add(neighbor);
-      queue.push(neighbor);
+  const walk = (start: number[], edges: Map<number, Set<number>>) => {
+    const visited = new Set(start);
+    const queue = [...start];
+    while (queue.length > 0) {
+      const location = queue.shift()!;
+      for (const neighbor of edges.get(location) ?? []) {
+        if (visited.has(neighbor)) continue;
+        visited.add(neighbor);
+        related.add(neighbor);
+        queue.push(neighbor);
+      }
     }
-  }
+  };
+  // A selection sees its own lowering descendants and its provenance ancestors.
+  // It deliberately does not descend again from an ancestor into sibling results.
+  walk(selected, parents);
+  walk(selected, children);
   return related;
 }
 
@@ -2499,11 +2598,87 @@ function irRowLocations(row: HTMLElement): number[] {
     .filter(Number.isInteger);
 }
 
-function renderIrLocationHighlight(selected: number[] | undefined, activeRow?: HTMLElement): void {
+function irRowEntities(row: HTMLElement): string[] {
+  return (row.dataset.irEntities ?? '').split(',').filter(Boolean);
+}
+
+function referencedIrLocations(selectedEntities: string[]): Set<number> {
+  const sourceMap = currentSnapshot?.sourceMap;
+  if (!sourceMap) return new Set();
+  const selected = new Set(selectedEntities);
+  return new Set((sourceMap.relations ?? [])
+    .filter(relation => selected.has(relation.from))
+    .map(relation => sourceMap.entities?.[relation.to]?.location)
+    .filter((location): location is number => Number.isInteger(location)));
+}
+
+function scopedIrLocations(exactLocations: Set<number>): Set<number> {
+  const sourceMap = currentSnapshot?.sourceMap;
+  if (!sourceMap) return new Set();
+  const entities = Object.entries(sourceMap.entities ?? {});
+  const scopes = new Set(entities
+    .filter(([, entity]) => entity.kind === 'module' && exactLocations.has(entity.location))
+    .map(([id]) => id));
+  if (scopes.size === 0) return new Set();
+
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const [id, entity] of entities) {
+      if (!entity.parent_scope || !scopes.has(entity.parent_scope) || scopes.has(id)) continue;
+      scopes.add(id);
+      changed = true;
+    }
+  }
+
+  const result = new Set<number>();
+  for (const [id, entity] of entities) {
+    if (!scopes.has(id)) continue;
+    for (const location of relatedIrLocations([entity.location])) result.add(location);
+  }
+  return result;
+}
+
+function rowStartsMappedModule(row: HTMLElement): boolean {
+  const path = row.dataset.irPath;
+  const line = Number(row.dataset.irLine);
+  if (!path || !Number.isInteger(line)) return false;
+  const entities = new Set(irRowEntities(row));
+  return (currentSnapshot?.sourceMap?.documents[path] ?? []).some(range =>
+    entities.has(range.entity)
+    && currentSnapshot?.sourceMap?.entities?.[range.entity]?.kind === 'module'
+    && range.start_line === line);
+}
+
+function renderIrLocationHighlight(
+  selected: number[] | undefined,
+  selectedEntities: string[] | undefined,
+  activeRow?: HTMLElement,
+): void {
   const related = selected ? relatedIrLocations(selected) : new Set<number>();
+  const scoped = selected ? scopedIrLocations(related) : new Set<number>();
+  const references = selectedEntities
+    ? referencedIrLocations(selectedEntities)
+    : new Set<number>();
+  const referencedScopes = scopedIrLocations(references);
   irComparison.querySelectorAll<HTMLElement>('.ir-code-line').forEach(row => {
-    const matches = irRowLocations(row).some(location => related.has(location));
+    const rowLocations = irRowLocations(row);
+    const locationMatches = rowLocations.some(location => related.has(location));
+    const rowEntities = irRowEntities(row);
+    const moduleOnly = rowEntities.length > 0 && rowEntities.every(entity =>
+      currentSnapshot?.sourceMap?.entities?.[entity]?.kind === 'module');
+    const matches = locationMatches
+      && (!moduleOnly || rowStartsMappedModule(row) || row === activeRow);
+    const scopeMatch = !matches && rowLocations.some(location => scoped.has(location));
+    const referenceLocationMatch = rowLocations.some(location => references.has(location));
+    const referenceMatch = referenceLocationMatch
+      && (!moduleOnly || rowStartsMappedModule(row));
+    const referenceScopeMatch = !referenceMatch
+      && rowLocations.some(location => referencedScopes.has(location));
     row.classList.toggle('ir-location-related', matches);
+    row.classList.toggle('ir-location-scope', scopeMatch);
+    row.classList.toggle('ir-location-reference', referenceMatch);
+    row.classList.toggle('ir-location-reference-scope', referenceScopeMatch);
     row.classList.toggle('ir-location-selected', matches && row === activeRow);
   });
 }

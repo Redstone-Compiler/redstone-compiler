@@ -8,6 +8,7 @@ pub type DebugLocationId = usize;
 pub struct IrDebugInfo {
     pub locations: Vec<DebugLocation>,
     pub entities: BTreeMap<String, DebugLocationId>,
+    pub relations: Vec<DebugRelation>,
 }
 
 impl PartialEq for IrDebugInfo {
@@ -42,7 +43,43 @@ pub enum DebugLocation {
 pub struct IrSourceMap {
     pub format: String,
     pub locations: Vec<DebugLocation>,
+    pub entities: BTreeMap<String, DebugEntity>,
+    pub relations: Vec<DebugRelation>,
     pub documents: BTreeMap<String, Vec<DebugRange>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DebugEntity {
+    pub location: DebugLocationId,
+    pub kind: DebugEntityKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_scope: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DebugEntityKind {
+    Module,
+    Port,
+    Net,
+    Instance,
+    Cell,
+    Node,
+    Other,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DebugRelation {
+    pub kind: DebugRelationKind,
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DebugRelationKind {
+    Instantiates,
+    CanonicalizedTo,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,6 +127,22 @@ impl IrDebugInfo {
         self.entities.get(entity).copied()
     }
 
+    pub fn relate(
+        &mut self,
+        kind: DebugRelationKind,
+        from: impl Into<String>,
+        to: impl Into<String>,
+    ) {
+        let relation = DebugRelation {
+            kind,
+            from: from.into(),
+            to: to.into(),
+        };
+        if !self.relations.contains(&relation) {
+            self.relations.push(relation);
+        }
+    }
+
     fn intern(&mut self, location: DebugLocation) -> DebugLocationId {
         if let Some(index) = self
             .locations
@@ -109,6 +162,30 @@ impl IrDebugInfo {
     ) -> IrSourceMap {
         let mut documents = generated_documents.into_iter().collect::<BTreeMap<_, _>>();
         let mut seen = BTreeSet::new();
+        let mut covered_sources = BTreeSet::new();
+        for (entity, location) in &self.entities {
+            let Some(source) = direct_source_parent(&self.locations, *location) else {
+                continue;
+            };
+            let DebugLocation::Source {
+                file,
+                start_line,
+                end_line,
+                ..
+            } = &self.locations[source]
+            else {
+                unreachable!()
+            };
+            covered_sources.insert(source);
+            if seen.insert((file.clone(), *start_line, *end_line, entity.clone())) {
+                documents.entry(file.clone()).or_default().push(DebugRange {
+                    entity: entity.clone(),
+                    start_line: *start_line,
+                    end_line: *end_line,
+                    location: source,
+                });
+            }
+        }
         for (location, candidate) in self.locations.iter().enumerate() {
             let DebugLocation::Source {
                 file,
@@ -119,7 +196,15 @@ impl IrDebugInfo {
             else {
                 continue;
             };
-            if seen.insert((file.clone(), *start_line, *end_line, location)) {
+            if covered_sources.contains(&location) {
+                continue;
+            }
+            if seen.insert((
+                file.clone(),
+                *start_line,
+                *end_line,
+                format!("source/{location}"),
+            )) {
                 documents.entry(file.clone()).or_default().push(DebugRange {
                     entity: format!("source/{location}"),
                     start_line: *start_line,
@@ -134,8 +219,44 @@ impl IrDebugInfo {
         IrSourceMap {
             format: "redstone-compiler.source-map.v1".to_owned(),
             locations: self.locations.clone(),
+            entities: self
+                .entities
+                .iter()
+                .map(|(entity, location)| (entity.clone(), debug_entity(entity, *location)))
+                .collect(),
+            relations: self.relations.clone(),
             documents,
         }
+    }
+}
+
+fn direct_source_parent(
+    locations: &[DebugLocation],
+    location: DebugLocationId,
+) -> Option<DebugLocationId> {
+    let DebugLocation::Derived { parent, .. } = locations.get(location)? else {
+        return None;
+    };
+    matches!(locations.get(*parent), Some(DebugLocation::Source { .. })).then_some(*parent)
+}
+
+fn debug_entity(entity: &str, location: DebugLocationId) -> DebugEntity {
+    let parts = entity.split('/').collect::<Vec<_>>();
+    let kind = match parts.get(2).copied() {
+        Some("module") => DebugEntityKind::Module,
+        Some("port") => DebugEntityKind::Port,
+        Some("net") => DebugEntityKind::Net,
+        Some("instance") => DebugEntityKind::Instance,
+        Some("cell") => DebugEntityKind::Cell,
+        Some("node") => DebugEntityKind::Node,
+        _ => DebugEntityKind::Other,
+    };
+    let parent_scope = (kind != DebugEntityKind::Module && parts.len() >= 4)
+        .then(|| format!("{}/{}/module/{}", parts[0], parts[1], parts[1]));
+    DebugEntity {
+        location,
+        kind,
+        parent_scope,
     }
 }
 
@@ -264,6 +385,32 @@ fn routable_ranges(design: &super::RoutableDesign, text: &str) -> Vec<DebugRange
             continue;
         };
         let module_end = find_block_end(&lines, module_start, "}");
+        push_range(
+            design,
+            &mut ranges,
+            routable_entity(&module.name, "module", &module.name),
+            module_start,
+            module_end,
+        );
+        for port in &module.ports {
+            let needle = format!(
+                "port {} {}",
+                match port.direction {
+                    super::routable::RoutablePortDirection::Input => "input",
+                    super::routable::RoutablePortDirection::Output => "output",
+                },
+                rcir_quoted(&port.name)
+            );
+            if let Some(line) = find_line_in(&lines, module_start, module_end, &needle) {
+                push_range(
+                    design,
+                    &mut ranges,
+                    routable_entity(&module.name, "port", &port.name),
+                    line,
+                    line,
+                );
+            }
+        }
         match &module.body {
             RoutableModuleBody::Composite { instances, nets } => {
                 for instance in instances {
@@ -376,6 +523,26 @@ fn rcir_quoted(value: &str) -> String {
 mod tests {
     use super::*;
 
+    fn ancestors(map: &IrSourceMap, location: DebugLocationId) -> BTreeSet<DebugLocationId> {
+        fn visit(map: &IrSourceMap, location: DebugLocationId, result: &mut BTreeSet<usize>) {
+            if !result.insert(location) {
+                return;
+            }
+            match &map.locations[location] {
+                DebugLocation::Source { .. } => {}
+                DebugLocation::Derived { parent, .. } => visit(map, *parent, result),
+                DebugLocation::Fused { parents } => {
+                    for parent in parents {
+                        visit(map, *parent, result);
+                    }
+                }
+            }
+        }
+        let mut result = BTreeSet::new();
+        visit(map, location, &mut result);
+        result
+    }
+
     #[test]
     fn counter_source_map_links_all_three_documents() -> eyre::Result<()> {
         let source = include_str!("../../test/counter.snapshot/counter.v");
@@ -401,6 +568,80 @@ mod tests {
                 .iter()
                 .any(|range| range.entity.contains("/instance/q_0_master"))
         }));
+        Ok(())
+    }
+
+    #[test]
+    fn hierarchical_leaf_nodes_keep_definition_level_provenance() -> eyre::Result<()> {
+        let source = include_str!("../../test/d-flip-flop.snapshot/d-flip-flop.v");
+        let logical =
+            super::super::LogicalDesign::from_verilog_source_named(source, "d-flip-flop.v")?;
+        let routable = logical.lower_to_routable()?;
+        let map = build_source_map(
+            &logical,
+            &logical.to_string(),
+            &routable,
+            &routable.to_string(),
+        );
+
+        let inv_not = map.entities[&routable_entity("inv", "node", "1")].location;
+        let logical_not = map.entities[&logical_entity("not_clk", "cell", "clk_n")].location;
+        assert!(ancestors(&map, inv_not).contains(&logical_not));
+
+        let latch = map.entities[&routable_entity("master", "node", "2")].location;
+        let logical_latch = map.entities[&logical_entity("d_latch", "cell", "state")].location;
+        assert!(ancestors(&map, latch).contains(&logical_latch));
+        assert!(!ancestors(&map, inv_not).contains(&logical_latch));
+
+        assert!(map.documents["ir/routable.rcir"]
+            .iter()
+            .any(|range| range.entity == routable_entity("d_flip_flop", "net", "inv_clk_n")));
+        let latch_scope = logical_entity("d_latch", "module", "d_latch");
+        assert_eq!(
+            map.entities[&logical_entity("d_latch", "cell", "state")].parent_scope,
+            Some(latch_scope.clone())
+        );
+        assert!(map.documents["d-flip-flop.v"]
+            .iter()
+            .any(|range| range.entity == latch_scope
+                && range.start_line == 8
+                && range.end_line == 16));
+        Ok(())
+    }
+
+    #[test]
+    fn source_map_separates_instantiation_references_from_provenance() -> eyre::Result<()> {
+        let source = include_str!("../../test/d-flip-flop.snapshot/d-flip-flop.v");
+        let logical =
+            super::super::LogicalDesign::from_verilog_source_named(source, "d-flip-flop.v")?;
+        let routable = logical.lower_to_routable()?;
+        let map = build_source_map(
+            &logical,
+            &logical.to_string(),
+            &routable,
+            &routable.to_string(),
+        );
+
+        let expected = [
+            DebugRelation {
+                kind: DebugRelationKind::Instantiates,
+                from: logical_entity("d_flip_flop", "instance", "inv"),
+                to: logical_entity("not_clk", "module", "not_clk"),
+            },
+            DebugRelation {
+                kind: DebugRelationKind::Instantiates,
+                from: routable_entity("d_flip_flop", "instance", "inv"),
+                to: routable_entity("inv", "module", "inv"),
+            },
+            DebugRelation {
+                kind: DebugRelationKind::Instantiates,
+                from: routable_entity("d_flip_flop", "instance", "slave"),
+                to: routable_entity("master", "module", "master"),
+            },
+        ];
+        for relation in expected {
+            assert!(map.relations.contains(&relation), "missing {relation:?}");
+        }
         Ok(())
     }
 }
