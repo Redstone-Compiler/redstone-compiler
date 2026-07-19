@@ -3,17 +3,24 @@ use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 
 use eyre::ContextCompat;
 
-use crate::graph::module::{GraphModule, GraphModulePortTarget, GraphModuleVariable};
+use crate::graph::module::{
+    GraphModule, GraphModulePortTarget, GraphModulePortType, GraphModuleVariable,
+};
 use crate::output::OutputEndpoint;
 use crate::transform::place_and_route::detailed_router::{
     self, PlaceRedstoneResult, PlaceRepeaterResult,
 };
 use crate::transform::place_and_route::global_pnr::assembly::reset_dynamic_power_states;
+use crate::transform::place_and_route::global_pnr::heuristics::GlobalHeuristicHooks;
 use crate::transform::place_and_route::global_pnr::ir::{
     LayoutCandidate, PhysicalPort, PhysicalPortDirection,
 };
+use crate::transform::place_and_route::global_pnr::physical_intent::ResolvedPhysicalIntent;
 use crate::transform::place_and_route::global_pnr::placer::PlacedModule;
 use crate::transform::place_and_route::global_pnr::progress::GlobalPnrProgress;
+use crate::transform::place_and_route::global_pnr::topology::{
+    NetId, ResolvedEndpoint, ResolvedPnrTopology,
+};
 use crate::transform::place_and_route::place_bound::{PlaceBound, PropagateType};
 use crate::transform::place_and_route::placed_node::PlacedNode;
 use crate::world::block::{Block, BlockKind, Direction};
@@ -28,6 +35,95 @@ const MAX_REDSTONE_STRENGTH: usize = 15;
 const FANOUT_ROUTE_SOURCE_LIMIT: usize = 8;
 const FANOUT_ROUTE_TERMINAL_LIMIT: usize = 24;
 const OUTPUT_ISOLATION_ESCAPE_MAX_STEPS: usize = 4;
+
+#[derive(Clone, Debug)]
+struct RoutingTopInput {
+    name: String,
+    targets: Vec<(String, String)>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct RoutingPlan {
+    top_inputs: Vec<RoutingTopInput>,
+    vars: Vec<GraphModuleVariable>,
+}
+
+impl RoutingPlan {
+    fn from_legacy(module: &GraphModule) -> Self {
+        Self {
+            top_inputs: module
+                .ports
+                .iter()
+                .filter(|port| port.port_type.is_input())
+                .map(|port| RoutingTopInput {
+                    name: port.name.clone(),
+                    targets: legacy_target_pairs(&port.target),
+                })
+                .collect(),
+            vars: module.vars.clone(),
+        }
+    }
+
+    fn from_resolved(topology: &ResolvedPnrTopology) -> eyre::Result<Self> {
+        let mut plan = Self::default();
+        for net in &topology.nets {
+            match &net.driver {
+                ResolvedEndpoint::TopPort { port } => {
+                    let port = topology
+                        .port(*port)
+                        .context("resolved routing plan has an unknown top input")?;
+                    let targets = net
+                        .sinks
+                        .iter()
+                        .filter_map(|sink| resolved_instance_port_pair(topology, sink))
+                        .collect::<Vec<_>>();
+                    if !targets.is_empty() {
+                        plan.top_inputs.push(RoutingTopInput {
+                            name: port.name.clone(),
+                            targets,
+                        });
+                    }
+                }
+                ResolvedEndpoint::InstancePort { .. } => {
+                    let source = resolved_instance_port_pair(topology, &net.driver)
+                        .context("resolved routing plan has an invalid driver")?;
+                    for sink in &net.sinks {
+                        let Some(target) = resolved_instance_port_pair(topology, sink) else {
+                            continue;
+                        };
+                        plan.vars.push(GraphModuleVariable {
+                            var_type: GraphModulePortType::InputNet,
+                            source: source.clone(),
+                            target,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(plan)
+    }
+}
+
+fn resolved_instance_port_pair(
+    topology: &ResolvedPnrTopology,
+    endpoint: &ResolvedEndpoint,
+) -> Option<(String, String)> {
+    let ResolvedEndpoint::InstancePort { instance, port } = endpoint else {
+        return None;
+    };
+    Some((
+        topology.instances.get(instance.0)?.display_name.clone(),
+        topology.port(*port)?.name.clone(),
+    ))
+}
+
+fn legacy_target_pairs(target: &GraphModulePortTarget) -> Vec<(String, String)> {
+    match target {
+        GraphModulePortTarget::Module(module, port) => vec![(module.clone(), port.clone())],
+        GraphModulePortTarget::Wire(targets) => targets.clone(),
+        GraphModulePortTarget::Node(_) => Vec::new(),
+    }
+}
 const SIGNAL_CONTACT_SEARCH_RADIUS: usize = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -111,6 +207,12 @@ struct PoweredRouteSource {
 
 #[derive(Clone, Debug)]
 pub struct RoutedNet {
+    /// Stable logical identity assigned by the resolved PnR topology. Legacy
+    /// router entry points leave this empty; prepared global PnR always fills
+    /// it before the route leaves this module.
+    pub net_id: Option<NetId>,
+    pub source_endpoint: Option<ResolvedEndpoint>,
+    pub sink_endpoint: Option<ResolvedEndpoint>,
     pub source_label: Option<String>,
     pub sink_label: Option<String>,
     pub source: Position,
@@ -136,6 +238,9 @@ impl RoutedNet {
             .into_iter()
             .collect();
         Self {
+            net_id: None,
+            source_endpoint: None,
+            sink_endpoint: None,
             source_label: None,
             sink_label: None,
             source,
@@ -146,6 +251,18 @@ impl RoutedNet {
             required_released_positions: vec![sink],
             powered_taps,
         }
+    }
+
+    fn with_topology_identity(
+        mut self,
+        net_id: NetId,
+        source: ResolvedEndpoint,
+        sink: Option<ResolvedEndpoint>,
+    ) -> Self {
+        self.net_id = Some(net_id);
+        self.source_endpoint = Some(source);
+        self.sink_endpoint = sink;
+        self
     }
 
     fn with_labels(mut self, source: impl Into<String>, sink: impl Into<String>) -> Self {
@@ -182,6 +299,119 @@ impl RoutedNet {
             })
             .collect()
     }
+}
+
+/// Route through the compatibility implementation, then bind every physical
+/// branch to the typed topology that initiated the global PnR run. This is the
+/// migration boundary: callers no longer need to rediscover net identity from
+/// display labels after routing.
+pub fn route_resolved_topology_with_order_from_prefix(
+    topology: &ResolvedPnrTopology,
+    intent: Option<&ResolvedPhysicalIntent>,
+    hooks: &GlobalHeuristicHooks,
+    candidates: &[LayoutCandidate],
+    placed_modules: &[PlacedModule],
+    config: &GlobalRoutingConfig,
+    order_strategy: NetOrderStrategy,
+    progress: &GlobalPnrProgress,
+    prefix: &[RoutedNet],
+) -> Result<Vec<RoutedNet>, PartialRoutingFailure> {
+    let plan = RoutingPlan::from_resolved(topology).map_err(|error| PartialRoutingFailure {
+        error,
+        routed_nets: prefix.to_vec(),
+    })?;
+    match route_module_variables_with_order_from_prefix_impl(
+        Some(topology),
+        intent,
+        hooks,
+        &plan,
+        candidates,
+        placed_modules,
+        config,
+        order_strategy,
+        progress,
+        prefix,
+    ) {
+        Ok(mut routes) => {
+            bind_route_topology(topology, candidates, placed_modules, &mut routes);
+            Ok(routes)
+        }
+        Err(mut failure) => {
+            bind_route_topology(
+                topology,
+                candidates,
+                placed_modules,
+                &mut failure.routed_nets,
+            );
+            Err(failure)
+        }
+    }
+}
+
+fn bind_route_topology(
+    topology: &ResolvedPnrTopology,
+    candidates: &[LayoutCandidate],
+    placed_modules: &[PlacedModule],
+    routes: &mut [RoutedNet],
+) {
+    for route in routes {
+        if route.net_id.is_some() {
+            continue;
+        }
+        let Some(source_label) = route.source_label.as_deref() else {
+            continue;
+        };
+        let Some(net) = topology.net_by_driver_label(source_label) else {
+            continue;
+        };
+        let sink = route
+            .sink_label
+            .as_deref()
+            .and_then(|label| topology.sink_by_label(net, label).cloned())
+            .or_else(|| {
+                net.sinks.iter().find_map(|endpoint| {
+                    endpoint_matches_route_sink(
+                        topology,
+                        endpoint,
+                        candidates,
+                        placed_modules,
+                        route,
+                    )
+                    .then(|| endpoint.clone())
+                })
+            });
+        *route = route
+            .clone()
+            .with_topology_identity(net.id, net.driver.clone(), sink);
+    }
+}
+
+fn endpoint_matches_route_sink(
+    topology: &ResolvedPnrTopology,
+    endpoint: &ResolvedEndpoint,
+    candidates: &[LayoutCandidate],
+    placed_modules: &[PlacedModule],
+    route: &RoutedNet,
+) -> bool {
+    let ResolvedEndpoint::InstancePort { instance, port } = endpoint else {
+        return false;
+    };
+    let Some(instance) = topology.instances.get(instance.0) else {
+        return false;
+    };
+    let Some(port) = topology.port(*port) else {
+        return false;
+    };
+    resolve_port_targets(
+        candidates,
+        placed_modules,
+        &instance.display_name,
+        &port.name,
+    )
+    .iter()
+    .any(|target| {
+        target.position == route.sink || route.required_powered_positions.contains(&target.position)
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -259,6 +489,34 @@ pub fn route_module_variables_with_order_from_prefix(
     progress: &GlobalPnrProgress,
     prefix: &[RoutedNet],
 ) -> Result<Vec<RoutedNet>, PartialRoutingFailure> {
+    let hooks = GlobalHeuristicHooks::default();
+    let plan = RoutingPlan::from_legacy(module);
+    route_module_variables_with_order_from_prefix_impl(
+        None,
+        None,
+        &hooks,
+        &plan,
+        candidates,
+        placed_modules,
+        config,
+        order_strategy,
+        progress,
+        prefix,
+    )
+}
+
+fn route_module_variables_with_order_from_prefix_impl(
+    topology: Option<&ResolvedPnrTopology>,
+    intent: Option<&ResolvedPhysicalIntent>,
+    hooks: &GlobalHeuristicHooks,
+    plan: &RoutingPlan,
+    candidates: &[LayoutCandidate],
+    placed_modules: &[PlacedModule],
+    config: &GlobalRoutingConfig,
+    order_strategy: NetOrderStrategy,
+    progress: &GlobalPnrProgress,
+    prefix: &[RoutedNet],
+) -> Result<Vec<RoutedNet>, PartialRoutingFailure> {
     let mut route_world = placed_candidate_world(candidates, placed_modules).map_err(|error| {
         PartialRoutingFailure {
             error,
@@ -283,9 +541,36 @@ pub fn route_module_variables_with_order_from_prefix(
         .iter()
         .filter_map(|route| Some((route.source_label.as_ref()?, route.sink_label.as_ref()?)))
         .collect::<HashSet<_>>();
-    let vars = ordered_module_variables(&module.vars, order_strategy)
+    let completed_typed_connections = prefix
+        .iter()
+        .filter_map(|route| Some((route.net_id?, route.sink_endpoint.clone()?)))
+        .collect::<HashSet<_>>();
+    let mut ordered_vars = ordered_module_variables(&plan.vars, order_strategy);
+    if let Some(topology) = topology {
+        ordered_vars.sort_by_key(|var| {
+            let label = format!("{}.{}", var.source.0, var.source.1);
+            let priority = topology.net_by_driver_label(&label).map_or(0, |net| {
+                intent.map_or(0, |intent| intent.net_priority(net.id))
+                    + hooks
+                        .net_priority_terms
+                        .iter()
+                        .map(|hook| (hook.evaluate)(topology, net.id, intent))
+                        .sum::<usize>()
+            });
+            std::cmp::Reverse(priority)
+        });
+    }
+    let vars = ordered_vars
         .into_iter()
         .filter(|var| {
+            if let Some(connection) = topology.and_then(|topology| {
+                let source = format!("{}.{}", var.source.0, var.source.1);
+                let sink = format!("{}.{}", var.target.0, var.target.1);
+                let net = topology.net_by_driver_label(&source)?;
+                Some((net.id, topology.sink_by_label(net, &sink)?.clone()))
+            }) {
+                return !completed_typed_connections.contains(&connection);
+            }
             let source = format!("{}.{}", var.source.0, var.source.1);
             let sink = format!("{}.{}", var.target.0, var.target.1);
             !completed_connections
@@ -297,7 +582,10 @@ pub fn route_module_variables_with_order_from_prefix(
         .collect::<Vec<_>>();
 
     let has_internal_prefix = prefix.iter().any(|route| {
-        route
+        matches!(
+            route.source_endpoint,
+            Some(ResolvedEndpoint::InstancePort { .. })
+        ) || route
             .source_label
             .as_deref()
             .is_some_and(|label| label.contains('.'))
@@ -319,7 +607,7 @@ pub fn route_module_variables_with_order_from_prefix(
         .map(str::to_owned)
         .collect::<HashSet<_>>();
     if let Err(error) = route_top_input_ports(
-        module,
+        &plan.top_inputs,
         candidates,
         placed_modules,
         config,
@@ -595,7 +883,7 @@ fn group_vars_by_source_ordered<'a>(
 }
 
 fn route_top_input_ports(
-    module: &GraphModule,
+    top_inputs: &[RoutingTopInput],
     candidates: &[LayoutCandidate],
     placed_modules: &[PlacedModule],
     config: &GlobalRoutingConfig,
@@ -604,15 +892,15 @@ fn route_top_input_ports(
     route_world: &mut World3D,
     routes: &mut Vec<RoutedNet>,
 ) -> eyre::Result<()> {
-    let top_inputs = module
-        .ports
-        .iter()
-        .filter(|port| port.port_type.is_input())
-        .collect::<Vec<_>>();
-
     let mut top_input_index = 0;
     for (port_index, port) in top_inputs.iter().enumerate() {
-        let sinks = resolve_port_target_positions(candidates, placed_modules, &port.target);
+        let sinks = port
+            .targets
+            .iter()
+            .flat_map(|(module, port)| {
+                resolve_port_targets(candidates, placed_modules, module, port)
+            })
+            .collect::<Vec<_>>();
         if sinks.is_empty() {
             progress.item(
                 port_index + 1,
@@ -1799,6 +2087,66 @@ pub fn collect_module_input_endpoints(
         .collect()
 }
 
+pub fn collect_topology_output_endpoints(
+    topology: &ResolvedPnrTopology,
+    candidates: &[LayoutCandidate],
+    placed_modules: &[PlacedModule],
+) -> Vec<OutputEndpoint> {
+    topology
+        .nets
+        .iter()
+        .flat_map(|net| {
+            net.sinks.iter().filter_map(|sink| {
+                let ResolvedEndpoint::TopPort { port } = sink else {
+                    return None;
+                };
+                let output = topology.port(*port)?;
+                let ResolvedEndpoint::InstancePort {
+                    instance,
+                    port: source_port,
+                } = &net.driver
+                else {
+                    return None;
+                };
+                let instance = topology.instances.get(instance.0)?;
+                let source_port = topology.port(*source_port)?;
+                let position = resolve_observable_port_position(
+                    candidates,
+                    placed_modules,
+                    &instance.display_name,
+                    &source_port.name,
+                )?;
+                Some(OutputEndpoint::new(output.name.clone(), position))
+            })
+        })
+        .collect()
+}
+
+pub fn collect_topology_input_endpoints(
+    topology: &ResolvedPnrTopology,
+    routed_nets: &[RoutedNet],
+) -> Vec<OutputEndpoint> {
+    routed_nets
+        .iter()
+        .filter(|route| {
+            route.source == route.sink
+                && route
+                    .blocks
+                    .first()
+                    .is_some_and(|(_, block)| block.kind.is_switch())
+        })
+        .filter_map(|route| {
+            let ResolvedEndpoint::TopPort { port } = route.source_endpoint.as_ref()? else {
+                return None;
+            };
+            Some(OutputEndpoint::new(
+                topology.port(*port)?.name.clone(),
+                route.source,
+            ))
+        })
+        .collect()
+}
+
 fn resolve_observable_port_target_positions(
     candidates: &[LayoutCandidate],
     placed_modules: &[PlacedModule],
@@ -1814,25 +2162,6 @@ fn resolve_observable_port_target_positions(
             .iter()
             .filter_map(|(module_name, port_name)| {
                 resolve_observable_port_position(candidates, placed_modules, module_name, port_name)
-            })
-            .collect(),
-        GraphModulePortTarget::Node(_) => Vec::new(),
-    }
-}
-
-fn resolve_port_target_positions(
-    candidates: &[LayoutCandidate],
-    placed_modules: &[PlacedModule],
-    target: &GraphModulePortTarget,
-) -> Vec<ResolvedPortTarget> {
-    match target {
-        GraphModulePortTarget::Module(module_name, port_name) => {
-            resolve_port_targets(candidates, placed_modules, module_name, port_name)
-        }
-        GraphModulePortTarget::Wire(targets) => targets
-            .iter()
-            .flat_map(|(module_name, port_name)| {
-                resolve_port_targets(candidates, placed_modules, module_name, port_name)
             })
             .collect(),
         GraphModulePortTarget::Node(_) => Vec::new(),
@@ -3529,11 +3858,16 @@ mod tests {
         GraphModule, GraphModulePort, GraphModulePortTarget, GraphModulePortType,
         GraphModuleVariable,
     };
+    use crate::ir::{NetClass, RoutablePortDirection};
     use crate::transform::place_and_route::global_pnr::ir::{
         LayoutCandidate, PhysicalPort, PhysicalPortDirection, PortConnection,
     };
     use crate::transform::place_and_route::global_pnr::placer::{
         place_candidates_on_shelves, GlobalPlacementConfig, PlacedModule,
+    };
+    use crate::transform::place_and_route::global_pnr::topology::{
+        DefinitionId, DefinitionKey, InstanceId, InstanceKey, NetKey, PortId, ResolvedDefinition,
+        ResolvedInstance, ResolvedNet, ResolvedPort,
     };
     use crate::world::block::{BlockKind, Direction, RedstoneState};
     use crate::world::simulator::Simulator;
@@ -4690,6 +5024,121 @@ mod tests {
 
         assert_eq!(routes.len(), 1);
         assert!(!routes[0].blocks.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn resolved_routing_binds_physical_branches_to_typed_net_ids() -> eyre::Result<()> {
+        let candidates = vec![
+            candidate(
+                "left",
+                Position(0, 0, 1),
+                "out",
+                PhysicalPortDirection::Output,
+            ),
+            candidate(
+                "right",
+                Position(0, 0, 1),
+                "in",
+                PhysicalPortDirection::Input,
+            ),
+        ];
+        let placed = place_candidates_on_shelves(
+            &candidates,
+            &GlobalPlacementConfig {
+                spacing: 3,
+                shelf_width: 16,
+                ..Default::default()
+            },
+        );
+        let left_endpoint = ResolvedEndpoint::InstancePort {
+            instance: InstanceId(0),
+            port: PortId(0),
+        };
+        let right_endpoint = ResolvedEndpoint::InstancePort {
+            instance: InstanceId(1),
+            port: PortId(1),
+        };
+        let topology = ResolvedPnrTopology {
+            top: DefinitionId(0),
+            definitions: vec![
+                ResolvedDefinition {
+                    id: DefinitionId(0),
+                    key: DefinitionKey("top".to_owned()),
+                    display_name: "top".to_owned(),
+                    ports: Vec::new(),
+                    is_leaf: false,
+                },
+                ResolvedDefinition {
+                    id: DefinitionId(1),
+                    key: DefinitionKey("left".to_owned()),
+                    display_name: "left".to_owned(),
+                    ports: vec![PortId(0)],
+                    is_leaf: true,
+                },
+                ResolvedDefinition {
+                    id: DefinitionId(2),
+                    key: DefinitionKey("right".to_owned()),
+                    display_name: "right".to_owned(),
+                    ports: vec![PortId(1)],
+                    is_leaf: true,
+                },
+            ],
+            ports: vec![
+                ResolvedPort {
+                    id: PortId(0),
+                    definition: DefinitionId(1),
+                    name: "out".to_owned(),
+                    direction: RoutablePortDirection::Output,
+                },
+                ResolvedPort {
+                    id: PortId(1),
+                    definition: DefinitionId(2),
+                    name: "in".to_owned(),
+                    direction: RoutablePortDirection::Input,
+                },
+            ],
+            instances: vec![
+                ResolvedInstance {
+                    id: InstanceId(0),
+                    key: InstanceKey("top/left".to_owned()),
+                    display_name: "left".to_owned(),
+                    definition: DefinitionId(1),
+                },
+                ResolvedInstance {
+                    id: InstanceId(1),
+                    key: InstanceKey("top/right".to_owned()),
+                    display_name: "right".to_owned(),
+                    definition: DefinitionId(2),
+                },
+            ],
+            nets: vec![ResolvedNet {
+                id: NetId(0),
+                key: NetKey("top/net/data".to_owned()),
+                display_name: "data".to_owned(),
+                class: NetClass::Data,
+                driver: left_endpoint.clone(),
+                sinks: vec![right_endpoint.clone()],
+            }],
+        };
+
+        let routes = route_resolved_topology_with_order_from_prefix(
+            &topology,
+            None,
+            &GlobalHeuristicHooks::default(),
+            &candidates,
+            &placed,
+            &GlobalRoutingConfig::default(),
+            NetOrderStrategy::Criticality,
+            &silent_progress(),
+            &[],
+        )
+        .map_err(|failure| failure.error)?;
+
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].net_id, Some(NetId(0)));
+        assert_eq!(routes[0].source_endpoint, Some(left_endpoint));
+        assert_eq!(routes[0].sink_endpoint, Some(right_endpoint));
         Ok(())
     }
 

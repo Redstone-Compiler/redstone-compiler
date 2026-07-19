@@ -1,11 +1,13 @@
 use std::cmp::Reverse;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::ops::{Deref, DerefMut};
 
 use eyre::ContextCompat;
 
 use crate::graph::logic::LogicGraph;
 use crate::graph::module::{GraphModule, GraphModulePortTarget, GraphModulePortType};
-use crate::graph::GraphNodeKind;
+use crate::graph::{Graph, GraphNodeKind};
+use crate::ir::{graph_from_routable_leaf, RoutableModule, RoutablePortDirection};
 use crate::output::{OutputEndpoint, PlacedWorld};
 use crate::transform::place_and_route::detailed_router;
 use crate::transform::place_and_route::global_pnr::ir::{
@@ -27,6 +29,90 @@ pub struct UnitCandidateConfig {
     pub input_constraints: LocalPlacerInputConstraints,
     pub max_candidates: usize,
     pub combinational_sampling_limit: Option<usize>,
+}
+
+/// Local-candidate preparation policy before it is resolved against a typed
+/// Routable definition. The default preserves the legacy single-policy API;
+/// definition and port entries provide the scoped model used by RCIR.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CandidatePolicySet {
+    pub default: UnitCandidateConfig,
+    pub definition_overrides: BTreeMap<String, UnitCandidateConfig>,
+    pub pin_search: BTreeMap<(String, String), Vec<Position>>,
+}
+
+impl CandidatePolicySet {
+    pub fn new(default: UnitCandidateConfig) -> Self {
+        Self {
+            default,
+            definition_overrides: BTreeMap::new(),
+            pin_search: BTreeMap::new(),
+        }
+    }
+
+    pub fn with_definition_override(
+        mut self,
+        definition: impl Into<String>,
+        policy: UnitCandidateConfig,
+    ) -> Self {
+        self.definition_overrides.insert(definition.into(), policy);
+        self
+    }
+
+    pub fn with_pin_search(
+        mut self,
+        definition: impl Into<String>,
+        port: impl Into<String>,
+        positions: impl IntoIterator<Item = Position>,
+    ) -> Self {
+        self.pin_search.insert(
+            (definition.into(), port.into()),
+            positions.into_iter().collect(),
+        );
+        self
+    }
+
+    pub fn effective_for_definition(&self, definition: &str) -> UnitCandidateConfig {
+        let mut policy = self
+            .definition_overrides
+            .get(definition)
+            .cloned()
+            .unwrap_or_else(|| self.default.clone());
+        for ((owner, port), positions) in &self.pin_search {
+            if owner == definition {
+                policy.input_constraints = policy
+                    .input_constraints
+                    .with_input_positions(port.clone(), positions.iter().copied());
+            }
+        }
+        policy
+    }
+}
+
+impl Default for CandidatePolicySet {
+    fn default() -> Self {
+        Self::new(UnitCandidateConfig::default())
+    }
+}
+
+impl From<UnitCandidateConfig> for CandidatePolicySet {
+    fn from(default: UnitCandidateConfig) -> Self {
+        Self::new(default)
+    }
+}
+
+impl Deref for CandidatePolicySet {
+    type Target = UnitCandidateConfig;
+
+    fn deref(&self) -> &Self::Target {
+        &self.default
+    }
+}
+
+impl DerefMut for CandidatePolicySet {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.default
+    }
 }
 
 impl Default for UnitCandidateConfig {
@@ -57,6 +143,77 @@ pub fn generate_graph_module_candidates_with_progress_label(
         .graph
         .clone()
         .context("only graph-backed GraphModule can generate unit layout candidates")?;
+    let ports = module
+        .ports
+        .iter()
+        .map(|port| match (&port.port_type, &port.target) {
+            (GraphModulePortType::InputNet, GraphModulePortTarget::Node(target)) => Some(
+                CandidatePort::new(&port.name, target, PhysicalPortDirection::Input),
+            ),
+            (GraphModulePortType::OutputNet, GraphModulePortTarget::Node(target)) => Some(
+                CandidatePort::new(&port.name, target, PhysicalPortDirection::Output),
+            ),
+            _ => None,
+        })
+        .map(|port| {
+            port.with_context(|| {
+                format!(
+                    "graph-backed module `{}` has a non-node or unsupported candidate port",
+                    module.name
+                )
+            })
+        })
+        .collect::<eyre::Result<Vec<_>>>()?;
+    generate_unit_candidates(&module.name, graph, ports, config, progress_label)
+}
+
+pub fn generate_routable_module_candidates_with_progress_label(
+    module: &RoutableModule,
+    config: &UnitCandidateConfig,
+    progress_label: Option<&str>,
+) -> eyre::Result<Vec<LayoutCandidate>> {
+    let graph = graph_from_routable_leaf(module)?;
+    let ports = module
+        .ports
+        .iter()
+        .map(|port| {
+            CandidatePort::new(
+                &port.name,
+                &port.name,
+                match port.direction {
+                    RoutablePortDirection::Input => PhysicalPortDirection::Input,
+                    RoutablePortDirection::Output => PhysicalPortDirection::Output,
+                },
+            )
+        })
+        .collect();
+    generate_unit_candidates(&module.name, graph, ports, config, progress_label)
+}
+
+#[derive(Clone, Debug)]
+struct CandidatePort {
+    name: String,
+    target: String,
+    direction: PhysicalPortDirection,
+}
+
+impl CandidatePort {
+    fn new(name: &str, target: &str, direction: PhysicalPortDirection) -> Self {
+        Self {
+            name: name.to_owned(),
+            target: target.to_owned(),
+            direction,
+        }
+    }
+}
+
+fn generate_unit_candidates(
+    module_name: &str,
+    graph: Graph,
+    ports: Vec<CandidatePort>,
+    config: &UnitCandidateConfig,
+    progress_label: Option<&str>,
+) -> eyre::Result<Vec<LayoutCandidate>> {
     let graph = LogicGraph { graph }.prepare_place()?;
     let placer = LocalPlacer::new(graph.clone(), config.local_config)?;
 
@@ -67,7 +224,12 @@ pub fn generate_graph_module_candidates_with_progress_label(
         progress_label,
     );
 
-    let validate_truth_table = graph_is_combinational(module);
+    let contains_sequential = graph
+        .graph
+        .nodes
+        .iter()
+        .any(|node| matches!(node.kind, GraphNodeKind::Sequential(_)));
+    let validate_truth_table = !contains_sequential;
     let mut candidates = Vec::new();
     for placed in placed {
         if candidates.len() >= config.max_candidates {
@@ -76,39 +238,30 @@ pub fn generate_graph_module_candidates_with_progress_label(
         if validate_truth_table && !candidate_matches_truth_table(&graph, &placed)? {
             continue;
         }
-        let (world, ports) = switchless_candidate_layout(
-            module,
+        let (world, physical_ports) = switchless_candidate_layout(
+            &ports,
+            contains_sequential,
             &config.input_constraints,
             placed.world,
             &placed.inputs,
             &placed.outputs,
         );
-        if !candidate_ports_cover_module_ports(module, &ports) {
+        if !candidate_ports_cover_module_ports(&ports, &physical_ports) {
             continue;
         }
         candidates.push(LayoutCandidate::from_world(
-            module.name.clone(),
+            module_name.to_owned(),
             world,
-            ports,
+            physical_ports,
         )?);
     }
     Ok(candidates)
 }
 
-fn candidate_ports_cover_module_ports(module: &GraphModule, ports: &[PhysicalPort]) -> bool {
-    module
-        .ports
+fn candidate_ports_cover_module_ports(expected: &[CandidatePort], actual: &[PhysicalPort]) -> bool {
+    expected
         .iter()
-        .all(|module_port| ports.iter().any(|port| port.name == module_port.name))
-}
-
-fn graph_is_combinational(module: &GraphModule) -> bool {
-    module.graph.as_ref().is_some_and(|graph| {
-        graph
-            .nodes
-            .iter()
-            .all(|node| !matches!(node.kind, GraphNodeKind::Sequential(_)))
-    })
+        .all(|expected| actual.iter().any(|port| port.name == expected.name))
 }
 
 fn candidate_matches_truth_table(
@@ -203,7 +356,8 @@ fn candidate_matches_truth_table(
 // TODO(high-level): make LocalPlacer produce either standalone layouts with switches
 // or child-module layouts with PhysicalPort metadata, instead of rewriting switches here.
 fn switchless_candidate_layout(
-    module: &GraphModule,
+    module_ports: &[CandidatePort],
+    contains_sequential: bool,
     input_constraints: &LocalPlacerInputConstraints,
     mut world: World3D,
     inputs: &[OutputEndpoint],
@@ -212,14 +366,19 @@ fn switchless_candidate_layout(
     let mut ports = Vec::new();
     // Sequential child layout은 내부 feedback/state signal이 외부 route와 직접
     // 합쳐지면 back-power 때문에 latch 상태가 깨질 수 있어서 diode 연결을 요구한다.
-    let contains_sequential = module_contains_sequential(module);
     let needs_output_isolation = contains_sequential;
     let needs_input_isolation = contains_sequential;
-    let use_direct_input_ports = !contains_sequential && module_input_port_count(module) > 1;
+    let use_direct_input_ports = !contains_sequential
+        && module_ports
+            .iter()
+            .filter(|port| port.direction == PhysicalPortDirection::Input)
+            .count()
+            > 1;
     let preserve_switch_position_inputs = contains_sequential || use_direct_input_ports;
-    for port in &module.ports {
-        match (&port.port_type, &port.target) {
-            (GraphModulePortType::InputNet, GraphModulePortTarget::Node(input_name)) => {
+    for port in module_ports {
+        match port.direction {
+            PhysicalPortDirection::Input => {
+                let input_name = &port.target;
                 let position = inputs
                     .iter()
                     .find(|input| input.name == *input_name)
@@ -252,7 +411,8 @@ fn switchless_candidate_layout(
                     });
                 }
             }
-            (GraphModulePortType::OutputNet, GraphModulePortTarget::Node(output_name)) => {
+            PhysicalPortDirection::Output => {
+                let output_name = &port.target;
                 if let Some(output) = outputs.iter().find(|output| output.name == *output_name) {
                     let position = output.position();
                     let access_points = expose_routeable_output_ports(&world, position);
@@ -271,7 +431,6 @@ fn switchless_candidate_layout(
                     });
                 }
             }
-            _ => {}
         }
     }
     for input in inputs {
@@ -286,23 +445,6 @@ fn switchless_candidate_layout(
     ports.sort_by(|a, b| a.name.cmp(&b.name));
     world.initialize_redstone_states();
     (world, ports)
-}
-
-fn module_contains_sequential(module: &GraphModule) -> bool {
-    module.graph.as_ref().is_some_and(|graph| {
-        graph
-            .nodes
-            .iter()
-            .any(|node| matches!(node.kind, GraphNodeKind::Sequential(_)))
-    })
-}
-
-fn module_input_port_count(module: &GraphModule) -> usize {
-    module
-        .ports
-        .iter()
-        .filter(|port| port.port_type.is_input())
-        .count()
 }
 
 fn remove_local_input_switches(world: &mut World3D) {
@@ -519,6 +661,35 @@ pub fn d_latch_child_candidate_config(local_config: LocalPlacerConfig) -> UnitCa
 mod tests {
     use super::*;
     use crate::world::block::{BlockKind, Direction};
+
+    #[test]
+    fn candidate_pin_search_is_scoped_by_definition_and_port() {
+        let policies = CandidatePolicySet::default()
+            .with_pin_search("first", "d", [Position(1, 2, 3)])
+            .with_pin_search("second", "d", [Position(4, 5, 1)]);
+
+        assert_eq!(
+            policies
+                .effective_for_definition("first")
+                .input_constraints
+                .positions_for_input_name("d"),
+            Some(vec![Position(1, 2, 3)])
+        );
+        assert_eq!(
+            policies
+                .effective_for_definition("second")
+                .input_constraints
+                .positions_for_input_name("d"),
+            Some(vec![Position(4, 5, 1)])
+        );
+        assert_eq!(
+            policies
+                .effective_for_definition("third")
+                .input_constraints
+                .positions_for_input_name("d"),
+            None
+        );
+    }
 
     #[test]
     fn switchless_direct_input_exposes_powered_redstone_instead_of_support_cobble() {

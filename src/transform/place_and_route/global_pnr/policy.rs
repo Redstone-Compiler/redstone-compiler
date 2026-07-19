@@ -1,4 +1,6 @@
-use crate::transform::place_and_route::global_pnr::candidate::UnitCandidateConfig;
+use crate::transform::place_and_route::global_pnr::candidate::{
+    CandidatePolicySet, UnitCandidateConfig,
+};
 use crate::transform::place_and_route::global_pnr::placer::GlobalPlacementConfig;
 use crate::transform::place_and_route::global_pnr::router::{
     GlobalRoutingConfig, NetOrderStrategy,
@@ -221,7 +223,7 @@ impl GlobalPnrPreset {
 
     pub fn config(self) -> GlobalPnrConfig {
         let mut config = GlobalPnrConfig {
-            candidate: UnitCandidateConfig::default(),
+            candidate: CandidatePolicySet::from(UnitCandidateConfig::default()),
             placement: GlobalPlacementConfig::default(),
             routing_probe: None,
             routing: GlobalRoutingConfig::default(),
@@ -229,6 +231,9 @@ impl GlobalPnrPreset {
             search: self.search_config(),
             show_progress: true,
             verifier: None,
+            physical_intent: None,
+            candidate_cache_dir: None,
+            heuristic_hooks: Default::default(),
         };
         if self == Self::Thorough {
             config.placement.cost_weights.routing_congestion = 4;

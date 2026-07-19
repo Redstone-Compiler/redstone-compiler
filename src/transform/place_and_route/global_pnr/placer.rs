@@ -1,12 +1,25 @@
 use std::collections::{HashMap, HashSet};
 
+use eyre::{ContextCompat, WrapErr};
+
 use crate::graph::module::{GraphModule, GraphModulePortTarget};
 use crate::transform::place_and_route::estimate::BoundingBox;
-use crate::transform::place_and_route::global_pnr::free_3d::place_free_3d;
+use crate::transform::place_and_route::global_pnr::free_3d::{
+    place_free_3d, place_free_3d_with_edges,
+};
+use crate::transform::place_and_route::global_pnr::heuristics::{
+    GlobalHeuristicHooks, PlacementHeuristicContext,
+};
 use crate::transform::place_and_route::global_pnr::ir::LayoutCandidate;
+use crate::transform::place_and_route::global_pnr::physical_intent::{
+    ResolvedPhysicalConstraint, ResolvedPhysicalIntent,
+};
 use crate::transform::place_and_route::global_pnr::policy::{
     LayerAssignmentStrategy, LayeredPlacementConfig, PlacementCostBreakdown, PlacementCostWeights,
     PlacementHeuristic, RoutingCongestionConfig,
+};
+use crate::transform::place_and_route::global_pnr::topology::{
+    ResolvedEndpoint, ResolvedPnrTopology,
 };
 use crate::world::position::Position;
 
@@ -41,6 +54,145 @@ pub struct PlacedModule {
     pub bbox: BoundingBox,
 }
 
+#[derive(Clone, Debug)]
+struct PlacementConnection {
+    source_instance: String,
+    source_port: String,
+    target_instance: String,
+    target_port: String,
+}
+
+#[derive(Clone, Debug, Default)]
+struct PlacementConnectivity {
+    connections: Vec<PlacementConnection>,
+    proximity_edges: Vec<(String, String)>,
+}
+
+impl PlacementConnectivity {
+    fn from_legacy(module: &GraphModule) -> Self {
+        let connections = module
+            .vars
+            .iter()
+            .map(|var| PlacementConnection {
+                source_instance: var.source.0.clone(),
+                source_port: var.source.1.clone(),
+                target_instance: var.target.0.clone(),
+                target_port: var.target.1.clone(),
+            })
+            .collect::<Vec<_>>();
+        let mut proximity_edges = connections
+            .iter()
+            .map(|connection| {
+                (
+                    connection.source_instance.clone(),
+                    connection.target_instance.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        for port in &module.ports {
+            let targets = target_modules(&port.target);
+            for (index, left) in targets.iter().enumerate() {
+                for right in targets.iter().skip(index + 1) {
+                    proximity_edges.push((left.clone(), right.clone()));
+                }
+            }
+        }
+        Self {
+            connections,
+            proximity_edges,
+        }
+    }
+
+    fn from_resolved(topology: &ResolvedPnrTopology) -> eyre::Result<Self> {
+        let mut connections = Vec::new();
+        let mut proximity_edges = Vec::new();
+        for net in &topology.nets {
+            let endpoints = std::iter::once(&net.driver)
+                .chain(net.sinks.iter())
+                .filter_map(|endpoint| match endpoint {
+                    ResolvedEndpoint::InstancePort { instance, port } => Some((*instance, *port)),
+                    ResolvedEndpoint::TopPort { .. } => None,
+                })
+                .collect::<Vec<_>>();
+            for (index, (left, _)) in endpoints.iter().enumerate() {
+                for (right, _) in endpoints.iter().skip(index + 1) {
+                    let left = topology
+                        .instances
+                        .get(left.0)
+                        .context("resolved placement edge has an unknown instance")?;
+                    let right = topology
+                        .instances
+                        .get(right.0)
+                        .context("resolved placement edge has an unknown instance")?;
+                    if left.id != right.id {
+                        proximity_edges
+                            .push((left.display_name.clone(), right.display_name.clone()));
+                    }
+                }
+            }
+            let ResolvedEndpoint::InstancePort {
+                instance: source_instance,
+                port: source_port,
+            } = net.driver
+            else {
+                continue;
+            };
+            let source_instance = topology
+                .instances
+                .get(source_instance.0)
+                .context("resolved placement net has an unknown driver instance")?;
+            let source_port = topology
+                .port(source_port)
+                .context("resolved placement net has an unknown driver port")?;
+            for sink in &net.sinks {
+                let ResolvedEndpoint::InstancePort { instance, port } = sink else {
+                    continue;
+                };
+                let target_instance = topology
+                    .instances
+                    .get(instance.0)
+                    .context("resolved placement net has an unknown sink instance")?;
+                let target_port = topology
+                    .port(*port)
+                    .context("resolved placement net has an unknown sink port")?;
+                connections.push(PlacementConnection {
+                    source_instance: source_instance.display_name.clone(),
+                    source_port: source_port.name.clone(),
+                    target_instance: target_instance.display_name.clone(),
+                    target_port: target_port.name.clone(),
+                });
+            }
+        }
+        proximity_edges.sort();
+        proximity_edges.dedup();
+        Ok(Self {
+            connections,
+            proximity_edges,
+        })
+    }
+
+    fn candidate_edges(&self, candidates: &[LayoutCandidate]) -> Vec<(usize, usize)> {
+        let by_name = candidates
+            .iter()
+            .enumerate()
+            .map(|(index, candidate)| (candidate.module_name.as_str(), index))
+            .collect::<HashMap<_, _>>();
+        // Free3D historically derives its attraction springs from routed
+        // instance-to-instance variables only. `proximity_edges` additionally
+        // contains a clique between the sinks of a top-level fanout net; using
+        // that here changes seeded placements during the typed-topology
+        // migration and can promote substantially more expensive routes.
+        self.connections
+            .iter()
+            .filter_map(|connection| {
+                let left = *by_name.get(connection.source_instance.as_str())?;
+                let right = *by_name.get(connection.target_instance.as_str())?;
+                (left != right).then_some((left, right))
+            })
+            .collect()
+    }
+}
+
 pub fn place_candidates_on_shelves(
     candidates: &[LayoutCandidate],
     config: &GlobalPlacementConfig,
@@ -58,6 +210,23 @@ pub fn placement_candidates(
     config: &GlobalPlacementConfig,
     heuristics: &[PlacementHeuristic],
 ) -> Vec<Vec<PlacedModule>> {
+    let connectivity = PlacementConnectivity::from_legacy(module);
+    placement_candidates_with_connectivity(
+        &connectivity,
+        Some(module),
+        candidates,
+        config,
+        heuristics,
+    )
+}
+
+fn placement_candidates_with_connectivity(
+    connectivity: &PlacementConnectivity,
+    legacy_module: Option<&GraphModule>,
+    candidates: &[LayoutCandidate],
+    config: &GlobalPlacementConfig,
+    heuristics: &[PlacementHeuristic],
+) -> Vec<Vec<PlacedModule>> {
     if candidates.is_empty() {
         return Vec::new();
     }
@@ -65,13 +234,18 @@ pub fn placement_candidates(
     let mut placements = Vec::new();
     for heuristic in heuristics {
         if let PlacementHeuristic::Free3D(free_3d) = heuristic {
-            if let Some(placed) = place_free_3d(module, candidates, *free_3d) {
+            let edges = connectivity.candidate_edges(candidates);
+            let placed = legacy_module.map_or_else(
+                || place_free_3d_with_edges(candidates, &edges, *free_3d),
+                |module| place_free_3d(module, candidates, *free_3d),
+            );
+            if let Some(placed) = placed {
                 push_unique_placement(&mut placements, placed);
             }
         }
     }
     let original_order = (0..candidates.len()).collect::<Vec<_>>();
-    let net_order = net_aware_candidate_order(module, candidates);
+    let net_order = net_aware_candidate_order(connectivity, candidates);
 
     if is_register_bit_module_set(candidates) {
         let layered_configs = heuristics
@@ -120,7 +294,12 @@ pub fn placement_candidates(
                     for layered in &layered_configs {
                         push_unique_placement(
                             &mut placements,
-                            apply_layered_placement(module, candidates, placed.clone(), *layered),
+                            apply_layered_placement(
+                                connectivity,
+                                candidates,
+                                placed.clone(),
+                                *layered,
+                            ),
                         );
                     }
                 }
@@ -137,15 +316,25 @@ pub fn placement_candidates(
                     for layered in &layered_configs {
                         push_unique_placement(
                             &mut placements,
-                            apply_layered_placement(module, candidates, placed.clone(), *layered),
+                            apply_layered_placement(
+                                connectivity,
+                                candidates,
+                                placed.clone(),
+                                *layered,
+                            ),
                         );
                     }
                 }
             }
         }
         placements.sort_by_key(|placed| {
-            placement_cost_breakdown(module, candidates, placed, config.congestion)
-                .weighted_total(config.cost_weights)
+            placement_cost_breakdown_connectivity(
+                connectivity,
+                candidates,
+                placed,
+                config.congestion,
+            )
+            .weighted_total(config.cost_weights)
         });
         placements.truncate(config.max_attempts.max(1));
         return placements;
@@ -192,22 +381,261 @@ pub fn placement_candidates(
                 let seed = place_candidates_on_shelves_in_order(candidates, &net_order, &config);
                 push_unique_placement(
                     &mut placements,
-                    apply_layered_placement(module, candidates, seed, layered),
+                    apply_layered_placement(connectivity, candidates, seed, layered),
                 );
             }
         }
     }
 
     placements.sort_by_key(|placed| {
-        placement_cost_breakdown(module, candidates, placed, config.congestion)
+        placement_cost_breakdown_connectivity(connectivity, candidates, placed, config.congestion)
             .weighted_total(config.cost_weights)
     });
     placements.truncate(config.max_attempts.max(1));
     placements
 }
 
+pub fn placement_candidates_resolved(
+    topology: &ResolvedPnrTopology,
+    intent: Option<&ResolvedPhysicalIntent>,
+    hooks: &GlobalHeuristicHooks,
+    candidates: &[LayoutCandidate],
+    config: &GlobalPlacementConfig,
+    heuristics: &[PlacementHeuristic],
+) -> eyre::Result<Vec<Vec<PlacedModule>>> {
+    let connectivity = PlacementConnectivity::from_resolved(topology)?;
+    let mut placements =
+        placement_candidates_with_connectivity(&connectivity, None, candidates, config, heuristics);
+    let context = PlacementHeuristicContext {
+        topology,
+        candidates,
+        intent,
+    };
+    for hook in &hooks.placement_transforms {
+        (hook.apply)(&context, &mut placements)
+            .with_context(|| format!("placement transform hook `{}` failed", hook.name))?;
+    }
+
+    let mut constrained = Vec::new();
+    let mut last_error = None;
+    for mut placed in placements {
+        let result = if let Some(intent) = intent {
+            apply_placement_intent(topology, intent, candidates, &mut placed)
+        } else {
+            validate_no_placement_overlap(&placed)
+        };
+        match result {
+            Ok(()) => push_unique_placement(&mut constrained, placed),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    if constrained.is_empty() {
+        return Err(last_error.unwrap_or_else(|| {
+            eyre::eyre!("physical placement constraints eliminated every placement attempt")
+        }));
+    }
+    constrained.sort_by_key(|placed| {
+        let preference = intent.map_or(Default::default(), |intent| {
+            intent.placement_preference_cost(topology, candidates, placed)
+        });
+        let hook_cost = hooks
+            .placement_cost_terms
+            .iter()
+            .map(|hook| (hook.evaluate)(&context, placed))
+            .sum::<usize>();
+        (
+            preference.strong,
+            preference.medium,
+            preference.weak,
+            hook_cost,
+            placement_cost_breakdown_connectivity(
+                &connectivity,
+                candidates,
+                placed,
+                config.congestion,
+            )
+            .weighted_total(config.cost_weights),
+        )
+    });
+    constrained.truncate(config.max_attempts.max(1));
+    Ok(constrained)
+}
+
+fn apply_placement_intent(
+    topology: &ResolvedPnrTopology,
+    intent: &ResolvedPhysicalIntent,
+    candidates: &[LayoutCandidate],
+    placed: &mut [PlacedModule],
+) -> eyre::Result<()> {
+    let fixed_instances = intent
+        .constraints
+        .iter()
+        .filter_map(|constraint| match constraint {
+            ResolvedPhysicalConstraint::FixedOrigin { instance, .. } => Some(*instance),
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+
+    // Exact locks are applied first. Other hard constraints may move only
+    // unlocked instances and must validate locked origins as written.
+    for constraint in &intent.constraints {
+        let ResolvedPhysicalConstraint::FixedOrigin {
+            id,
+            instance,
+            origin,
+        } = constraint
+        else {
+            continue;
+        };
+        let item = placed_instance_mut(topology, placed, *instance, id)?;
+        item.origin = Position(origin[0], origin[1], origin[2]);
+    }
+
+    for constraint in &intent.constraints {
+        let (instance_id, id) = match constraint {
+            ResolvedPhysicalConstraint::Inside { instance, id, .. }
+            | ResolvedPhysicalConstraint::LayerRange { instance, id, .. } => (*instance, id),
+            _ => continue,
+        };
+        let item = placed_instance_mut(topology, placed, instance_id, id)?;
+        let candidate = candidates
+            .get(item.candidate_index)
+            .with_context(|| format!("constraint `{id}` references a missing candidate"))?;
+        let size = [
+            candidate.bbox.width(),
+            candidate.bbox.depth(),
+            candidate.bbox.height(),
+        ];
+        let locked = fixed_instances.contains(&instance_id);
+
+        match constraint {
+            ResolvedPhysicalConstraint::Inside { region, .. } => {
+                let region = intent
+                    .regions
+                    .get(region)
+                    .with_context(|| format!("constraint `{id}` has an unknown region"))?;
+                let max_origin = [
+                    maximum_origin(region.max[0], size[0], id)?,
+                    maximum_origin(region.max[1], size[1], id)?,
+                    maximum_origin(region.max[2], size[2], id)?,
+                ];
+                if !locked {
+                    item.origin.0 = item.origin.0.clamp(region.min[0], max_origin[0]);
+                    item.origin.1 = item.origin.1.clamp(region.min[1], max_origin[1]);
+                    item.origin.2 = item.origin.2.clamp(region.min[2], max_origin[2]);
+                }
+            }
+            ResolvedPhysicalConstraint::LayerRange { min, max, .. } => {
+                let max_origin = maximum_origin(*max, size[2], id)?;
+                if !locked {
+                    item.origin.2 = item.origin.2.clamp(*min, max_origin);
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    validate_placement_intent(topology, intent, candidates, placed)?;
+    validate_no_placement_overlap(placed)
+}
+
+fn placed_instance_mut<'a>(
+    topology: &ResolvedPnrTopology,
+    placed: &'a mut [PlacedModule],
+    instance: crate::transform::place_and_route::global_pnr::topology::InstanceId,
+    constraint_id: &str,
+) -> eyre::Result<&'a mut PlacedModule> {
+    let instance = topology
+        .instances
+        .get(instance.0)
+        .with_context(|| format!("constraint `{constraint_id}` has an unknown instance id"))?;
+    placed
+        .iter_mut()
+        .find(|placed| placed.module_name == instance.display_name)
+        .with_context(|| {
+            format!(
+                "constraint `{constraint_id}` targets unplaced instance `{}`",
+                instance.display_name
+            )
+        })
+}
+
+fn maximum_origin(region_max: usize, size: usize, id: &str) -> eyre::Result<usize> {
+    region_max
+        .checked_add(1)
+        .and_then(|extent| extent.checked_sub(size))
+        .with_context(|| format!("constraint `{id}` region is smaller than the selected candidate"))
+}
+
+fn validate_placement_intent(
+    topology: &ResolvedPnrTopology,
+    intent: &ResolvedPhysicalIntent,
+    candidates: &[LayoutCandidate],
+    placed: &[PlacedModule],
+) -> eyre::Result<()> {
+    for constraint in &intent.constraints {
+        let (instance_id, id) = match constraint {
+            ResolvedPhysicalConstraint::Inside { instance, id, .. }
+            | ResolvedPhysicalConstraint::LayerRange { instance, id, .. }
+            | ResolvedPhysicalConstraint::FixedOrigin { instance, id, .. } => (*instance, id),
+            _ => continue,
+        };
+        let instance = &topology.instances[instance_id.0];
+        let item = placed
+            .iter()
+            .find(|placed| placed.module_name == instance.display_name)
+            .with_context(|| format!("constraint `{id}` targets an unplaced instance"))?;
+        let candidate = &candidates[item.candidate_index];
+        let min = [item.origin.0, item.origin.1, item.origin.2];
+        let max = [
+            item.origin.0 + candidate.bbox.width() - 1,
+            item.origin.1 + candidate.bbox.depth() - 1,
+            item.origin.2 + candidate.bbox.height() - 1,
+        ];
+        let satisfied = match constraint {
+            ResolvedPhysicalConstraint::Inside { region, .. } => {
+                intent.regions[region].contains_box(min, max)
+            }
+            ResolvedPhysicalConstraint::LayerRange { min, max, .. } => {
+                item.origin.2 >= *min && item.origin.2 + candidate.bbox.height() - 1 <= *max
+            }
+            ResolvedPhysicalConstraint::FixedOrigin { origin, .. } => min == *origin,
+            _ => true,
+        };
+        if !satisfied {
+            eyre::bail!(
+                "physical constraint `{id}` is violated by instance `{}` at {:?}",
+                instance.display_name,
+                item.origin
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_no_placement_overlap(placed: &[PlacedModule]) -> eyre::Result<()> {
+    for (index, left) in placed.iter().enumerate() {
+        for right in placed.iter().skip(index + 1) {
+            let overlaps = left.origin.0 < right.origin.0 + right.bbox.width()
+                && right.origin.0 < left.origin.0 + left.bbox.width()
+                && left.origin.1 < right.origin.1 + right.bbox.depth()
+                && right.origin.1 < left.origin.1 + left.bbox.depth()
+                && left.origin.2 < right.origin.2 + right.bbox.height()
+                && right.origin.2 < left.origin.2 + left.bbox.height();
+            if overlaps {
+                eyre::bail!(
+                    "physical constraints overlap instances `{}` and `{}`",
+                    left.module_name,
+                    right.module_name
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 fn apply_layered_placement(
-    module: &GraphModule,
+    connectivity: &PlacementConnectivity,
     candidates: &[LayoutCandidate],
     mut placed: Vec<PlacedModule>,
     config: LayeredPlacementConfig,
@@ -224,7 +652,7 @@ fn apply_layered_placement(
             (0..placed.len()).map(|index| index % layer_count).collect()
         }
         LayerAssignmentStrategy::NetAware => {
-            net_aware_layer_assignments(module, &placed, layer_count)
+            net_aware_layer_assignments(connectivity, &placed, layer_count)
         }
     };
     for (placed, layer) in placed.iter_mut().zip(assignments) {
@@ -234,7 +662,7 @@ fn apply_layered_placement(
 }
 
 fn net_aware_layer_assignments(
-    module: &GraphModule,
+    connectivity: &PlacementConnectivity,
     placed: &[PlacedModule],
     layer_count: usize,
 ) -> Vec<usize> {
@@ -244,14 +672,14 @@ fn net_aware_layer_assignments(
     let mut layer_loads = vec![0usize; layer_count.max(1)];
 
     for item in placed {
-        let connected_layers = module
-            .vars
+        let connected_layers = connectivity
+            .proximity_edges
             .iter()
-            .filter_map(|var| {
-                if var.source.0 == item.module_name {
-                    assigned_by_module.get(var.target.0.as_str()).copied()
-                } else if var.target.0 == item.module_name {
-                    assigned_by_module.get(var.source.0.as_str()).copied()
+            .filter_map(|(left, right)| {
+                if left == &item.module_name {
+                    assigned_by_module.get(right.as_str()).copied()
+                } else if right == &item.module_name {
+                    assigned_by_module.get(left.as_str()).copied()
                 } else {
                     None
                 }
@@ -910,13 +1338,24 @@ fn placement_signature(placed: &[PlacedModule]) -> Vec<(usize, Position)> {
     signature
 }
 
-fn net_aware_candidate_order(module: &GraphModule, candidates: &[LayoutCandidate]) -> Vec<usize> {
+fn net_aware_candidate_order(
+    connectivity: &PlacementConnectivity,
+    candidates: &[LayoutCandidate],
+) -> Vec<usize> {
     let module_to_candidate = candidates
         .iter()
         .enumerate()
         .map(|(index, candidate)| (candidate.module_name.as_str(), index))
         .collect::<HashMap<_, _>>();
-    let edges = module_edges(module, &module_to_candidate);
+    let edges = connectivity
+        .proximity_edges
+        .iter()
+        .filter_map(|(left, right)| {
+            let left = *module_to_candidate.get(left.as_str())?;
+            let right = *module_to_candidate.get(right.as_str())?;
+            (left != right).then_some((left, right))
+        })
+        .collect::<Vec<_>>();
     if edges.is_empty() {
         return (0..candidates.len()).collect();
     }
@@ -957,43 +1396,6 @@ fn net_aware_candidate_order(module: &GraphModule, candidates: &[LayoutCandidate
     order
 }
 
-fn module_edges(
-    module: &GraphModule,
-    module_to_candidate: &HashMap<&str, usize>,
-) -> Vec<(usize, usize)> {
-    let mut edges = Vec::new();
-    for var in &module.vars {
-        let Some(&source) = module_to_candidate.get(var.source.0.as_str()) else {
-            continue;
-        };
-        let Some(&target) = module_to_candidate.get(var.target.0.as_str()) else {
-            continue;
-        };
-        if source != target {
-            edges.push((source, target));
-        }
-    }
-
-    for port in &module.ports {
-        let targets = target_modules(&port.target);
-        for (left_index, left) in targets.iter().enumerate() {
-            for right in targets.iter().skip(left_index + 1) {
-                let Some(&left) = module_to_candidate.get(left.as_str()) else {
-                    continue;
-                };
-                let Some(&right) = module_to_candidate.get(right.as_str()) else {
-                    continue;
-                };
-                if left != right {
-                    edges.push((left, right));
-                }
-            }
-        }
-    }
-
-    edges
-}
-
 fn target_modules(target: &GraphModulePortTarget) -> Vec<String> {
     match target {
         GraphModulePortTarget::Module(module, _) => vec![module.clone()],
@@ -1007,8 +1409,23 @@ fn target_modules(target: &GraphModulePortTarget) -> Vec<String> {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn placement_cost_breakdown(
     module: &GraphModule,
+    candidates: &[LayoutCandidate],
+    placed: &[PlacedModule],
+    congestion_config: RoutingCongestionConfig,
+) -> PlacementCostBreakdown {
+    placement_cost_breakdown_connectivity(
+        &PlacementConnectivity::from_legacy(module),
+        candidates,
+        placed,
+        congestion_config,
+    )
+}
+
+fn placement_cost_breakdown_connectivity(
+    connectivity: &PlacementConnectivity,
     candidates: &[LayoutCandidate],
     placed: &[PlacedModule],
     congestion_config: RoutingCongestionConfig,
@@ -1026,11 +1443,11 @@ pub(crate) fn placement_cost_breakdown(
     };
 
     let mut net_regions = Vec::new();
-    for var in &module.vars {
-        let Some(source) = placed_by_module.get(var.source.0.as_str()) else {
+    for connection in &connectivity.connections {
+        let Some(source) = placed_by_module.get(connection.source_instance.as_str()) else {
             continue;
         };
-        let Some(target) = placed_by_module.get(var.target.0.as_str()) else {
+        let Some(target) = placed_by_module.get(connection.target_instance.as_str()) else {
             continue;
         };
         let source_candidate = &candidates[source.candidate_index];
@@ -1038,14 +1455,14 @@ pub(crate) fn placement_cost_breakdown(
         let Some(source_port) = source_candidate
             .ports
             .iter()
-            .find(|port| port.name == var.source.1)
+            .find(|port| port.name == connection.source_port)
         else {
             continue;
         };
         let Some(target_port) = target_candidate
             .ports
             .iter()
-            .find(|port| port.name == var.target.1)
+            .find(|port| port.name == connection.target_port)
         else {
             continue;
         };
@@ -1070,6 +1487,21 @@ pub(crate) fn placement_cost_breakdown(
     cost.routing_congestion = estimate_routing_congestion(&net_regions, congestion_config);
 
     cost
+}
+
+pub(crate) fn placement_cost_breakdown_resolved(
+    topology: &ResolvedPnrTopology,
+    candidates: &[LayoutCandidate],
+    placed: &[PlacedModule],
+    congestion_config: RoutingCongestionConfig,
+) -> eyre::Result<PlacementCostBreakdown> {
+    let connectivity = PlacementConnectivity::from_resolved(topology)?;
+    Ok(placement_cost_breakdown_connectivity(
+        &connectivity,
+        candidates,
+        placed,
+        congestion_config,
+    ))
 }
 
 fn estimate_routing_congestion(
@@ -1139,13 +1571,22 @@ fn translate_candidate_position(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     use super::*;
+    use crate::transform::place_and_route::global_pnr::heuristics::PlacementTransformHook;
     use crate::transform::place_and_route::global_pnr::ir::{
         LayoutCandidateCost, PhysicalPort, PhysicalPortDirection, PortConnection,
+    };
+    use crate::transform::place_and_route::global_pnr::physical_intent::{
+        IntentRegion, ResolvedPhysicalConstraint, ResolvedPhysicalIntent,
     };
     use crate::transform::place_and_route::global_pnr::policy::{
         Free3DPlacementConfig, LayerAssignmentStrategy, LayeredPlacementConfig, PlacementHeuristic,
         RoutingCongestionConfig,
+    };
+    use crate::transform::place_and_route::global_pnr::topology::{
+        DefinitionId, DefinitionKey, InstanceId, InstanceKey, ResolvedDefinition,
     };
     use crate::world::position::DimSize;
     use crate::world::World3D;
@@ -1197,6 +1638,103 @@ mod tests {
             true,
         )
         .expect("port y")
+    }
+
+    static PLACEMENT_TRANSFORM_CALLED: AtomicBool = AtomicBool::new(false);
+
+    fn observe_placement_transform(
+        _context: &PlacementHeuristicContext<'_>,
+        _placements: &mut Vec<Vec<PlacedModule>>,
+    ) -> eyre::Result<()> {
+        PLACEMENT_TRANSFORM_CALLED.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    #[test]
+    fn resolved_placement_applies_fixed_origin_and_region_constraints() -> eyre::Result<()> {
+        PLACEMENT_TRANSFORM_CALLED.store(false, Ordering::SeqCst);
+        let candidates = vec![test_candidate("child", &[])];
+        let topology = ResolvedPnrTopology {
+            top: DefinitionId(0),
+            definitions: vec![
+                ResolvedDefinition {
+                    id: DefinitionId(0),
+                    key: DefinitionKey("top".to_owned()),
+                    display_name: "top".to_owned(),
+                    ports: Vec::new(),
+                    is_leaf: false,
+                },
+                ResolvedDefinition {
+                    id: DefinitionId(1),
+                    key: DefinitionKey("child".to_owned()),
+                    display_name: "child".to_owned(),
+                    ports: Vec::new(),
+                    is_leaf: true,
+                },
+            ],
+            ports: Vec::new(),
+            instances: vec![
+                crate::transform::place_and_route::global_pnr::topology::ResolvedInstance {
+                    id: InstanceId(0),
+                    key: InstanceKey("top/child".to_owned()),
+                    display_name: "child".to_owned(),
+                    definition: DefinitionId(1),
+                },
+            ],
+            nets: Vec::new(),
+        };
+        let intent = ResolvedPhysicalIntent {
+            format: "test".to_owned(),
+            design: "top".to_owned(),
+            regions: [(
+                "logic".to_owned(),
+                IntentRegion {
+                    min: [10, 10, 2],
+                    max: [30, 30, 8],
+                },
+            )]
+            .into_iter()
+            .collect(),
+            constraints: vec![
+                ResolvedPhysicalConstraint::Inside {
+                    id: "inside".to_owned(),
+                    instance: InstanceId(0),
+                    region: "logic".to_owned(),
+                },
+                ResolvedPhysicalConstraint::LayerRange {
+                    id: "layers".to_owned(),
+                    instance: InstanceId(0),
+                    min: 2,
+                    max: 6,
+                },
+                ResolvedPhysicalConstraint::FixedOrigin {
+                    id: "lock".to_owned(),
+                    instance: InstanceId(0),
+                    origin: [12, 14, 3],
+                },
+            ],
+        };
+
+        let hooks = GlobalHeuristicHooks {
+            placement_transforms: vec![PlacementTransformHook {
+                name: "test-observer",
+                apply: observe_placement_transform,
+            }],
+            ..Default::default()
+        };
+        let placements = placement_candidates_resolved(
+            &topology,
+            Some(&intent),
+            &hooks,
+            &candidates,
+            &GlobalPlacementConfig::default(),
+            &[PlacementHeuristic::Shelf],
+        )?;
+
+        assert!(!placements.is_empty());
+        assert!(PLACEMENT_TRANSFORM_CALLED.load(Ordering::SeqCst));
+        assert_eq!(placements[0][0].origin, Position(12, 14, 3));
+        Ok(())
     }
 
     #[test]
@@ -1283,6 +1821,32 @@ mod tests {
 
         assert!(!shelf_only.is_empty());
         assert!(shelf_only.len() < shelf_and_grid.len());
+    }
+
+    #[test]
+    fn free_3d_springs_exclude_top_input_fanout_proximity_edges() {
+        let candidates = vec![
+            test_candidate("source", &[]),
+            test_candidate("first_sink", &[]),
+            test_candidate("second_sink", &[]),
+        ];
+        let connectivity = PlacementConnectivity {
+            connections: vec![PlacementConnection {
+                source_instance: "source".to_owned(),
+                source_port: "q".to_owned(),
+                target_instance: "first_sink".to_owned(),
+                target_port: "d".to_owned(),
+            }],
+            // This edge represents two sinks sharing a top-level input. It is
+            // useful to placement cost/order, but was never a Free3D spring in
+            // the legacy GraphModule path.
+            proximity_edges: vec![
+                ("source".to_owned(), "first_sink".to_owned()),
+                ("first_sink".to_owned(), "second_sink".to_owned()),
+            ],
+        };
+
+        assert_eq!(connectivity.candidate_edges(&candidates), vec![(0, 1)]);
     }
 
     #[test]

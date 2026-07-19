@@ -11,31 +11,35 @@ const entries = await readdir(sourceRoot, { withFileTypes: true });
 const examples = [];
 
 for (const entry of entries) {
-  if (!entry.isFile() || !entry.name.endsWith('.nbt')) continue;
+  if (!entry.isFile() || (!entry.name.endsWith('.nbt') && !entry.name.endsWith('.rsnap'))) continue;
 
   const source = join(sourceRoot, entry.name);
   const target = join(targetRoot, entry.name);
+  const kind = entry.name.endsWith('.rsnap') ? 'snapshot' : 'nbt';
   const outputsName = entry.name.replace(/\.nbt$/, '.outputs.json');
   const outputsSource = join(sourceRoot, outputsName);
   const outputsTarget = join(targetRoot, outputsName);
   const info = await stat(source);
   await copyFile(source, target);
   const example = {
+    kind,
     name: entry.name,
     file: entry.name,
     path: `examples/${entry.name}`,
     size: info.size,
   };
-  try {
-    await stat(outputsSource);
-    await copyFile(outputsSource, outputsTarget);
-    example.outputsPath = `examples/${outputsName}`;
-  } catch (error) {
-    if (error?.code !== 'ENOENT') throw error;
+  if (kind === 'nbt') {
+    try {
+      await stat(outputsSource);
+      await copyFile(outputsSource, outputsTarget);
+      example.outputsPath = `examples/${outputsName}`;
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+    }
   }
   examples.push(example);
 }
 
 examples.sort((a, b) => a.name.localeCompare(b.name));
 await writeFile(join(targetRoot, 'manifest.json'), `${JSON.stringify(examples, null, 2)}\n`);
-console.log(`Prepared ${examples.length} NBT examples in ${targetRoot}`);
+console.log(`Prepared ${examples.length} examples in ${targetRoot}`);

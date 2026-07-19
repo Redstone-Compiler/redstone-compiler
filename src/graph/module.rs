@@ -181,6 +181,16 @@ impl GraphModuleContext {
     {
         modules.for_each(|module| self.append(module));
     }
+
+    pub fn modules(&self) -> impl Iterator<Item = &GraphModule> {
+        self.modules.iter()
+    }
+
+    pub fn get(&self, name: &str) -> Option<&GraphModule> {
+        self.module_index
+            .get(name)
+            .and_then(|index| self.modules.get(*index))
+    }
 }
 
 impl Index<&str> for GraphModuleContext {

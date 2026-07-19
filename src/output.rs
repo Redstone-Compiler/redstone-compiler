@@ -2,7 +2,10 @@ use std::fs;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
+use crate::nbt::ToNBT;
+use crate::snapshot::{emit_json, emit_nbt, SnapshotProduct, SnapshotProductInfo};
 use crate::world::position::Position;
 use crate::world::World3D;
 
@@ -18,6 +21,53 @@ pub struct PlacedWorld {
 impl PlacedWorld {
     pub fn metadata(&self) -> OutputMetadata {
         OutputMetadata::new(self.outputs.clone())
+    }
+}
+
+impl SnapshotProduct for PlacedWorld {
+    fn emit_snapshot(&self, design_name: &str) -> eyre::Result<SnapshotProductInfo> {
+        let nbt_name = format!("{}.nbt", safe_artifact_name(design_name));
+        emit_nbt(&nbt_name, self.world.to_nbt())?;
+        emit_json(
+            "interface.json",
+            json!({
+                "format": "redstone-compiler.interface.v1",
+                "inputs": self.inputs,
+                "outputs": self.outputs,
+            }),
+        )?;
+        Ok(SnapshotProductInfo {
+            top_module: design_name.to_owned(),
+            final_nbt: nbt_name,
+            summary: json!({
+                "world": {
+                    "size": [self.world.size.0, self.world.size.1, self.world.size.2],
+                    "non_air_blocks": self.world.iter_block().len(),
+                },
+                "interface": {
+                    "inputs": self.inputs.len(),
+                    "outputs": self.outputs.len(),
+                }
+            }),
+        })
+    }
+}
+
+fn safe_artifact_name(name: &str) -> String {
+    let safe = name
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    if safe.is_empty() {
+        "design".to_owned()
+    } else {
+        safe
     }
 }
 

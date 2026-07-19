@@ -3,8 +3,22 @@ import { BlockState, Structure } from 'deepslate/core';
 import { StructureRenderer } from 'deepslate/render';
 import type { StructureBlock, StructureModel } from '../types';
 import { MinecraftResources } from './mcmeta';
+import { BoundingBoxRenderer, type ViewerBoundingBox } from './BoundingBoxRenderer';
+import { RouteRenderer, type ViewerRoute } from './RouteRenderer';
 
 type SelectionHandler = (block: StructureBlock | undefined) => void;
+type BoundingBoxSelectionHandler = (box: ViewerBoundingBox | undefined) => void;
+type BoundingBoxHoverHandler = (
+  box: ViewerBoundingBox | undefined,
+  clientX: number,
+  clientY: number,
+) => void;
+type RouteSelectionHandler = (route: ViewerRoute | undefined) => void;
+type RouteHoverHandler = (
+  route: ViewerRoute | undefined,
+  clientX: number,
+  clientY: number,
+) => void;
 type DragMode = 'move' | 'rotate';
 type SetStructureOptions = {
   preserveView?: boolean;
@@ -12,6 +26,7 @@ type SetStructureOptions = {
 };
 
 const ROTATION_DRAG_SCALE = 300;
+const CLICK_DRAG_THRESHOLD_PX = 5;
 const KEYBOARD_MOVE_SPEED = 0.0008;
 const PAN_MOVE_SPEED = 0.001;
 
@@ -37,15 +52,28 @@ function createDeepslateStructure(model: StructureModel): Structure {
 export class StructureViewer {
   private readonly gl: WebGLRenderingContext;
   private readonly resourcesPromise = MinecraftResources.load();
+  private readonly boundingBoxRenderer: BoundingBoxRenderer;
+  private readonly routeRenderer: RouteRenderer;
   private renderer?: StructureRenderer;
   private structure = Structure.EMPTY;
   private model?: StructureModel;
   private selectedBlock?: vec3;
+  private isolatedBox?: ViewerBoundingBox;
+  private isolatedBlockKeys?: Set<string>;
+  private blocksVisible = true;
+  private gridVisible = true;
   private traceHighlights: vec3[] = [];
   private onSelect: SelectionHandler = () => undefined;
+  private onBoundingBoxSelect: BoundingBoxSelectionHandler = () => undefined;
+  private onBoundingBoxHover: BoundingBoxHoverHandler = () => undefined;
+  private onRouteSelect: RouteSelectionHandler = () => undefined;
+  private onRouteHover: RouteHoverHandler = () => undefined;
   private frame = 0;
   private dragMode?: DragMode;
   private dragPos?: vec2;
+  private clickPointerId?: number;
+  private clickStart?: vec2;
+  private clickDragged = false;
   private readonly activePointers = new Map<number, vec2>();
   private lastFrameTime = 0;
   private readonly movement = new Set<string>();
@@ -61,13 +89,18 @@ export class StructureViewer {
     });
     if (!gl) throw new Error('WebGL is unavailable.');
     this.gl = gl;
+    this.boundingBoxRenderer = new BoundingBoxRenderer(gl);
+    this.routeRenderer = new RouteRenderer(gl);
 
     canvas.addEventListener('contextmenu', event => event.preventDefault());
     canvas.addEventListener('pointerdown', event => this.onPointerDown(event));
     canvas.addEventListener('pointermove', event => this.onPointerMove(event));
     canvas.addEventListener('pointerup', event => this.onPointerUp(event));
     canvas.addEventListener('pointercancel', event => this.onPointerUp(event));
-    canvas.addEventListener('pointerleave', event => this.onPointerUp(event));
+    canvas.addEventListener('pointerleave', event => {
+      this.clearOverlayHover();
+      this.onPointerUp(event);
+    });
     canvas.addEventListener('wheel', event => this.onWheel(event), { passive: false });
     window.addEventListener('keydown', event => this.onKeyDown(event));
     window.addEventListener('keyup', event => this.onKeyUp(event));
@@ -80,9 +113,83 @@ export class StructureViewer {
     this.onSelect = handler;
   }
 
+  setBoundingBoxes(
+    boxes: ViewerBoundingBox[],
+    handler?: BoundingBoxSelectionHandler,
+    hoverHandler?: BoundingBoxHoverHandler,
+  ): void {
+    this.clearBoundingBoxHover();
+    this.boundingBoxRenderer.setBoxes(boxes);
+    this.onBoundingBoxSelect = handler ?? (() => undefined);
+    this.onBoundingBoxHover = hoverHandler ?? (() => undefined);
+    this.render();
+  }
+
+  setHoveredBoundingBoxId(id: string | undefined): void {
+    if (this.boundingBoxRenderer.setHoveredId(id)) this.render();
+  }
+
+  setRoutes(
+    routes: ViewerRoute[],
+    handler?: RouteSelectionHandler,
+    hoverHandler?: RouteHoverHandler,
+  ): void {
+    this.clearRouteHover();
+    this.routeRenderer.setRoutes(routes);
+    this.onRouteSelect = handler ?? (() => undefined);
+    this.onRouteHover = hoverHandler ?? (() => undefined);
+    this.render();
+  }
+
+  setRelatedRouteIds(ids: Iterable<string>): void {
+    if (this.routeRenderer.setRelatedIds(ids)) this.render();
+  }
+
+  setSelectedRouteId(id: string | undefined): void {
+    if (this.routeRenderer.setSelectedId(id)) this.render();
+  }
+
+  setIsolatedBoundingBox(box: ViewerBoundingBox | undefined): void {
+    this.isolatedBox = box;
+    this.boundingBoxRenderer.setSelectedId(box?.id);
+    this.selectedBlock = undefined;
+    this.onSelect(undefined);
+    this.applyVisibleStructure();
+  }
+
+  setIsolatedBlockPositions(positions: Array<[number, number, number]> | undefined): void {
+    this.isolatedBlockKeys = positions
+      ? new Set(positions.map(position => position.join(',')))
+      : undefined;
+    this.selectedBlock = undefined;
+    this.onSelect(undefined);
+    this.applyVisibleStructure();
+  }
+
+  setBlocksVisible(visible: boolean): void {
+    if (this.blocksVisible === visible) return;
+    this.blocksVisible = visible;
+    if (!visible) {
+      this.selectedBlock = undefined;
+      this.onSelect(undefined);
+    }
+    this.render();
+  }
+
+  setGridVisible(visible: boolean): void {
+    if (this.gridVisible === visible) return;
+    this.gridVisible = visible;
+    this.render();
+  }
+
   async setStructure(model: StructureModel, options: SetStructureOptions = {}): Promise<void> {
     this.model = model;
-    this.structure = createDeepslateStructure(model);
+    if (!options.preserveView) {
+      this.isolatedBox = undefined;
+      this.isolatedBlockKeys = undefined;
+      this.boundingBoxRenderer.setSelectedId(undefined);
+    }
+    this.structure = createDeepslateStructure(this.visibleModel(model));
 
     if (!this.renderer) {
       const resources = await this.resourcesPromise;
@@ -104,6 +211,28 @@ export class StructureViewer {
     }
 
     this.traceHighlights = [];
+    this.render();
+  }
+
+  private visibleModel(model: StructureModel): StructureModel {
+    const box = this.isolatedBox;
+    const blockKeys = this.isolatedBlockKeys;
+    if (!box && !blockKeys) return model;
+    return {
+      ...model,
+      blocks: model.blocks.filter(block => {
+        const insideBox = !box || block.pos.every(
+          (value, axis) => value >= box.min[axis] && value < box.max[axis],
+        );
+        return insideBox && (!blockKeys || blockKeys.has(block.pos.join(',')));
+      }),
+    };
+  }
+
+  private applyVisibleStructure(): void {
+    if (!this.model) return;
+    this.structure = createDeepslateStructure(this.visibleModel(this.model));
+    this.renderer?.setStructure(this.structure);
     this.render();
   }
 
@@ -140,19 +269,33 @@ export class StructureViewer {
     if (this.activePointers.size === 1) {
       this.dragMode = event.button === 2 ? 'move' : 'rotate';
       this.dragPos = vec2.clone(pos);
+      if (event.button === 0) {
+        this.clickPointerId = event.pointerId;
+        this.clickStart = vec2.clone(pos);
+        this.clickDragged = false;
+      }
     } else {
       this.dragMode = 'move';
       this.dragPos = undefined;
-    }
-
-    if (event.button === 0 && this.activePointers.size === 1) {
-      this.selectBlock(event.offsetX, event.offsetY);
+      this.clearClickCandidate();
     }
   }
 
   private onPointerMove(event: PointerEvent): void {
+    if (event.pointerType === 'mouse' && this.activePointers.size === 0) {
+      this.updateOverlayHover(event.offsetX, event.offsetY, event.clientX, event.clientY);
+      return;
+    }
+
     const currentPos = this.activePointers.get(event.pointerId);
     if (!currentPos) return;
+
+    if (this.clickPointerId === event.pointerId && this.clickStart) {
+      const pointerPos = vec2.fromValues(event.clientX, event.clientY);
+      if (vec2.distance(this.clickStart, pointerPos) >= CLICK_DRAG_THRESHOLD_PX) {
+        this.clickDragged = true;
+      }
+    }
 
     event.preventDefault();
 
@@ -194,6 +337,12 @@ export class StructureViewer {
   }
 
   private onPointerUp(event: PointerEvent): void {
+    const shouldSelect = event.type === 'pointerup'
+      && this.clickPointerId === event.pointerId
+      && !this.clickDragged
+      && this.activePointers.size === 1;
+    if (this.clickPointerId === event.pointerId) this.clearClickCandidate();
+
     this.activePointers.delete(event.pointerId);
     if (this.canvas.hasPointerCapture(event.pointerId)) {
       this.canvas.releasePointerCapture(event.pointerId);
@@ -201,6 +350,7 @@ export class StructureViewer {
 
     if (this.activePointers.size === 0) {
       this.endDrag();
+      if (shouldSelect) this.selectBlock(event.offsetX, event.offsetY);
       return;
     }
 
@@ -215,6 +365,12 @@ export class StructureViewer {
     this.activePointers.clear();
     this.dragMode = undefined;
     this.dragPos = undefined;
+  }
+
+  private clearClickCandidate(): void {
+    this.clickPointerId = undefined;
+    this.clickStart = undefined;
+    this.clickDragged = false;
   }
 
   private getTouchGesture(): [vec2, vec2] | undefined {
@@ -258,6 +414,39 @@ export class StructureViewer {
     if (!this.renderer || !this.model) return;
 
     this.resize();
+    const selectedRoute = this.pickRoute(x, y);
+    if (selectedRoute) {
+      this.routeRenderer.setSelectedId(selectedRoute.id);
+      this.boundingBoxRenderer.setSelectedId(this.isolatedBox?.id);
+      this.clearOverlayHover();
+      this.selectedBlock = undefined;
+      this.onSelect(undefined);
+      this.onRouteSelect(selectedRoute);
+      this.render();
+      return;
+    }
+
+    this.routeRenderer.setSelectedId(undefined);
+    this.onRouteSelect(undefined);
+    const selectedBox = this.pickBoundingBox(x, y);
+    if (selectedBox) {
+      this.boundingBoxRenderer.setSelectedId(selectedBox.id);
+      this.clearBoundingBoxHover();
+      this.selectedBlock = undefined;
+      this.onSelect(undefined);
+      this.onBoundingBoxSelect(selectedBox);
+      this.render();
+      return;
+    }
+
+    this.boundingBoxRenderer.setSelectedId(undefined);
+    this.onBoundingBoxSelect(undefined);
+    if (!this.blocksVisible) {
+      this.selectedBlock = undefined;
+      this.onSelect(undefined);
+      this.render();
+      return;
+    }
     this.clearFrame();
     this.renderer.drawColoredStructure(this.getViewMatrix());
 
@@ -273,6 +462,62 @@ export class StructureViewer {
     }
 
     this.render();
+  }
+
+  private updateOverlayHover(x: number, y: number, clientX: number, clientY: number): void {
+    if (!this.renderer || !this.model) return;
+
+    this.resize();
+    const hoveredRoute = this.pickRoute(x, y);
+    if (hoveredRoute) {
+      this.clearBoundingBoxHover();
+      this.canvas.style.cursor = 'pointer';
+      this.onRouteHover(hoveredRoute, clientX, clientY);
+      if (this.routeRenderer.setHoveredId(hoveredRoute.id)) this.render();
+      return;
+    }
+
+    this.clearRouteHover();
+    const hoveredBox = this.pickBoundingBox(x, y);
+    this.canvas.style.cursor = hoveredBox ? 'pointer' : '';
+    this.onBoundingBoxHover(hoveredBox, clientX, clientY);
+    if (this.boundingBoxRenderer.setHoveredId(hoveredBox?.id)) this.render();
+  }
+
+  private clearBoundingBoxHover(): void {
+    this.onBoundingBoxHover(undefined, 0, 0);
+    if (this.boundingBoxRenderer.setHoveredId(undefined)) this.render();
+  }
+
+  private clearRouteHover(): void {
+    this.onRouteHover(undefined, 0, 0);
+    if (this.routeRenderer.setHoveredId(undefined)) this.render();
+  }
+
+  private clearOverlayHover(): void {
+    this.canvas.style.cursor = '';
+    this.clearBoundingBoxHover();
+    this.clearRouteHover();
+  }
+
+  private pickBoundingBox(x: number, y: number): ViewerBoundingBox | undefined {
+    return this.boundingBoxRenderer.pick(
+      x,
+      y,
+      this.getViewMatrix(),
+      this.canvas.clientWidth,
+      this.canvas.clientHeight,
+    );
+  }
+
+  private pickRoute(x: number, y: number): ViewerRoute | undefined {
+    return this.routeRenderer.pick(
+      x,
+      y,
+      this.getViewMatrix(),
+      this.canvas.clientWidth,
+      this.canvas.clientHeight,
+    );
   }
 
   private getViewMatrix(): mat4 {
@@ -299,6 +544,8 @@ export class StructureViewer {
     }
 
     this.renderer.setViewport(0, 0, this.canvas.width, this.canvas.height);
+    this.boundingBoxRenderer.setViewport(0, 0, this.canvas.width, this.canvas.height);
+    this.routeRenderer.setViewport(0, 0, this.canvas.width, this.canvas.height);
   }
 
   private render(): void {
@@ -312,13 +559,17 @@ export class StructureViewer {
       this.resize();
       this.clearFrame();
       const viewMatrix = this.getViewMatrix();
-      this.renderer.drawGrid(viewMatrix);
-      this.renderer.drawStructure(viewMatrix);
-      for (const block of this.traceHighlights) {
-        this.renderer.drawOutline(viewMatrix, block);
-      }
-      if (this.selectedBlock) {
-        this.renderer.drawOutline(viewMatrix, this.selectedBlock);
+      if (this.gridVisible) this.renderer.drawGrid(viewMatrix);
+      if (this.blocksVisible) this.renderer.drawStructure(viewMatrix);
+      this.routeRenderer.draw(viewMatrix);
+      this.boundingBoxRenderer.draw(viewMatrix);
+      if (this.blocksVisible) {
+        for (const block of this.traceHighlights) {
+          this.renderer.drawOutline(viewMatrix, block);
+        }
+        if (this.selectedBlock) {
+          this.renderer.drawOutline(viewMatrix, this.selectedBlock);
+        }
       }
 
       if (this.movement.size > 0) {

@@ -1,29 +1,34 @@
 [
   {
+    "kind": "nbt",
     "name": "alu-export.nbt",
     "file": "alu-export.nbt",
     "path": "examples/alu-export.nbt",
     "size": 3386
   },
   {
+    "kind": "nbt",
     "name": "alu.nbt",
     "file": "alu.nbt",
     "path": "examples/alu.nbt",
     "size": 11304
   },
   {
+    "kind": "nbt",
     "name": "and-gate.nbt",
     "file": "and-gate.nbt",
     "path": "examples/and-gate.nbt",
     "size": 292
   },
   {
+    "kind": "nbt",
     "name": "counter-global-placement-bbox.nbt",
     "file": "counter-global-placement-bbox.nbt",
     "path": "examples/counter-global-placement-bbox.nbt",
     "size": 1204
   },
   {
+    "kind": "nbt",
     "name": "counter-global-smoke.nbt",
     "file": "counter-global-smoke.nbt",
     "path": "examples/counter-global-smoke.nbt",
@@ -31,31 +36,50 @@
     "outputsPath": "examples/counter-global-smoke.outputs.json"
   },
   {
+    "kind": "snapshot",
+    "name": "counter.rsnap",
+    "file": "counter.rsnap",
+    "path": "examples/counter.rsnap",
+    "size": 36505
+  },
+  {
+    "kind": "nbt",
     "name": "d-flip-flop-global-placement-bbox.nbt",
     "file": "d-flip-flop-global-placement-bbox.nbt",
     "path": "examples/d-flip-flop-global-placement-bbox.nbt",
-    "size": 577
+    "size": 570
   },
   {
+    "kind": "nbt",
     "name": "d-flip-flop-global-smoke.nbt",
     "file": "d-flip-flop-global-smoke.nbt",
     "path": "examples/d-flip-flop-global-smoke.nbt",
-    "size": 1479,
+    "size": 1433,
     "outputsPath": "examples/d-flip-flop-global-smoke.outputs.json"
   },
   {
+    "kind": "snapshot",
+    "name": "d-flip-flop.rsnap",
+    "file": "d-flip-flop.rsnap",
+    "path": "examples/d-flip-flop.rsnap",
+    "size": 18725
+  },
+  {
+    "kind": "nbt",
     "name": "d-latch.nbt",
     "file": "d-latch.nbt",
     "path": "examples/d-latch.nbt",
     "size": 617
   },
   {
+    "kind": "nbt",
     "name": "full-adder.nbt",
     "file": "full-adder.nbt",
     "path": "examples/full-adder.nbt",
     "size": 508
   },
   {
+    "kind": "nbt",
     "name": "half-adder-generated-from-verilog.nbt",
     "file": "half-adder-generated-from-verilog.nbt",
     "path": "examples/half-adder-generated-from-verilog.nbt",
@@ -63,72 +87,84 @@
     "outputsPath": "examples/half-adder-generated-from-verilog.outputs.json"
   },
   {
+    "kind": "nbt",
     "name": "half-adder-generated.nbt",
     "file": "half-adder-generated.nbt",
     "path": "examples/half-adder-generated.nbt",
     "size": 553
   },
   {
+    "kind": "nbt",
     "name": "half-adder.nbt",
     "file": "half-adder.nbt",
     "path": "examples/half-adder.nbt",
     "size": 21376
   },
   {
+    "kind": "nbt",
     "name": "level.nbt",
     "file": "level.nbt",
     "path": "examples/level.nbt",
     "size": 1900
   },
   {
+    "kind": "nbt",
     "name": "rs-latch.nbt",
     "file": "rs-latch.nbt",
     "path": "examples/rs-latch.nbt",
     "size": 368
   },
   {
+    "kind": "nbt",
     "name": "test-fix.nbt",
     "file": "test-fix.nbt",
     "path": "examples/test-fix.nbt",
     "size": 673
   },
   {
+    "kind": "nbt",
     "name": "test-repeater.nbt",
     "file": "test-repeater.nbt",
     "path": "examples/test-repeater.nbt",
     "size": 553
   },
   {
+    "kind": "nbt",
     "name": "test.nbt",
     "file": "test.nbt",
     "path": "examples/test.nbt",
     "size": 4146
   },
   {
+    "kind": "nbt",
     "name": "xor-gate-complex.nbt",
     "file": "xor-gate-complex.nbt",
     "path": "examples/xor-gate-complex.nbt",
     "size": 10570
   },
   {
+    "kind": "nbt",
     "name": "xor-gate-shortest.nbt",
     "file": "xor-gate-shortest.nbt",
     "path": "examples/xor-gate-shortest.nbt",
     "size": 7075
   },
   {
+    "kind": "nbt",
     "name": "xor-gate-simple.nbt",
     "file": "xor-gate-simple.nbt",
     "path": "examples/xor-gate-simple.nbt",
     "size": 11748
   },
   {
+    "kind": "nbt",
     "name": "xor-generated.nbt",
     "file": "xor-generated.nbt",
     "path": "examples/xor-generated.nbt",
     "size": 353
   },
   {
+    "kind": "nbt",
     "name": "xor.nbt",
     "file": "xor.nbt",
     "path": "examples/xor.nbt",

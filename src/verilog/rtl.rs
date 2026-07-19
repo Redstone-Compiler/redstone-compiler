@@ -254,7 +254,7 @@ fn lower_expr(
         AstExpr::Ident(name) => signal_expr(name, signal_index),
         AstExpr::Number(value) => Ok(RtlExpr::Const {
             value: *value,
-            width: 1,
+            width: constant_width(*value),
         }),
         AstExpr::Not(expr) => Ok(RtlExpr::Not(Box::new(lower_expr(expr, signal_index)?))),
         AstExpr::Binary { op, left, right } => {
@@ -268,6 +268,10 @@ fn lower_expr(
             })
         }
     }
+}
+
+fn constant_width(value: usize) -> usize {
+    (usize::BITS - value.leading_zeros()).max(1) as usize
 }
 
 fn signal_expr(name: &str, signal_index: &HashMap<String, RtlSignalId>) -> eyre::Result<RtlExpr> {

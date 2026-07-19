@@ -84,6 +84,16 @@ input {
   background: rgb(38 47 55 / 88%);
 }
 
+.file-button.hidden {
+  display: none;
+}
+
+.snapshot-box-button.active {
+  border-color: rgb(255 129 112 / 65%);
+  background: rgb(211 50 50 / 28%);
+  color: #ffe4df;
+}
+
 .file-button input {
   display: none;
 }
@@ -306,6 +316,77 @@ input {
   text-align: center;
 }
 
+.snapshot-section-title {
+  margin: 8px 7px 3px;
+  color: #87939d;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.snapshot-section-title:first-child {
+  margin-top: 2px;
+}
+
+.snapshot-collapsible {
+  margin: 3px 0;
+}
+
+.snapshot-collapsible > summary {
+  padding: 5px 7px;
+  border-radius: 4px;
+  color: #aab5bd;
+  font: 11px/1.4 "Cascadia Mono", Consolas, monospace;
+  cursor: pointer;
+  user-select: none;
+}
+
+.snapshot-collapsible > summary:hover {
+  background: rgb(255 255 255 / 6%);
+  color: #e3e9ed;
+}
+
+.snapshot-collapsible-body {
+  margin-left: 8px;
+  padding-left: 5px;
+  border-left: 1px solid rgb(255 255 255 / 10%);
+}
+
+.snapshot-ir-entry .file-entry-name {
+  color: #a5d6ff;
+}
+
+.snapshot-entry-detail {
+  max-width: 48%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.constraint-entry {
+  box-shadow: inset 2px 0 transparent;
+}
+
+.constraint-entry.constraint-satisfied {
+  box-shadow: inset 2px 0 #55c98a;
+}
+
+.constraint-entry.constraint-violated {
+  box-shadow: inset 2px 0 #ef6464;
+}
+
+.constraint-entry.constraint-not_evaluated {
+  box-shadow: inset 2px 0 #8c98a3;
+}
+
+.constraint-satisfied .constraint-entry-status {
+  color: #83d9aa;
+}
+
+.constraint-violated .constraint-entry-status {
+  color: #ff8e8e;
+}
+
 .file-entry,
 .switch-entry {
   display: flex;
@@ -347,6 +428,16 @@ input {
   background: rgb(255 255 255 / 7%);
 }
 
+.file-entry.bbox-hover:not(.selected) {
+  background: rgb(255 216 96 / 14%);
+  box-shadow: inset 2px 0 #ffd860;
+  color: #fff;
+}
+
+.file-entry.bbox-hover:not(.selected) .file-entry-size {
+  color: #ffe8a6;
+}
+
 .file-entry.selected,
 .switch-entry.selected {
   background: rgb(211 50 50 / 24%);
@@ -356,6 +447,39 @@ input {
 .file-entry.selected .file-entry-size,
 .switch-entry.selected .switch-entry-state {
   color: #ffd0d0;
+}
+
+.bbox-tooltip {
+  position: fixed;
+  z-index: 40;
+  display: grid;
+  gap: 3px;
+  max-width: min(320px, calc(100vw - 16px));
+  padding: 8px 10px;
+  border: 1px solid rgb(255 216 96 / 48%);
+  border-radius: 6px;
+  background: rgb(15 19 23 / 94%);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 36%);
+  color: #f8fafb;
+  font: 11px/1.35 "Cascadia Mono", Consolas, monospace;
+  pointer-events: none;
+}
+
+.bbox-tooltip.hidden {
+  display: none;
+}
+
+.bbox-tooltip strong {
+  overflow: hidden;
+  color: #ffe38a;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bbox-tooltip span {
+  color: #aeb9c2;
+  white-space: nowrap;
 }
 
 .inspector-panel {
@@ -995,6 +1119,363 @@ input {
   display: block;
   width: 100%;
   height: 100%;
+}
+
+.artifact-dialog-surface {
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.artifact-dialog-actions,
+.artifact-toggle {
+  display: flex;
+  align-items: center;
+}
+
+.artifact-dialog-actions {
+  gap: 12px;
+}
+
+.artifact-toggle {
+  gap: 6px;
+  color: #aeb8c0;
+  cursor: pointer;
+  font-size: 12px;
+  user-select: none;
+}
+
+.artifact-toggle.hidden {
+  display: none;
+}
+
+.artifact-toggle input {
+  margin: 0;
+  accent-color: #599fdf;
+}
+
+.artifact-content.hidden,
+.ir-comparison.hidden {
+  display: none;
+}
+
+.ir-comparison {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) 7px minmax(180px, 1fr) 7px minmax(180px, 1fr);
+  min-width: 0;
+  min-height: 0;
+  background: #101317;
+}
+
+.ir-comparison-pane {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+}
+
+.ir-comparison-splitter {
+  position: relative;
+  z-index: 2;
+  width: 7px;
+  min-height: 0;
+  border-right: 1px solid rgb(255 255 255 / 7%);
+  border-left: 1px solid rgb(255 255 255 / 7%);
+  background: #151a1f;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.ir-comparison-splitter::after {
+  position: absolute;
+  top: 50%;
+  left: 2px;
+  width: 1px;
+  height: 34px;
+  border-right: 1px solid #58636d;
+  border-left: 1px solid #58636d;
+  content: '';
+  transform: translateY(-50%);
+}
+
+.ir-comparison-splitter:hover,
+.ir-comparison-splitter:focus-visible,
+.ir-comparison-splitter.dragging {
+  outline: 0;
+  background: #294664;
+}
+
+body.ir-pane-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
+.ir-comparison-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+  padding: 9px 12px;
+  border-bottom: 1px solid rgb(255 255 255 / 10%);
+  background: #181d22;
+  font: 11px/1.3 "Cascadia Mono", Consolas, monospace;
+}
+
+.ir-comparison-header strong {
+  color: #f0f4f6;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.ir-comparison-header span {
+  overflow: hidden;
+  color: #7f8b95;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ir-code {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  color: #c9d1d9;
+  background: #101317;
+  font: 12px/1.55 "Cascadia Mono", Consolas, monospace;
+  tab-size: 2;
+}
+
+.ir-code-line {
+  display: grid;
+  grid-template-columns: 46px max-content;
+  min-width: 100%;
+}
+
+.ir-code-line:hover {
+  background: rgb(255 255 255 / 4%);
+}
+
+.ir-code-line-linked {
+  cursor: pointer;
+}
+
+.ir-code-line.ir-code-line-grouped {
+  background: hsl(var(--ir-location-hue) 58% 52% / 8%);
+  box-shadow: inset 2px 0 hsl(var(--ir-location-hue) 72% 64% / 42%);
+}
+
+.ir-code-line.ir-code-line-grouped:hover {
+  background: hsl(var(--ir-location-hue) 62% 55% / 15%);
+}
+
+.ir-comparison.ir-color-mapping-disabled
+  .ir-code-line.ir-code-line-grouped:not(.ir-location-related):not(.ir-location-scope):not(.ir-location-reference):not(.ir-location-reference-scope) {
+  background: transparent;
+  box-shadow: none;
+}
+
+.ir-comparison.ir-color-mapping-disabled
+  .ir-code-line.ir-code-line-grouped:not(.ir-location-related):not(.ir-location-scope):not(.ir-location-reference):not(.ir-location-reference-scope):hover {
+  background: rgb(255 255 255 / 4%);
+}
+
+.ir-code-line.ir-location-related {
+  background: rgb(67 135 214 / 18%);
+  box-shadow: inset 3px 0 rgb(89 166 255 / 70%);
+}
+
+.ir-code-line.ir-location-scope {
+  background: rgb(67 135 214 / 7%);
+  box-shadow: inset 2px 0 rgb(89 166 255 / 28%);
+}
+
+.ir-code-line.ir-location-reference {
+  background: rgb(162 106 222 / 16%);
+  box-shadow: inset 3px 0 rgb(188 128 255 / 75%);
+}
+
+.ir-code-line.ir-location-reference-scope {
+  background: rgb(162 106 222 / 6%);
+  box-shadow: inset 2px 0 rgb(188 128 255 / 26%);
+}
+
+.ir-code-line.ir-location-selected {
+  background: rgb(230 164 63 / 24%);
+  box-shadow: inset 3px 0 #e6a43f;
+}
+
+.ir-line-number {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  padding: 0 10px 0 6px;
+  border-right: 1px solid rgb(255 255 255 / 7%);
+  background: #101317;
+  color: #53606a;
+  text-align: right;
+  user-select: none;
+}
+
+.ir-code-line:hover .ir-line-number {
+  background: #171c21;
+  color: #9aa6af;
+}
+
+.ir-code-line.ir-code-line-grouped .ir-line-number {
+  background: hsl(var(--ir-location-hue) 32% 18% / 82%);
+  color: hsl(var(--ir-location-hue) 60% 76%);
+}
+
+.ir-code-line.ir-code-line-grouped:hover .ir-line-number {
+  background: hsl(var(--ir-location-hue) 38% 22% / 92%);
+}
+
+.ir-comparison.ir-color-mapping-disabled
+  .ir-code-line.ir-code-line-grouped:not(.ir-location-related):not(.ir-location-scope):not(.ir-location-reference):not(.ir-location-reference-scope) .ir-line-number {
+  background: #101317;
+  color: #53606a;
+}
+
+.ir-comparison.ir-color-mapping-disabled
+  .ir-code-line.ir-code-line-grouped:not(.ir-location-related):not(.ir-location-scope):not(.ir-location-reference):not(.ir-location-reference-scope):hover .ir-line-number {
+  background: #171c21;
+  color: #9aa6af;
+}
+
+.ir-code-line.ir-location-related .ir-line-number {
+  background: #172638;
+  color: #8fc2ff;
+}
+
+.ir-code-line.ir-location-scope .ir-line-number {
+  background: #131b24;
+  color: #708aa3;
+}
+
+.ir-code-line.ir-location-reference .ir-line-number {
+  background: #291d38;
+  color: #d5adff;
+}
+
+.ir-code-line.ir-location-reference-scope .ir-line-number {
+  background: #1b1622;
+  color: #8c779f;
+}
+
+.ir-code-line.ir-location-selected .ir-line-number {
+  background: #352b1c;
+  color: #ffd18a;
+}
+
+.ir-line-content {
+  display: block;
+  padding: 0 10px;
+  font: inherit;
+  white-space: pre;
+}
+
+@media (max-width: 1050px) {
+  .ir-comparison {
+    grid-template-columns: 1fr !important;
+    grid-template-rows: repeat(3, minmax(260px, 1fr));
+    overflow: auto;
+  }
+
+  .ir-comparison-splitter {
+    display: none;
+  }
+
+  .ir-comparison-pane {
+    min-height: 260px;
+    border-right: 0;
+    border-bottom: 1px solid rgb(255 255 255 / 10%);
+  }
+}
+
+.artifact-content {
+  min-height: 0;
+  margin: 0;
+  padding: 16px;
+  overflow: auto;
+  color: #dce3e7;
+  background: #101317;
+  font: 12px/1.55 "Cascadia Mono", Consolas, monospace;
+  white-space: pre;
+}
+
+.artifact-content.language-rcir {
+  color: #c9d1d9;
+  tab-size: 2;
+}
+
+.artifact-content.language-verilog {
+  color: #c9d1d9;
+  tab-size: 2;
+}
+
+.rcir-comment {
+  color: #708090;
+  font-style: italic;
+}
+
+.rcir-keyword {
+  color: #ff7b72;
+  font-weight: 600;
+}
+
+.rcir-stage {
+  color: #d2a8ff;
+  font-weight: 600;
+}
+
+.rcir-type {
+  color: #79c0ff;
+}
+
+.rcir-operation {
+  color: #d2a8ff;
+}
+
+.rcir-string {
+  color: #a5d6ff;
+}
+
+.rcir-number {
+  color: #ffa657;
+}
+
+.verilog-comment {
+  color: #708090;
+  font-style: italic;
+}
+
+.verilog-keyword {
+  color: #ff7b72;
+  font-weight: 600;
+}
+
+.verilog-type {
+  color: #79c0ff;
+}
+
+.verilog-number,
+.verilog-constant {
+  color: #ffa657;
+}
+
+.verilog-string {
+  color: #a5d6ff;
+}
+
+.verilog-directive {
+  color: #d2a8ff;
+  font-weight: 600;
+}
+
+.verilog-system {
+  color: #d2a8ff;
+}
+
+.verilog-operator {
+  color: #ff9bce;
 }
 
 .graph-output svg g.node {

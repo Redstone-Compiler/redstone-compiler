@@ -1,18 +1,21 @@
 use std::collections::HashSet;
 
 use eyre::ContextCompat;
+use serde::{Deserialize, Serialize};
 
 use crate::transform::place_and_route::estimate::{bounding_box, BoundingBox};
 use crate::world::position::Position;
 use crate::world::World3D;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PhysicalPortDirection {
     Input,
     Output,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PortConnection {
     Direct,
     InputDiode,

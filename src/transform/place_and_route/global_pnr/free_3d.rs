@@ -45,12 +45,34 @@ pub(crate) fn place_free_3d(
     candidates: &[LayoutCandidate],
     config: Free3DPlacementConfig,
 ) -> Option<Vec<PlacedModule>> {
+    let candidate_by_name = candidates
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| (candidate.module_name.as_str(), index))
+        .collect::<HashMap<_, _>>();
+    let edges = module
+        .vars
+        .iter()
+        .filter_map(|var| {
+            let source = *candidate_by_name.get(var.source.0.as_str())?;
+            let target = *candidate_by_name.get(var.target.0.as_str())?;
+            (source != target).then_some((source, target))
+        })
+        .collect::<Vec<_>>();
+    place_free_3d_with_edges(candidates, &edges, config)
+}
+
+pub(crate) fn place_free_3d_with_edges(
+    candidates: &[LayoutCandidate],
+    edges: &[(usize, usize)],
+    config: Free3DPlacementConfig,
+) -> Option<Vec<PlacedModule>> {
     if candidates.is_empty() {
         return None;
     }
 
     let mut bodies = seed_bodies(candidates, config.clearance, config.seed);
-    relax(&mut bodies, module, candidates, config);
+    relax(&mut bodies, edges, config);
     let mut origins = snap_origins(&bodies);
     legalize(&mut origins, candidates, config.clearance)?;
     shift_into_positive_world(&mut origins, 4);
@@ -128,27 +150,7 @@ fn seed_bodies(candidates: &[LayoutCandidate], clearance: usize, seed: u64) -> V
         .collect()
 }
 
-fn relax(
-    bodies: &mut [Body],
-    module: &GraphModule,
-    candidates: &[LayoutCandidate],
-    config: Free3DPlacementConfig,
-) {
-    let candidate_by_name = candidates
-        .iter()
-        .enumerate()
-        .map(|(index, candidate)| (candidate.module_name.as_str(), index))
-        .collect::<HashMap<_, _>>();
-    let edges = module
-        .vars
-        .iter()
-        .filter_map(|var| {
-            let source = *candidate_by_name.get(var.source.0.as_str())?;
-            let target = *candidate_by_name.get(var.target.0.as_str())?;
-            (source != target).then_some((source, target))
-        })
-        .collect::<Vec<_>>();
-
+fn relax(bodies: &mut [Body], edges: &[(usize, usize)], config: Free3DPlacementConfig) {
     for _ in 0..config.iterations {
         let count = bodies.len() as f64;
         let centroid = bodies.iter().fold(Vec3::default(), |mut sum, body| {
@@ -172,7 +174,7 @@ fn relax(
             })
             .collect::<Vec<_>>();
 
-        for &(source, target) in &edges {
+        for &(source, target) in edges {
             let delta = Vec3 {
                 x: bodies[target].center.x - bodies[source].center.x,
                 y: bodies[target].center.y - bodies[source].center.y,
