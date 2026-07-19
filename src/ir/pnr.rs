@@ -116,7 +116,52 @@ pub struct CandidateSpec {
     pub search_box: [usize; 3],
     pub retain: usize,
     pub combinational_samples: Option<usize>,
+    #[serde(default)]
+    pub clustering: ClusteringSpec,
     pub local_placer: LocalPlacerSpec,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClusteringSpec {
+    pub enabled: bool,
+    pub prefer_provenance: bool,
+    pub reuse_macros: bool,
+    pub keep_monolithic: bool,
+    pub trigger_logic_nodes: usize,
+    pub max_logic_nodes: usize,
+    pub max_tagged_logic_nodes: usize,
+    pub candidates_per_cluster: usize,
+    pub max_alternative_combinations: usize,
+    pub placement_spacings: Vec<usize>,
+    pub shelf_width: usize,
+    pub routing_floor_margin: usize,
+    pub input_boundary_bias: bool,
+    pub direct_max_steps: usize,
+    pub beam_width: usize,
+    pub beam_max_expansions: usize,
+}
+
+impl Default for ClusteringSpec {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            prefer_provenance: true,
+            reuse_macros: true,
+            keep_monolithic: true,
+            trigger_logic_nodes: 8,
+            max_logic_nodes: 4,
+            max_tagged_logic_nodes: 12,
+            candidates_per_cluster: 2,
+            max_alternative_combinations: 6,
+            placement_spacings: vec![4, 8],
+            shelf_width: 96,
+            routing_floor_margin: 4,
+            input_boundary_bias: true,
+            direct_max_steps: 128,
+            beam_width: 64,
+            beam_max_expansions: 2_048,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -137,6 +182,52 @@ pub struct LocalPlacerSpec {
     pub not_route_step_sampling: SamplingSpec,
     pub max_route_step: usize,
     pub route_step_sampling: SamplingSpec,
+    pub objective: LocalObjectiveSpec,
+    pub adaptive: LocalAdaptiveSpec,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalObjectiveSpec {
+    pub block_count: usize,
+    pub bbox_volume: usize,
+    pub bbox_extent: usize,
+    pub bbox_height: usize,
+    pub local_density: usize,
+    pub future_join_distance: usize,
+}
+
+impl Default for LocalObjectiveSpec {
+    fn default() -> Self {
+        Self {
+            block_count: 10,
+            bbox_volume: 1,
+            bbox_extent: 5,
+            bbox_height: 20,
+            local_density: 3,
+            future_join_distance: 8,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalAdaptiveSpec {
+    pub max_retries: usize,
+    pub route_depth_multiplier: usize,
+    pub route_depth_cap: usize,
+    pub sampling_multiplier: usize,
+    pub sampling_cap: Option<usize>,
+}
+
+impl Default for LocalAdaptiveSpec {
+    fn default() -> Self {
+        Self {
+            max_retries: 1,
+            route_depth_multiplier: 2,
+            route_depth_cap: 16,
+            sampling_multiplier: 2,
+            sampling_cap: None,
+        }
+    }
 }
 
 /// Hard packaging and routing-access requirements attached to one leaf definition.

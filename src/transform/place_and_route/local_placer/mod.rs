@@ -16,7 +16,7 @@ use crate::logic::LogicType;
 use crate::output::{OutputEndpoint, PlacedWorld};
 use crate::sequential::layout::SequentialMacro;
 use crate::sequential::{SequentialPrimitive, SequentialType};
-use crate::transform::place_and_route::estimate::{bounding_box_of_positions, world_compact_cost};
+use crate::transform::place_and_route::estimate::{bounding_box, bounding_box_of_positions};
 use crate::transform::place_and_route::place_bound::PropagateType;
 use crate::world::block::{Block, BlockKind, Direction};
 use crate::world::position::{DimSize, Position};
@@ -29,9 +29,9 @@ mod scheduler;
 mod state;
 
 pub use config::{
-    InputPlacementStrategy, LocalPlacerConfig, LocalPlacerInputConstraints, NotRouteStrategy,
-    PlacementSamplingPolicy, PlacementSchedulePolicy, TorchPlacementStrategy,
-    K_MAX_LOCAL_PLACE_NODE_COUNT,
+    InputPlacementStrategy, LocalPlacementCostWeights, LocalPlacerConfig,
+    LocalPlacerInputConstraints, NotRouteStrategy, PlacementSamplingPolicy,
+    PlacementSchedulePolicy, TorchPlacementStrategy, K_MAX_LOCAL_PLACE_NODE_COUNT,
 };
 pub use debug::{
     LocalPlacementFailure, LocalPlacementFailureKind, LocalPlacementStage, LocalPlacerDebug,
@@ -57,6 +57,7 @@ use sequential::{
 pub struct LocalPlacer {
     graph: LogicGraph,
     config: LocalPlacerConfig,
+    cost_weights: LocalPlacementCostWeights,
     visit_orders: Vec<GraphNodeId>,
     cost_join_pairs_by_step: Vec<Vec<FutureJoinPair>>,
 }
@@ -68,8 +69,6 @@ const RANKED_RANDOM_TAIL_SAMPLE_SCOPE: u64 = 2;
 const LEAK_SAMPLING_QUEUE_THRESHOLD: usize = 10_000;
 const PLACEMENT_DIVERSITY_SPAN_BUCKET_SIZE: usize = 4;
 const RANKED_DIVERSITY_SLOT_DIVISOR: usize = 4;
-const LOCAL_DENSITY_COST_WEIGHT: usize = 3;
-const FUTURE_JOIN_DISTANCE_COST_WEIGHT: usize = 8;
 
 impl LocalPlacer {
     pub fn new(graph: LogicGraph, config: LocalPlacerConfig) -> eyre::Result<Self> {
@@ -84,10 +83,25 @@ impl LocalPlacer {
         config: LocalPlacerConfig,
         visit_orders: Vec<GraphNodeId>,
     ) -> eyre::Result<Self> {
+        Self::new_with_visit_order_and_cost(
+            graph,
+            config,
+            visit_orders,
+            LocalPlacementCostWeights::default(),
+        )
+    }
+
+    pub(crate) fn new_with_visit_order_and_cost(
+        graph: LogicGraph,
+        config: LocalPlacerConfig,
+        visit_orders: Vec<GraphNodeId>,
+        cost_weights: LocalPlacementCostWeights,
+    ) -> eyre::Result<Self> {
         let cost_join_pairs_by_step = build_cost_join_pairs_by_step(&graph, &visit_orders);
         let result = Self {
             graph,
             config,
+            cost_weights,
             visit_orders,
             cost_join_pairs_by_step,
         };
@@ -1000,10 +1014,31 @@ impl LocalPlacer {
 
     fn placement_cost(&self, step: usize, world: &World3D, state: &PlacementState) -> usize {
         let current_node_id = self.visit_orders[step];
-        let mut cost = world_compact_cost(world);
+        let block_count = world.iter_block().len();
+        let mut cost = block_count.saturating_mul(self.cost_weights.block_count);
+        if let Some(bounds) = bounding_box(world) {
+            cost = cost
+                .saturating_add(
+                    bounds
+                        .volume()
+                        .saturating_mul(self.cost_weights.bbox_volume),
+                )
+                .saturating_add(
+                    bounds
+                        .extent_sum()
+                        .saturating_mul(self.cost_weights.bbox_extent),
+                )
+                .saturating_add(
+                    bounds
+                        .height()
+                        .saturating_mul(self.cost_weights.bbox_height),
+                );
+        }
 
         if let Some(position) = state.node_position(current_node_id) {
-            cost += local_density(world, position) * LOCAL_DENSITY_COST_WEIGHT;
+            cost = cost.saturating_add(
+                local_density(world, position).saturating_mul(self.cost_weights.local_density),
+            );
         }
 
         for pair in &self.cost_join_pairs_by_step[step] {
@@ -1011,7 +1046,11 @@ impl LocalPlacer {
             else {
                 continue;
             };
-            cost += a.manhattan_distance(&b) * pair.weight * FUTURE_JOIN_DISTANCE_COST_WEIGHT;
+            cost = cost.saturating_add(
+                a.manhattan_distance(&b)
+                    .saturating_mul(pair.weight)
+                    .saturating_mul(self.cost_weights.future_join_distance),
+            );
         }
 
         cost

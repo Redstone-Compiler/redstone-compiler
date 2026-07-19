@@ -20,13 +20,13 @@ pub use logical::{
     LogicalValue, LOGICAL_IR_VERSION,
 };
 pub use pnr::{
-    CandidateSpec, CellFaceSpec, CongestionSpec, Free3dSweepSpec, InputPlacementSpec,
-    LayerAssignmentSpec, LocalCellContractSpec, LocalPlacerSpec, NetOrderSpec, NotRouteSpec,
-    ObjectiveSpec, PhysicalConstraintSpec, PhysicalRegionSpec, PhysicalSpec,
-    PlacementHeuristicSpec, PlacementSamplingSpec, PlacementScheduleSpec, PlacementSpec, PnrSpec,
-    PortAccessDirectionSpec, PortAccessSpec, PortRef, PreferenceSpec, RoutableDocument,
-    RouteStageSpec, RouteStrategySpec, RouteValidationSpec, RoutingSpec, SamplingSpec, SearchSpec,
-    TorchPlacementSpec,
+    CandidateSpec, CellFaceSpec, ClusteringSpec, CongestionSpec, Free3dSweepSpec,
+    InputPlacementSpec, LayerAssignmentSpec, LocalAdaptiveSpec, LocalCellContractSpec,
+    LocalObjectiveSpec, LocalPlacerSpec, NetOrderSpec, NotRouteSpec, ObjectiveSpec,
+    PhysicalConstraintSpec, PhysicalRegionSpec, PhysicalSpec, PlacementHeuristicSpec,
+    PlacementSamplingSpec, PlacementScheduleSpec, PlacementSpec, PnrSpec, PortAccessDirectionSpec,
+    PortAccessSpec, PortRef, PreferenceSpec, RoutableDocument, RouteStageSpec, RouteStrategySpec,
+    RouteValidationSpec, RoutingSpec, SamplingSpec, SearchSpec, TorchPlacementSpec,
 };
 pub use routable::{
     Endpoint, NetClass, RoutableDesign, RoutableInstance, RoutableModule, RoutableModuleBody,

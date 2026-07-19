@@ -5,6 +5,29 @@ use crate::transform::place_and_route::sampling::SamplingPolicy;
 use crate::world::position::Position;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct LocalPlacementCostWeights {
+    pub block_count: usize,
+    pub bbox_volume: usize,
+    pub bbox_extent: usize,
+    pub bbox_height: usize,
+    pub local_density: usize,
+    pub future_join_distance: usize,
+}
+
+impl Default for LocalPlacementCostWeights {
+    fn default() -> Self {
+        Self {
+            block_count: 10,
+            bbox_volume: 1,
+            bbox_extent: 5,
+            bbox_height: 20,
+            local_density: 3,
+            future_join_distance: 8,
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct LocalPlacerConfig {
     pub random_seed: u64,
     pub schedule: PlacementSchedulePolicy,

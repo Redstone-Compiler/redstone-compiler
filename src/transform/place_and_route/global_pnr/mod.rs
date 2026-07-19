@@ -70,9 +70,6 @@ use crate::transform::place_and_route::global_pnr::topology::{
     NetId, ResolvedEndpoint, ResolvedPnrTopology,
 };
 use crate::transform::place_and_route::global_pnr::visualize::placement_bbox_wireframe_world;
-use crate::transform::place_and_route::local_placer::{
-    LocalPlacerConfig, NotRouteStrategy, PlacementSamplingPolicy,
-};
 use crate::transform::place_and_route::sampling::SamplingPolicy;
 use crate::world::position::{DimSize, Position};
 use crate::world::World3D;
@@ -1797,14 +1794,6 @@ fn candidate_config_for_routable_child(
 ) -> UnitCandidateConfig {
     let mut config = base_config.clone();
     if routable_module_is_combinational(child) {
-        if routable_input_port_count(child) > 1
-            && matches!(
-                config.local_config.placement_sampling_policy,
-                PlacementSamplingPolicy::StepPolicy
-            )
-        {
-            config.local_config = multi_input_combinational_local_config(config.local_config);
-        }
         if let Some(limit) = config.combinational_sampling_limit {
             config.local_config.step_sampling_policy = SamplingPolicy::Random(limit);
             config.local_config.not_route_step_sampling_policy = SamplingPolicy::Random(limit);
@@ -1829,16 +1818,6 @@ fn routable_input_port_count(module: &RoutableModule) -> usize {
         .iter()
         .filter(|port| port.direction == RoutablePortDirection::Input)
         .count()
-}
-
-fn multi_input_combinational_local_config(mut config: LocalPlacerConfig) -> LocalPlacerConfig {
-    config.leak_sampling = false;
-    config.not_route_strategy = NotRouteStrategy::DirectAndRedstone;
-    config.max_not_route_step = config.max_not_route_step.max(4);
-    config.not_route_step_sampling_policy = SamplingPolicy::Random(512);
-    config.max_route_step = config.max_route_step.max(4);
-    config.route_step_sampling_policy = SamplingPolicy::Random(512);
-    config
 }
 
 #[cfg(test)]
@@ -1977,6 +1956,28 @@ mod tests {
             .contains_output_tables_under_input_permutation(
                 &expected_full_adder_graph()?.truth_table()?
             ));
+        Ok(())
+    }
+
+    #[test]
+    fn routable_child_keeps_explicit_local_placer_policy() -> eyre::Result<()> {
+        let source = include_str!("../../../../test/full-adder.v");
+        let routable = LogicalDesign::from_verilog_source_named(source, "full-adder.v")?
+            .lower_to_routable()?;
+        let child = routable
+            .module(&routable.top)
+            .context("missing full adder")?;
+        let mut base = UnitCandidateConfig::default();
+        base.local_config.leak_sampling = true;
+        base.local_config.not_route_strategy = NotRouteStrategy::RedstoneOnly;
+        base.local_config.max_not_route_step = 7;
+        base.local_config.not_route_step_sampling_policy = SamplingPolicy::Take(23);
+        base.local_config.max_route_step = 9;
+        base.local_config.route_step_sampling_policy = SamplingPolicy::Take(29);
+
+        let effective = candidate_config_for_routable_child(child, &base);
+
+        assert_eq!(effective, base);
         Ok(())
     }
 

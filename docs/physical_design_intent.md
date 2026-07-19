@@ -293,6 +293,14 @@ half-adder truth tables share a verified per-compilation macro candidate; only
 the boundary port roles are relabeled. The composed result is not forced: it
 competes with monolithic candidates on volume, block count, height, and
 footprint, so hierarchy cannot regress a compact leaf merely by existing.
+These choices are expressed by the leaf's `pnr.candidate` profile: provenance
+cuts, macro reuse, cluster sizes, retained geometry alternatives, shelf
+spacing, floor margin, and composition-router budgets are source-level RCIR
+knobs rather than compiler constants. They remain a hierarchical fallback or
+portfolio choice, not a substitute for the monolithic local placement
+objective. The same candidate profile separately records local objective and
+adaptive retry policy so experiments can tune a leaf without changing its
+Routable graph.
 
 ## Physical intent semantics
 

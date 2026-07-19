@@ -8,8 +8,8 @@ use serde::Serialize;
 use crate::graph::logic::LogicGraph;
 use crate::graph::{Graph, GraphNodeKind};
 use crate::ir::{
-    graph_from_routable_leaf, CellFaceSpec, LocalCellContractSpec, PortAccessDirectionSpec,
-    RoutableModule, RoutablePortDirection,
+    graph_from_routable_leaf, CellFaceSpec, ClusteringSpec, LocalCellContractSpec,
+    PortAccessDirectionSpec, RoutableModule, RoutablePortDirection,
 };
 use crate::output::{OutputEndpoint, PlacedWorld};
 use crate::snapshot::{emit_json, record as record_snapshot, SnapshotEvent};
@@ -18,9 +18,10 @@ use crate::transform::place_and_route::global_pnr::ir::{
     LayoutCandidate, PhysicalPort, PhysicalPortDirection, PortConnection,
 };
 use crate::transform::place_and_route::local_placer::{
-    LocalPlacementFailure, LocalPlacementFailureKind, LocalPlacementStage, LocalPlacer,
-    LocalPlacerConfig, LocalPlacerDebug, LocalPlacerInputConstraints, PlacementSamplingPolicy,
-    PlacementSchedulePolicy, PlacementScheduler,
+    LocalPlacementCostWeights, LocalPlacementFailure, LocalPlacementFailureKind,
+    LocalPlacementStage, LocalPlacer, LocalPlacerConfig, LocalPlacerDebug,
+    LocalPlacerInputConstraints, PlacementSamplingPolicy, PlacementSchedulePolicy,
+    PlacementScheduler,
 };
 use crate::transform::place_and_route::placed_node::PlacedNode;
 use crate::transform::place_and_route::sampling::SamplingPolicy;
@@ -38,7 +39,31 @@ pub struct UnitCandidateConfig {
     pub input_constraints: LocalPlacerInputConstraints,
     pub max_candidates: usize,
     pub combinational_sampling_limit: Option<usize>,
+    pub local_objective: LocalPlacementCostWeights,
+    pub adaptive_search: LocalAdaptiveSearchConfig,
+    pub clustering: ClusteringSpec,
     pub local_cell_contract: LocalCellContractSpec,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct LocalAdaptiveSearchConfig {
+    pub max_retries: usize,
+    pub route_depth_multiplier: usize,
+    pub route_depth_cap: usize,
+    pub sampling_multiplier: usize,
+    pub sampling_cap: Option<usize>,
+}
+
+impl Default for LocalAdaptiveSearchConfig {
+    fn default() -> Self {
+        Self {
+            max_retries: 1,
+            route_depth_multiplier: 2,
+            route_depth_cap: 16,
+            sampling_multiplier: 2,
+            sampling_cap: None,
+        }
+    }
 }
 
 /// Local-candidate preparation policy before it is resolved against a typed
@@ -133,6 +158,9 @@ impl Default for UnitCandidateConfig {
             input_constraints: LocalPlacerInputConstraints::default(),
             max_candidates: 16,
             combinational_sampling_limit: None,
+            local_objective: LocalPlacementCostWeights::default(),
+            adaptive_search: LocalAdaptiveSearchConfig::default(),
+            clustering: ClusteringSpec::default(),
             local_cell_contract: LocalCellContractSpec::default(),
         }
     }
@@ -199,6 +227,9 @@ fn generate_routable_module_candidates(
         progress_label,
         input_mode,
     )?;
+    if clustered.is_some() && !config.clustering.keep_monolithic {
+        return Ok(clustered.unwrap());
+    }
     let mut candidates = generate_unit_candidates(
         &module.name,
         graph,
@@ -302,10 +333,11 @@ fn generate_unit_candidates(
         let mut local_config = config.local_config;
         let mut adaptive_attempt = 0usize;
         let placed = loop {
-            let placer = LocalPlacer::new_with_visit_order(
+            let placer = LocalPlacer::new_with_visit_order_and_cost(
                 graph.clone(),
                 local_config,
                 schedule.order.clone(),
+                config.local_objective,
             )?;
             let mut debug = LocalPlacerDebug::default();
             let mut placed = match input_mode {
@@ -363,10 +395,12 @@ fn generate_unit_candidates(
                 "local candidate frontier exhausted"
             );
 
-            if adaptive_attempt >= 1 {
+            if adaptive_attempt >= config.adaptive_search.max_retries {
                 break placed;
             }
-            let Some(escalated) = adaptive_retry_config(local_config, &failure) else {
+            let Some(escalated) =
+                adaptive_retry_config(local_config, config.adaptive_search, &failure)
+            else {
                 break placed;
             };
             adaptive_attempt += 1;
@@ -375,7 +409,7 @@ fn generate_unit_candidates(
                 module = module_name,
                 stage = ?failure.stage,
                 retry = adaptive_attempt,
-                max_retries = 1,
+                max_retries = config.adaptive_search.max_retries,
                 max_not_route_step = escalated.max_not_route_step,
                 max_route_step = escalated.max_route_step,
                 "retrying local candidate generation with a bounded stage-specific budget"
@@ -639,60 +673,76 @@ fn snapshot_file_component(name: &str) -> String {
 
 fn adaptive_retry_config(
     config: LocalPlacerConfig,
+    adaptive: LocalAdaptiveSearchConfig,
     failure: &LocalPlacementFailure,
 ) -> Option<LocalPlacerConfig> {
     let mut retry = config;
     match failure.stage {
         LocalPlacementStage::NotRouting => {
             if failure.kind == LocalPlacementFailureKind::RouteDepthExhausted {
-                retry.max_not_route_step = grow_route_depth(config.max_not_route_step);
+                retry.max_not_route_step = grow_route_depth(config.max_not_route_step, adaptive);
             }
             if failure.kind == LocalPlacementFailureKind::RouteBeamExhausted {
                 retry.not_route_step_sampling_policy =
-                    grow_sampling(config.not_route_step_sampling_policy);
+                    grow_sampling(config.not_route_step_sampling_policy, adaptive);
             }
-            retry.step_sampling_policy = grow_sampling(config.step_sampling_policy);
+            retry.step_sampling_policy = grow_sampling(config.step_sampling_policy, adaptive);
             retry.placement_sampling_policy =
-                grow_placement_sampling(config.placement_sampling_policy);
+                grow_placement_sampling(config.placement_sampling_policy, adaptive);
         }
         LocalPlacementStage::OrRouting => {
             if failure.kind == LocalPlacementFailureKind::RouteDepthExhausted {
-                retry.max_route_step = grow_route_depth(config.max_route_step);
+                retry.max_route_step = grow_route_depth(config.max_route_step, adaptive);
             }
             if failure.kind == LocalPlacementFailureKind::RouteBeamExhausted {
-                retry.route_step_sampling_policy = grow_sampling(config.route_step_sampling_policy);
+                retry.route_step_sampling_policy =
+                    grow_sampling(config.route_step_sampling_policy, adaptive);
             }
-            retry.step_sampling_policy = grow_sampling(config.step_sampling_policy);
+            retry.step_sampling_policy = grow_sampling(config.step_sampling_policy, adaptive);
             retry.placement_sampling_policy =
-                grow_placement_sampling(config.placement_sampling_policy);
+                grow_placement_sampling(config.placement_sampling_policy, adaptive);
         }
         LocalPlacementStage::SequentialPlacement | LocalPlacementStage::OtherPlacement => {
-            retry.step_sampling_policy = grow_sampling(config.step_sampling_policy);
+            retry.step_sampling_policy = grow_sampling(config.step_sampling_policy, adaptive);
             retry.placement_sampling_policy =
-                grow_placement_sampling(config.placement_sampling_policy);
+                grow_placement_sampling(config.placement_sampling_policy, adaptive);
         }
         LocalPlacementStage::InputPlacement | LocalPlacementStage::OutputPlacement => return None,
     }
     (retry != config).then_some(retry)
 }
 
-fn grow_route_depth(depth: usize) -> usize {
+fn grow_route_depth(depth: usize, adaptive: LocalAdaptiveSearchConfig) -> usize {
     if depth == 0 {
         0
     } else {
-        depth.saturating_mul(2).min(16)
+        depth
+            .saturating_mul(adaptive.route_depth_multiplier)
+            .min(adaptive.route_depth_cap)
+            .max(depth)
     }
 }
 
-fn grow_sampling(policy: SamplingPolicy) -> SamplingPolicy {
+fn grow_sample_count(count: usize, adaptive: LocalAdaptiveSearchConfig) -> usize {
+    let grown = count.saturating_mul(adaptive.sampling_multiplier);
+    adaptive
+        .sampling_cap
+        .map_or(grown, |cap| grown.min(cap))
+        .max(count)
+}
+
+fn grow_sampling(policy: SamplingPolicy, adaptive: LocalAdaptiveSearchConfig) -> SamplingPolicy {
     match policy {
         SamplingPolicy::None => SamplingPolicy::None,
-        SamplingPolicy::Take(count) => SamplingPolicy::Take(count.saturating_mul(2)),
-        SamplingPolicy::Random(count) => SamplingPolicy::Random(count.saturating_mul(2)),
+        SamplingPolicy::Take(count) => SamplingPolicy::Take(grow_sample_count(count, adaptive)),
+        SamplingPolicy::Random(count) => SamplingPolicy::Random(grow_sample_count(count, adaptive)),
     }
 }
 
-fn grow_placement_sampling(policy: PlacementSamplingPolicy) -> PlacementSamplingPolicy {
+fn grow_placement_sampling(
+    policy: PlacementSamplingPolicy,
+    adaptive: LocalAdaptiveSearchConfig,
+) -> PlacementSamplingPolicy {
     match policy {
         PlacementSamplingPolicy::StepPolicy => PlacementSamplingPolicy::StepPolicy,
         PlacementSamplingPolicy::Cost {
@@ -700,8 +750,8 @@ fn grow_placement_sampling(policy: PlacementSamplingPolicy) -> PlacementSampling
             random_count,
             start_step,
         } => PlacementSamplingPolicy::Cost {
-            count: count.saturating_mul(2),
-            random_count: random_count.saturating_mul(2),
+            count: grow_sample_count(count, adaptive),
+            random_count: grow_sample_count(random_count, adaptive),
             start_step,
         },
         PlacementSamplingPolicy::Ranked {
@@ -709,8 +759,8 @@ fn grow_placement_sampling(policy: PlacementSamplingPolicy) -> PlacementSampling
             random_count,
             start_step,
         } => PlacementSamplingPolicy::Ranked {
-            count: count.saturating_mul(2),
-            random_count: random_count.saturating_mul(2),
+            count: grow_sample_count(count, adaptive),
+            random_count: grow_sample_count(random_count, adaptive),
             start_step,
         },
     }
@@ -1126,6 +1176,9 @@ pub fn d_latch_child_candidate_config(local_config: LocalPlacerConfig) -> UnitCa
             .with_input_positions("en", [Position(0, 6, 1)]),
         max_candidates: 1,
         combinational_sampling_limit: None,
+        local_objective: LocalPlacementCostWeights::default(),
+        adaptive_search: LocalAdaptiveSearchConfig::default(),
+        clustering: ClusteringSpec::default(),
         local_cell_contract: LocalCellContractSpec::default(),
     }
 }
@@ -1227,8 +1280,12 @@ mod tests {
             ..Default::default()
         };
 
-        let retry = adaptive_retry_config(config, &failure(LocalPlacementStage::OrRouting))
-            .expect("retry config");
+        let retry = adaptive_retry_config(
+            config,
+            LocalAdaptiveSearchConfig::default(),
+            &failure(LocalPlacementStage::OrRouting),
+        )
+        .expect("retry config");
 
         assert_eq!(retry.max_route_step, 8);
         assert_eq!(retry.route_step_sampling_policy, SamplingPolicy::Random(16));
@@ -1257,16 +1314,53 @@ mod tests {
         let mut failure = failure(LocalPlacementStage::OrRouting);
         failure.kind = LocalPlacementFailureKind::RouteBeamExhausted;
 
-        let retry = adaptive_retry_config(config, &failure).expect("retry config");
+        let retry = adaptive_retry_config(config, LocalAdaptiveSearchConfig::default(), &failure)
+            .expect("retry config");
 
         assert_eq!(retry.max_route_step, 4);
         assert_eq!(retry.route_step_sampling_policy, SamplingPolicy::Random(32));
     }
 
     #[test]
+    fn adaptive_retry_uses_configured_growth_and_caps() {
+        let config = LocalPlacerConfig {
+            max_route_step: 5,
+            route_step_sampling_policy: SamplingPolicy::Random(20),
+            placement_sampling_policy: PlacementSamplingPolicy::Cost {
+                count: 30,
+                random_count: 4,
+                start_step: 0,
+            },
+            ..Default::default()
+        };
+        let adaptive = LocalAdaptiveSearchConfig {
+            max_retries: 3,
+            route_depth_multiplier: 3,
+            route_depth_cap: 12,
+            sampling_multiplier: 4,
+            sampling_cap: Some(50),
+        };
+
+        let retry =
+            adaptive_retry_config(config, adaptive, &failure(LocalPlacementStage::OrRouting))
+                .expect("retry config");
+
+        assert_eq!(retry.max_route_step, 12);
+        assert_eq!(
+            retry.placement_sampling_policy,
+            PlacementSamplingPolicy::Cost {
+                count: 50,
+                random_count: 16,
+                start_step: 0,
+            }
+        );
+    }
+
+    #[test]
     fn adaptive_retry_does_not_expand_impossible_input_constraints() {
         assert!(adaptive_retry_config(
             LocalPlacerConfig::default(),
+            LocalAdaptiveSearchConfig::default(),
             &failure(LocalPlacementStage::InputPlacement)
         )
         .is_none());

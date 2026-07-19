@@ -5,7 +5,7 @@ use super::candidate::{
 };
 use super::ir::{LayoutCandidate, PhysicalPortDirection};
 use crate::graph::logic::LogicGraph;
-use crate::graph::Graph;
+use crate::graph::{Graph, GraphNodeKind};
 use crate::ir::{graph_from_routable_leaf, RoutableModule};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -136,6 +136,13 @@ fn recognize_macro(module: &RoutableModule) -> eyre::Result<Option<MacroBinding>
 }
 
 fn recognize_macro_graph(graph: &Graph) -> eyre::Result<Option<MacroBinding>> {
+    if graph
+        .nodes
+        .iter()
+        .any(|node| matches!(node.kind, GraphNodeKind::Sequential(_)))
+    {
+        return Ok(None);
+    }
     let graph = LogicGraph {
         graph: graph.clone(),
     };
@@ -292,6 +299,17 @@ mod tests {
             recognize_macro_graph(&half_adder.graph)?.map(|binding| binding.kind),
             Some(CombinationalMacroKind::HalfAdder)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn sequential_leaf_skips_combinational_macro_recognition() -> eyre::Result<()> {
+        let source = "module latch(d, en, q); input d, en; output reg q; always @(*) begin if (en) begin q <= d; end end endmodule";
+        let design = crate::ir::LogicalDesign::from_verilog_source(source)?.lower_to_routable()?;
+        let module = design.module("latch").expect("latch module");
+        let graph = graph_from_routable_leaf(module)?;
+
+        assert!(recognize_macro_graph(&graph)?.is_none());
         Ok(())
     }
 

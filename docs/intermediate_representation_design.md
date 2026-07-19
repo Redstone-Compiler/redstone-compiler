@@ -154,6 +154,84 @@ module "counter" { ... }
 leaf "inv" { ... }
 ```
 
+Combinational hierarchy search is part of the candidate profile and is fully
+replayable from Routable RCIR:
+
+```text
+profile pnr.candidate "adder-search" {
+  search-box [10, 10, 5];
+  retain 8;
+  combinational-samples none;
+  clustering {
+    enabled true;
+    prefer-provenance true;
+    reuse-macros true;
+    keep-monolithic true;
+    trigger-logic-nodes 8;
+    max-logic-nodes 4;
+    max-tagged-logic-nodes 12;
+    candidates-per-cluster 2;
+    max-alternative-combinations 6;
+    placement-spacings [4, 8];
+    shelf-width 96;
+    routing-floor-margin 4;
+    input-boundary-bias true;
+    direct-max-steps 128;
+    beam-width 64;
+    beam-max-expansions 2048;
+  }
+  local-placer { ... }
+}
+```
+
+Setting `enabled false` selects monolithic local placement. With clustering
+enabled, `keep-monolithic` controls whether the composed result competes with
+the original leaf or replaces it. A zero direct budget disables the direct
+probe; zero beam width or expansion budget disables the beam stage. At least
+one composition router must remain enabled. This block configures an optional
+hierarchical candidate representation: it is not the leaf local placer's own
+routing policy.
+
+The leaf local placer owns its quality objective and failure-sensitive retry
+policy. Both are explicit in the same bound candidate profile:
+
+```text
+local-placer {
+  random-seed 29;
+  schedule auto;
+  # input, placement-sampling, and routing fields omitted here
+
+  objective {
+    block-count 10;
+    bbox-volume 1;
+    bbox-extent 5;
+    bbox-height 20;
+    local-density 3;
+    future-join-distance 8;
+  }
+
+  adaptive {
+    max-retries 1;
+    route-depth-multiplier 2;
+    route-depth-cap 16;
+    sampling-multiplier 2;
+    sampling-cap none;
+  }
+}
+```
+
+The objective weights rank partial local placements; they do not change
+candidate legality. `max-retries 0` disables adaptive retry. A route depth of
+zero remains disabled during retry, so adaptation never silently enables a
+route family that the profile turned off. Sampling and depth caps never shrink
+the explicitly configured initial budget.
+
+Candidate profiles are authoritative. The compiler does not replace an
+explicit multi-input combinational leaf policy with hidden NOT/OR routing
+defaults. `combinational-samples N` remains an explicit profile-level shorthand
+that sets the three combinational step/NOT-route/OR-route sampling limits to
+`random(N)` when the candidate is resolved.
+
 An input port may carry the object-local coordinate constraint
 `@pnr.pin_search(positions = [[x, y, z], ...])`. Placement heuristics are an
 ordered list, and a `free3d` entry represents a deterministic Cartesian sweep
@@ -581,6 +659,13 @@ introducing an external source near the logic cone that first consumes it
 instead of requiring every input to form an initial prefix. The
 schedule changes search order only; it does not mutate Routable IR or its cache
 identity as a circuit.
+
+Local candidate cost and adaptive retry are also replayable policy rather than
+compiler constants. `objective` preserves the established compact cost as its
+default while allowing experiments to trade block count, bounding volume,
+extent, height, local density, and future reconvergent-join distance. `adaptive`
+controls retry count, route-depth growth and cap, and sampling growth and cap.
+The resolved values participate in the candidate configuration fingerprint.
 
 Prepared/replayed global execution stores only the module name, resolved typed
 topology, candidate sets, and preparation metadata. Snapshot replay determines

@@ -4,14 +4,15 @@ use eyre::{ContextCompat, WrapErr};
 
 use crate::ir::{
     CandidateSpec, CongestionSpec, Free3dSweepSpec, InputPlacementSpec, LayerAssignmentSpec,
-    LocalPlacerSpec, NetOrderSpec, NotRouteSpec, ObjectiveSpec, PhysicalConstraintSpec,
-    PhysicalRegionSpec, PhysicalSpec, PlacementHeuristicSpec, PlacementSamplingSpec,
-    PlacementScheduleSpec, PlacementSpec, PnrSpec, PortRef, PreferenceSpec, RoutableDesign,
-    RoutableDocument, RoutableModuleBody, RouteStageSpec, RouteStrategySpec, RouteValidationSpec,
-    RoutingSpec, SamplingSpec, SearchSpec, TorchPlacementSpec,
+    LocalAdaptiveSpec, LocalObjectiveSpec, LocalPlacerSpec, NetOrderSpec, NotRouteSpec,
+    ObjectiveSpec, PhysicalConstraintSpec, PhysicalRegionSpec, PhysicalSpec,
+    PlacementHeuristicSpec, PlacementSamplingSpec, PlacementScheduleSpec, PlacementSpec, PnrSpec,
+    PortRef, PreferenceSpec, RoutableDesign, RoutableDocument, RoutableModuleBody, RouteStageSpec,
+    RouteStrategySpec, RouteValidationSpec, RoutingSpec, SamplingSpec, SearchSpec,
+    TorchPlacementSpec,
 };
 use crate::transform::place_and_route::global_pnr::candidate::{
-    CandidatePolicySet, UnitCandidateConfig,
+    CandidatePolicySet, LocalAdaptiveSearchConfig, UnitCandidateConfig,
 };
 use crate::transform::place_and_route::global_pnr::physical_intent::{
     IntentRegion, PhysicalConstraint, PhysicalIntent, PreferenceStrength,
@@ -29,8 +30,9 @@ use crate::transform::place_and_route::global_pnr::topology::{
 };
 use crate::transform::place_and_route::global_pnr::{GlobalPnrConfig, GlobalSearchConfig};
 use crate::transform::place_and_route::local_placer::{
-    InputPlacementStrategy, LocalPlacerConfig, LocalPlacerInputConstraints, NotRouteStrategy,
-    PlacementSamplingPolicy, PlacementSchedulePolicy, TorchPlacementStrategy,
+    InputPlacementStrategy, LocalPlacementCostWeights, LocalPlacerConfig,
+    LocalPlacerInputConstraints, NotRouteStrategy, PlacementSamplingPolicy,
+    PlacementSchedulePolicy, TorchPlacementStrategy,
 };
 use crate::transform::place_and_route::sampling::SamplingPolicy;
 use crate::world::position::{DimSize, Position};
@@ -177,6 +179,8 @@ pub fn apply_routable_document(
             .candidate_profiles
             .get(profile_name)
             .with_context(|| format!("missing pnr.candidate profile `{profile_name}`"))?;
+        validate_clustering_spec(profile_name, &profile.clustering)?;
+        validate_local_search_spec(profile_name, &profile.local_placer)?;
         let mut policy = candidate_policy_from_spec(profile);
         policy.local_cell_contract = document
             .local_cell_contracts
@@ -240,6 +244,60 @@ pub fn apply_routable_document(
         let topology = ResolvedPnrTopology::from_routable(&document.design)?;
         config.physical_intent =
             Some(physical_intent_from_spec(physical, &document.design.top).bind(&topology)?);
+    }
+    Ok(())
+}
+
+fn validate_local_search_spec(name: &str, spec: &LocalPlacerSpec) -> eyre::Result<()> {
+    let objective = spec.objective;
+    if objective.block_count == 0
+        && objective.bbox_volume == 0
+        && objective.bbox_extent == 0
+        && objective.bbox_height == 0
+        && objective.local_density == 0
+        && objective.future_join_distance == 0
+    {
+        eyre::bail!("pnr.candidate `{name}` local objective requires a positive weight");
+    }
+    if spec.adaptive.max_retries > 0 {
+        if spec.adaptive.route_depth_multiplier == 0 || spec.adaptive.route_depth_cap == 0 {
+            eyre::bail!(
+                "pnr.candidate `{name}` adaptive route multiplier and cap must be positive"
+            );
+        }
+        if spec.adaptive.sampling_multiplier == 0 || spec.adaptive.sampling_cap == Some(0) {
+            eyre::bail!(
+                "pnr.candidate `{name}` adaptive sampling multiplier and cap must be positive"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_clustering_spec(name: &str, spec: &crate::ir::ClusteringSpec) -> eyre::Result<()> {
+    if !spec.enabled {
+        return Ok(());
+    }
+    if spec.max_logic_nodes == 0 {
+        eyre::bail!("pnr.candidate `{name}` clustering max-logic-nodes must be positive");
+    }
+    if spec.prefer_provenance && spec.max_tagged_logic_nodes == 0 {
+        eyre::bail!("pnr.candidate `{name}` clustering max-tagged-logic-nodes must be positive");
+    }
+    if spec.candidates_per_cluster == 0 || spec.max_alternative_combinations == 0 {
+        eyre::bail!(
+            "pnr.candidate `{name}` clustering candidate and combination limits must be positive"
+        );
+    }
+    if spec.placement_spacings.is_empty() || spec.shelf_width == 0 {
+        eyre::bail!(
+            "pnr.candidate `{name}` clustering requires placement spacings and a positive shelf width"
+        );
+    }
+    if spec.direct_max_steps == 0 && (spec.beam_width == 0 || spec.beam_max_expansions == 0) {
+        eyre::bail!(
+            "pnr.candidate `{name}` clustering requires direct or beam composition routing"
+        );
     }
     Ok(())
 }
@@ -319,7 +377,12 @@ pub(super) fn candidate_spec_from_policy(policy: &UnitCandidateConfig) -> Candid
         search_box: [policy.dim.0, policy.dim.1, policy.dim.2],
         retain: policy.max_candidates,
         combinational_samples: policy.combinational_sampling_limit,
-        local_placer: local_spec(policy.local_config),
+        clustering: policy.clustering.clone(),
+        local_placer: local_spec(
+            policy.local_config,
+            policy.local_objective,
+            policy.adaptive_search,
+        ),
     }
 }
 
@@ -330,11 +393,18 @@ fn candidate_policy_from_spec(spec: &CandidateSpec) -> UnitCandidateConfig {
         input_constraints: LocalPlacerInputConstraints::default(),
         max_candidates: spec.retain,
         combinational_sampling_limit: spec.combinational_samples,
+        local_objective: local_objective(spec.local_placer.objective),
+        adaptive_search: local_adaptive(spec.local_placer.adaptive),
+        clustering: spec.clustering.clone(),
         local_cell_contract: Default::default(),
     }
 }
 
-fn local_spec(config: LocalPlacerConfig) -> LocalPlacerSpec {
+fn local_spec(
+    config: LocalPlacerConfig,
+    objective: LocalPlacementCostWeights,
+    adaptive: LocalAdaptiveSearchConfig,
+) -> LocalPlacerSpec {
     LocalPlacerSpec {
         random_seed: config.random_seed,
         schedule: match config.schedule {
@@ -367,6 +437,42 @@ fn local_spec(config: LocalPlacerConfig) -> LocalPlacerSpec {
         not_route_step_sampling: sampling_spec(config.not_route_step_sampling_policy),
         max_route_step: config.max_route_step,
         route_step_sampling: sampling_spec(config.route_step_sampling_policy),
+        objective: LocalObjectiveSpec {
+            block_count: objective.block_count,
+            bbox_volume: objective.bbox_volume,
+            bbox_extent: objective.bbox_extent,
+            bbox_height: objective.bbox_height,
+            local_density: objective.local_density,
+            future_join_distance: objective.future_join_distance,
+        },
+        adaptive: LocalAdaptiveSpec {
+            max_retries: adaptive.max_retries,
+            route_depth_multiplier: adaptive.route_depth_multiplier,
+            route_depth_cap: adaptive.route_depth_cap,
+            sampling_multiplier: adaptive.sampling_multiplier,
+            sampling_cap: adaptive.sampling_cap,
+        },
+    }
+}
+
+fn local_objective(spec: LocalObjectiveSpec) -> LocalPlacementCostWeights {
+    LocalPlacementCostWeights {
+        block_count: spec.block_count,
+        bbox_volume: spec.bbox_volume,
+        bbox_extent: spec.bbox_extent,
+        bbox_height: spec.bbox_height,
+        local_density: spec.local_density,
+        future_join_distance: spec.future_join_distance,
+    }
+}
+
+fn local_adaptive(spec: LocalAdaptiveSpec) -> LocalAdaptiveSearchConfig {
+    LocalAdaptiveSearchConfig {
+        max_retries: spec.max_retries,
+        route_depth_multiplier: spec.route_depth_multiplier,
+        route_depth_cap: spec.route_depth_cap,
+        sampling_multiplier: spec.sampling_multiplier,
+        sampling_cap: spec.sampling_cap,
     }
 }
 
@@ -966,6 +1072,26 @@ mod tests {
                 .with_pin_search("leaf", "a", [Position(1, 2, 3)]);
         let mut leaf_policy = original.candidate.default.clone();
         leaf_policy.max_candidates = 3;
+        leaf_policy.clustering.trigger_logic_nodes = 6;
+        leaf_policy.clustering.max_logic_nodes = 3;
+        leaf_policy.clustering.candidates_per_cluster = 4;
+        leaf_policy.clustering.placement_spacings = vec![2, 5, 9];
+        leaf_policy.clustering.beam_max_expansions = 1_024;
+        leaf_policy.local_objective = LocalPlacementCostWeights {
+            block_count: 7,
+            bbox_volume: 11,
+            bbox_extent: 13,
+            bbox_height: 17,
+            local_density: 19,
+            future_join_distance: 23,
+        };
+        leaf_policy.adaptive_search = LocalAdaptiveSearchConfig {
+            max_retries: 3,
+            route_depth_multiplier: 4,
+            route_depth_cap: 24,
+            sampling_multiplier: 5,
+            sampling_cap: Some(2_000),
+        };
         leaf_policy.local_cell_contract = LocalCellContractSpec {
             max_bbox: Some([4, 4, 4]),
             ports: BTreeMap::from([(
@@ -1000,6 +1126,12 @@ mod tests {
         assert!(text.contains("@pnr.design(profile = \"leaf-design\")"));
         assert!(text.contains("@pnr.max_bbox(size = [4, 4, 4])"));
         assert!(text.contains("@pnr.pin(face = up, access = inward)"));
+        assert!(text.contains("trigger-logic-nodes 6;"));
+        assert!(text.contains("placement-spacings [2, 5, 9];"));
+        assert!(text.contains("bbox-volume 11;"));
+        assert!(text.contains("future-join-distance 23;"));
+        assert!(text.contains("max-retries 3;"));
+        assert!(text.contains("sampling-cap 2000;"));
         assert!(!text.contains("candidate-defaults"));
         let parsed: RoutableDocument = text.parse()?;
         let mut restored = GlobalPnrConfig::default();
@@ -1012,6 +1144,36 @@ mod tests {
             pnr_spec_from_config(&restored),
             pnr_spec_from_config(&original)
         );
+        let mut invalid = parsed.clone();
+        invalid
+            .candidate_profiles
+            .get_mut("leaf-cell-search")
+            .unwrap()
+            .clustering
+            .placement_spacings
+            .clear();
+        let error = apply_routable_document(&invalid, &mut GlobalPnrConfig::default())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("requires placement spacings"));
+        let mut invalid = parsed.clone();
+        invalid
+            .candidate_profiles
+            .get_mut("leaf-cell-search")
+            .unwrap()
+            .local_placer
+            .objective = LocalObjectiveSpec {
+            block_count: 0,
+            bbox_volume: 0,
+            bbox_extent: 0,
+            bbox_height: 0,
+            local_density: 0,
+            future_join_distance: 0,
+        };
+        let error = apply_routable_document(&invalid, &mut GlobalPnrConfig::default())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("local objective requires a positive weight"));
         Ok(())
     }
 

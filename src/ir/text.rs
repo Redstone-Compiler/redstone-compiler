@@ -8,13 +8,13 @@ use super::routable::{
 };
 use super::syntax::{tokenize, Token};
 use super::{
-    CandidateSpec, CellFaceSpec, CongestionSpec, Free3dSweepSpec, InputPlacementSpec,
-    LayerAssignmentSpec, LocalCellContractSpec, LocalPlacerSpec, NetOrderSpec, NotRouteSpec,
-    ObjectiveSpec, PhysicalConstraintSpec, PhysicalRegionSpec, PhysicalSpec,
-    PlacementHeuristicSpec, PlacementSamplingSpec, PlacementScheduleSpec, PlacementSpec, PnrSpec,
-    PortAccessDirectionSpec, PortAccessSpec, PortRef, PreferenceSpec, RoutableDocument,
-    RouteStageSpec, RouteStrategySpec, RouteValidationSpec, RoutingSpec, SamplingSpec, SearchSpec,
-    TorchPlacementSpec,
+    CandidateSpec, CellFaceSpec, ClusteringSpec, CongestionSpec, Free3dSweepSpec,
+    InputPlacementSpec, LayerAssignmentSpec, LocalAdaptiveSpec, LocalCellContractSpec,
+    LocalObjectiveSpec, LocalPlacerSpec, NetOrderSpec, NotRouteSpec, ObjectiveSpec,
+    PhysicalConstraintSpec, PhysicalRegionSpec, PhysicalSpec, PlacementHeuristicSpec,
+    PlacementSamplingSpec, PlacementScheduleSpec, PlacementSpec, PnrSpec, PortAccessDirectionSpec,
+    PortAccessSpec, PortRef, PreferenceSpec, RoutableDocument, RouteStageSpec, RouteStrategySpec,
+    RouteValidationSpec, RoutingSpec, SamplingSpec, SearchSpec, TorchPlacementSpec,
 };
 
 impl fmt::Display for RoutableDesign {
@@ -282,9 +282,81 @@ fn write_candidate_body(
         Some(value) => writeln!(output, "{indent}combinational-samples {value};")?,
         None => writeln!(output, "{indent}combinational-samples none;")?,
     }
+    writeln!(output, "{indent}clustering {{")?;
+    write_clustering_body(output, &candidate.clustering, &format!("{indent}  "))?;
+    writeln!(output, "{indent}}}")?;
     writeln!(output, "{indent}local-placer {{")?;
     write_local_placer_body(output, &candidate.local_placer, &format!("{indent}  "))?;
     writeln!(output, "{indent}}}")
+}
+
+fn write_clustering_body(
+    output: &mut fmt::Formatter<'_>,
+    clustering: &ClusteringSpec,
+    indent: &str,
+) -> fmt::Result {
+    writeln!(output, "{indent}enabled {};", clustering.enabled)?;
+    writeln!(
+        output,
+        "{indent}prefer-provenance {};",
+        clustering.prefer_provenance
+    )?;
+    writeln!(output, "{indent}reuse-macros {};", clustering.reuse_macros)?;
+    writeln!(
+        output,
+        "{indent}keep-monolithic {};",
+        clustering.keep_monolithic
+    )?;
+    writeln!(
+        output,
+        "{indent}trigger-logic-nodes {};",
+        clustering.trigger_logic_nodes
+    )?;
+    writeln!(
+        output,
+        "{indent}max-logic-nodes {};",
+        clustering.max_logic_nodes
+    )?;
+    writeln!(
+        output,
+        "{indent}max-tagged-logic-nodes {};",
+        clustering.max_tagged_logic_nodes
+    )?;
+    writeln!(
+        output,
+        "{indent}candidates-per-cluster {};",
+        clustering.candidates_per_cluster
+    )?;
+    writeln!(
+        output,
+        "{indent}max-alternative-combinations {};",
+        clustering.max_alternative_combinations
+    )?;
+    write!(output, "{indent}placement-spacings [")?;
+    write_usize_list(output, &clustering.placement_spacings)?;
+    writeln!(output, "];")?;
+    writeln!(output, "{indent}shelf-width {};", clustering.shelf_width)?;
+    writeln!(
+        output,
+        "{indent}routing-floor-margin {};",
+        clustering.routing_floor_margin
+    )?;
+    writeln!(
+        output,
+        "{indent}input-boundary-bias {};",
+        clustering.input_boundary_bias
+    )?;
+    writeln!(
+        output,
+        "{indent}direct-max-steps {};",
+        clustering.direct_max_steps
+    )?;
+    writeln!(output, "{indent}beam-width {};", clustering.beam_width)?;
+    writeln!(
+        output,
+        "{indent}beam-max-expansions {};",
+        clustering.beam_max_expansions
+    )
 }
 
 fn write_local_placer_body(
@@ -373,7 +445,65 @@ fn write_local_placer_body(
         output,
         "{indent}route-step-sampling {};",
         sampling_text(local.route_step_sampling)
-    )
+    )?;
+    writeln!(output, "{indent}objective {{")?;
+    writeln!(
+        output,
+        "{indent}  block-count {};",
+        local.objective.block_count
+    )?;
+    writeln!(
+        output,
+        "{indent}  bbox-volume {};",
+        local.objective.bbox_volume
+    )?;
+    writeln!(
+        output,
+        "{indent}  bbox-extent {};",
+        local.objective.bbox_extent
+    )?;
+    writeln!(
+        output,
+        "{indent}  bbox-height {};",
+        local.objective.bbox_height
+    )?;
+    writeln!(
+        output,
+        "{indent}  local-density {};",
+        local.objective.local_density
+    )?;
+    writeln!(
+        output,
+        "{indent}  future-join-distance {};",
+        local.objective.future_join_distance
+    )?;
+    writeln!(output, "{indent}}}")?;
+    writeln!(output, "{indent}adaptive {{")?;
+    writeln!(
+        output,
+        "{indent}  max-retries {};",
+        local.adaptive.max_retries
+    )?;
+    writeln!(
+        output,
+        "{indent}  route-depth-multiplier {};",
+        local.adaptive.route_depth_multiplier
+    )?;
+    writeln!(
+        output,
+        "{indent}  route-depth-cap {};",
+        local.adaptive.route_depth_cap
+    )?;
+    writeln!(
+        output,
+        "{indent}  sampling-multiplier {};",
+        local.adaptive.sampling_multiplier
+    )?;
+    match local.adaptive.sampling_cap {
+        Some(value) => writeln!(output, "{indent}  sampling-cap {value};")?,
+        None => writeln!(output, "{indent}  sampling-cap none;")?,
+    }
+    writeln!(output, "{indent}}}")
 }
 
 fn write_route_stage(
@@ -1047,6 +1177,11 @@ impl Parser {
         self.expect_keyword("combinational-samples")?;
         let combinational_samples = self.parse_optional_usize()?;
         self.expect_symbol(';')?;
+        let clustering = if self.consume_keyword("clustering") {
+            self.parse_clustering_spec()?
+        } else {
+            ClusteringSpec::default()
+        };
         self.expect_keyword("local-placer")?;
         let local_placer = self.parse_local_placer_spec()?;
         self.expect_symbol('}')?;
@@ -1054,7 +1189,79 @@ impl Parser {
             search_box,
             retain,
             combinational_samples,
+            clustering,
             local_placer,
+        })
+    }
+
+    fn parse_clustering_spec(&mut self) -> eyre::Result<ClusteringSpec> {
+        self.expect_symbol('{')?;
+        self.expect_keyword("enabled")?;
+        let enabled = self.expect_bool()?;
+        self.expect_symbol(';')?;
+        self.expect_keyword("prefer-provenance")?;
+        let prefer_provenance = self.expect_bool()?;
+        self.expect_symbol(';')?;
+        self.expect_keyword("reuse-macros")?;
+        let reuse_macros = self.expect_bool()?;
+        self.expect_symbol(';')?;
+        self.expect_keyword("keep-monolithic")?;
+        let keep_monolithic = self.expect_bool()?;
+        self.expect_symbol(';')?;
+        self.expect_keyword("trigger-logic-nodes")?;
+        let trigger_logic_nodes = self.expect_usize()?;
+        self.expect_symbol(';')?;
+        self.expect_keyword("max-logic-nodes")?;
+        let max_logic_nodes = self.expect_usize()?;
+        self.expect_symbol(';')?;
+        self.expect_keyword("max-tagged-logic-nodes")?;
+        let max_tagged_logic_nodes = self.expect_usize()?;
+        self.expect_symbol(';')?;
+        self.expect_keyword("candidates-per-cluster")?;
+        let candidates_per_cluster = self.expect_usize()?;
+        self.expect_symbol(';')?;
+        self.expect_keyword("max-alternative-combinations")?;
+        let max_alternative_combinations = self.expect_usize()?;
+        self.expect_symbol(';')?;
+        self.expect_keyword("placement-spacings")?;
+        let placement_spacings = self.parse_usize_list()?;
+        self.expect_symbol(';')?;
+        self.expect_keyword("shelf-width")?;
+        let shelf_width = self.expect_usize()?;
+        self.expect_symbol(';')?;
+        self.expect_keyword("routing-floor-margin")?;
+        let routing_floor_margin = self.expect_usize()?;
+        self.expect_symbol(';')?;
+        self.expect_keyword("input-boundary-bias")?;
+        let input_boundary_bias = self.expect_bool()?;
+        self.expect_symbol(';')?;
+        self.expect_keyword("direct-max-steps")?;
+        let direct_max_steps = self.expect_usize()?;
+        self.expect_symbol(';')?;
+        self.expect_keyword("beam-width")?;
+        let beam_width = self.expect_usize()?;
+        self.expect_symbol(';')?;
+        self.expect_keyword("beam-max-expansions")?;
+        let beam_max_expansions = self.expect_usize()?;
+        self.expect_symbol(';')?;
+        self.expect_symbol('}')?;
+        Ok(ClusteringSpec {
+            enabled,
+            prefer_provenance,
+            reuse_macros,
+            keep_monolithic,
+            trigger_logic_nodes,
+            max_logic_nodes,
+            max_tagged_logic_nodes,
+            candidates_per_cluster,
+            max_alternative_combinations,
+            placement_spacings,
+            shelf_width,
+            routing_floor_margin,
+            input_boundary_bias,
+            direct_max_steps,
+            beam_width,
+            beam_max_expansions,
         })
     }
 
@@ -1127,6 +1334,45 @@ impl Parser {
         self.expect_keyword("route-step-sampling")?;
         let route_step_sampling = self.parse_sampling()?;
         self.expect_symbol(';')?;
+        self.expect_keyword("objective")?;
+        self.expect_symbol('{')?;
+        self.expect_keyword("block-count")?;
+        let block_count = self.expect_usize()?;
+        self.expect_symbol(';')?;
+        self.expect_keyword("bbox-volume")?;
+        let bbox_volume = self.expect_usize()?;
+        self.expect_symbol(';')?;
+        self.expect_keyword("bbox-extent")?;
+        let bbox_extent = self.expect_usize()?;
+        self.expect_symbol(';')?;
+        self.expect_keyword("bbox-height")?;
+        let bbox_height = self.expect_usize()?;
+        self.expect_symbol(';')?;
+        self.expect_keyword("local-density")?;
+        let local_density = self.expect_usize()?;
+        self.expect_symbol(';')?;
+        self.expect_keyword("future-join-distance")?;
+        let future_join_distance = self.expect_usize()?;
+        self.expect_symbol(';')?;
+        self.expect_symbol('}')?;
+        self.expect_keyword("adaptive")?;
+        self.expect_symbol('{')?;
+        self.expect_keyword("max-retries")?;
+        let max_retries = self.expect_usize()?;
+        self.expect_symbol(';')?;
+        self.expect_keyword("route-depth-multiplier")?;
+        let route_depth_multiplier = self.expect_usize()?;
+        self.expect_symbol(';')?;
+        self.expect_keyword("route-depth-cap")?;
+        let route_depth_cap = self.expect_usize()?;
+        self.expect_symbol(';')?;
+        self.expect_keyword("sampling-multiplier")?;
+        let sampling_multiplier = self.expect_usize()?;
+        self.expect_symbol(';')?;
+        self.expect_keyword("sampling-cap")?;
+        let sampling_cap = self.parse_optional_usize()?;
+        self.expect_symbol(';')?;
+        self.expect_symbol('}')?;
         self.expect_symbol('}')?;
         Ok(LocalPlacerSpec {
             random_seed,
@@ -1145,6 +1391,21 @@ impl Parser {
             not_route_step_sampling,
             max_route_step,
             route_step_sampling,
+            objective: LocalObjectiveSpec {
+                block_count,
+                bbox_volume,
+                bbox_extent,
+                bbox_height,
+                local_density,
+                future_join_distance,
+            },
+            adaptive: LocalAdaptiveSpec {
+                max_retries,
+                route_depth_multiplier,
+                route_depth_cap,
+                sampling_multiplier,
+                sampling_cap,
+            },
         })
     }
 

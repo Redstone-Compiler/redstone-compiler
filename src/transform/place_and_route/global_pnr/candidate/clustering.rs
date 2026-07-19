@@ -10,9 +10,9 @@ use super::{
 use crate::graph::logic::LogicGraph;
 use crate::graph::{Graph, GraphNode, GraphNodeId, GraphNodeKind};
 use crate::ir::{
-    Endpoint, NetClass, RoutableDesign, RoutableInstance, RoutableModule, RoutableModuleBody,
-    RoutableNet, RoutableNode, RoutableNodeKind, RoutablePort, RoutablePortDirection,
-    ROUTABLE_IR_TARGET, ROUTABLE_IR_VERSION,
+    ClusteringSpec, Endpoint, NetClass, RoutableDesign, RoutableInstance, RoutableModule,
+    RoutableModuleBody, RoutableNet, RoutableNode, RoutableNodeKind, RoutablePort,
+    RoutablePortDirection, ROUTABLE_IR_TARGET, ROUTABLE_IR_VERSION,
 };
 use crate::logic::LogicType;
 use crate::output::PlacedWorld;
@@ -30,9 +30,6 @@ use crate::transform::place_and_route::global_pnr::router::{
     NetOrderStrategy, RouteValidationMode,
 };
 use crate::transform::place_and_route::global_pnr::topology::ResolvedPnrTopology;
-
-const CLUSTER_TRIGGER_LOGIC_NODES: usize = 8;
-const CLUSTER_MAX_LOGIC_NODES: usize = 4;
 
 #[derive(Clone, Debug)]
 struct ClusterBoundaryPort {
@@ -64,27 +61,37 @@ pub(super) fn try_generate_clustered_candidates(
     progress_label: Option<&str>,
     input_mode: CandidateInputMode,
 ) -> eyre::Result<Option<Vec<LayoutCandidate>>> {
+    let clustering = &config.clustering;
+    if !clustering.enabled {
+        return Ok(None);
+    }
+    if graph
+        .nodes
+        .iter()
+        .any(|node| matches!(node.kind, GraphNodeKind::Sequential(_)))
+    {
+        return Ok(None);
+    }
     let logic_nodes = graph
         .nodes
         .iter()
         .filter(|node| matches!(node.kind, GraphNodeKind::Logic(_)))
         .count();
-    if logic_nodes < CLUSTER_TRIGGER_LOGIC_NODES {
+    if logic_nodes < clustering.trigger_logic_nodes {
         return Ok(None);
     }
-    let plan =
-        match CombinationalClusterPlan::build(module_name, graph, ports, CLUSTER_MAX_LOGIC_NODES) {
-            Ok(Some(plan)) => plan,
-            Ok(None) => return Ok(None),
-            Err(error) => {
-                tracing::debug!(
-                    module = module_name,
-                    error = %error,
-                    "combinational clustering plan failed; falling back to monolithic placement"
-                );
-                return Ok(None);
-            }
-        };
+    let plan = match CombinationalClusterPlan::build(module_name, graph, ports, clustering) {
+        Ok(Some(plan)) => plan,
+        Ok(None) => return Ok(None),
+        Err(error) => {
+            tracing::debug!(
+                module = module_name,
+                error = %error,
+                "combinational clustering plan failed; falling back to monolithic placement"
+            );
+            return Ok(None);
+        }
+    };
 
     match compose_candidate(
         &plan,
@@ -128,8 +135,9 @@ impl CombinationalClusterPlan {
         module_name: &str,
         graph: &Graph,
         ports: &[CandidatePort],
-        max_logic_nodes: usize,
+        clustering: &ClusteringSpec,
     ) -> eyre::Result<Option<Self>> {
+        let max_logic_nodes = clustering.max_logic_nodes;
         if max_logic_nodes == 0 {
             eyre::bail!("cluster size must be positive");
         }
@@ -168,11 +176,12 @@ impl CombinationalClusterPlan {
         // duplicated top inputs and exposes reusable half-adder macros.
         let mut tagged_chunks = Vec::<Vec<GraphNodeId>>::new();
         let mut tagged_index = HashMap::<String, usize>::new();
-        let all_tagged = logic_order.iter().all(|node_id| {
-            original
-                .find_node_by_id(*node_id)
-                .is_some_and(|node| !node.tag.is_empty())
-        });
+        let all_tagged = clustering.prefer_provenance
+            && logic_order.iter().all(|node_id| {
+                original
+                    .find_node_by_id(*node_id)
+                    .is_some_and(|node| !node.tag.is_empty())
+            });
         if all_tagged {
             for node_id in &logic_order {
                 let tag = original.find_node_by_id(*node_id).unwrap().tag.clone();
@@ -190,7 +199,7 @@ impl CombinationalClusterPlan {
         let chunks = if tagged_chunks.len() > 1
             && tagged_chunks
                 .iter()
-                .all(|chunk| chunk.len() <= max_logic_nodes.saturating_mul(3))
+                .all(|chunk| chunk.len() <= clustering.max_tagged_logic_nodes)
         {
             tagged_chunks
         } else {
@@ -563,7 +572,7 @@ fn compose_candidate(
         // Keep a small geometry portfolio. The most compact local result is
         // not necessarily externally routable once several cluster boundary
         // pins share a face.
-        cluster_config.max_candidates = 2;
+        cluster_config.max_candidates = config.clustering.candidates_per_cluster.max(1);
         cluster_config.input_constraints = Default::default();
         cluster_config.local_cell_contract = Default::default();
         // Cluster boundaries are real composition pins, not merely observable
@@ -580,22 +589,29 @@ fn compose_candidate(
             .iter()
             .map(|port| (port.name.clone(), port.direction.clone()))
             .collect::<Vec<_>>();
-        let (generated, _) = macro_library.resolve_graph_or_generate(
-            &cluster.name,
-            &cluster.graph,
-            &macro_ports,
-            &cluster_config,
-            || {
-                generate_unit_candidates(
+        let generate = || {
+            generate_unit_candidates(
+                &cluster.name,
+                cluster.graph.clone(),
+                candidate_ports,
+                &cluster_config,
+                progress_label,
+                CandidateInputMode::ExternalPorts,
+            )
+        };
+        let generated = if config.clustering.reuse_macros {
+            macro_library
+                .resolve_graph_or_generate(
                     &cluster.name,
-                    cluster.graph.clone(),
-                    candidate_ports,
+                    &cluster.graph,
+                    &macro_ports,
                     &cluster_config,
-                    progress_label,
-                    CandidateInputMode::ExternalPorts,
-                )
-            },
-        )?;
+                    generate,
+                )?
+                .0
+        } else {
+            generate()?
+        };
         if generated.is_empty() {
             tracing::info!(
                 module = module_name,
@@ -611,20 +627,36 @@ fn compose_candidate(
     let topology = ResolvedPnrTopology::from_routable(&plan.synthetic)?;
     let progress = GlobalPnrProgress::new(false, module_name);
     let hooks = GlobalHeuristicHooks::default();
-    for mut candidates in cluster_candidate_combinations(&candidate_sets) {
+    let mut routing_strategies = Vec::new();
+    if config.clustering.direct_max_steps > 0 {
+        routing_strategies.push(GlobalRoutingStrategy::DirectGreedy {
+            max_steps: config.clustering.direct_max_steps,
+        });
+    }
+    if config.clustering.beam_width > 0 && config.clustering.beam_max_expansions > 0 {
+        routing_strategies.push(GlobalRoutingStrategy::GreedyBeam {
+            beam_width: config.clustering.beam_width,
+            max_expansions: config.clustering.beam_max_expansions,
+            variant_seed: 0,
+        });
+    }
+    for mut candidates in cluster_candidate_combinations(
+        &candidate_sets,
+        config.clustering.max_alternative_combinations,
+    ) {
         // External input switches are allocated at the route world's maximum
         // X boundary. The topological first clusters consume those inputs, so
         // place them at that side instead of forcing every input across the
         // entire shelf.
-        if plan.clusters.len() >= 3 {
+        if config.clustering.input_boundary_bias && plan.clusters.len() >= 3 {
             candidates.reverse();
         }
-        for spacing in [4usize, 8] {
+        for &spacing in &config.clustering.placement_spacings {
             let mut placed = place_candidates_on_shelves(
                 &candidates,
                 &GlobalPlacementConfig {
                     spacing,
-                    shelf_width: 96,
+                    shelf_width: config.clustering.shelf_width,
                     max_attempts: 1,
                     ..Default::default()
                 },
@@ -634,16 +666,9 @@ fn compose_candidate(
             // the generic shelf placer otherwise puts them directly on the route
             // world's floor, where no supporting redstone path can approach.
             for module in &mut placed {
-                module.origin.2 = module.origin.2.max(4);
+                module.origin.2 = module.origin.2.max(config.clustering.routing_floor_margin);
             }
-            for strategy in [
-                GlobalRoutingStrategy::DirectGreedy { max_steps: 128 },
-                GlobalRoutingStrategy::GreedyBeam {
-                    beam_width: 64,
-                    max_expansions: 2_048,
-                    variant_seed: 0,
-                },
-            ] {
+            for &strategy in &routing_strategies {
                 let routing = GlobalRoutingConfig {
                     strategy,
                     validation: RouteValidationMode::Deferred,
@@ -716,8 +741,9 @@ fn compose_candidate(
 /// accessible pin geometry without exploding into a Cartesian product.
 fn cluster_candidate_combinations(
     candidate_sets: &[Vec<LayoutCandidate>],
+    max_combinations: usize,
 ) -> Vec<Vec<LayoutCandidate>> {
-    if candidate_sets.iter().any(Vec::is_empty) {
+    if max_combinations == 0 || candidate_sets.iter().any(Vec::is_empty) {
         return Vec::new();
     }
     let best = candidate_sets
@@ -732,6 +758,7 @@ fn cluster_candidate_combinations(
             combinations.push(combination);
         }
     }
+    combinations.truncate(max_combinations);
     combinations
 }
 
@@ -776,8 +803,13 @@ mod tests {
             .prepare_place()?
             .graph;
         let ports = graph_ports(&graph);
-        let plan = CombinationalClusterPlan::build("full_adder", &graph, &ports, 4)?
-            .context("full adder should require more than one cluster")?;
+        let plan = CombinationalClusterPlan::build(
+            "full_adder",
+            &graph,
+            &ports,
+            &ClusteringSpec::default(),
+        )?
+        .context("full adder should require more than one cluster")?;
 
         assert!(plan.clusters.len() > 1);
         let planned = plan
@@ -806,8 +838,16 @@ mod tests {
     fn two_stage_dag_has_an_end_to_end_cluster_composition_path() -> eyre::Result<()> {
         let graph = LogicGraph::from_stmt("~(a|b)", "y")?.prepare_place()?.graph;
         let ports = graph_ports(&graph);
-        let plan = CombinationalClusterPlan::build("nor", &graph, &ports, 1)?
-            .context("NOR should split at one logic node per cluster")?;
+        let plan = CombinationalClusterPlan::build(
+            "nor",
+            &graph,
+            &ports,
+            &ClusteringSpec {
+                max_logic_nodes: 1,
+                ..Default::default()
+            },
+        )?
+        .context("NOR should split at one logic node per cluster")?;
         assert_eq!(plan.clusters.len(), 2);
         // Physical composition is exercised by `compose_candidate`; failure is
         // allowed to fall back in production, but this small DAG must route.
@@ -843,6 +883,32 @@ mod tests {
         assert!(input_ports
             .iter()
             .all(|port| candidate.world[port.position].kind.is_switch()));
+        Ok(())
+    }
+
+    #[test]
+    fn disabled_clustering_skips_large_combinational_leaf() -> eyre::Result<()> {
+        let graph = predefined_logics::buffered_full_adder_graph()?
+            .prepare_place()?
+            .graph;
+        let ports = graph_ports(&graph);
+        let config = UnitCandidateConfig {
+            clustering: ClusteringSpec {
+                enabled: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        assert!(try_generate_clustered_candidates(
+            "full_adder",
+            &graph,
+            &ports,
+            &config,
+            None,
+            CandidateInputMode::ExternalPorts,
+        )?
+        .is_none());
         Ok(())
     }
 }

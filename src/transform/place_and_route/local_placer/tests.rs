@@ -539,6 +539,69 @@ fn cost_sampling_keeps_lower_cost_candidates() -> eyre::Result<()> {
 }
 
 #[test]
+fn local_objective_weights_change_candidate_ranking() -> eyre::Result<()> {
+    let graph = LogicGraph::from_stmt("a|b", "c")?.prepare_place()?;
+    let order = graph.topological_order();
+    let block_only = LocalPlacer::new_with_visit_order_and_cost(
+        graph.clone(),
+        config(1),
+        order.clone(),
+        LocalPlacementCostWeights {
+            block_count: 1,
+            bbox_volume: 0,
+            bbox_extent: 0,
+            bbox_height: 0,
+            local_density: 0,
+            future_join_distance: 0,
+        },
+    )?;
+    let volume_only = LocalPlacer::new_with_visit_order_and_cost(
+        graph,
+        config(1),
+        order,
+        LocalPlacementCostWeights {
+            block_count: 0,
+            bbox_volume: 1,
+            bbox_extent: 0,
+            bbox_height: 0,
+            local_density: 0,
+            future_join_distance: 0,
+        },
+    )?;
+    let cobble = Block {
+        kind: BlockKind::Cobble {
+            on_count: 0,
+            on_base_count: 0,
+        },
+        direction: Direction::None,
+    };
+    let mut spread = empty_world();
+    spread[Position(0, 0, 0)] = cobble;
+    spread[Position(5, 5, 3)] = cobble;
+    let mut dense = empty_world();
+    dense[Position(0, 0, 0)] = cobble;
+    dense[Position(1, 0, 0)] = cobble;
+    dense[Position(0, 1, 0)] = cobble;
+    let state = PlacementState::default();
+
+    let block_choice = block_only.sample_by_cost(
+        0,
+        vec![
+            (dense.clone(), state.clone()),
+            (spread.clone(), state.clone()),
+        ],
+        1,
+        0,
+    );
+    let volume_choice =
+        volume_only.sample_by_cost(0, vec![(spread, state.clone()), (dense, state)], 1, 0);
+
+    assert_eq!(block_choice[0].0.iter_block().len(), 2);
+    assert_eq!(volume_choice[0].0.iter_block().len(), 3);
+    Ok(())
+}
+
+#[test]
 fn ranked_sampling_keeps_lower_cost_candidates() -> eyre::Result<()> {
     let graph = LogicGraph::from_stmt("a|b", "c")?.prepare_place()?;
     let placer = LocalPlacer::new(graph.clone(), config(1))?;
