@@ -125,6 +125,10 @@ export class StructureViewer {
     this.render();
   }
 
+  setHoveredBoundingBoxId(id: string | undefined): void {
+    if (this.boundingBoxRenderer.setHoveredId(id)) this.render();
+  }
+
   setRoutes(
     routes: ViewerRoute[],
     handler?: RouteSelectionHandler,

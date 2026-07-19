@@ -193,7 +193,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
         </details>
         <details id="files-panel" class="floating-panel files-panel">
           <summary>
-            <span>Files</span>
+            <span id="files-title">Files</span>
             <span id="files-count">No folder</span>
           </summary>
           <div id="files-list" class="files-list empty">Open a folder to browse NBT files.</div>
@@ -343,6 +343,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
           <strong id="artifact-title">Snapshot artifact</strong>
           <button id="close-artifact" class="panel-action" type="button">Close</button>
         </header>
+        <nav id="artifact-tabs" class="artifact-tabs hidden" aria-label="Snapshot source stages"></nav>
         <pre id="artifact-content" class="artifact-content"></pre>
       </div>
     </dialog>
@@ -354,6 +355,7 @@ const snapshotInput = document.querySelector<HTMLInputElement>('#snapshot-input'
 const folderInput = document.querySelector<HTMLInputElement>('#folder-input')!;
 const dropZone = document.querySelector<HTMLElement>('#drop-zone')!;
 const filesPanel = document.querySelector<HTMLDetailsElement>('#files-panel')!;
+const filesTitle = document.querySelector<HTMLElement>('#files-title')!;
 const filesList = document.querySelector<HTMLElement>('#files-list')!;
 const filesCount = document.querySelector<HTMLElement>('#files-count')!;
 const canvas = document.querySelector<HTMLCanvasElement>('#structure-canvas')!;
@@ -443,6 +445,7 @@ const selectedNbtCanvas = document.querySelector<HTMLCanvasElement>('#selected-n
 const artifactDialog = document.querySelector<HTMLDialogElement>('#artifact-dialog')!;
 const closeArtifactButton = document.querySelector<HTMLButtonElement>('#close-artifact')!;
 const artifactTitle = document.querySelector<HTMLElement>('#artifact-title')!;
+const artifactTabs = document.querySelector<HTMLElement>('#artifact-tabs')!;
 const artifactContent = document.querySelector<HTMLElement>('#artifact-content')!;
 
 const viewer = new StructureViewer(canvas);
@@ -1999,13 +2002,40 @@ function parseSnapshotConstraints(reportValue: unknown, resolvedValue: unknown):
 function renderSnapshotBrowser(snapshot: LoadedSnapshot): void {
   filesList.replaceChildren();
   filesList.className = 'files-list snapshot-files-list';
+  filesTitle.textContent = 'Snapshot';
   filesCount.textContent = `${snapshot.manifest.top_module ?? 'snapshot'} · ${snapshot.instances.length} boxes`;
   filesPanel.open = true;
 
+  appendSnapshotSection('NBT');
   const finalPath = snapshot.manifest.final_nbt;
   if (finalPath && snapshot.filesByPath.has(finalPath)) {
-    appendSnapshotSection('Final');
     appendSnapshotNbtEntry(finalPath, finalPath, 'main');
+  }
+
+  const diagnosticPaths = ['placement-bboxes.nbt', 'routes/routes.nbt']
+    .filter(path => snapshot.filesByPath.has(path));
+  for (const path of diagnosticPaths) {
+    const segments = path.split('/');
+    appendSnapshotNbtEntry(segments[segments.length - 1] ?? path, path, 'main');
+  }
+
+  const candidateNbt = snapshot.manifest.artifacts.filter(artifact =>
+    artifact.kind === 'nbt' && /^candidates\//i.test(artifact.path) && snapshot.filesByPath.has(artifact.path));
+  if (candidateNbt.length > 0) {
+    const body = appendSnapshotCollapsibleSection('Candidates', candidateNbt.length);
+    for (const artifact of candidateNbt) {
+      appendSnapshotNbtEntry(artifact.path.replace(/^candidates\//i, ''), artifact.path, 'main', body);
+    }
+  }
+
+  const irArtifacts = snapshot.manifest.artifacts.filter(artifact =>
+    isSnapshotIrArtifact(artifact.path) && snapshot.filesByPath.has(artifact.path));
+  if (irArtifacts.length > 0) {
+    appendSnapshotSection('IR');
+    const button = createFileEntry('Open IR viewer', irArtifacts.map(artifact => snapshotIrLabel(artifact.path)).join(' · '));
+    button.classList.add('snapshot-ir-entry');
+    button.addEventListener('click', () => void openSnapshotIrViewer(irArtifacts.map(artifact => artifact.path)));
+    filesList.append(button);
   }
 
   if (snapshot.instances.length > 0) {
@@ -2016,7 +2046,9 @@ function renderSnapshotBrowser(snapshot: LoadedSnapshot): void {
       const button = createFileEntry(instance.instance, instance.module, file.size);
       button.dataset.snapshotPath = instance.circuitPath;
       button.dataset.snapshotInstance = instance.artifactPath;
-      button.addEventListener('click', () => void openSnapshotInstance(instance));
+      button.addEventListener('mouseenter', () => hoverSnapshotInstance(instance));
+      button.addEventListener('mouseleave', () => hoverSnapshotInstance(undefined));
+      button.addEventListener('click', () => selectSnapshotInstance(instance));
       filesList.append(button);
     }
   }
@@ -2034,29 +2066,21 @@ function renderSnapshotBrowser(snapshot: LoadedSnapshot): void {
     }
   }
 
-  const diagnosticPaths = ['placement-bboxes.nbt', 'routes/routes.nbt'].filter(path => snapshot.filesByPath.has(path));
-  if (diagnosticPaths.length > 0) {
-    appendSnapshotSection('PnR diagnostics');
-    for (const path of diagnosticPaths) {
-      const segments = path.split('/');
-      appendSnapshotNbtEntry(segments[segments.length - 1] ?? path, path, 'main');
-    }
-  }
-
   const metadata = snapshot.manifest.artifacts.filter(
     artifact =>
       artifact.kind !== 'nbt' &&
+      !isSnapshotIrArtifact(artifact.path) &&
       !/^instances\/[^/]+\/instance\.json$/i.test(artifact.path) &&
       snapshot.filesByPath.has(artifact.path),
   );
   if (metadata.length > 0) {
-    appendSnapshotSection('Metadata');
+    const body = appendSnapshotCollapsibleSection('Others', metadata.length);
     for (const artifact of metadata) {
       const file = snapshot.filesByPath.get(artifact.path)!;
       const button = createFileEntry(artifact.path, artifact.kind, file.size);
       button.dataset.snapshotPath = artifact.path;
       button.addEventListener('click', () => void openTextArtifact(artifact.path));
-      filesList.append(button);
+      body.append(button);
     }
   }
 }
@@ -2068,13 +2092,41 @@ function appendSnapshotSection(label: string): void {
   filesList.append(heading);
 }
 
-function appendSnapshotNbtEntry(label: string, path: string, target: 'main'): void {
+function appendSnapshotCollapsibleSection(label: string, count: number): HTMLElement {
+  const details = document.createElement('details');
+  details.className = 'snapshot-collapsible';
+  const summary = document.createElement('summary');
+  summary.textContent = `${label} (${count})`;
+  const body = document.createElement('div');
+  body.className = 'snapshot-collapsible-body';
+  details.append(summary, body);
+  filesList.append(details);
+  return body;
+}
+
+function appendSnapshotNbtEntry(
+  label: string,
+  path: string,
+  target: 'main',
+  parent: HTMLElement = filesList,
+): void {
   const file = currentSnapshot?.filesByPath.get(path);
   if (!file || target !== 'main') return;
   const button = createFileEntry(label, 'NBT', file.size);
   button.dataset.snapshotPath = path;
   button.addEventListener('click', () => void openSnapshotNbt(path, button));
-  filesList.append(button);
+  parent.append(button);
+}
+
+function isSnapshotIrArtifact(path: string): boolean {
+  return /\.v$/i.test(path) || /^ir\/(logical|routable)\.rcir$/i.test(path);
+}
+
+function snapshotIrLabel(path: string): string {
+  if (/\.v$/i.test(path)) return 'Verilog';
+  if (/logical\.rcir$/i.test(path)) return 'Logical RCIR';
+  if (/routable\.rcir$/i.test(path)) return 'Routable RCIR';
+  return path;
 }
 
 function createFileEntry(label: string, detail: string, size?: number): HTMLButtonElement {
@@ -2149,39 +2201,90 @@ async function openSnapshotNbt(path: string, selectedEntry?: Element | null): Pr
   await openFile(file, selectedEntry, outputMetadataJson, path);
 }
 
-async function openSnapshotInstance(instance: SnapshotInstance): Promise<void> {
-  const file = currentSnapshot?.filesByPath.get(instance.circuitPath);
-  if (!file) throw new Error(`Instance NBT is missing: ${instance.circuitPath}`);
+function snapshotBoxForInstance(instance: SnapshotInstance): {
+  id: string;
+  label: string;
+  min: [number, number, number];
+  max: [number, number, number];
+} {
+  return {
+    id: instance.artifactPath,
+    label: instance.instance,
+    min: compilerPositionToNbt(instance.global_bbox.min),
+    max: compilerPositionToNbt(instance.global_bbox.max).map(value => value + 1) as [number, number, number],
+  };
+}
 
-  selectedNbtTitle.textContent = instance.instance;
-  selectedNbtStatus.textContent = `Loading ${instance.module}...`;
-  if (!selectedNbtDialog.open) selectedNbtDialog.showModal();
+function hoverSnapshotInstance(instance: SnapshotInstance | undefined): void {
+  viewer.setHoveredBoundingBoxId(instance?.artifactPath);
+  viewer.setRelatedRouteIds(
+    instance ? relatedRouteIdsForBox(instance.artifactPath) : relatedRouteIdsForBox(isolatedSnapshotBoxId),
+  );
+}
 
-  try {
-    const parsed = await loadNbtFile(file);
-    const structure = toStructureModel(parsed.root);
-    if (!structure) throw new Error('Instance artifact is not a Minecraft structure.');
-    await selectedNbtViewer.setStructure(structure);
-    const { min, max } = instance.global_bbox;
-    selectedNbtStatus.textContent = [
-      instance.module,
-      `${structure.blocks.length} blocks`,
-      `global bbox (${min.join(', ')}) → (${max.join(', ')})`,
-    ].join(' · ');
-  } catch (error) {
-    selectedNbtStatus.textContent = error instanceof Error ? error.message : String(error);
-  }
+function selectSnapshotInstance(instance: SnapshotInstance): void {
+  setSnapshotRouteIsolation(undefined);
+  setSnapshotBoxIsolation(
+    isolatedSnapshotBoxId === instance.artifactPath ? undefined : snapshotBoxForInstance(instance),
+  );
 }
 
 async function openTextArtifact(path: string): Promise<void> {
   const file = currentSnapshot?.filesByPath.get(path);
   if (!file) throw new Error(`Snapshot artifact is missing: ${path}`);
-  const text = await file.text();
+  artifactTabs.replaceChildren();
+  artifactTabs.classList.add('hidden');
   artifactTitle.textContent = path;
-  artifactContent.classList.toggle('language-rcir', path.toLowerCase().endsWith('.rcir'));
-  if (path.toLowerCase().endsWith('.rcir')) {
+  await renderArtifactContent(path);
+  if (!artifactDialog.open) artifactDialog.showModal();
+}
+
+async function openSnapshotIrViewer(paths: string[]): Promise<void> {
+  const orderedPaths = [...paths].sort((a, b) => snapshotIrOrder(a) - snapshotIrOrder(b));
+  if (orderedPaths.length === 0) return;
+
+  artifactTitle.textContent = `${currentSnapshot?.manifest.top_module ?? 'Snapshot'} IR`;
+  artifactTabs.replaceChildren();
+  artifactTabs.classList.remove('hidden');
+  for (const path of orderedPaths) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'artifact-tab';
+    button.textContent = snapshotIrLabel(path);
+    button.dataset.artifactPath = path;
+    button.addEventListener('click', () => void selectSnapshotIrTab(path));
+    artifactTabs.append(button);
+  }
+
+  await selectSnapshotIrTab(orderedPaths[0]);
+  if (!artifactDialog.open) artifactDialog.showModal();
+}
+
+function snapshotIrOrder(path: string): number {
+  if (/\.v$/i.test(path)) return 0;
+  if (/logical\.rcir$/i.test(path)) return 1;
+  if (/routable\.rcir$/i.test(path)) return 2;
+  return 3;
+}
+
+async function selectSnapshotIrTab(path: string): Promise<void> {
+  artifactTabs.querySelectorAll<HTMLButtonElement>('.artifact-tab').forEach(button => {
+    const selected = button.dataset.artifactPath === path;
+    button.classList.toggle('active', selected);
+    button.setAttribute('aria-selected', String(selected));
+  });
+  await renderArtifactContent(path);
+}
+
+async function renderArtifactContent(path: string): Promise<void> {
+  const file = currentSnapshot?.filesByPath.get(path);
+  if (!file) throw new Error(`Snapshot artifact is missing: ${path}`);
+  const text = await file.text();
+  const isRcir = path.toLowerCase().endsWith('.rcir');
+  artifactContent.classList.toggle('language-rcir', isRcir);
+  artifactContent.classList.toggle('language-verilog', path.toLowerCase().endsWith('.v'));
+  if (isRcir) {
     artifactContent.replaceChildren(highlightRcir(text));
-    if (!artifactDialog.open) artifactDialog.showModal();
     return;
   }
   try {
@@ -2189,7 +2292,6 @@ async function openTextArtifact(path: string): Promise<void> {
   } catch {
     artifactContent.textContent = text;
   }
-  if (!artifactDialog.open) artifactDialog.showModal();
 }
 
 function findSnapshotEntry(path: string): Element | null {
@@ -2238,6 +2340,10 @@ function setSnapshotBoxIsolation(box: {
   isolatedSnapshotBoxId = box?.id;
   viewer.setIsolatedBoundingBox(box);
   viewer.setRelatedRouteIds(relatedRouteIdsForBox(box?.id));
+
+  for (const entry of filesList.querySelectorAll<HTMLElement>('[data-snapshot-instance]')) {
+    entry.classList.toggle('selected', entry.dataset.snapshotInstance === box?.id);
+  }
 
   if (!box) return;
   const instance = currentSnapshot?.instances.find(candidate => candidate.artifactPath === box.id);
@@ -2465,6 +2571,7 @@ function renderFileBrowser(files: File[]): void {
     .sort((a, b) => getDisplayPath(a).localeCompare(getDisplayPath(b)));
 
   filesList.replaceChildren();
+  filesTitle.textContent = 'Files';
   filesList.classList.toggle('empty', nbtFiles.length === 0);
   filesCount.textContent = nbtFiles.length === 0 ? 'No NBT files' : `${nbtFiles.length} files`;
   filesPanel.open = true;
@@ -2511,6 +2618,7 @@ async function loadExamples(): Promise<void> {
 
 function renderExampleBrowser(examples: ExampleFile[]): void {
   filesList.replaceChildren();
+  filesTitle.textContent = 'Files';
   filesList.classList.toggle('empty', examples.length === 0);
   filesCount.textContent = examples.length === 0 ? 'No NBT files' : `${examples.length} files`;
 

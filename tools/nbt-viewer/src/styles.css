@@ -329,6 +329,34 @@ input {
   margin-top: 2px;
 }
 
+.snapshot-collapsible {
+  margin: 3px 0;
+}
+
+.snapshot-collapsible > summary {
+  padding: 5px 7px;
+  border-radius: 4px;
+  color: #aab5bd;
+  font: 11px/1.4 "Cascadia Mono", Consolas, monospace;
+  cursor: pointer;
+  user-select: none;
+}
+
+.snapshot-collapsible > summary:hover {
+  background: rgb(255 255 255 / 6%);
+  color: #e3e9ed;
+}
+
+.snapshot-collapsible-body {
+  margin-left: 8px;
+  padding-left: 5px;
+  border-left: 1px solid rgb(255 255 255 / 10%);
+}
+
+.snapshot-ir-entry .file-entry-name {
+  color: #a5d6ff;
+}
+
 .snapshot-entry-detail {
   max-width: 48%;
   overflow: hidden;
@@ -1094,7 +1122,40 @@ input {
 }
 
 .artifact-dialog-surface {
-  grid-template-rows: auto 1fr;
+  grid-template-rows: auto auto 1fr;
+}
+
+.artifact-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 8px 12px 0;
+  overflow-x: auto;
+  border-bottom: 1px solid rgb(255 255 255 / 8%);
+  background: #15191e;
+}
+
+.artifact-tabs.hidden {
+  display: none;
+}
+
+.artifact-tab {
+  flex: 0 0 auto;
+  padding: 7px 10px 8px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: #8f9ba5;
+  font: 11px/1.2 "Cascadia Mono", Consolas, monospace;
+  cursor: pointer;
+}
+
+.artifact-tab:hover {
+  color: #dce3e7;
+}
+
+.artifact-tab.active {
+  border-bottom-color: #d53b3b;
+  color: #fff;
 }
 
 .artifact-content {
