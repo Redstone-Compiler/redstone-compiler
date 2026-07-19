@@ -1132,7 +1132,7 @@ input {
 
 .ir-comparison {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: minmax(180px, 1fr) 7px minmax(180px, 1fr) 7px minmax(180px, 1fr);
   min-width: 0;
   min-height: 0;
   background: #101317;
@@ -1143,11 +1143,42 @@ input {
   grid-template-rows: auto minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
-  border-right: 1px solid rgb(255 255 255 / 10%);
 }
 
-.ir-comparison-pane:last-child {
-  border-right: 0;
+.ir-comparison-splitter {
+  position: relative;
+  z-index: 2;
+  width: 7px;
+  min-height: 0;
+  border-right: 1px solid rgb(255 255 255 / 7%);
+  border-left: 1px solid rgb(255 255 255 / 7%);
+  background: #151a1f;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.ir-comparison-splitter::after {
+  position: absolute;
+  top: 50%;
+  left: 2px;
+  width: 1px;
+  height: 34px;
+  border-right: 1px solid #58636d;
+  border-left: 1px solid #58636d;
+  content: '';
+  transform: translateY(-50%);
+}
+
+.ir-comparison-splitter:hover,
+.ir-comparison-splitter:focus-visible,
+.ir-comparison-splitter.dragging {
+  outline: 0;
+  background: #294664;
+}
+
+body.ir-pane-resizing {
+  cursor: col-resize;
+  user-select: none;
 }
 
 .ir-comparison-header {
@@ -1245,9 +1276,13 @@ input {
 
 @media (max-width: 1050px) {
   .ir-comparison {
-    grid-template-columns: 1fr;
+    grid-template-columns: 1fr !important;
     grid-template-rows: repeat(3, minmax(260px, 1fr));
     overflow: auto;
+  }
+
+  .ir-comparison-splitter {
+    display: none;
   }
 
   .ir-comparison-pane {

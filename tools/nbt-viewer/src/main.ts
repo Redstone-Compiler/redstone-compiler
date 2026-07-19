@@ -2294,6 +2294,7 @@ async function openSnapshotIrViewer(paths: string[]): Promise<void> {
   artifactContent.classList.add('hidden');
   irComparison.classList.remove('hidden');
   irComparison.replaceChildren();
+  irComparison.style.removeProperty('grid-template-columns');
   pinnedIrLocations = undefined;
 
   const sources = await Promise.all(orderedPaths.map(async path => {
@@ -2301,10 +2302,89 @@ async function openSnapshotIrViewer(paths: string[]): Promise<void> {
     if (!file) throw new Error(`Snapshot artifact is missing: ${path}`);
     return { path, source: await file.text() };
   }));
-  for (const { path, source } of sources) {
+  for (const [index, { path, source }] of sources.entries()) {
+    if (index > 0) irComparison.append(createIrComparisonSplitter(index - 1));
     irComparison.append(createIrComparisonPane(path, source));
   }
+  resetIrPaneWidths();
   if (!artifactDialog.open) artifactDialog.showModal();
+}
+
+function createIrComparisonSplitter(leftPaneIndex: number): HTMLElement {
+  const splitter = document.createElement('div');
+  splitter.className = 'ir-comparison-splitter';
+  splitter.dataset.leftPaneIndex = String(leftPaneIndex);
+  splitter.setAttribute('role', 'separator');
+  splitter.setAttribute('aria-orientation', 'vertical');
+  splitter.setAttribute('aria-label', `Resize IR panes ${leftPaneIndex + 1} and ${leftPaneIndex + 2}`);
+  splitter.tabIndex = 0;
+
+  splitter.addEventListener('pointerdown', event => beginIrPaneResize(event, splitter));
+  splitter.addEventListener('dblclick', resetIrPaneWidths);
+  splitter.addEventListener('keydown', event => {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+    event.preventDefault();
+    resizeIrPanePair(splitter, event.key === 'ArrowLeft' ? -24 : 24);
+  });
+  return splitter;
+}
+
+function resetIrPaneWidths(): void {
+  const paneCount = irComparison.querySelectorAll('.ir-comparison-pane').length;
+  const columns = Array.from({ length: paneCount }, (_, index) => (
+    index + 1 < paneCount ? ['minmax(180px, 1fr)', '7px'] : ['minmax(180px, 1fr)']
+  )).flat();
+  irComparison.style.gridTemplateColumns = columns.join(' ');
+}
+
+function beginIrPaneResize(event: PointerEvent, splitter: HTMLElement): void {
+  if (event.button !== 0) return;
+  event.preventDefault();
+  const startX = event.clientX;
+  const startWidths = currentIrPaneWidths();
+  const leftPaneIndex = Number(splitter.dataset.leftPaneIndex);
+  splitter.classList.add('dragging');
+  document.body.classList.add('ir-pane-resizing');
+  splitter.setPointerCapture(event.pointerId);
+
+  const move = (moveEvent: PointerEvent) => {
+    applyIrPanePairResize(startWidths, leftPaneIndex, moveEvent.clientX - startX);
+  };
+  const stop = () => {
+    splitter.classList.remove('dragging');
+    document.body.classList.remove('ir-pane-resizing');
+    splitter.removeEventListener('pointermove', move);
+    splitter.removeEventListener('pointerup', stop);
+    splitter.removeEventListener('pointercancel', stop);
+  };
+  splitter.addEventListener('pointermove', move);
+  splitter.addEventListener('pointerup', stop);
+  splitter.addEventListener('pointercancel', stop);
+}
+
+function resizeIrPanePair(splitter: HTMLElement, delta: number): void {
+  applyIrPanePairResize(currentIrPaneWidths(), Number(splitter.dataset.leftPaneIndex), delta);
+}
+
+function currentIrPaneWidths(): number[] {
+  return Array.from(irComparison.querySelectorAll<HTMLElement>('.ir-comparison-pane'))
+    .map(pane => pane.getBoundingClientRect().width);
+}
+
+function applyIrPanePairResize(widths: number[], leftPaneIndex: number, delta: number): void {
+  const minimumWidth = 180;
+  const pairWidth = widths[leftPaneIndex] + widths[leftPaneIndex + 1];
+  const leftWidth = Math.min(
+    pairWidth - minimumWidth,
+    Math.max(minimumWidth, widths[leftPaneIndex] + delta),
+  );
+  const resized = [...widths];
+  resized[leftPaneIndex] = leftWidth;
+  resized[leftPaneIndex + 1] = pairWidth - leftWidth;
+  const columns = resized.flatMap((width, index) => (
+    index + 1 < resized.length ? [`${Math.round(width)}px`, '7px'] : [`${Math.round(width)}px`]
+  ));
+  irComparison.style.gridTemplateColumns = columns.join(' ');
 }
 
 function snapshotIrOrder(path: string): number {
