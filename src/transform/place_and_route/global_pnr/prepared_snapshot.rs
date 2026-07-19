@@ -57,8 +57,19 @@ struct CandidateMetadata {
     format: String,
     id: String,
     module_name: String,
+    #[serde(default)]
+    bbox: CandidateBoundingBox,
+    #[serde(default)]
+    cost: super::ir::LayoutCandidateCost,
     ports: Vec<PhysicalPortDto>,
     blocked_cells: Vec<[usize; 3]>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct CandidateBoundingBox {
+    min: [usize; 3],
+    max: [usize; 3],
+    size: [usize; 3],
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -112,6 +123,16 @@ pub(super) fn emit_candidate_library(prepared: &PreparedPnrDesign) -> eyre::Resu
                     format: "redstone-compiler.candidate.v1".to_owned(),
                     id: id.clone(),
                     module_name: candidate.module_name.clone(),
+                    bbox: CandidateBoundingBox {
+                        min: position_array(candidate.bbox.min),
+                        max: position_array(candidate.bbox.max),
+                        size: [
+                            candidate.bbox.width(),
+                            candidate.bbox.depth(),
+                            candidate.bbox.height(),
+                        ],
+                    },
+                    cost: candidate.cost.clone(),
                     ports: candidate
                         .ports
                         .iter()
@@ -411,5 +432,57 @@ impl SnapshotSource {
                 Err(error) => Err(error.into()),
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn candidate_metadata_serializes_bbox_and_quality_metrics() {
+        let metadata = CandidateMetadata {
+            format: "redstone-compiler.candidate.v1".to_owned(),
+            id: "candidate".to_owned(),
+            module_name: "adder".to_owned(),
+            bbox: CandidateBoundingBox {
+                min: [1, 2, 3],
+                max: [7, 8, 7],
+                size: [7, 7, 5],
+            },
+            cost: super::super::ir::LayoutCandidateCost {
+                block_count: 65,
+                bbox_volume: 245,
+                bbox_footprint: 49,
+                bbox_height: 5,
+                port_access_points: 3,
+            },
+            ports: Vec::new(),
+            blocked_cells: Vec::new(),
+        };
+
+        let value = serde_json::to_value(metadata).expect("serialize metadata");
+        assert_eq!(value["bbox"]["size"], serde_json::json!([7, 7, 5]));
+        assert_eq!(value["cost"]["block_count"], 65);
+        assert_eq!(value["cost"]["bbox_footprint"], 49);
+        assert_eq!(value["cost"]["port_access_points"], 3);
+    }
+
+    #[test]
+    fn candidate_metadata_without_new_metrics_still_deserializes() {
+        let metadata: CandidateMetadata = serde_json::from_value(serde_json::json!({
+            "format": "redstone-compiler.candidate.v1",
+            "id": "candidate",
+            "module_name": "adder",
+            "ports": [],
+            "blocked_cells": []
+        }))
+        .expect("deserialize legacy metadata");
+
+        assert_eq!(metadata.bbox.size, [0, 0, 0]);
+        assert_eq!(
+            metadata.cost,
+            super::super::ir::LayoutCandidateCost::default()
+        );
     }
 }

@@ -20,10 +20,11 @@ pub use logical::{
     LogicalValue, LOGICAL_IR_VERSION,
 };
 pub use pnr::{
-    CandidateSpec, CongestionSpec, Free3dSweepSpec, InputPlacementSpec, LayerAssignmentSpec,
-    LocalPlacerSpec, NetOrderSpec, NotRouteSpec, ObjectiveSpec, PhysicalConstraintSpec,
-    PhysicalRegionSpec, PhysicalSpec, PlacementHeuristicSpec, PlacementSamplingSpec,
-    PlacementScheduleSpec, PlacementSpec, PnrSpec, PortRef, PreferenceSpec, RoutableDocument,
+    CandidateSpec, CellFaceSpec, CongestionSpec, Free3dSweepSpec, InputPlacementSpec,
+    LayerAssignmentSpec, LocalCellContractSpec, LocalPlacerSpec, NetOrderSpec, NotRouteSpec,
+    ObjectiveSpec, PhysicalConstraintSpec, PhysicalRegionSpec, PhysicalSpec,
+    PlacementHeuristicSpec, PlacementSamplingSpec, PlacementScheduleSpec, PlacementSpec, PnrSpec,
+    PortAccessDirectionSpec, PortAccessSpec, PortRef, PreferenceSpec, RoutableDocument,
     RouteStageSpec, RouteStrategySpec, RouteValidationSpec, RoutingSpec, SamplingSpec, SearchSpec,
     TorchPlacementSpec,
 };

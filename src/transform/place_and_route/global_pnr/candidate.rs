@@ -3,24 +3,33 @@ use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::ops::{Deref, DerefMut};
 
 use eyre::ContextCompat;
+use serde::Serialize;
 
 use crate::graph::logic::LogicGraph;
 use crate::graph::{Graph, GraphNodeKind};
-use crate::ir::{graph_from_routable_leaf, RoutableModule, RoutablePortDirection};
+use crate::ir::{
+    graph_from_routable_leaf, CellFaceSpec, LocalCellContractSpec, PortAccessDirectionSpec,
+    RoutableModule, RoutablePortDirection,
+};
 use crate::output::{OutputEndpoint, PlacedWorld};
+use crate::snapshot::{emit_json, record as record_snapshot, SnapshotEvent};
 use crate::transform::place_and_route::detailed_router;
 use crate::transform::place_and_route::global_pnr::ir::{
     LayoutCandidate, PhysicalPort, PhysicalPortDirection, PortConnection,
 };
 use crate::transform::place_and_route::local_placer::{
-    LocalPlacer, LocalPlacerConfig, LocalPlacerInputConstraints, PlacementSchedulePolicy,
-    PlacementScheduler,
+    LocalPlacementFailure, LocalPlacementFailureKind, LocalPlacementStage, LocalPlacer,
+    LocalPlacerConfig, LocalPlacerDebug, LocalPlacerInputConstraints, PlacementSamplingPolicy,
+    PlacementSchedulePolicy, PlacementScheduler,
 };
 use crate::transform::place_and_route::placed_node::PlacedNode;
+use crate::transform::place_and_route::sampling::SamplingPolicy;
 use crate::world::block::Block;
 use crate::world::position::{DimSize, Position};
 use crate::world::simulator::Simulator;
 use crate::world::{World, World3D};
+
+mod clustering;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UnitCandidateConfig {
@@ -29,6 +38,7 @@ pub struct UnitCandidateConfig {
     pub input_constraints: LocalPlacerInputConstraints,
     pub max_candidates: usize,
     pub combinational_sampling_limit: Option<usize>,
+    pub local_cell_contract: LocalCellContractSpec,
 }
 
 /// Local-candidate preparation policy before it is resolved against a typed
@@ -123,6 +133,7 @@ impl Default for UnitCandidateConfig {
             input_constraints: LocalPlacerInputConstraints::default(),
             max_candidates: 16,
             combinational_sampling_limit: None,
+            local_cell_contract: LocalCellContractSpec::default(),
         }
     }
 }
@@ -166,7 +177,7 @@ fn generate_routable_module_candidates(
     input_mode: CandidateInputMode,
 ) -> eyre::Result<Vec<LayoutCandidate>> {
     let graph = graph_from_routable_leaf(module)?;
-    let ports = module
+    let ports: Vec<_> = module
         .ports
         .iter()
         .map(|port| {
@@ -180,14 +191,39 @@ fn generate_routable_module_candidates(
             )
         })
         .collect();
-    generate_unit_candidates(
+    let clustered = clustering::try_generate_clustered_candidates(
+        &module.name,
+        &graph,
+        &ports,
+        config,
+        progress_label,
+        input_mode,
+    )?;
+    let mut candidates = generate_unit_candidates(
         &module.name,
         graph,
         ports,
         config,
         progress_label,
         input_mode,
-    )
+    )?;
+    if let Some(clustered) = clustered {
+        candidates.extend(clustered);
+        // Clustering is an additional search representation, not a forced
+        // replacement. Keep the compact monolithic result when composition
+        // overhead outweighs the benefit, while retaining clustered layouts
+        // when they win on physical cost.
+        candidates.sort_by_key(|candidate| {
+            (
+                candidate.cost.bbox_volume,
+                candidate.cost.block_count,
+                candidate.cost.bbox_height,
+                candidate.cost.bbox_footprint,
+            )
+        });
+        candidates.truncate(config.max_candidates.max(1));
+    }
+    Ok(candidates)
 }
 
 #[derive(Clone, Debug)]
@@ -228,6 +264,7 @@ fn generate_unit_candidates(
     let mut generated_count = 0usize;
     let mut truth_table_rejections = 0usize;
     let mut port_rejections = 0usize;
+    let mut contract_rejections = 0usize;
     let mut schedules = if config.local_config.schedule == PlacementSchedulePolicy::Auto {
         PlacementScheduler::new(&graph).candidates()
     } else {
@@ -240,6 +277,8 @@ fn generate_unit_candidates(
     schedules.sort_by_key(|schedule| (schedule.order != topological_order, schedule.metrics));
     let schedule_count = schedules.len();
     let mut attempted_schedules = 0usize;
+    let mut adaptive_retries = 0usize;
+    let mut schedule_reports = Vec::new();
 
     for (schedule_attempt, schedule) in schedules.into_iter().enumerate() {
         if candidates.len() >= config.max_candidates {
@@ -258,45 +297,115 @@ fn generate_unit_candidates(
                 "trying local placement schedule"
             );
         }
-        let placer =
-            LocalPlacer::new_with_visit_order(graph.clone(), config.local_config, schedule.order)?;
-        let mut placed = match input_mode {
-            CandidateInputMode::ExternalPorts => placer
-                .generate_with_outputs_and_planned_inputs_progress(
+        let accepted_before = candidates.len();
+        let mut failures = Vec::new();
+        let mut local_config = config.local_config;
+        let mut adaptive_attempt = 0usize;
+        let placed = loop {
+            let placer = LocalPlacer::new_with_visit_order(
+                graph.clone(),
+                local_config,
+                schedule.order.clone(),
+            )?;
+            let mut debug = LocalPlacerDebug::default();
+            let mut placed = match input_mode {
+                CandidateInputMode::ExternalPorts => placer
+                    .generate_with_outputs_and_planned_inputs_debug_progress(
+                        config.dim,
+                        None,
+                        &config.input_constraints,
+                        Some(&mut debug),
+                        progress_label,
+                    ),
+                CandidateInputMode::MaterializedSwitches => placer
+                    .generate_with_outputs_and_input_constraints_debug_progress(
+                        config.dim,
+                        None,
+                        &config.input_constraints,
+                        Some(&mut debug),
+                        progress_label,
+                    ),
+            };
+            if input_mode == CandidateInputMode::ExternalPorts && placed.is_empty() {
+                tracing::info!(
+                    module = module_name,
+                    "planned child inputs produced no candidates; retrying incremental input placement"
+                );
+                debug = LocalPlacerDebug::default();
+                placed = placer.generate_with_outputs_and_input_constraints_debug_progress(
                     config.dim,
                     None,
                     &config.input_constraints,
+                    Some(&mut debug),
                     progress_label,
-                ),
-            CandidateInputMode::MaterializedSwitches => placer
-                .generate_with_outputs_and_input_constraints_progress(
-                    config.dim,
-                    None,
-                    &config.input_constraints,
-                    progress_label,
-                ),
-        };
-        if input_mode == CandidateInputMode::ExternalPorts && placed.is_empty() {
+                );
+            }
+            if !placed.is_empty() {
+                break placed;
+            }
+
+            let Some(failure) = debug.failure() else {
+                break placed;
+            };
+            failures.push(failure.clone());
+            tracing::debug!(
+                module = module_name,
+                stage = ?failure.stage,
+                failure = ?failure.kind,
+                step = failure.step + 1,
+                total_steps = failure.total_steps,
+                node_id = failure.node_id,
+                node_kind = failure.node_kind,
+                input_candidates = failure.input_candidates,
+                generated_candidates = failure.generated_candidates,
+                route_calls = failure.route_calls,
+                route_candidates = failure.route_candidates,
+                "local candidate frontier exhausted"
+            );
+
+            if adaptive_attempt >= 1 {
+                break placed;
+            }
+            let Some(escalated) = adaptive_retry_config(local_config, &failure) else {
+                break placed;
+            };
+            adaptive_attempt += 1;
+            adaptive_retries += 1;
             tracing::info!(
                 module = module_name,
-                "planned child inputs produced no candidates; retrying incremental input placement"
+                stage = ?failure.stage,
+                retry = adaptive_attempt,
+                max_retries = 1,
+                max_not_route_step = escalated.max_not_route_step,
+                max_route_step = escalated.max_route_step,
+                "retrying local candidate generation with a bounded stage-specific budget"
             );
-            placed = placer.generate_with_outputs_and_input_constraints_progress(
-                config.dim,
-                None,
-                &config.input_constraints,
-                progress_label,
-            );
-        }
+            local_config = escalated;
+        };
+        let placed_count = placed.len();
         generated_count += placed.len();
 
         for placed in placed {
             if candidates.len() >= config.max_candidates {
                 break;
             }
-            if validate_truth_table && !candidate_matches_truth_table(&graph, &placed)? {
-                truth_table_rejections += 1;
-                continue;
+            if validate_truth_table {
+                match candidate_matches_truth_table(&graph, &placed) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        truth_table_rejections += 1;
+                        continue;
+                    }
+                    Err(error) => {
+                        tracing::debug!(
+                            module = module_name,
+                            error = %error,
+                            "rejecting local candidate with incomplete or invalid endpoints"
+                        );
+                        port_rejections += 1;
+                        continue;
+                    }
+                }
             }
             let (world, physical_ports) = candidate_layout(
                 &ports,
@@ -311,12 +420,26 @@ fn generate_unit_candidates(
                 port_rejections += 1;
                 continue;
             }
-            candidates.push(LayoutCandidate::from_world(
-                module_name.to_owned(),
-                world,
-                physical_ports,
-            )?);
+            let mut candidate =
+                LayoutCandidate::from_world(module_name.to_owned(), world, physical_ports)?;
+            if !candidate_satisfies_local_cell_contract(&mut candidate, &config.local_cell_contract)
+            {
+                contract_rejections += 1;
+                continue;
+            }
+            candidates.push(candidate);
         }
+        schedule_reports.push(LocalScheduleAttemptReport {
+            attempt: schedule_attempt + 1,
+            input_lifetime: schedule.metrics.input_lifetime,
+            peak_frontier: schedule.metrics.peak_frontier,
+            total_frontier: schedule.metrics.total_frontier,
+            edge_lifetime: schedule.metrics.edge_lifetime,
+            adaptive_retries: adaptive_attempt,
+            generated: placed_count,
+            accepted: candidates.len() - accepted_before,
+            failures,
+        });
     }
     tracing::info!(
         module = module_name,
@@ -325,9 +448,272 @@ fn generate_unit_candidates(
         attempted_schedules,
         truth_table_rejections,
         port_rejections,
+        contract_rejections,
         "local candidate validation completed"
     );
+    let report = LocalCandidateSearchReport {
+        format: "redstone-compiler.local-candidate-search.v1",
+        module: module_name,
+        requested_candidates: config.max_candidates,
+        schedules_available: schedule_count,
+        attempted_schedules,
+        adaptive_retries,
+        generated: generated_count,
+        accepted: candidates.len(),
+        truth_table_rejections,
+        port_rejections,
+        attempts: schedule_reports,
+        candidates: candidates
+            .iter()
+            .enumerate()
+            .map(|(index, candidate)| LocalCandidateQuality {
+                index,
+                volume: candidate.cost.bbox_volume,
+                footprint: candidate.cost.bbox_footprint,
+                height: candidate.cost.bbox_height,
+                blocks: candidate.cost.block_count,
+                port_access_count: candidate.cost.port_access_points,
+            })
+            .collect(),
+    };
+    emit_json(
+        format!(
+            "candidates/search/{}.json",
+            snapshot_file_component(module_name)
+        ),
+        &report,
+    )?;
+    record_snapshot(SnapshotEvent::LocalCandidateSearch {
+        module: module_name.to_owned(),
+        attempted_schedules,
+        adaptive_retries,
+        failures: report
+            .attempts
+            .iter()
+            .map(|attempt| attempt.failures.len())
+            .sum(),
+        generated: generated_count,
+        accepted: candidates.len(),
+    });
     Ok(candidates)
+}
+
+fn candidate_satisfies_local_cell_contract(
+    candidate: &mut LayoutCandidate,
+    contract: &LocalCellContractSpec,
+) -> bool {
+    if contract.max_bbox.is_none() && contract.ports.is_empty() {
+        return true;
+    }
+
+    // A cell package includes both occupied blocks and its declared routing
+    // access points. This prevents an otherwise small world from satisfying a
+    // bbox contract while exposing a pin outside that package.
+    let mut min = candidate.bbox.min;
+    let mut max = candidate.bbox.max;
+    for position in candidate
+        .ports
+        .iter()
+        .flat_map(|port| std::iter::once(port.position).chain(port.routing_access_positions()))
+    {
+        min.0 = min.0.min(position.0);
+        min.1 = min.1.min(position.1);
+        min.2 = min.2.min(position.2);
+        max.0 = max.0.max(position.0);
+        max.1 = max.1.max(position.1);
+        max.2 = max.2.max(position.2);
+    }
+
+    if let Some(limit) = contract.max_bbox {
+        let extent = [max.0 - min.0 + 1, max.1 - min.1 + 1, max.2 - min.2 + 1];
+        if extent
+            .into_iter()
+            .zip(limit)
+            .any(|(actual, maximum)| actual > maximum)
+        {
+            return false;
+        }
+    }
+
+    for (name, requirement) in &contract.ports {
+        let Some(port) = candidate.ports.iter_mut().find(|port| port.name == *name) else {
+            return false;
+        };
+        let direction_matches = match requirement.access {
+            PortAccessDirectionSpec::Inward => port.direction == PhysicalPortDirection::Input,
+            PortAccessDirectionSpec::Outward => port.direction == PhysicalPortDirection::Output,
+            PortAccessDirectionSpec::Bidirectional => true,
+        };
+        if !direction_matches {
+            return false;
+        }
+        let matching_access = port
+            .routing_access_positions()
+            .into_iter()
+            .filter(|position| position_is_on_face(*position, min, max, requirement.face))
+            .collect::<Vec<_>>();
+        if matching_access.is_empty() {
+            return false;
+        }
+        port.route_position = matching_access.first().copied();
+        port.access_points = matching_access;
+    }
+    candidate.cost.port_access_points = candidate
+        .ports
+        .iter()
+        .map(|port| port.routing_access_positions().len())
+        .sum();
+    true
+}
+
+fn position_is_on_face(
+    position: Position,
+    min: Position,
+    max: Position,
+    face: CellFaceSpec,
+) -> bool {
+    match face {
+        CellFaceSpec::West => position.0 == min.0,
+        CellFaceSpec::East => position.0 == max.0,
+        CellFaceSpec::North => position.1 == min.1,
+        CellFaceSpec::South => position.1 == max.1,
+        CellFaceSpec::Down => position.2 == min.2,
+        CellFaceSpec::Up => position.2 == max.2,
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct LocalCandidateSearchReport<'a> {
+    format: &'static str,
+    module: &'a str,
+    requested_candidates: usize,
+    schedules_available: usize,
+    attempted_schedules: usize,
+    adaptive_retries: usize,
+    generated: usize,
+    accepted: usize,
+    truth_table_rejections: usize,
+    port_rejections: usize,
+    attempts: Vec<LocalScheduleAttemptReport>,
+    candidates: Vec<LocalCandidateQuality>,
+}
+
+#[derive(Debug, Serialize)]
+struct LocalScheduleAttemptReport {
+    attempt: usize,
+    input_lifetime: usize,
+    peak_frontier: usize,
+    total_frontier: usize,
+    edge_lifetime: usize,
+    adaptive_retries: usize,
+    generated: usize,
+    accepted: usize,
+    failures: Vec<LocalPlacementFailure>,
+}
+
+#[derive(Debug, Serialize)]
+struct LocalCandidateQuality {
+    index: usize,
+    volume: usize,
+    footprint: usize,
+    height: usize,
+    blocks: usize,
+    port_access_count: usize,
+}
+
+fn snapshot_file_component(name: &str) -> String {
+    if name.is_empty() {
+        return "unnamed".to_owned();
+    }
+    let mut encoded = String::new();
+    for byte in name.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_') {
+            encoded.push(char::from(byte));
+        } else {
+            use std::fmt::Write as _;
+            let _ = write!(encoded, "%{byte:02X}");
+        }
+    }
+    encoded
+}
+
+fn adaptive_retry_config(
+    config: LocalPlacerConfig,
+    failure: &LocalPlacementFailure,
+) -> Option<LocalPlacerConfig> {
+    let mut retry = config;
+    match failure.stage {
+        LocalPlacementStage::NotRouting => {
+            if failure.kind == LocalPlacementFailureKind::RouteDepthExhausted {
+                retry.max_not_route_step = grow_route_depth(config.max_not_route_step);
+            }
+            if failure.kind == LocalPlacementFailureKind::RouteBeamExhausted {
+                retry.not_route_step_sampling_policy =
+                    grow_sampling(config.not_route_step_sampling_policy);
+            }
+            retry.step_sampling_policy = grow_sampling(config.step_sampling_policy);
+            retry.placement_sampling_policy =
+                grow_placement_sampling(config.placement_sampling_policy);
+        }
+        LocalPlacementStage::OrRouting => {
+            if failure.kind == LocalPlacementFailureKind::RouteDepthExhausted {
+                retry.max_route_step = grow_route_depth(config.max_route_step);
+            }
+            if failure.kind == LocalPlacementFailureKind::RouteBeamExhausted {
+                retry.route_step_sampling_policy = grow_sampling(config.route_step_sampling_policy);
+            }
+            retry.step_sampling_policy = grow_sampling(config.step_sampling_policy);
+            retry.placement_sampling_policy =
+                grow_placement_sampling(config.placement_sampling_policy);
+        }
+        LocalPlacementStage::SequentialPlacement | LocalPlacementStage::OtherPlacement => {
+            retry.step_sampling_policy = grow_sampling(config.step_sampling_policy);
+            retry.placement_sampling_policy =
+                grow_placement_sampling(config.placement_sampling_policy);
+        }
+        LocalPlacementStage::InputPlacement | LocalPlacementStage::OutputPlacement => return None,
+    }
+    (retry != config).then_some(retry)
+}
+
+fn grow_route_depth(depth: usize) -> usize {
+    if depth == 0 {
+        0
+    } else {
+        depth.saturating_mul(2).min(16)
+    }
+}
+
+fn grow_sampling(policy: SamplingPolicy) -> SamplingPolicy {
+    match policy {
+        SamplingPolicy::None => SamplingPolicy::None,
+        SamplingPolicy::Take(count) => SamplingPolicy::Take(count.saturating_mul(2)),
+        SamplingPolicy::Random(count) => SamplingPolicy::Random(count.saturating_mul(2)),
+    }
+}
+
+fn grow_placement_sampling(policy: PlacementSamplingPolicy) -> PlacementSamplingPolicy {
+    match policy {
+        PlacementSamplingPolicy::StepPolicy => PlacementSamplingPolicy::StepPolicy,
+        PlacementSamplingPolicy::Cost {
+            count,
+            random_count,
+            start_step,
+        } => PlacementSamplingPolicy::Cost {
+            count: count.saturating_mul(2),
+            random_count: random_count.saturating_mul(2),
+            start_step,
+        },
+        PlacementSamplingPolicy::Ranked {
+            count,
+            random_count,
+            start_step,
+        } => PlacementSamplingPolicy::Ranked {
+            count: count.saturating_mul(2),
+            random_count: random_count.saturating_mul(2),
+            start_step,
+        },
+    }
 }
 
 fn candidate_ports_cover_module_ports(expected: &[CandidatePort], actual: &[PhysicalPort]) -> bool {
@@ -740,6 +1126,7 @@ pub fn d_latch_child_candidate_config(local_config: LocalPlacerConfig) -> UnitCa
             .with_input_positions("en", [Position(0, 6, 1)]),
         max_candidates: 1,
         combinational_sampling_limit: None,
+        local_cell_contract: LocalCellContractSpec::default(),
     }
 }
 
@@ -747,6 +1134,189 @@ pub fn d_latch_child_candidate_config(local_config: LocalPlacerConfig) -> UnitCa
 mod tests {
     use super::*;
     use crate::world::block::{BlockKind, Direction};
+
+    fn contract_test_candidate(port_position: Position) -> LayoutCandidate {
+        let mut world = World3D::new(DimSize(6, 6, 4));
+        world[Position(1, 1, 1)] = PlacedNode::new_cobble(Position(1, 1, 1)).block;
+        world[Position(3, 3, 2)] = PlacedNode::new_cobble(Position(3, 3, 2)).block;
+        LayoutCandidate::from_world(
+            "contract-test".to_owned(),
+            world,
+            vec![PhysicalPort {
+                name: "a".to_owned(),
+                direction: PhysicalPortDirection::Input,
+                position: port_position,
+                route_position: None,
+                access_points: vec![port_position],
+                connection: PortConnection::Direct,
+            }],
+        )
+        .expect("candidate")
+    }
+
+    fn west_input_contract(max_bbox: [usize; 3]) -> LocalCellContractSpec {
+        LocalCellContractSpec {
+            max_bbox: Some(max_bbox),
+            ports: BTreeMap::from([(
+                "a".to_owned(),
+                crate::ir::PortAccessSpec {
+                    face: CellFaceSpec::West,
+                    access: PortAccessDirectionSpec::Inward,
+                },
+            )]),
+        }
+    }
+
+    #[test]
+    fn local_cell_contract_accepts_candidate_inside_bbox_with_on_face_pin() {
+        let mut candidate = contract_test_candidate(Position(1, 2, 1));
+
+        assert!(candidate_satisfies_local_cell_contract(
+            &mut candidate,
+            &west_input_contract([3, 3, 2])
+        ));
+    }
+
+    #[test]
+    fn local_cell_contract_rejects_oversized_candidate() {
+        let mut candidate = contract_test_candidate(Position(1, 2, 1));
+
+        assert!(!candidate_satisfies_local_cell_contract(
+            &mut candidate,
+            &west_input_contract([2, 3, 2])
+        ));
+    }
+
+    #[test]
+    fn local_cell_contract_rejects_off_face_pin() {
+        let mut candidate = contract_test_candidate(Position(2, 2, 1));
+
+        assert!(!candidate_satisfies_local_cell_contract(
+            &mut candidate,
+            &west_input_contract([3, 3, 2])
+        ));
+    }
+
+    fn failure(stage: LocalPlacementStage) -> LocalPlacementFailure {
+        LocalPlacementFailure {
+            stage,
+            kind: LocalPlacementFailureKind::RouteDepthExhausted,
+            step: 2,
+            total_steps: 5,
+            node_id: 3,
+            node_kind: "test".to_owned(),
+            input_candidates: 8,
+            generated_candidates: 0,
+            route_calls: 8,
+            route_candidates: 0,
+        }
+    }
+
+    #[test]
+    fn adaptive_retry_only_grows_the_failed_or_routing_budget() {
+        let config = LocalPlacerConfig {
+            max_not_route_step: 3,
+            not_route_step_sampling_policy: SamplingPolicy::Random(11),
+            max_route_step: 4,
+            route_step_sampling_policy: SamplingPolicy::Random(16),
+            placement_sampling_policy: PlacementSamplingPolicy::Ranked {
+                count: 32,
+                random_count: 4,
+                start_step: 1,
+            },
+            ..Default::default()
+        };
+
+        let retry = adaptive_retry_config(config, &failure(LocalPlacementStage::OrRouting))
+            .expect("retry config");
+
+        assert_eq!(retry.max_route_step, 8);
+        assert_eq!(retry.route_step_sampling_policy, SamplingPolicy::Random(16));
+        assert_eq!(retry.max_not_route_step, 3);
+        assert_eq!(
+            retry.not_route_step_sampling_policy,
+            SamplingPolicy::Random(11)
+        );
+        assert_eq!(
+            retry.placement_sampling_policy,
+            PlacementSamplingPolicy::Ranked {
+                count: 64,
+                random_count: 8,
+                start_step: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn adaptive_retry_grows_sampling_when_the_route_beam_was_pruned() {
+        let config = LocalPlacerConfig {
+            max_route_step: 4,
+            route_step_sampling_policy: SamplingPolicy::Random(16),
+            ..Default::default()
+        };
+        let mut failure = failure(LocalPlacementStage::OrRouting);
+        failure.kind = LocalPlacementFailureKind::RouteBeamExhausted;
+
+        let retry = adaptive_retry_config(config, &failure).expect("retry config");
+
+        assert_eq!(retry.max_route_step, 4);
+        assert_eq!(retry.route_step_sampling_policy, SamplingPolicy::Random(32));
+    }
+
+    #[test]
+    fn adaptive_retry_does_not_expand_impossible_input_constraints() {
+        assert!(adaptive_retry_config(
+            LocalPlacerConfig::default(),
+            &failure(LocalPlacementStage::InputPlacement)
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn local_candidate_search_report_serializes_failures_and_quality() {
+        let report = LocalCandidateSearchReport {
+            format: "redstone-compiler.local-candidate-search.v1",
+            module: "adder/core",
+            requested_candidates: 2,
+            schedules_available: 3,
+            attempted_schedules: 2,
+            adaptive_retries: 1,
+            generated: 4,
+            accepted: 1,
+            truth_table_rejections: 2,
+            port_rejections: 1,
+            attempts: vec![LocalScheduleAttemptReport {
+                attempt: 1,
+                input_lifetime: 3,
+                peak_frontier: 4,
+                total_frontier: 12,
+                edge_lifetime: 20,
+                adaptive_retries: 1,
+                generated: 0,
+                accepted: 0,
+                failures: vec![failure(LocalPlacementStage::OrRouting)],
+            }],
+            candidates: vec![LocalCandidateQuality {
+                index: 0,
+                volume: 245,
+                footprint: 49,
+                height: 5,
+                blocks: 65,
+                port_access_count: 3,
+            }],
+        };
+
+        let value = serde_json::to_value(report).expect("serialize report");
+        assert_eq!(value["attempts"][0]["failures"][0]["stage"], "or_routing");
+        assert_eq!(
+            value["attempts"][0]["failures"][0]["kind"],
+            "route_depth_exhausted"
+        );
+        assert_eq!(value["candidates"][0]["volume"], 245);
+        assert_eq!(value["candidates"][0]["port_access_count"], 3);
+        assert_eq!(snapshot_file_component("adder/core"), "adder%2Fcore");
+        assert_eq!(snapshot_file_component("full_adder"), "full_adder");
+    }
 
     #[test]
     fn candidate_pin_search_is_scoped_by_definition_and_port() {

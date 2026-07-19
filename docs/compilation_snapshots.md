@@ -19,6 +19,7 @@ counter.snapshot/
 |   `-- source-map.json
 |-- candidates/
 |   |-- index.json
+|   |-- search/<module>.json
 |   `-- set-<index>/
 |       |-- candidate-<index>.nbt
 |       `-- candidate-<index>.json
@@ -70,6 +71,16 @@ instance. `pnr/topology.json` assigns typed definition, instance, port, and net
 IDs. `pnr/preparation.json` records candidate bindings and a migration parity
 signature. Together these files make the snapshot a replayable boundary
 between local preparation and global PnR.
+
+Each freshly generated local definition also writes
+`candidates/search/<module>.json`. This report records schedule metrics,
+stage-classified frontier failures, bounded adaptive retries, validation
+rejections, and retained candidate quality (`volume`, `footprint`, `height`,
+`blocks`, and `port_access_count`). The per-candidate metadata beside each NBT
+duplicates those quality metrics together with its bounding box, so replay and
+viewer tooling do not need to scan the NBT to rank candidates. A persistent or
+in-memory cache hit has candidate quality metadata but no new search report,
+because no local search ran in that compilation.
 
 `summary.json` records status, total elapsed time, selected placement and route
 metrics, and typed compilation events. Failed compilation scopes still write a

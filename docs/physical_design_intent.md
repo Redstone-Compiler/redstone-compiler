@@ -278,6 +278,22 @@ every coordinate in an unconstrained continuous 3D space.
 For Redstone, `z` should initially behave as a discrete and comparatively
 expensive layer dimension, while `x` and `y` carry most floorplanning freedom.
 
+### Routable-leaf clustering and physical macro reuse
+
+Large combinational Routable leaves are searched through a bounded portfolio:
+the original monolithic leaf and a bottom-up composition of smaller physical
+clusters. Lowering provenance tags are preferred as cluster boundaries because
+they preserve semantic cones such as `partial_sum`, `sum`, and `cout` after
+technology mapping. Untagged graphs fall back to deterministic topological
+chunks.
+
+Every cluster candidate is independently simulated, then the composed world is
+routed and checked against the original leaf truth table. Recognized XOR and
+half-adder truth tables share a verified per-compilation macro candidate; only
+the boundary port roles are relabeled. The composed result is not forced: it
+competes with monolithic candidates on volume, block count, height, and
+footprint, so hierarchy cannot regress a compact leaf merely by existing.
+
 ## Physical intent semantics
 
 ### Requirements, preferences, and locks
@@ -566,6 +582,13 @@ able to choose among them based on the surrounding instances and nets.
 
 The candidate library should retain a bounded Pareto frontier, optionally with
 diversity sampling among candidates with similar metrics.
+
+The initial implementation ranks the non-dominated frontier ahead of dominated
+candidates using bbox volume, footprint, height, occupied block count, and the
+number of exposed port access points. Geometry diversity remains the bounded
+tie-breaker. This intentionally keeps the metrics separate instead of hiding
+them behind one scalar compactness score; delay, isolation halo, and historical
+routing failures can be added when those measurements become available.
 
 ### Compact-search strategy and optimality claims
 

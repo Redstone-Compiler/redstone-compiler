@@ -1,6 +1,7 @@
 pub mod assembly;
 pub mod candidate;
 mod candidate_cache;
+mod combinational_macro;
 pub mod diagnostics;
 mod free_3d;
 pub mod heuristics;
@@ -37,9 +38,11 @@ use crate::snapshot::{
 };
 use crate::transform::place_and_route::global_pnr::assembly::assemble_world;
 use crate::transform::place_and_route::global_pnr::candidate::{
-    generate_routable_module_candidates_with_progress_label,
     generate_routable_top_leaf_candidates_with_progress_label, CandidatePolicySet,
     UnitCandidateConfig,
+};
+use crate::transform::place_and_route::global_pnr::combinational_macro::{
+    CombinationalMacroLibrary, MacroCandidateSource,
 };
 pub use crate::transform::place_and_route::global_pnr::heuristics::GlobalHeuristicHooks;
 use crate::transform::place_and_route::global_pnr::ir::{LayoutCandidate, PhysicalPortDirection};
@@ -1511,6 +1514,7 @@ fn prepare_routable_child_candidate_sets(
     let started = Instant::now();
     let mut bindings = Vec::new();
     let mut cache = ChildCandidateCache::default();
+    let mut macro_library = CombinationalMacroLibrary::default();
     let mut reused = 0usize;
     let mut candidate_references = 0usize;
     for (index, instance) in instances.iter().enumerate() {
@@ -1547,11 +1551,17 @@ fn prepare_routable_child_candidate_sets(
                         )),
                     }
                 }
-                let candidates = generate_routable_module_candidates_with_progress_label(
+                let (candidates, macro_source) = macro_library.candidates_for(
                     child,
                     &child_config,
                     config.show_progress.then_some(instance.name.as_str()),
                 )?;
+                if macro_source == MacroCandidateSource::ReusedVerifiedMacro {
+                    progress.detail(format!(
+                        "`{}` reused a verified combinational macro",
+                        instance.name
+                    ));
+                }
                 if let Some(root) = config.candidate_cache_dir.as_deref()
                     && let Err(error) = candidate_cache::store(root, &persistent_key, &candidates)
                 {

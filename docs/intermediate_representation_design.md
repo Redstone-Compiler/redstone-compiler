@@ -132,6 +132,7 @@ RoutableDocument
 |- named pnr.design profiles
 |- explicit module/leaf profile bindings
 |- port-local @pnr.pin_search annotations
+|- hard local-cell packaging and port-access contracts
 `- PhysicalSpec
 ```
 
@@ -158,6 +159,32 @@ An input port may carry the object-local coordinate constraint
 ordered list, and a `free3d` entry represents a deterministic Cartesian sweep
 of clearances (outer loop) and seeds (inner loop). `physical {}` appears after
 the circuit modules and holds regions and multi-object constraints.
+
+Hard requirements on a generated leaf stay directly beside that leaf rather
+than inside its reusable search profile:
+
+```text
+@pnr.candidate(profile = "cell-search")
+@pnr.max_bbox(size = [8, 6, 4])
+leaf "compact_xor" {
+  @pnr.pin_search(positions = [[0, 2, 1]])
+  @pnr.pin(face = west, access = inward)
+  port input "a";
+
+  @pnr.pin(face = east, access = outward)
+  port output "y";
+  ...
+}
+```
+
+`search-box` controls where candidate generation searches;
+`@pnr.max_bbox` is a packaging contract that every accepted realization must
+eventually satisfy. The parser already rejects zero dimensions, pin-search
+coordinates outside the box, and coordinates that contradict the declared
+face. Faces use the local cell axes (`west/east` = x, `north/south` = depth,
+`down/up` = height). `access` describes the legal signal direction relative to
+the cell. Enforcement against generated worlds belongs at the candidate
+acceptance boundary, not in the RCIR parser.
 
 The compileable boundary is the entire document:
 

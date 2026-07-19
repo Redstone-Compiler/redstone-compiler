@@ -33,7 +33,10 @@ pub use config::{
     PlacementSamplingPolicy, PlacementSchedulePolicy, TorchPlacementStrategy,
     K_MAX_LOCAL_PLACE_NODE_COUNT,
 };
-pub use debug::{LocalPlacerDebug, RouteDebug, RouteDepthDebug, RouteRejectReason, StepDebug};
+pub use debug::{
+    LocalPlacementFailure, LocalPlacementFailureKind, LocalPlacementStage, LocalPlacerDebug,
+    RouteDebug, RouteDepthDebug, RouteRejectReason, StepDebug,
+};
 use isolation::RouteIsolation;
 pub use scheduler::{PlacementSchedule, PlacementScheduleMetrics, PlacementScheduler};
 use state::PlacementState;
@@ -231,10 +234,27 @@ impl LocalPlacer {
         input_constraints: &LocalPlacerInputConstraints,
         progress_label: Option<&str>,
     ) -> Vec<PlacedWorld> {
+        self.generate_with_outputs_and_input_constraints_debug_progress(
+            dim,
+            finish_step,
+            input_constraints,
+            None,
+            progress_label,
+        )
+    }
+
+    pub fn generate_with_outputs_and_input_constraints_debug_progress(
+        &self,
+        dim: DimSize,
+        finish_step: Option<usize>,
+        input_constraints: &LocalPlacerInputConstraints,
+        debug: Option<&mut LocalPlacerDebug>,
+        progress_label: Option<&str>,
+    ) -> Vec<PlacedWorld> {
         self.generate_queue(
             dim,
             finish_step,
-            None,
+            debug,
             Some(input_constraints),
             progress_label,
         )
@@ -258,16 +278,34 @@ impl LocalPlacer {
         input_constraints: &LocalPlacerInputConstraints,
         progress_label: Option<&str>,
     ) -> Vec<PlacedWorld> {
+        self.generate_with_outputs_and_planned_inputs_debug_progress(
+            dim,
+            finish_step,
+            input_constraints,
+            None,
+            progress_label,
+        )
+    }
+
+    pub fn generate_with_outputs_and_planned_inputs_debug_progress(
+        &self,
+        dim: DimSize,
+        finish_step: Option<usize>,
+        input_constraints: &LocalPlacerInputConstraints,
+        debug: Option<&mut LocalPlacerDebug>,
+        progress_label: Option<&str>,
+    ) -> Vec<PlacedWorld> {
         if !self.inputs_form_initial_prefix()
             || !matches!(
                 self.config.placement_sampling_policy,
                 PlacementSamplingPolicy::StepPolicy
             )
         {
-            return self.generate_with_outputs_and_input_constraints_progress(
+            return self.generate_with_outputs_and_input_constraints_debug_progress(
                 dim,
                 finish_step,
                 input_constraints,
+                debug,
                 progress_label,
             );
         }
@@ -275,6 +313,7 @@ impl LocalPlacer {
             dim,
             finish_step,
             Some(input_constraints),
+            debug,
             progress_label,
         )
         .into_iter()
@@ -379,13 +418,14 @@ impl LocalPlacer {
         dim: DimSize,
         finish_step: Option<usize>,
         input_constraints: Option<&LocalPlacerInputConstraints>,
+        debug: Option<&mut LocalPlacerDebug>,
         progress_label: Option<&str>,
     ) -> PlacerQueue {
         let queue = self.initial_pin_plan_queue(dim, input_constraints);
         self.generate_queue_from_with_input_constraints(
             queue,
             finish_step,
-            None,
+            debug,
             input_constraints,
             progress_label,
         )
@@ -574,6 +614,18 @@ impl LocalPlacer {
             total_steps: self.visit_orders.len(),
             node_id: node.id,
             node_kind: format!("{:?}", node.kind),
+            stage: match &node.kind {
+                GraphNodeKind::Input(_) => LocalPlacementStage::InputPlacement,
+                GraphNodeKind::Logic(logic) if logic.logic_type == LogicType::Not => {
+                    LocalPlacementStage::NotRouting
+                }
+                GraphNodeKind::Logic(logic) if logic.logic_type == LogicType::Or => {
+                    LocalPlacementStage::OrRouting
+                }
+                GraphNodeKind::Sequential(_) => LocalPlacementStage::SequentialPlacement,
+                GraphNodeKind::Output(_) => LocalPlacementStage::OutputPlacement,
+                _ => LocalPlacementStage::OtherPlacement,
+            },
             input_node_ids: node.inputs.clone(),
             input_positions,
             input_queue_len,

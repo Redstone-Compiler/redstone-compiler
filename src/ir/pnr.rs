@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::RoutableDesign;
+use super::{RoutableDesign, RoutableModuleBody};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RoutableDocument {
@@ -17,6 +17,8 @@ pub struct RoutableDocument {
     pub design_bindings: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub pin_search: BTreeMap<PortRef, Vec<[usize; 3]>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub local_cell_contracts: BTreeMap<String, LocalCellContractSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub physical: Option<PhysicalSpec>,
 }
@@ -30,8 +32,69 @@ impl RoutableDocument {
             candidate_bindings: BTreeMap::new(),
             design_bindings: BTreeMap::new(),
             pin_search: BTreeMap::new(),
+            local_cell_contracts: BTreeMap::new(),
             physical: None,
         }
+    }
+
+    pub fn validate_local_cell_contracts(&self) -> eyre::Result<()> {
+        for (definition, contract) in &self.local_cell_contracts {
+            let module = self
+                .design
+                .modules
+                .iter()
+                .find(|module| module.name == *definition)
+                .ok_or_else(|| {
+                    eyre::eyre!("local-cell contract references unknown leaf `{definition}`")
+                })?;
+            if !matches!(module.body, RoutableModuleBody::Leaf { .. }) {
+                eyre::bail!("local-cell contract `{definition}` references a composite module");
+            }
+            if let Some(size) = contract.max_bbox {
+                if size.contains(&0) {
+                    eyre::bail!(
+                        "@pnr.max_bbox on leaf `{definition}` requires non-zero dimensions"
+                    );
+                }
+            }
+            for port_name in contract.ports.keys() {
+                if !module.ports.iter().any(|port| port.name == *port_name) {
+                    eyre::bail!("@pnr.pin references unknown port `{definition}.{port_name}`");
+                }
+            }
+            for (key, positions) in self
+                .pin_search
+                .iter()
+                .filter(|(key, _)| key.definition == *definition)
+            {
+                if let Some(size) = contract.max_bbox {
+                    for position in positions {
+                        if position
+                            .iter()
+                            .zip(size)
+                            .any(|(coordinate, limit)| *coordinate >= limit)
+                        {
+                            eyre::bail!(
+                                "@pnr.pin_search position {:?} exceeds @pnr.max_bbox {:?} on `{}.{}`",
+                                position, size, key.definition, key.port
+                            );
+                        }
+                        if let Some(access) = contract.ports.get(&key.port) {
+                            if !access.face.contains(*position, size) {
+                                eyre::bail!(
+                                    "@pnr.pin_search position {:?} is not on the required {} face of `{}.{}`",
+                                    position,
+                                    access.face.as_str(),
+                                    key.definition,
+                                    key.port
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -74,6 +137,66 @@ pub struct LocalPlacerSpec {
     pub not_route_step_sampling: SamplingSpec,
     pub max_route_step: usize,
     pub route_step_sampling: SamplingSpec,
+}
+
+/// Hard packaging and routing-access requirements attached to one leaf definition.
+///
+/// These are contracts, not search hints: a realized candidate must satisfy them.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalCellContractSpec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bbox: Option<[usize; 3]>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub ports: BTreeMap<String, PortAccessSpec>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortAccessSpec {
+    pub face: CellFaceSpec,
+    pub access: PortAccessDirectionSpec,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CellFaceSpec {
+    West,
+    East,
+    Down,
+    Up,
+    North,
+    South,
+}
+
+impl CellFaceSpec {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::West => "west",
+            Self::East => "east",
+            Self::Down => "down",
+            Self::Up => "up",
+            Self::North => "north",
+            Self::South => "south",
+        }
+    }
+
+    fn contains(self, position: [usize; 3], size: [usize; 3]) -> bool {
+        match self {
+            Self::West => position[0] == 0,
+            Self::East => position[0] + 1 == size[0],
+            Self::Down => position[2] == 0,
+            Self::Up => position[2] + 1 == size[2],
+            Self::North => position[1] == 0,
+            Self::South => position[1] + 1 == size[1],
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PortAccessDirectionSpec {
+    Inward,
+    Outward,
+    Bidirectional,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

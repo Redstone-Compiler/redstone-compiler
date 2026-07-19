@@ -43,6 +43,7 @@ pub fn routable_document_from_config(
     let mut pin_search = BTreeMap::new();
     let mut candidate_profiles = BTreeMap::new();
     let mut candidate_bindings = BTreeMap::new();
+    let mut local_cell_contracts = BTreeMap::new();
     let mut interned_profiles = Vec::<(String, CandidateSpec)>::new();
 
     for module in &design.modules {
@@ -54,6 +55,9 @@ pub fn routable_document_from_config(
             .definition_overrides
             .get(&module.name)
             .unwrap_or(&config.candidate.default);
+        if policy.local_cell_contract != Default::default() {
+            local_cell_contracts.insert(module.name.clone(), policy.local_cell_contract.clone());
+        }
         let candidate_spec = candidate_spec_from_policy(policy);
         let profile = interned_profiles
             .iter()
@@ -130,6 +134,7 @@ pub fn routable_document_from_config(
         candidate_bindings,
         design_bindings,
         pin_search,
+        local_cell_contracts,
         physical: config
             .physical_intent
             .as_ref()
@@ -143,6 +148,7 @@ pub fn apply_routable_document(
     config: &mut GlobalPnrConfig,
 ) -> eyre::Result<()> {
     document.design.validate()?;
+    document.validate_local_cell_contracts()?;
     let design_profile_name = document
         .design_bindings
         .get(&document.design.top)
@@ -171,7 +177,13 @@ pub fn apply_routable_document(
             .candidate_profiles
             .get(profile_name)
             .with_context(|| format!("missing pnr.candidate profile `{profile_name}`"))?;
-        resolved_candidates.push((module.name.clone(), candidate_policy_from_spec(profile)));
+        let mut policy = candidate_policy_from_spec(profile);
+        policy.local_cell_contract = document
+            .local_cell_contracts
+            .get(&module.name)
+            .cloned()
+            .unwrap_or_default();
+        resolved_candidates.push((module.name.clone(), policy));
     }
     let (_, default_candidate) = resolved_candidates
         .first()
@@ -318,6 +330,7 @@ fn candidate_policy_from_spec(spec: &CandidateSpec) -> UnitCandidateConfig {
         input_constraints: LocalPlacerInputConstraints::default(),
         max_candidates: spec.retain,
         combinational_sampling_limit: spec.combinational_samples,
+        local_cell_contract: Default::default(),
     }
 }
 
@@ -912,6 +925,7 @@ fn array_position(position: [usize; 3]) -> Position {
 mod tests {
     use super::*;
     use crate::ir::{
+        CellFaceSpec, LocalCellContractSpec, PortAccessDirectionSpec, PortAccessSpec,
         RoutableModule, RoutableModuleBody, RoutableNode, RoutableNodeKind, RoutablePort,
         RoutablePortDirection, ROUTABLE_IR_TARGET, ROUTABLE_IR_VERSION,
     };
@@ -952,6 +966,16 @@ mod tests {
                 .with_pin_search("leaf", "a", [Position(1, 2, 3)]);
         let mut leaf_policy = original.candidate.default.clone();
         leaf_policy.max_candidates = 3;
+        leaf_policy.local_cell_contract = LocalCellContractSpec {
+            max_bbox: Some([4, 4, 4]),
+            ports: BTreeMap::from([(
+                "a".to_owned(),
+                PortAccessSpec {
+                    face: CellFaceSpec::Up,
+                    access: PortAccessDirectionSpec::Inward,
+                },
+            )]),
+        };
         original
             .candidate
             .definition_overrides
@@ -974,6 +998,8 @@ mod tests {
         assert!(text.contains("profile pnr.design \"leaf-design\""));
         assert!(text.contains("@pnr.candidate(profile = \"leaf-cell-search\")"));
         assert!(text.contains("@pnr.design(profile = \"leaf-design\")"));
+        assert!(text.contains("@pnr.max_bbox(size = [4, 4, 4])"));
+        assert!(text.contains("@pnr.pin(face = up, access = inward)"));
         assert!(!text.contains("candidate-defaults"));
         let parsed: RoutableDocument = text.parse()?;
         let mut restored = GlobalPnrConfig::default();

@@ -89,6 +89,14 @@ pub enum SnapshotEvent {
         candidates: usize,
         elapsed_ms: u64,
     },
+    LocalCandidateSearch {
+        module: String,
+        attempted_schedules: usize,
+        adaptive_retries: usize,
+        failures: usize,
+        generated: usize,
+        accepted: usize,
+    },
     RoutingProgress {
         attempt: usize,
         total_attempts: usize,
@@ -555,6 +563,24 @@ mod tests {
     fn rejects_artifact_paths_outside_snapshot() {
         assert!(checked_relative_path(PathBuf::from("../outside.json")).is_err());
         assert!(checked_relative_path(PathBuf::from("inside/data.json")).is_ok());
+    }
+
+    #[test]
+    fn local_candidate_search_event_has_stable_serialized_fields() {
+        let value = serde_json::to_value(SnapshotEvent::LocalCandidateSearch {
+            module: "adder".to_owned(),
+            attempted_schedules: 2,
+            adaptive_retries: 1,
+            failures: 1,
+            generated: 8,
+            accepted: 2,
+        })
+        .expect("serialize event");
+
+        assert_eq!(value["kind"], "local_candidate_search");
+        assert_eq!(value["module"], "adder");
+        assert_eq!(value["adaptive_retries"], 1);
+        assert_eq!(value["accepted"], 2);
     }
 
     #[test]
