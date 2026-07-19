@@ -1,4 +1,5 @@
 mod adapter;
+pub mod debug;
 pub(crate) use adapter::graph_from_routable_leaf;
 pub mod logical;
 mod logical_adapter;
@@ -12,6 +13,7 @@ mod text;
 use std::fmt;
 use std::str::FromStr;
 
+pub use debug::{DebugLocation, DebugLocationId, DebugRange, IrDebugInfo, IrSourceMap};
 pub use logical::{
     ClockEdge, LogicalBinding, LogicalCell, LogicalCellKind, LogicalDesign, LogicalInput,
     LogicalInstance, LogicalModule, LogicalNet, LogicalOutput, LogicalPort, LogicalPortDirection,

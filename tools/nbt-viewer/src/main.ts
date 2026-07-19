@@ -118,6 +118,28 @@ type SnapshotConstraint = {
   instanceIds: number[];
   netIds: number[];
 };
+type SnapshotDebugLocation =
+  | {
+    kind: 'source';
+    file: string;
+    start_line: number;
+    start_column: number;
+    end_line: number;
+    end_column: number;
+  }
+  | { kind: 'derived'; label: string; parent: number }
+  | { kind: 'fused'; parents: number[] };
+type SnapshotDebugRange = {
+  entity: string;
+  start_line: number;
+  end_line: number;
+  location: number;
+};
+type SnapshotSourceMap = {
+  format: 'redstone-compiler.source-map.v1';
+  locations: SnapshotDebugLocation[];
+  documents: Record<string, SnapshotDebugRange[]>;
+};
 type LoadedSnapshot = {
   manifest: SnapshotManifest;
   filesByPath: Map<string, File>;
@@ -125,6 +147,7 @@ type LoadedSnapshot = {
   routes: SnapshotRoute[];
   constraints: SnapshotConstraint[];
   interfaceJson?: string;
+  sourceMap?: SnapshotSourceMap;
 };
 
 const TRACE_ANIMATION_INTERVAL_MS = 50;
@@ -502,6 +525,7 @@ let blocksVisible = true;
 let gridVisible = true;
 let snapshotBoxesVisible = true;
 let snapshotRoutesVisible = true;
+let pinnedIrLocations: number[] | undefined;
 
 folderInput.setAttribute('webkitdirectory', '');
 folderInput.setAttribute('directory', '');
@@ -550,7 +574,14 @@ toggleGridButton.addEventListener('click', () => {
 });
 
 window.addEventListener('keydown', event => {
-  if (event.key !== 'Escape' || (!isolatedSnapshotBoxId && !isolatedSnapshotRouteId)) return;
+  if (event.key !== 'Escape') return;
+  if (pinnedIrLocations) {
+    event.preventDefault();
+    pinnedIrLocations = undefined;
+    renderIrLocationHighlight(undefined);
+    return;
+  }
+  if (!isolatedSnapshotBoxId && !isolatedSnapshotRouteId) return;
   event.preventDefault();
   setSnapshotRouteIsolation(undefined);
   setSnapshotBoxIsolation(undefined);
@@ -1848,6 +1879,20 @@ async function parseSnapshot(files: File[]): Promise<LoadedSnapshot | undefined>
     }
 
     const interfaceJson = await filesByPath.get('interface.json')?.text();
+    let sourceMap: SnapshotSourceMap | undefined;
+    const sourceMapFile = filesByPath.get('ir/source-map.json');
+    if (sourceMapFile) {
+      try {
+        const parsed = JSON.parse(await sourceMapFile.text()) as SnapshotSourceMap;
+        if (parsed.format === 'redstone-compiler.source-map.v1'
+          && Array.isArray(parsed.locations)
+          && parsed.documents && typeof parsed.documents === 'object') {
+          sourceMap = parsed;
+        }
+      } catch (error) {
+        console.warn('Skipping invalid IR source map.', error);
+      }
+    }
     const instances: SnapshotInstance[] = [];
     for (const artifact of manifest.artifacts) {
       if (!/^instances\/[^/]+\/instance\.json$/i.test(artifact.path)) continue;
@@ -1886,7 +1931,7 @@ async function parseSnapshot(files: File[]): Promise<LoadedSnapshot | undefined>
       }
     }
 
-    return { manifest, filesByPath, instances, routes, constraints, interfaceJson };
+    return { manifest, filesByPath, instances, routes, constraints, interfaceJson, sourceMap };
   }
 
   return undefined;
@@ -2248,6 +2293,7 @@ async function openSnapshotIrViewer(paths: string[]): Promise<void> {
   artifactContent.classList.add('hidden');
   irComparison.classList.remove('hidden');
   irComparison.replaceChildren();
+  pinnedIrLocations = undefined;
 
   const sources = await Promise.all(orderedPaths.map(async path => {
     const file = currentSnapshot?.filesByPath.get(path);
@@ -2287,6 +2333,26 @@ function createIrComparisonPane(path: string, source: string): HTMLElement {
   lines.forEach((line, index) => {
     const row = document.createElement('div');
     row.className = 'ir-code-line';
+    row.dataset.irPath = path;
+    row.dataset.irLine = String(index + 1);
+    const locationIds = sourceMapLocationsForLine(path, index + 1);
+    if (locationIds.length > 0) {
+      row.classList.add('ir-code-line-linked');
+      row.dataset.irLocations = locationIds.join(',');
+      row.addEventListener('mouseenter', () => {
+        if (!pinnedIrLocations) renderIrLocationHighlight(locationIds, row);
+      });
+      row.addEventListener('mouseleave', () => {
+        if (!pinnedIrLocations) renderIrLocationHighlight(undefined);
+      });
+      row.addEventListener('click', () => {
+        const sameSelection = pinnedIrLocations?.length === locationIds.length
+          && pinnedIrLocations.every(location => locationIds.includes(location));
+        pinnedIrLocations = sameSelection ? undefined : locationIds;
+        renderIrLocationHighlight(pinnedIrLocations, sameSelection ? undefined : row);
+        if (!sameSelection) scrollRelatedIrPanesIntoView(row);
+      });
+    }
     const number = document.createElement('span');
     number.className = 'ir-line-number';
     number.textContent = String(index + 1);
@@ -2303,6 +2369,67 @@ function createIrComparisonPane(path: string, source: string): HTMLElement {
 
   pane.append(header, code);
   return pane;
+}
+
+function sourceMapLocationsForLine(path: string, line: number): number[] {
+  const ranges = currentSnapshot?.sourceMap?.documents[path]
+    ?.filter(range => range.start_line <= line && line <= range.end_line) ?? [];
+  if (ranges.length === 0) return [];
+  if (/\.v$/i.test(path)) return [...new Set(ranges.map(range => range.location))];
+  const smallestSpan = Math.min(...ranges.map(range => range.end_line - range.start_line));
+  return [...new Set(ranges
+    .filter(range => range.end_line - range.start_line === smallestSpan)
+    .map(range => range.location))];
+}
+
+function relatedIrLocations(selected: number[]): Set<number> {
+  const locations = currentSnapshot?.sourceMap?.locations ?? [];
+  const edges = new Map<number, Set<number>>();
+  const link = (left: number, right: number) => {
+    if (!edges.has(left)) edges.set(left, new Set());
+    if (!edges.has(right)) edges.set(right, new Set());
+    edges.get(left)!.add(right);
+    edges.get(right)!.add(left);
+  };
+  locations.forEach((location, index) => {
+    if (location.kind === 'derived') link(index, location.parent);
+    if (location.kind === 'fused') location.parents.forEach(parent => link(index, parent));
+  });
+  const related = new Set(selected);
+  const queue = [...selected];
+  while (queue.length > 0) {
+    const location = queue.shift()!;
+    for (const neighbor of edges.get(location) ?? []) {
+      if (related.has(neighbor)) continue;
+      related.add(neighbor);
+      queue.push(neighbor);
+    }
+  }
+  return related;
+}
+
+function irRowLocations(row: HTMLElement): number[] {
+  return (row.dataset.irLocations ?? '').split(',')
+    .filter(Boolean)
+    .map(Number)
+    .filter(Number.isInteger);
+}
+
+function renderIrLocationHighlight(selected: number[] | undefined, activeRow?: HTMLElement): void {
+  const related = selected ? relatedIrLocations(selected) : new Set<number>();
+  irComparison.querySelectorAll<HTMLElement>('.ir-code-line').forEach(row => {
+    const matches = irRowLocations(row).some(location => related.has(location));
+    row.classList.toggle('ir-location-related', matches);
+    row.classList.toggle('ir-location-selected', matches && row === activeRow);
+  });
+}
+
+function scrollRelatedIrPanesIntoView(activeRow: HTMLElement): void {
+  for (const pane of irComparison.querySelectorAll<HTMLElement>('.ir-comparison-pane')) {
+    if (pane.contains(activeRow)) continue;
+    pane.querySelector<HTMLElement>('.ir-code-line.ir-location-related')
+      ?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }
 }
 
 async function renderArtifactContent(path: string): Promise<void> {

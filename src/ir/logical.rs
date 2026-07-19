@@ -10,6 +10,8 @@ pub struct LogicalDesign {
     pub version: u32,
     pub top: String,
     pub modules: Vec<LogicalModule>,
+    #[serde(skip)]
+    pub debug: super::debug::IrDebugInfo,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

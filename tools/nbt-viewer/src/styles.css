@@ -1195,6 +1195,20 @@ input {
   background: rgb(255 255 255 / 4%);
 }
 
+.ir-code-line-linked {
+  cursor: pointer;
+}
+
+.ir-code-line.ir-location-related {
+  background: rgb(67 135 214 / 18%);
+  box-shadow: inset 3px 0 rgb(89 166 255 / 70%);
+}
+
+.ir-code-line.ir-location-selected {
+  background: rgb(230 164 63 / 24%);
+  box-shadow: inset 3px 0 #e6a43f;
+}
+
 .ir-line-number {
   position: sticky;
   left: 0;
@@ -1210,6 +1224,16 @@ input {
 .ir-code-line:hover .ir-line-number {
   background: #171c21;
   color: #9aa6af;
+}
+
+.ir-code-line.ir-location-related .ir-line-number {
+  background: #172638;
+  color: #8fc2ff;
+}
+
+.ir-code-line.ir-location-selected .ir-line-number {
+  background: #352b1c;
+  color: #ffd18a;
 }
 
 .ir-line-content {

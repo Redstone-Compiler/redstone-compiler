@@ -913,6 +913,7 @@ mod tests {
             version: ROUTABLE_IR_VERSION,
             target: ROUTABLE_IR_TARGET.to_owned(),
             top: "leaf".to_owned(),
+            debug: Default::default(),
             modules: vec![RoutableModule {
                 name: "leaf".to_owned(),
                 ports: vec![RoutablePort {
@@ -982,6 +983,7 @@ mod tests {
             version: ROUTABLE_IR_VERSION,
             target: ROUTABLE_IR_TARGET.to_owned(),
             top: "leaf".to_owned(),
+            debug: Default::default(),
             modules: vec![RoutableModule {
                 name: "leaf".to_owned(),
                 ports: Vec::new(),

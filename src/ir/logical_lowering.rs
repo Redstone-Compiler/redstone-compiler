@@ -26,7 +26,116 @@ pub(crate) fn lower_logical_to_routable(design: &LogicalDesign) -> eyre::Result<
     design.validate()?;
     let graph_design = lower_logical_design(design)
         .wrap_err("logical IR uses a construct not yet supported by redstone-v1 mapping")?;
-    RoutableDesign::from_graph_module_design(&graph_design)
+    let mut routable = RoutableDesign::from_graph_module_design(&graph_design)?;
+    routable.debug = design.debug.clone();
+    attach_routable_debug_locations(design, &mut routable);
+    Ok(routable)
+}
+
+fn attach_routable_debug_locations(design: &LogicalDesign, routable: &mut RoutableDesign) {
+    use super::debug::{logical_entity, routable_entity};
+    use super::routable::RoutableModuleBody;
+
+    let Some(logical_top) = design.module(&design.top) else {
+        return;
+    };
+    let increment = logical_top
+        .cells
+        .iter()
+        .find(|cell| matches!(cell.kind, LogicalCellKind::Inc | LogicalCellKind::Add))
+        .and_then(|cell| {
+            design
+                .debug
+                .get(&logical_entity(&logical_top.name, "cell", &cell.name))
+        });
+    let state = logical_top
+        .cells
+        .iter()
+        .find(|cell| cell.kind.is_sequential())
+        .and_then(|cell| {
+            design
+                .debug
+                .get(&logical_entity(&logical_top.name, "cell", &cell.name))
+        });
+
+    let modules = routable.modules.clone();
+    for module in modules {
+        match module.body {
+            RoutableModuleBody::Composite { instances, nets } => {
+                for instance in instances {
+                    let parent = location_for_generated_name(&instance.name, increment, state)
+                        .or_else(|| {
+                            design.debug.get(&logical_entity(
+                                &logical_top.name,
+                                "instance",
+                                &instance.name,
+                            ))
+                        });
+                    let Some(parent) = parent else { continue };
+                    let entity = routable_entity(&module.name, "instance", &instance.name);
+                    let location = routable.debug.derived(entity.clone(), parent);
+                    routable.debug.bind(entity, location);
+                }
+                for net in nets {
+                    let parent = logical_net_location(design, logical_top, &net.name)
+                        .or_else(|| location_for_generated_name(&net.name, increment, state));
+                    let Some(parent) = parent else { continue };
+                    let entity = routable_entity(&module.name, "net", &net.name);
+                    let location = routable.debug.derived(entity.clone(), parent);
+                    routable.debug.bind(entity, location);
+                }
+            }
+            RoutableModuleBody::Leaf { nodes } => {
+                let parent =
+                    location_for_generated_name(&module.name, increment, state).or_else(|| {
+                        design.debug.get(&logical_entity(
+                            &logical_top.name,
+                            "module",
+                            &logical_top.name,
+                        ))
+                    });
+                let Some(parent) = parent else { continue };
+                for node in nodes {
+                    let entity = routable_entity(&module.name, "node", &node.id.to_string());
+                    let location = routable.debug.derived(entity.clone(), parent);
+                    routable.debug.bind(entity, location);
+                }
+            }
+        }
+    }
+}
+
+fn location_for_generated_name(
+    name: &str,
+    increment: Option<usize>,
+    state: Option<usize>,
+) -> Option<usize> {
+    if name.contains("_next") || name.contains("_carry") {
+        increment
+    } else if name.contains("_clk_inv") || name.contains("_master") || name.contains("_slave") {
+        state
+    } else {
+        None
+    }
+}
+
+fn logical_net_location(
+    design: &LogicalDesign,
+    module: &LogicalModule,
+    routable_name: &str,
+) -> Option<usize> {
+    use super::debug::logical_entity;
+    if let Some(location) = design
+        .debug
+        .get(&logical_entity(&module.name, "net", routable_name))
+    {
+        return Some(location);
+    }
+    let base = routable_name
+        .rsplit_once('_')
+        .filter(|(_, suffix)| suffix.chars().all(|ch| ch.is_ascii_digit()))
+        .map_or(routable_name, |(base, _)| base);
+    design.debug.get(&logical_entity(&module.name, "net", base))
 }
 
 fn lower_logical_design(design: &LogicalDesign) -> eyre::Result<GraphModuleDesign> {

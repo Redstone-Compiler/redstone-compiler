@@ -50,6 +50,7 @@ impl FromStr for LogicalDesign {
             version,
             top,
             modules,
+            debug: Default::default(),
         };
         design.validate()?;
         Ok(design)

@@ -67,6 +67,7 @@ impl RoutableDesign {
             target: ROUTABLE_IR_TARGET.to_owned(),
             top: design.top.clone(),
             modules: definitions,
+            debug: Default::default(),
         };
         ir.validate()?;
         Ok(ir)

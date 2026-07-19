@@ -681,11 +681,17 @@ pub fn place_and_route_logical_design_with_visualization(
     config: &GlobalPnrConfig,
 ) -> eyre::Result<GlobalPnrResult> {
     design.validate()?;
+    let routable = design.lower_to_routable()?;
     if crate::snapshot::is_active() {
-        crate::snapshot::emit_text("ir/logical.rcir", design.to_string())?;
+        let logical_text = design.to_string();
+        let routable_text = routable_document_from_config(&routable, config)?.to_string();
+        let source_map =
+            crate::ir::debug::build_source_map(design, &logical_text, &routable, &routable_text);
+        crate::snapshot::emit_text("ir/logical.rcir", logical_text)?;
         crate::snapshot::emit_json("ir/logical.json", design)?;
+        crate::snapshot::emit_json("ir/source-map.json", &source_map)?;
     }
-    place_and_route_routable_design_with_visualization(&design.lower_to_routable()?, config)
+    place_and_route_routable_design_with_visualization(&routable, config)
 }
 
 pub fn place_and_route_logical_design(
@@ -2654,8 +2660,9 @@ mod tests {
               end
             endmodule
             "#;
-        let logical_input = LogicalDesign::from_verilog_modules(&parse_modules(source)?)?;
-        let logical_input: LogicalDesign = logical_input.to_string().parse()?;
+        let logical_with_debug = LogicalDesign::from_verilog_source_named(source, "counter.v")?;
+        let mut logical_input: LogicalDesign = logical_with_debug.to_string().parse()?;
+        logical_input.debug = logical_with_debug.debug;
         let sampling_limit = std::env::var("COUNTER_SAMPLING_LIMIT")
             .ok()
             .and_then(|value| value.parse().ok())

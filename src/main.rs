@@ -93,7 +93,12 @@ fn replay_snapshot_input(opt: CompilerOption) -> eyre::Result<()> {
 
 fn compile_verilog_input(opt: CompilerOption) -> eyre::Result<()> {
     let source = std::fs::read_to_string(&opt.input)?;
-    let logical = LogicalDesign::from_verilog_source(&source)?;
+    let source_name = opt
+        .input
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("source.v");
+    let logical = LogicalDesign::from_verilog_source_named(&source, source_name)?;
     let Some(output) = opt.output else {
         let cells = logical
             .modules

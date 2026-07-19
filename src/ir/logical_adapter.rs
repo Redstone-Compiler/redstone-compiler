@@ -17,8 +17,14 @@ use crate::verilog::synth::{synthesize_module, SynthCell};
 
 impl LogicalDesign {
     pub fn from_verilog_source(source: &str) -> eyre::Result<Self> {
+        Self::from_verilog_source_named(source, "source.v")
+    }
+
+    pub fn from_verilog_source_named(source: &str, file_name: &str) -> eyre::Result<Self> {
         let modules = crate::verilog::parser::parse_modules(source)?;
-        Self::from_verilog_modules(&modules)
+        let mut design = Self::from_verilog_modules(&modules)?;
+        attach_verilog_debug_locations(&mut design, file_name, source);
+        Ok(design)
     }
 
     pub fn from_verilog_modules(modules: &[VerilogModule]) -> eyre::Result<Self> {
@@ -32,6 +38,7 @@ impl LogicalDesign {
                 .iter()
                 .map(logical_module_from_verilog)
                 .collect::<eyre::Result<Vec<_>>>()?,
+            debug: Default::default(),
         };
         design.validate()?;
         Ok(design)
@@ -45,6 +52,198 @@ impl LogicalDesign {
         self.validate()?;
         self.modules.iter().map(logical_module_to_verilog).collect()
     }
+}
+
+fn attach_verilog_debug_locations(design: &mut LogicalDesign, file: &str, source: &str) {
+    use super::debug::logical_entity;
+
+    let lines = source.lines().collect::<Vec<_>>();
+    for module in &design.modules {
+        let (module_start, module_end) =
+            module_line_range(&lines, &module.name).unwrap_or((0, lines.len().saturating_sub(1)));
+        let source_location = design.debug.source(
+            file,
+            module_start + 1,
+            1,
+            module_end + 1,
+            lines.get(module_end).map_or(1, |line| line.len() + 1),
+        );
+        let module_location = design
+            .debug
+            .derived(format!("logical.module.{}", module.name), source_location);
+        design.debug.bind(
+            logical_entity(&module.name, "module", &module.name),
+            module_location,
+        );
+
+        let module_lines = &lines[module_start..=module_end];
+        let always_ranges = always_line_ranges(module_lines, module_start);
+        for net in &module.nets {
+            let line_index = (module_start..=module_end).find(|index| {
+                let line = lines[*index];
+                ["input", "output", "wire", "reg"]
+                    .iter()
+                    .any(|keyword| line.contains(keyword))
+                    && contains_word(line, &net.name)
+            });
+            let Some(line_index) = line_index else {
+                continue;
+            };
+            let source_location = line_location(&mut design.debug, file, &lines, line_index);
+            let location = design
+                .debug
+                .derived(format!("logical.net.{}", net.name), source_location);
+            design
+                .debug
+                .bind(logical_entity(&module.name, "net", &net.name), location);
+        }
+
+        for cell in &module.cells {
+            let source_range = if cell.kind.is_sequential() {
+                cell.origin
+                    .as_deref()
+                    .and_then(|origin| origin.strip_prefix("verilog.process."))
+                    .and_then(|index| index.parse::<usize>().ok())
+                    .and_then(|index| always_ranges.get(index).copied())
+            } else {
+                let output = cell.outputs.first().map(|output| output.net.as_str());
+                output.and_then(|output| {
+                    expression_line_range(&lines, module_start, module_end, output)
+                })
+            }
+            .unwrap_or((module_start, module_end));
+            let source_location = range_location(
+                &mut design.debug,
+                file,
+                &lines,
+                source_range.0,
+                source_range.1,
+            );
+            let location = design
+                .debug
+                .derived(format!("logical.cell.{}", cell.name), source_location);
+            design
+                .debug
+                .bind(logical_entity(&module.name, "cell", &cell.name), location);
+        }
+
+        for instance in &module.instances {
+            let line_index = (module_start..=module_end)
+                .find(|index| contains_word(lines[*index], &instance.name));
+            let Some(line_index) = line_index else {
+                continue;
+            };
+            let source_location = line_location(&mut design.debug, file, &lines, line_index);
+            let location = design.debug.derived(
+                format!("logical.instance.{}", instance.name),
+                source_location,
+            );
+            design.debug.bind(
+                logical_entity(&module.name, "instance", &instance.name),
+                location,
+            );
+        }
+    }
+}
+
+fn module_line_range(lines: &[&str], name: &str) -> Option<(usize, usize)> {
+    let start = lines
+        .iter()
+        .position(|line| line.contains("module") && contains_word(line, name))?;
+    let end = (start..lines.len()).find(|index| lines[*index].contains("endmodule"))?;
+    Some((start, end))
+}
+
+fn always_line_ranges(lines: &[&str], offset: usize) -> Vec<(usize, usize)> {
+    let mut result = Vec::new();
+    let mut index = 0;
+    while index < lines.len() {
+        if !lines[index].contains("always") {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        let mut depth = 0isize;
+        loop {
+            depth += count_word(lines[index], "begin") as isize;
+            depth -= count_word(lines[index], "end") as isize;
+            if depth <= 0 && index > start {
+                break;
+            }
+            index += 1;
+            if index >= lines.len() {
+                break;
+            }
+        }
+        result.push((
+            offset + start,
+            offset + index.min(lines.len().saturating_sub(1)),
+        ));
+        index += 1;
+    }
+    result
+}
+
+fn expression_line_range(
+    lines: &[&str],
+    start: usize,
+    end: usize,
+    output: &str,
+) -> Option<(usize, usize)> {
+    let base = output.strip_suffix("_next").unwrap_or(output);
+    (start..=end).find_map(|index| {
+        let line = lines[index];
+        let is_assignment = (line.contains("<=") && contains_word(line, base))
+            || (line.contains("assign") && contains_word(line, output));
+        is_assignment.then_some((index, index))
+    })
+}
+
+fn line_location(
+    debug: &mut super::debug::IrDebugInfo,
+    file: &str,
+    lines: &[&str],
+    line: usize,
+) -> usize {
+    range_location(debug, file, lines, line, line)
+}
+
+fn range_location(
+    debug: &mut super::debug::IrDebugInfo,
+    file: &str,
+    lines: &[&str],
+    start: usize,
+    end: usize,
+) -> usize {
+    debug.source(
+        file,
+        start + 1,
+        1,
+        end + 1,
+        lines.get(end).map_or(1, |line| line.len() + 1),
+    )
+}
+
+fn contains_word(line: &str, word: &str) -> bool {
+    line.match_indices(word).any(|(index, _)| {
+        let before = line[..index].chars().next_back();
+        let after = line[index + word.len()..].chars().next();
+        before.is_none_or(|ch| !is_word_char(ch)) && after.is_none_or(|ch| !is_word_char(ch))
+    })
+}
+
+fn count_word(line: &str, word: &str) -> usize {
+    line.match_indices(word)
+        .filter(|(index, _)| {
+            let before = line[..*index].chars().next_back();
+            let after = line[*index + word.len()..].chars().next();
+            before.is_none_or(|ch| !is_word_char(ch)) && after.is_none_or(|ch| !is_word_char(ch))
+        })
+        .count()
+}
+
+fn is_word_char(ch: char) -> bool {
+    ch == '_' || ch == '$' || ch.is_ascii_alphanumeric()
 }
 
 fn logical_module_from_verilog(module: &VerilogModule) -> eyre::Result<LogicalModule> {

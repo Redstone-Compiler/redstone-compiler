@@ -653,6 +653,7 @@ impl FromStr for RoutableDocument {
             target,
             top,
             modules,
+            debug: Default::default(),
         };
         design.validate()?;
         for (definition, profile) in &candidate_bindings {
@@ -1978,6 +1979,7 @@ mod tests {
             version: ROUTABLE_IR_VERSION,
             target: ROUTABLE_IR_TARGET.to_owned(),
             top: "top".to_owned(),
+            debug: Default::default(),
             modules: vec![
                 RoutableModule {
                     name: "inv".to_owned(),

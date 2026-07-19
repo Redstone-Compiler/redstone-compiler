@@ -12,6 +12,8 @@ pub struct RoutableDesign {
     pub target: String,
     pub top: String,
     pub modules: Vec<RoutableModule>,
+    #[serde(skip)]
+    pub debug: super::debug::IrDebugInfo,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

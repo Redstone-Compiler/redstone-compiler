@@ -11,7 +11,9 @@ round-trips, and compilation snapshots contain both files.
 The implemented Logical subset covers the counter/register path, scalar
 combinational primitives, and one-level structural hierarchy. References with
 slices, the complete arithmetic/mux schemas, deeper or mixed hierarchy, and
-stable provenance sidecars remain future work. Routable documents may embed
+physical-object provenance remain future work. Compilation snapshots now carry
+a source/cross-stage location sidecar for Verilog, Logical RCIR, and Routable
+RCIR. Routable documents may embed
 candidate preparation, placement, routing, search, and physical intent in the
 same file. There is no compatibility reader for earlier experimental syntax;
 the implemented language is simply `rcir 1`.
@@ -361,11 +363,13 @@ module-instantiation cycles are forbidden in RCIR. A compiler may flatten
 hierarchy during lowering, but the lowering map must retain the origin of every
 generated object.
 
-## Provenance
+## Debug locations and provenance
 
-Human-readable RCIR does not carry verbose `origin` strings on every
-declaration. The compiler maintains stable IDs in memory and emits large source
-and cross-stage maps separately:
+Human-readable RCIR does not carry verbose source spans on every declaration.
+The compiler attaches non-semantic debug locations in memory and emits them as
+`ir/source-map.json`. A location is either a Verilog source range, a derived
+location with one parent, or a fused location with multiple parents. Rendered
+document ranges associate lines in each source/IR file with those locations:
 
 ```text
 Verilog source span
@@ -375,8 +379,12 @@ Verilog source span
   -> NBT block positions
 ```
 
-Snapshots store this as `ir/provenance.json`. Symbolic names in RCIR are labels;
-renaming a label must not change structural identity inside a running compile.
+The current implementation covers the first two arrows and lets the Viewer
+highlight corresponding Verilog, Logical RCIR, and Routable RCIR lines. It is
+deliberately debug information: locations are omitted from semantic JSON,
+parsing standalone RCIR does not require them, and they do not participate in
+circuit equality or cache identity. Stable physical instance/route/block
+provenance remains a later extension of the same sidecar.
 
 ## Validation
 
@@ -476,8 +484,9 @@ The first implementation is not complete until all of the following hold:
 6. Emitted `routable.rcir` compiles without the original Verilog source.
 7. A fixed configuration passes the existing counter behavioral verifier from
    Verilog, Logical RCIR, and Routable RCIR inputs.
-8. Snapshot provenance can navigate from the logical increment/register to all
-   generated Routable cells and physical objects.
+8. Snapshot source maps can navigate from the logical increment/register to
+   all generated Routable cells; physical-object navigation remains follow-up
+   work.
 
 ## Implementation status
 

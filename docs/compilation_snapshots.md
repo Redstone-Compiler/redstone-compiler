@@ -15,7 +15,8 @@ counter.snapshot/
 |   |-- logical.rcir
 |   |-- logical.json
 |   |-- routable.rcir
-|   `-- routable.json
+|   |-- routable.json
+|   `-- source-map.json
 |-- candidates/
 |   |-- index.json
 |   `-- set-<index>/
@@ -47,6 +48,12 @@ The matching JSON files contain the same experimental data for tools that
 prefer a structured format. Each IR artifact is emitted immediately after its
 stage completes, so it remains available when later lowering, placement, or
 routing fails.
+
+`ir/source-map.json` links rendered line ranges across the original Verilog,
+Logical RCIR, and Routable RCIR through source, derived, and fused locations.
+It is debug-only metadata and does not affect RCIR semantics or cache keys. The
+Viewer uses it for Godbolt-style hover highlighting and click-to-pin navigation
+between the three panes.
 
 `pnr/config.json` is the generated, typed expansion of the effective PnR policy
 plus runtime-only metadata. It is diagnostic output; the source of truth for a
