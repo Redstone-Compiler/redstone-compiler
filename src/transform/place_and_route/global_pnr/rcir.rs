@@ -302,7 +302,7 @@ pub fn apply_pnr_spec(spec: &PnrSpec, config: &mut GlobalPnrConfig) -> eyre::Res
     Ok(())
 }
 
-fn candidate_spec_from_policy(policy: &UnitCandidateConfig) -> CandidateSpec {
+pub(super) fn candidate_spec_from_policy(policy: &UnitCandidateConfig) -> CandidateSpec {
     CandidateSpec {
         search_box: [policy.dim.0, policy.dim.1, policy.dim.2],
         retain: policy.max_candidates,

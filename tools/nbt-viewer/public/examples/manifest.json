@@ -40,22 +40,29 @@
     "name": "counter.rsnap",
     "file": "counter.rsnap",
     "path": "examples/counter.rsnap",
-    "size": 35634
+    "size": 35664
   },
   {
     "kind": "nbt",
     "name": "d-flip-flop-global-placement-bbox.nbt",
     "file": "d-flip-flop-global-placement-bbox.nbt",
     "path": "examples/d-flip-flop-global-placement-bbox.nbt",
-    "size": 577
+    "size": 570
   },
   {
     "kind": "nbt",
     "name": "d-flip-flop-global-smoke.nbt",
     "file": "d-flip-flop-global-smoke.nbt",
     "path": "examples/d-flip-flop-global-smoke.nbt",
-    "size": 1479,
+    "size": 1433,
     "outputsPath": "examples/d-flip-flop-global-smoke.outputs.json"
+  },
+  {
+    "kind": "snapshot",
+    "name": "d-flip-flop.rsnap",
+    "file": "d-flip-flop.rsnap",
+    "path": "examples/d-flip-flop.rsnap",
+    "size": 18017
   },
   {
     "kind": "nbt",

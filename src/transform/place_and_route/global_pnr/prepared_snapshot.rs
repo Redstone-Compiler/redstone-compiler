@@ -144,7 +144,10 @@ pub(super) fn emit_candidate_library(prepared: &PreparedPnrDesign) -> eyre::Resu
         "candidates/index.json",
         CandidateLibraryManifest {
             format: CANDIDATE_LIBRARY_FORMAT.to_owned(),
-            prepare_config_fingerprint: prepare_config_fingerprint(&prepared.prepare_config),
+            prepare_config_fingerprint: prepare_config_fingerprint(
+                &prepared.prepare_config,
+                &prepared.topology,
+            ),
             summary: prepared.summary.clone(),
             candidate_sets: set_manifests,
             instance_bindings: instance_bindings
@@ -195,7 +198,7 @@ pub fn load_prepared_pnr_snapshot(
     if manifest.format != CANDIDATE_LIBRARY_FORMAT {
         eyre::bail!("unsupported candidate library format `{}`", manifest.format);
     }
-    let expected_fingerprint = prepare_config_fingerprint(&effective_config);
+    let expected_fingerprint = prepare_config_fingerprint(&effective_config, &topology);
     if manifest.prepare_config_fingerprint != expected_fingerprint {
         eyre::bail!(
             "prepared candidate configuration mismatch; expected {}, snapshot contains {}",
@@ -293,8 +296,65 @@ pub fn load_prepared_pnr_snapshot(
     })
 }
 
-fn prepare_config_fingerprint(config: &PnrPrepareConfig) -> String {
-    debug_parity_hash(&config.candidate)
+pub(super) fn prepare_config_fingerprint(
+    config: &PnrPrepareConfig,
+    topology: &ResolvedPnrTopology,
+) -> String {
+    let mut canonical = normalized_candidate_policies(config, topology)
+        .into_iter()
+        .map(|(_, policy)| {
+            let input_positions = policy
+                .input_constraints
+                .input_positions()
+                .map(|(name, positions)| (name.to_owned(), positions.to_vec()))
+                .collect::<std::collections::BTreeMap<_, _>>();
+            format!(
+                "{:?}|{:?}",
+                super::rcir::candidate_spec_from_policy(&policy),
+                input_positions
+            )
+        })
+        .collect::<Vec<_>>();
+    canonical.sort();
+    canonical.dedup();
+    debug_parity_hash(&canonical)
+}
+
+pub(super) fn normalized_candidate_policies(
+    config: &PnrPrepareConfig,
+    topology: &ResolvedPnrTopology,
+) -> std::collections::BTreeMap<
+    String,
+    crate::transform::place_and_route::global_pnr::candidate::UnitCandidateConfig,
+> {
+    topology
+        .definitions
+        .iter()
+        .filter(|definition| definition.is_leaf)
+        .map(|definition| {
+            let valid_inputs = definition
+                .ports
+                .iter()
+                .filter_map(|port| topology.port(*port))
+                .filter(|port| port.direction == crate::ir::RoutablePortDirection::Input)
+                .map(|port| port.name.as_str())
+                .collect::<HashSet<_>>();
+            let mut policy = config
+                .candidate
+                .effective_for_definition(&definition.display_name);
+            policy.input_constraints = policy
+                .input_constraints
+                .input_positions()
+                .filter(|(name, _)| valid_inputs.contains(name))
+                .fold(
+                    crate::transform::place_and_route::local_placer::LocalPlacerInputConstraints::default(),
+                    |constraints, (name, positions)| {
+                        constraints.with_input_positions(name, positions.iter().copied())
+                    },
+                );
+            (definition.display_name.clone(), policy)
+        })
+        .collect()
 }
 
 fn position_array(position: Position) -> [usize; 3] {

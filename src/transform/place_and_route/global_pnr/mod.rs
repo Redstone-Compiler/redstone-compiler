@@ -2167,8 +2167,6 @@ mod tests {
     };
     use crate::transform::place_and_route::sampling::SamplingPolicy;
     use crate::transform::place_and_route::utils::world_to_logic_with_outputs;
-    use crate::verilog::design::lower_design_modules;
-    use crate::verilog::parser::parse_modules;
     use crate::verilog::synth::d_latch_graph_module;
     use crate::world::block::BlockKind;
     use crate::world::position::{DimSize, Position};
@@ -2583,8 +2581,7 @@ mod tests {
     #[ignore = "search-heavy sequential global pnr smoke test"]
     fn d_flip_flop_module_generates_world_from_child_layout_candidates() -> eyre::Result<()> {
         init_tracing_from_env();
-        let design = lower_design_modules(&parse_modules(
-            r#"
+        let source = r#"
             module not_clk(clk, clk_n);
               input clk;
               output clk_n;
@@ -2609,8 +2606,20 @@ mod tests {
               d_latch master(.d(d), .en(clk_n), .q(master_q));
               d_latch slave(.d(master_q), .en(clk), .q(q));
             endmodule
-            "#,
-        )?)?;
+            "#;
+        let logical = LogicalDesign::from_verilog_source_named(source, "d-flip-flop.v")?;
+        let free_3d_heuristics = [2, 4, 6]
+            .into_iter()
+            .flat_map(|clearance| {
+                (0..8).map(move |seed| {
+                    PlacementHeuristic::Free3D(Free3DPlacementConfig {
+                        seed,
+                        clearance,
+                        ..Free3DPlacementConfig::default()
+                    })
+                })
+            })
+            .collect();
         let config = GlobalPnrConfig {
             candidate: d_latch_child_candidate_config(sequential_local_config()).into(),
             placement: GlobalPlacementConfig {
@@ -2619,11 +2628,71 @@ mod tests {
                 max_attempts: 64,
                 ..Default::default()
             },
+            routing_probe: Some(GlobalRoutingConfig {
+                strategy: crate::transform::place_and_route::global_pnr::router::GlobalRoutingStrategy::DirectGreedy {
+                    max_steps: 128,
+                },
+                validation: crate::transform::place_and_route::global_pnr::router::RouteValidationMode::Deferred,
+            }),
+            routing: GlobalRoutingConfig {
+                strategy: crate::transform::place_and_route::global_pnr::router::GlobalRoutingStrategy::GreedyBeam {
+                    beam_width: 128,
+                    max_expansions: 4_096,
+                    variant_seed: 0,
+                },
+                validation: crate::transform::place_and_route::global_pnr::router::RouteValidationMode::Deferred,
+            },
+            routing_refinement: Some(GlobalRoutingConfig {
+                strategy: crate::transform::place_and_route::global_pnr::router::GlobalRoutingStrategy::GreedyBeam {
+                    beam_width: 128,
+                    max_expansions: 4_096,
+                    variant_seed: 0,
+                },
+                validation: crate::transform::place_and_route::global_pnr::router::RouteValidationMode::Deferred,
+            }),
+            search: GlobalSearchConfig {
+                budget: GlobalSearchBudget {
+                    max_candidates_per_child: 1,
+                    max_layout_combinations: 1,
+                    max_detailed_routing_attempts: 2,
+                    max_refined_routing_attempts: 2,
+                    max_refinement_rounds: 8,
+                },
+                policies: GlobalPnrPolicies {
+                    placement_heuristics: free_3d_heuristics,
+                    net_order_strategies: vec![
+                        NetOrderStrategy::Criticality,
+                        NetOrderStrategy::HighestFanoutFirst,
+                    ],
+                },
+            },
             verifier: Some(assert_positive_edge_dff_behavior),
             ..Default::default()
         };
 
-        let result = place_and_route_design_with_visualization(&design, &config)?;
+        let routable = logical.lower_to_routable()?;
+        let topology = ResolvedPnrTopology::from_routable(&routable)?;
+        let document = routable_document_from_config(&routable, &config)?;
+        let mut restored_config = GlobalPnrConfig::default();
+        apply_routable_document(&document, &mut restored_config)?;
+        assert_eq!(
+            prepared_snapshot::normalized_candidate_policies(
+                &PnrPrepareConfig::from(&config),
+                &topology,
+            ),
+            prepared_snapshot::normalized_candidate_policies(
+                &PnrPrepareConfig::from(&restored_config),
+                &topology,
+            ),
+            "candidate policy changed while serializing DFF Routable RCIR"
+        );
+        let result = compile_with_snapshot(
+            SnapshotOptions::new("test/d-flip-flop.snapshot", "d-flip-flop")
+                .with_source_text("d-flip-flop.v", source),
+            || place_and_route_logical_design_with_visualization(&logical, &config),
+        )?;
+        assert!(std::path::Path::new("test/d-flip-flop.snapshot/ir/logical.rcir").is_file());
+        assert!(std::path::Path::new("test/d-flip-flop.snapshot/ir/source-map.json").is_file());
         let placed = result.placed_world;
 
         assert!(!placed.world.iter_block().is_empty());
