@@ -162,6 +162,40 @@ fn local_placer_seeded_queue_reuses_preplaced_input_nodes() -> eyre::Result<()> 
 }
 
 #[test]
+fn planned_inputs_bound_the_joint_pin_search_before_world_expansion() -> eyre::Result<()> {
+    let mut graph = LogicGraph::from_stmt("a|b", "x")?;
+    graph.graph.merge(LogicGraph::from_stmt("x|c", "y")?.graph);
+    let graph = graph.prepare_place()?;
+    let input_ids = graph
+        .nodes
+        .iter()
+        .filter_map(|node| node.kind.is_input().then_some(node.id))
+        .collect_vec();
+    let mut placer_config = config(4);
+    placer_config.step_sampling_policy = SamplingPolicy::Random(32);
+    let placer = LocalPlacer::new(graph, placer_config)?;
+
+    let mut queue = placer.initial_pin_plan_queue(DimSize(5, 5, 2), None);
+
+    assert!(!queue.is_empty());
+    assert!(queue.len() <= 32);
+    assert!(queue.iter().all(|(_, state)| input_ids
+        .iter()
+        .all(|node_id| state.node_position(*node_id).is_some())));
+
+    // Input steps consume the preselected terminal plan instead of multiplying
+    // every partial world by every remaining input position.
+    for step in 0..input_ids.len() {
+        let before = queue.len();
+        let result = placer.do_step(step, queue, None, None);
+        assert_eq!(result.queue.len(), before);
+        queue = result.queue;
+    }
+
+    Ok(())
+}
+
+#[test]
 fn placement_cost_penalizes_spread_future_join_inputs() -> eyre::Result<()> {
     let graph = LogicGraph::from_stmt("a|b", "c")?.prepare_place()?;
     let placer = LocalPlacer::new(graph.clone(), config(1))?;

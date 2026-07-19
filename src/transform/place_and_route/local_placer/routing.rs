@@ -32,6 +32,22 @@ pub(super) fn generate_inputs(
     kind: BlockKind,
     constrained_positions: Option<&[Position]>,
 ) -> Vec<(World3D, Position)> {
+    input_placements(config, world, kind, constrained_positions)
+        .into_iter()
+        .map(|placed_node| {
+            let mut new_world = world.clone();
+            place_node(&mut new_world, placed_node);
+            (new_world, placed_node.position)
+        })
+        .collect()
+}
+
+pub(super) fn input_placements(
+    config: &LocalPlacerConfig,
+    world: &World3D,
+    kind: BlockKind,
+    constrained_positions: Option<&[Position]>,
+) -> Vec<PlacedNode> {
     let mut input_strategy = Direction::iter_direction_without_top()
         .map(|direction| Block { kind, direction })
         .collect_vec();
@@ -64,16 +80,12 @@ pub(super) fn generate_inputs(
     let mut generated = input_strategy
         .into_iter()
         .cartesian_product(place_strategy)
-        // Place Input Node
-        .flat_map(|(block, position)| {
+        .filter_map(|(block, position)| {
             let placed_node = PlacedNode { position, block };
             if placed_node.has_conflict(world, &Default::default()) {
                 return None;
             }
-
-            let mut new_world = world.clone();
-            place_node(&mut new_world, placed_node);
-            Some((new_world, position))
+            Some(placed_node)
         })
         .collect_vec();
 

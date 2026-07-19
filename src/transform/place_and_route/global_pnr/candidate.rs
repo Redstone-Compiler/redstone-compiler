@@ -219,12 +219,34 @@ fn generate_unit_candidates(
     let graph = LogicGraph { graph };
     let placer = LocalPlacer::new(graph.clone(), config.local_config)?;
 
-    let placed = placer.generate_with_outputs_and_input_constraints_progress(
-        config.dim,
-        None,
-        &config.input_constraints,
-        progress_label,
-    );
+    let mut placed = match input_mode {
+        CandidateInputMode::ExternalPorts => placer
+            .generate_with_outputs_and_planned_inputs_progress(
+                config.dim,
+                None,
+                &config.input_constraints,
+                progress_label,
+            ),
+        CandidateInputMode::MaterializedSwitches => placer
+            .generate_with_outputs_and_input_constraints_progress(
+                config.dim,
+                None,
+                &config.input_constraints,
+                progress_label,
+            ),
+    };
+    if input_mode == CandidateInputMode::ExternalPorts && placed.is_empty() {
+        tracing::info!(
+            module = module_name,
+            "planned child inputs produced no candidates; retrying incremental input placement"
+        );
+        placed = placer.generate_with_outputs_and_input_constraints_progress(
+            config.dim,
+            None,
+            &config.input_constraints,
+            progress_label,
+        );
+    }
     let generated_count = placed.len();
 
     let contains_sequential = graph

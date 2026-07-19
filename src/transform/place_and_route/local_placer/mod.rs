@@ -205,6 +205,60 @@ impl LocalPlacer {
         .collect()
     }
 
+    /// Generates candidates after choosing all external input pins as one bounded plan.
+    ///
+    /// The switches are temporary electrical drivers used by the local router and verifier.
+    /// Global PnR removes them when it converts the result into a switchless child layout.
+    pub fn generate_with_outputs_and_planned_inputs_progress(
+        &self,
+        dim: DimSize,
+        finish_step: Option<usize>,
+        input_constraints: &LocalPlacerInputConstraints,
+        progress_label: Option<&str>,
+    ) -> Vec<PlacedWorld> {
+        if !self.inputs_form_initial_prefix()
+            || !matches!(
+                self.config.placement_sampling_policy,
+                PlacementSamplingPolicy::StepPolicy
+            )
+        {
+            return self.generate_with_outputs_and_input_constraints_progress(
+                dim,
+                finish_step,
+                input_constraints,
+                progress_label,
+            );
+        }
+        self.generate_queue_with_planned_inputs(
+            dim,
+            finish_step,
+            Some(input_constraints),
+            progress_label,
+        )
+        .into_iter()
+        .map(|(world, state)| PlacedWorld {
+            world,
+            inputs: self.input_endpoints(&state),
+            outputs: self.output_endpoints(&state),
+        })
+        .collect()
+    }
+
+    fn inputs_form_initial_prefix(&self) -> bool {
+        let mut saw_non_input = false;
+        for node_id in &self.visit_orders {
+            let is_input = self
+                .graph
+                .find_node_by_id(*node_id)
+                .is_some_and(|node| node.kind.is_input());
+            if is_input && saw_non_input {
+                return false;
+            }
+            saw_non_input |= !is_input;
+        }
+        true
+    }
+
     pub fn generate_with_debug(
         &self,
         dim: DimSize,
@@ -275,6 +329,85 @@ impl LocalPlacer {
             debug,
             input_constraints,
             progress_label,
+        )
+    }
+
+    fn generate_queue_with_planned_inputs(
+        &self,
+        dim: DimSize,
+        finish_step: Option<usize>,
+        input_constraints: Option<&LocalPlacerInputConstraints>,
+        progress_label: Option<&str>,
+    ) -> PlacerQueue {
+        let queue = self.initial_pin_plan_queue(dim, input_constraints);
+        self.generate_queue_from_with_input_constraints(
+            queue,
+            finish_step,
+            None,
+            input_constraints,
+            progress_label,
+        )
+    }
+
+    fn initial_pin_plan_queue(
+        &self,
+        dim: DimSize,
+        input_constraints: Option<&LocalPlacerInputConstraints>,
+    ) -> PlacerQueue {
+        let mut queue = vec![(World3D::new(dim), PlacementState::default())];
+        for (step, node_id) in self.visit_orders.iter().copied().enumerate() {
+            let node = self.graph.find_node_by_id(node_id).unwrap();
+            let GraphNodeKind::Input(input_name) = &node.kind else {
+                continue;
+            };
+            let constrained_positions = input_constraints
+                .and_then(|constraints| constraints.positions_for(node.id, input_name));
+
+            // Expand lightweight descriptors and sample them before cloning World3D.
+            // A 2,500 x 25 pin step therefore materializes at most the beam size.
+            let mut extensions = Vec::new();
+            for (parent, (world, _)) in queue.iter().enumerate() {
+                for kind in input_node_kind() {
+                    extensions.extend(
+                        input_placements(
+                            &self.config,
+                            world,
+                            kind,
+                            constrained_positions.as_deref(),
+                        )
+                        .into_iter()
+                        .map(|placed_node| (parent, placed_node)),
+                    );
+                }
+            }
+            let extensions = self.sample_pin_extensions(step, extensions);
+
+            let mut next = Vec::with_capacity(extensions.len());
+            for (parent, placed_node) in extensions {
+                let (parent_world, parent_state) = &queue[parent];
+                let mut world = parent_world.clone();
+                let mut state = parent_state.clone();
+                place_node(&mut world, placed_node);
+                state.set_node_position(node.id, placed_node.position);
+                state.set_signal_footprint(node.id, [placed_node.position]);
+                next.push((world, state));
+            }
+            queue = next;
+            if queue.is_empty() {
+                break;
+            }
+        }
+        queue
+    }
+
+    fn sample_pin_extensions(
+        &self,
+        step: usize,
+        extensions: Vec<(usize, PlacedNode)>,
+    ) -> Vec<(usize, PlacedNode)> {
+        self.config.step_sampling_policy.sample_with_seed(
+            extensions,
+            self.config.sampling_seed(STEP_SAMPLE_SCOPE, step),
         )
     }
 
