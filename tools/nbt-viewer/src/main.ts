@@ -343,7 +343,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
           <strong id="artifact-title">Snapshot artifact</strong>
           <button id="close-artifact" class="panel-action" type="button">Close</button>
         </header>
-        <nav id="artifact-tabs" class="artifact-tabs hidden" aria-label="Snapshot source stages"></nav>
+        <div id="ir-comparison" class="ir-comparison hidden"></div>
         <pre id="artifact-content" class="artifact-content"></pre>
       </div>
     </dialog>
@@ -445,7 +445,7 @@ const selectedNbtCanvas = document.querySelector<HTMLCanvasElement>('#selected-n
 const artifactDialog = document.querySelector<HTMLDialogElement>('#artifact-dialog')!;
 const closeArtifactButton = document.querySelector<HTMLButtonElement>('#close-artifact')!;
 const artifactTitle = document.querySelector<HTMLElement>('#artifact-title')!;
-const artifactTabs = document.querySelector<HTMLElement>('#artifact-tabs')!;
+const irComparison = document.querySelector<HTMLElement>('#ir-comparison')!;
 const artifactContent = document.querySelector<HTMLElement>('#artifact-content')!;
 
 const viewer = new StructureViewer(canvas);
@@ -2232,8 +2232,9 @@ function selectSnapshotInstance(instance: SnapshotInstance): void {
 async function openTextArtifact(path: string): Promise<void> {
   const file = currentSnapshot?.filesByPath.get(path);
   if (!file) throw new Error(`Snapshot artifact is missing: ${path}`);
-  artifactTabs.replaceChildren();
-  artifactTabs.classList.add('hidden');
+  irComparison.replaceChildren();
+  irComparison.classList.add('hidden');
+  artifactContent.classList.remove('hidden');
   artifactTitle.textContent = path;
   await renderArtifactContent(path);
   if (!artifactDialog.open) artifactDialog.showModal();
@@ -2244,19 +2245,18 @@ async function openSnapshotIrViewer(paths: string[]): Promise<void> {
   if (orderedPaths.length === 0) return;
 
   artifactTitle.textContent = `${currentSnapshot?.manifest.top_module ?? 'Snapshot'} IR`;
-  artifactTabs.replaceChildren();
-  artifactTabs.classList.remove('hidden');
-  for (const path of orderedPaths) {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'artifact-tab';
-    button.textContent = snapshotIrLabel(path);
-    button.dataset.artifactPath = path;
-    button.addEventListener('click', () => void selectSnapshotIrTab(path));
-    artifactTabs.append(button);
-  }
+  artifactContent.classList.add('hidden');
+  irComparison.classList.remove('hidden');
+  irComparison.replaceChildren();
 
-  await selectSnapshotIrTab(orderedPaths[0]);
+  const sources = await Promise.all(orderedPaths.map(async path => {
+    const file = currentSnapshot?.filesByPath.get(path);
+    if (!file) throw new Error(`Snapshot artifact is missing: ${path}`);
+    return { path, source: await file.text() };
+  }));
+  for (const { path, source } of sources) {
+    irComparison.append(createIrComparisonPane(path, source));
+  }
   if (!artifactDialog.open) artifactDialog.showModal();
 }
 
@@ -2267,13 +2267,42 @@ function snapshotIrOrder(path: string): number {
   return 3;
 }
 
-async function selectSnapshotIrTab(path: string): Promise<void> {
-  artifactTabs.querySelectorAll<HTMLButtonElement>('.artifact-tab').forEach(button => {
-    const selected = button.dataset.artifactPath === path;
-    button.classList.toggle('active', selected);
-    button.setAttribute('aria-selected', String(selected));
+function createIrComparisonPane(path: string, source: string): HTMLElement {
+  const pane = document.createElement('section');
+  pane.className = 'ir-comparison-pane';
+
+  const header = document.createElement('header');
+  header.className = 'ir-comparison-header';
+  const title = document.createElement('strong');
+  title.textContent = snapshotIrLabel(path);
+  const filename = document.createElement('span');
+  filename.textContent = path;
+  header.append(title, filename);
+
+  const code = document.createElement('div');
+  code.className = 'ir-code';
+  code.classList.toggle('language-rcir', path.toLowerCase().endsWith('.rcir'));
+  code.classList.toggle('language-verilog', path.toLowerCase().endsWith('.v'));
+  const lines = source.replace(/\r\n?/g, '\n').split('\n');
+  lines.forEach((line, index) => {
+    const row = document.createElement('div');
+    row.className = 'ir-code-line';
+    const number = document.createElement('span');
+    number.className = 'ir-line-number';
+    number.textContent = String(index + 1);
+    const content = document.createElement('code');
+    content.className = 'ir-line-content';
+    if (path.toLowerCase().endsWith('.rcir')) {
+      content.replaceChildren(highlightRcir(line || '\u200b'));
+    } else {
+      content.textContent = line || '\u200b';
+    }
+    row.append(number, content);
+    code.append(row);
   });
-  await renderArtifactContent(path);
+
+  pane.append(header, code);
+  return pane;
 }
 
 async function renderArtifactContent(path: string): Promise<void> {

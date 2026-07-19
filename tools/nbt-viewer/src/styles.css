@@ -1122,40 +1122,115 @@ input {
 }
 
 .artifact-dialog-surface {
-  grid-template-rows: auto auto 1fr;
+  grid-template-rows: auto minmax(0, 1fr);
 }
 
-.artifact-tabs {
-  display: flex;
-  gap: 4px;
-  padding: 8px 12px 0;
-  overflow-x: auto;
-  border-bottom: 1px solid rgb(255 255 255 / 8%);
-  background: #15191e;
-}
-
-.artifact-tabs.hidden {
+.artifact-content.hidden,
+.ir-comparison.hidden {
   display: none;
 }
 
-.artifact-tab {
-  flex: 0 0 auto;
-  padding: 7px 10px 8px;
-  border: 0;
-  border-bottom: 2px solid transparent;
-  background: transparent;
-  color: #8f9ba5;
-  font: 11px/1.2 "Cascadia Mono", Consolas, monospace;
-  cursor: pointer;
+.ir-comparison {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  min-width: 0;
+  min-height: 0;
+  background: #101317;
 }
 
-.artifact-tab:hover {
-  color: #dce3e7;
+.ir-comparison-pane {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  border-right: 1px solid rgb(255 255 255 / 10%);
 }
 
-.artifact-tab.active {
-  border-bottom-color: #d53b3b;
-  color: #fff;
+.ir-comparison-pane:last-child {
+  border-right: 0;
+}
+
+.ir-comparison-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+  padding: 9px 12px;
+  border-bottom: 1px solid rgb(255 255 255 / 10%);
+  background: #181d22;
+  font: 11px/1.3 "Cascadia Mono", Consolas, monospace;
+}
+
+.ir-comparison-header strong {
+  color: #f0f4f6;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.ir-comparison-header span {
+  overflow: hidden;
+  color: #7f8b95;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ir-code {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  color: #c9d1d9;
+  background: #101317;
+  font: 12px/1.55 "Cascadia Mono", Consolas, monospace;
+  tab-size: 2;
+}
+
+.ir-code-line {
+  display: grid;
+  grid-template-columns: 46px max-content;
+  min-width: 100%;
+}
+
+.ir-code-line:hover {
+  background: rgb(255 255 255 / 4%);
+}
+
+.ir-line-number {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  padding: 0 10px 0 6px;
+  border-right: 1px solid rgb(255 255 255 / 7%);
+  background: #101317;
+  color: #53606a;
+  text-align: right;
+  user-select: none;
+}
+
+.ir-code-line:hover .ir-line-number {
+  background: #171c21;
+  color: #9aa6af;
+}
+
+.ir-line-content {
+  display: block;
+  padding: 0 10px;
+  font: inherit;
+  white-space: pre;
+}
+
+@media (max-width: 1050px) {
+  .ir-comparison {
+    grid-template-columns: 1fr;
+    grid-template-rows: repeat(3, minmax(260px, 1fr));
+    overflow: auto;
+  }
+
+  .ir-comparison-pane {
+    min-height: 260px;
+    border-right: 0;
+    border-bottom: 1px solid rgb(255 255 255 / 10%);
+  }
 }
 
 .artifact-content {
