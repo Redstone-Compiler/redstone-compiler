@@ -1,5 +1,6 @@
 use std::cmp::Reverse;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::ops::{Deref, DerefMut};
 
 use eyre::ContextCompat;
 
@@ -28,6 +29,90 @@ pub struct UnitCandidateConfig {
     pub input_constraints: LocalPlacerInputConstraints,
     pub max_candidates: usize,
     pub combinational_sampling_limit: Option<usize>,
+}
+
+/// Local-candidate preparation policy before it is resolved against a typed
+/// Routable definition. The default preserves the legacy single-policy API;
+/// definition and port entries provide the scoped model used by RCIR.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CandidatePolicySet {
+    pub default: UnitCandidateConfig,
+    pub definition_overrides: BTreeMap<String, UnitCandidateConfig>,
+    pub pin_search: BTreeMap<(String, String), Vec<Position>>,
+}
+
+impl CandidatePolicySet {
+    pub fn new(default: UnitCandidateConfig) -> Self {
+        Self {
+            default,
+            definition_overrides: BTreeMap::new(),
+            pin_search: BTreeMap::new(),
+        }
+    }
+
+    pub fn with_definition_override(
+        mut self,
+        definition: impl Into<String>,
+        policy: UnitCandidateConfig,
+    ) -> Self {
+        self.definition_overrides.insert(definition.into(), policy);
+        self
+    }
+
+    pub fn with_pin_search(
+        mut self,
+        definition: impl Into<String>,
+        port: impl Into<String>,
+        positions: impl IntoIterator<Item = Position>,
+    ) -> Self {
+        self.pin_search.insert(
+            (definition.into(), port.into()),
+            positions.into_iter().collect(),
+        );
+        self
+    }
+
+    pub fn effective_for_definition(&self, definition: &str) -> UnitCandidateConfig {
+        let mut policy = self
+            .definition_overrides
+            .get(definition)
+            .cloned()
+            .unwrap_or_else(|| self.default.clone());
+        for ((owner, port), positions) in &self.pin_search {
+            if owner == definition {
+                policy.input_constraints = policy
+                    .input_constraints
+                    .with_input_positions(port.clone(), positions.iter().copied());
+            }
+        }
+        policy
+    }
+}
+
+impl Default for CandidatePolicySet {
+    fn default() -> Self {
+        Self::new(UnitCandidateConfig::default())
+    }
+}
+
+impl From<UnitCandidateConfig> for CandidatePolicySet {
+    fn from(default: UnitCandidateConfig) -> Self {
+        Self::new(default)
+    }
+}
+
+impl Deref for CandidatePolicySet {
+    type Target = UnitCandidateConfig;
+
+    fn deref(&self) -> &Self::Target {
+        &self.default
+    }
+}
+
+impl DerefMut for CandidatePolicySet {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.default
+    }
 }
 
 impl Default for UnitCandidateConfig {
@@ -576,6 +661,35 @@ pub fn d_latch_child_candidate_config(local_config: LocalPlacerConfig) -> UnitCa
 mod tests {
     use super::*;
     use crate::world::block::{BlockKind, Direction};
+
+    #[test]
+    fn candidate_pin_search_is_scoped_by_definition_and_port() {
+        let policies = CandidatePolicySet::default()
+            .with_pin_search("first", "d", [Position(1, 2, 3)])
+            .with_pin_search("second", "d", [Position(4, 5, 1)]);
+
+        assert_eq!(
+            policies
+                .effective_for_definition("first")
+                .input_constraints
+                .positions_for_input_name("d"),
+            Some(vec![Position(1, 2, 3)])
+        );
+        assert_eq!(
+            policies
+                .effective_for_definition("second")
+                .input_constraints
+                .positions_for_input_name("d"),
+            Some(vec![Position(4, 5, 1)])
+        );
+        assert_eq!(
+            policies
+                .effective_for_definition("third")
+                .input_constraints
+                .positions_for_input_name("d"),
+            None
+        );
+    }
 
     #[test]
     fn switchless_direct_input_exposes_powered_redstone_instead_of_support_cobble() {

@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use eyre::{ContextCompat, WrapErr};
 use serde::{Deserialize, Serialize};
 
-pub const LOGICAL_IR_VERSION: u32 = 2;
+pub const LOGICAL_IR_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LogicalDesign {
@@ -182,7 +182,7 @@ impl LogicalModule {
             }
             if port.name != port.net {
                 eyre::bail!(
-                    "logical IR v2 requires port `{}` to use a same-named net, found `{}`",
+                    "logical RCIR requires port `{}` to use a same-named net, found `{}`",
                     port.name,
                     port.net
                 );

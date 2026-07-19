@@ -11,11 +11,13 @@ use super::{
     candidate_parity_hash, debug_parity_hash, PnrPreparationSummary, PnrPrepareConfig,
     PreparedCandidateSet, PreparedInstanceCandidateBinding, PreparedPnrBody, PreparedPnrDesign,
 };
-use crate::ir::{RoutableDesign, RoutableModuleBody};
+use crate::ir::{RoutableDocument, RoutableModuleBody};
 use crate::nbt::{NBTRoot, ToNBT};
 use crate::snapshot::{emit_json, emit_nbt as snapshot_emit_nbt};
 use crate::transform::place_and_route::global_pnr::topology::ResolvedPnrTopology;
-use crate::transform::place_and_route::global_pnr::ResolvedPhysicalIntent;
+use crate::transform::place_and_route::global_pnr::{
+    apply_routable_document, GlobalPnrConfig, ResolvedPhysicalIntent,
+};
 use crate::world::position::Position;
 use crate::world::World3D;
 
@@ -164,7 +166,17 @@ pub fn load_prepared_pnr_snapshot(
     let mut source = SnapshotSource::open(path.as_ref())?;
     let routable_source = String::from_utf8(source.read("ir/routable.rcir")?)
         .wrap_err("snapshot Routable IR is not UTF-8")?;
-    let routable: RoutableDesign = routable_source.parse()?;
+    let document: RoutableDocument = routable_source.parse()?;
+    let routable = &document.design;
+    let mut effective_config = config.clone();
+    let mut embedded = GlobalPnrConfig::default();
+    apply_routable_document(&document, &mut embedded)?;
+    effective_config.candidate = embedded.candidate;
+    let snapshot_pnr = document
+        .design_bindings
+        .get(&document.design.top)
+        .and_then(|name| document.design_profiles.get(name))
+        .cloned();
     let topology = ResolvedPnrTopology::from_routable(&routable)?;
     let top = routable
         .module(&routable.top)
@@ -183,7 +195,7 @@ pub fn load_prepared_pnr_snapshot(
     if manifest.format != CANDIDATE_LIBRARY_FORMAT {
         eyre::bail!("unsupported candidate library format `{}`", manifest.format);
     }
-    let expected_fingerprint = prepare_config_fingerprint(config);
+    let expected_fingerprint = prepare_config_fingerprint(&effective_config);
     if manifest.prepare_config_fingerprint != expected_fingerprint {
         eyre::bail!(
             "prepared candidate configuration mismatch; expected {}, snapshot contains {}",
@@ -273,10 +285,11 @@ pub fn load_prepared_pnr_snapshot(
     Ok(PreparedPnrDesign {
         module_name,
         topology,
-        prepare_config: config.clone(),
+        prepare_config: effective_config,
         body,
         summary: manifest.summary,
         snapshot_intent,
+        snapshot_pnr,
     })
 }
 

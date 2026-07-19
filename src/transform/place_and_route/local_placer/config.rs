@@ -102,6 +102,22 @@ impl LocalPlacerInputConstraints {
     pub fn positions_for_input_name(&self, input_name: &str) -> Option<Vec<Position>> {
         self.positions_by_input_name.get(input_name).cloned()
     }
+
+    pub fn input_positions(&self) -> impl Iterator<Item = (&str, &[Position])> {
+        self.positions_by_input_name
+            .iter()
+            .map(|(name, positions)| (name.as_str(), positions.as_slice()))
+    }
+
+    pub fn node_positions(&self) -> impl Iterator<Item = (GraphNodeId, &[Position])> {
+        self.positions_by_node_id
+            .iter()
+            .map(|(id, positions)| (*id, positions.as_slice()))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.positions_by_node_id.is_empty() && self.positions_by_input_name.is_empty()
+    }
 }
 
 #[derive(Default, Debug, Copy, Clone, PartialEq, Eq)]

@@ -10,6 +10,7 @@ pub mod placer;
 pub mod policy;
 mod prepared_snapshot;
 pub mod progress;
+pub mod rcir;
 pub mod router;
 pub mod search;
 pub mod topology;
@@ -19,12 +20,16 @@ use std::time::{Duration, Instant};
 
 use eyre::ContextCompat;
 pub use prepared_snapshot::load_prepared_pnr_snapshot;
+pub use rcir::{
+    apply_pnr_spec, apply_routable_document, pnr_spec_from_config, routable_document_from_config,
+};
 use serde_json::{json, Value};
 
 use crate::graph::module::{GraphModule, GraphModuleContext, GraphModuleDesign};
 use crate::graph::GraphNodeKind;
 use crate::ir::{
-    LogicalDesign, RoutableDesign, RoutableModule, RoutableModuleBody, RoutablePortDirection,
+    LogicalDesign, PnrSpec, RoutableDesign, RoutableModule, RoutableModuleBody,
+    RoutablePortDirection,
 };
 use crate::nbt::ToNBT;
 use crate::output::{OutputEndpoint, PlacedWorld};
@@ -35,7 +40,8 @@ use crate::snapshot::{
 use crate::transform::place_and_route::global_pnr::assembly::assemble_world;
 use crate::transform::place_and_route::global_pnr::candidate::{
     generate_graph_module_candidates_with_progress_label,
-    generate_routable_module_candidates_with_progress_label, UnitCandidateConfig,
+    generate_routable_module_candidates_with_progress_label, CandidatePolicySet,
+    UnitCandidateConfig,
 };
 pub use crate::transform::place_and_route::global_pnr::heuristics::GlobalHeuristicHooks;
 use crate::transform::place_and_route::global_pnr::ir::{LayoutCandidate, PhysicalPortDirection};
@@ -70,7 +76,7 @@ use crate::world::World3D;
 
 #[derive(Clone, Debug)]
 pub struct GlobalPnrConfig {
-    pub candidate: UnitCandidateConfig,
+    pub candidate: CandidatePolicySet,
     pub placement: GlobalPlacementConfig,
     /// Optional cheap whole-design routing attempt evaluated before `routing`.
     /// It shares the exact same local candidates and placement.
@@ -102,7 +108,7 @@ pub struct GlobalSearchConfig {
 /// global search settings as long as this configuration remains unchanged.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PnrPrepareConfig {
-    pub candidate: UnitCandidateConfig,
+    pub candidate: CandidatePolicySet,
     pub show_progress: bool,
     pub candidate_cache_dir: Option<std::path::PathBuf>,
 }
@@ -163,6 +169,7 @@ pub struct PreparedPnrDesign {
     body: PreparedPnrBody,
     summary: PnrPreparationSummary,
     snapshot_intent: Option<ResolvedPhysicalIntent>,
+    snapshot_pnr: Option<PnrSpec>,
 }
 
 impl PreparedPnrDesign {
@@ -180,6 +187,14 @@ impl PreparedPnrDesign {
 
     pub fn snapshot_intent(&self) -> Option<&ResolvedPhysicalIntent> {
         self.snapshot_intent.as_ref()
+    }
+
+    pub fn apply_snapshot_config(&self, config: &mut GlobalPnrConfig) -> eyre::Result<()> {
+        if let Some(spec) = &self.snapshot_pnr {
+            apply_pnr_spec(spec, config)?;
+        }
+        config.candidate = self.prepare_config.candidate.clone();
+        Ok(())
     }
 
     /// A deterministic, migration-only observation point for candidate and
@@ -547,92 +562,22 @@ fn position_json(position: Position) -> Value {
 }
 
 fn global_pnr_config_snapshot(config: &GlobalPnrConfig) -> Value {
-    let local = config.candidate.local_config;
-    let weights = config.placement.cost_weights;
-    let congestion = config.placement.congestion;
-    let budget = config.search.budget;
-    let routing_json = |routing: GlobalRoutingConfig| {
-        json!({
-            "strategy": format!("{:?}", routing.strategy),
-            "validation": format!("{:?}", routing.validation),
-        })
-    };
     json!({
         "format": "redstone-compiler.pnr-config.v1",
-        "candidate": {
-            "dimensions": [
-                config.candidate.dim.0,
-                config.candidate.dim.1,
-                config.candidate.dim.2,
-            ],
-            "max_candidates": config.candidate.max_candidates,
-            "combinational_sampling_limit": config.candidate.combinational_sampling_limit,
+        "effective_design_profile": pnr_spec_from_config(config),
+        "runtime": {
+            "show_progress": config.show_progress,
+            "verifier_enabled": config.verifier.is_some(),
             "persistent_cache_enabled": config.candidate_cache_dir.is_some(),
-            "input_constraints": format!("{:?}", config.candidate.input_constraints),
-            "local_placer": {
-                "random_seed": local.random_seed,
-                "greedy_input_generation": local.greedy_input_generation,
-                "input_placement_strategy": format!("{:?}", local.input_placement_strategy),
-                "input_candidate_limit": local.input_candidate_limit,
-                "step_sampling_policy": format!("{:?}", local.step_sampling_policy),
-                "placement_sampling_policy": format!("{:?}", local.placement_sampling_policy),
-                "leak_sampling": local.leak_sampling,
-                "route_torch_directly": local.route_torch_directly,
-                "materialize_outputs": local.materialize_outputs,
-                "torch_placement_strategy": format!("{:?}", local.torch_placement_strategy),
-                "not_route_strategy": format!("{:?}", local.not_route_strategy),
-                "max_not_route_step": local.max_not_route_step,
-                "not_route_step_sampling_policy": format!("{:?}", local.not_route_step_sampling_policy),
-                "max_route_step": local.max_route_step,
-                "route_step_sampling_policy": format!("{:?}", local.route_step_sampling_policy),
-            },
-        },
-        "placement": {
-            "spacing": config.placement.spacing,
-            "shelf_width": config.placement.shelf_width,
-            "max_attempts": config.placement.max_attempts,
-            "cost_weights": {
-                "placement_volume": weights.placement_volume,
-                "xy_footprint": weights.xy_footprint,
-                "height_span": weights.height_span,
-                "estimated_wire_length": weights.estimated_wire_length,
-                "vertical_distance": weights.vertical_distance,
-                "routing_congestion": weights.routing_congestion,
-            },
-            "congestion": {
-                "bin_size_xy": congestion.bin_size_xy,
-                "bin_size_z": congestion.bin_size_z,
-            },
-            "heuristics": config.search.policies.placement_heuristics.iter().map(|heuristic| format!("{heuristic:?}")).collect::<Vec<_>>(),
-        },
-        "routing": {
-            "probe": config.routing_probe.map(routing_json),
-            "primary": routing_json(config.routing),
-            "refinement": config.routing_refinement.map(routing_json),
-            "net_orders": config.search.policies.net_order_strategies.iter().map(|order| format!("{order:?}")).collect::<Vec<_>>(),
-        },
-        "budget": {
-            "max_candidates_per_child": budget.max_candidates_per_child,
-            "max_layout_combinations": budget.max_layout_combinations,
-            "max_detailed_routing_attempts": budget.max_detailed_routing_attempts,
-            "max_refined_routing_attempts": budget.max_refined_routing_attempts,
-            "max_refinement_rounds": budget.max_refinement_rounds,
-        },
-        "show_progress": config.show_progress,
-        "verifier_enabled": config.verifier.is_some(),
-        "physical_intent": config.physical_intent.as_ref().map(|intent| json!({
-            "design": intent.design,
-            "regions": intent.regions.len(),
-            "constraints": intent.constraints.len(),
-        })),
-        "experimental_hooks": config.heuristic_hooks.names(),
+            "experimental_hooks": config.heuristic_hooks.names(),
+        }
     })
 }
 
 impl Default for GlobalPnrConfig {
     fn default() -> Self {
         Self {
-            candidate: UnitCandidateConfig::default(),
+            candidate: CandidatePolicySet::default(),
             placement: GlobalPlacementConfig::default(),
             routing_probe: None,
             routing: GlobalRoutingConfig::default(),
@@ -687,7 +632,8 @@ pub fn place_and_route_design_with_visualization(
 ) -> eyre::Result<GlobalPnrResult> {
     if crate::snapshot::is_active() {
         let routable = RoutableDesign::from_graph_module_design(design)?;
-        crate::snapshot::emit_text("ir/routable.rcir", routable.to_string())?;
+        let document = routable_document_from_config(&routable, config)?;
+        crate::snapshot::emit_text("ir/routable.rcir", document.to_string())?;
         crate::snapshot::emit_json("ir/routable.json", &routable)?;
     }
     place_and_route_module_with_visualization(&design.context, design.top_module(), config)
@@ -699,7 +645,8 @@ pub fn place_and_route_routable_design_with_visualization(
 ) -> eyre::Result<GlobalPnrResult> {
     design.validate()?;
     if crate::snapshot::is_active() {
-        crate::snapshot::emit_text("ir/routable.rcir", design.to_string())?;
+        let document = routable_document_from_config(design, config)?;
+        crate::snapshot::emit_text("ir/routable.rcir", document.to_string())?;
         crate::snapshot::emit_json("ir/routable.json", design)?;
     }
     let prepared = prepare_routable_design_for_global_pnr(design, &PnrPrepareConfig::from(config))?;
@@ -787,9 +734,11 @@ fn prepare_module_with_topology(
     let progress = GlobalPnrProgress::new(config.show_progress, module.name.clone());
     if module.graph.is_some() {
         progress.stage(1, 4, "generate leaf layout candidates");
+        let candidate_config = config.candidate.effective_for_definition(&module.name);
+        let candidate_config = candidate_config_for_child(module, &candidate_config);
         let candidates = generate_graph_module_candidates_with_progress_label(
             module,
-            &config.candidate,
+            &candidate_config,
             config.show_progress.then_some(module.name.as_str()),
         )?;
         if candidates.is_empty() {
@@ -816,6 +765,7 @@ fn prepare_module_with_topology(
             body: PreparedPnrBody::Leaf { candidates },
             summary,
             snapshot_intent: None,
+            snapshot_pnr: None,
         };
         emit_prepared_pnr_snapshot(&prepared)?;
         return Ok(prepared);
@@ -835,6 +785,7 @@ fn prepare_module_with_topology(
         },
         summary,
         snapshot_intent: None,
+        snapshot_pnr: None,
     };
     emit_prepared_pnr_snapshot(&prepared)?;
     Ok(prepared)
@@ -850,9 +801,11 @@ fn prepare_routable_module_with_topology(
     let progress = GlobalPnrProgress::new(config.show_progress, module.name.clone());
     if matches!(module.body, RoutableModuleBody::Leaf { .. }) {
         progress.stage(1, 4, "generate leaf layout candidates");
+        let candidate_config = config.candidate.effective_for_definition(&module.name);
+        let candidate_config = candidate_config_for_routable_child(module, &candidate_config);
         let candidates = generate_routable_module_candidates_with_progress_label(
             module,
-            &config.candidate,
+            &candidate_config,
             config.show_progress.then_some(module.name.as_str()),
         )?;
         if candidates.is_empty() {
@@ -874,6 +827,7 @@ fn prepare_routable_module_with_topology(
             body: PreparedPnrBody::Leaf { candidates },
             summary,
             snapshot_intent: None,
+            snapshot_pnr: None,
         };
         emit_prepared_pnr_snapshot(&prepared)?;
         return Ok(prepared);
@@ -893,6 +847,7 @@ fn prepare_routable_module_with_topology(
         },
         summary,
         snapshot_intent: None,
+        snapshot_pnr: None,
     };
     emit_prepared_pnr_snapshot(&prepared)?;
     Ok(prepared)
@@ -1683,7 +1638,8 @@ fn prepare_routable_child_candidate_sets(
         if !matches!(child.body, RoutableModuleBody::Leaf { .. }) {
             eyre::bail!("Routable child module `{}` is not a leaf", child.name);
         }
-        let child_config = candidate_config_for_routable_child(child, &config.candidate);
+        let base_config = config.candidate.effective_for_definition(&child.name);
+        let child_config = candidate_config_for_routable_child(child, &base_config);
         let persistent_key = routable_candidate_shape_fingerprint(child, &child_config);
         let persistent_hit = std::cell::Cell::new(false);
         let candidate_started = Instant::now();
@@ -1810,7 +1766,8 @@ fn prepare_child_candidate_sets(
             format!("generate `{instance}` candidate"),
         );
         let child = &context[instance.as_str()];
-        let child_config = candidate_config_for_child(child, &config.candidate);
+        let base_config = config.candidate.effective_for_definition(&child.name);
+        let child_config = candidate_config_for_child(child, &base_config);
         let persistent_key = candidate_shape_fingerprint(child, &child_config);
         let persistent_hit = std::cell::Cell::new(false);
         let candidate_started = Instant::now();
@@ -2328,7 +2285,8 @@ mod tests {
                 dim: DimSize(8, 8, 4),
                 max_candidates: 1,
                 ..Default::default()
-            },
+            }
+            .into(),
             placement: GlobalPlacementConfig::default(),
             ..Default::default()
         };
@@ -2359,7 +2317,8 @@ mod tests {
                 dim: DimSize(8, 8, 4),
                 max_candidates: 1,
                 ..Default::default()
-            },
+            }
+            .into(),
             placement: GlobalPlacementConfig::default(),
             ..Default::default()
         };
@@ -2392,7 +2351,8 @@ mod tests {
                 dim: DimSize(8, 8, 4),
                 max_candidates: 1,
                 ..Default::default()
-            },
+            }
+            .into(),
             placement: GlobalPlacementConfig::default(),
             show_progress: false,
             ..Default::default()
@@ -2448,7 +2408,8 @@ mod tests {
                 dim: DimSize(8, 8, 4),
                 max_candidates: 1,
                 ..Default::default()
-            },
+            }
+            .into(),
             show_progress: false,
             candidate_cache_dir: None,
         };
@@ -2462,7 +2423,7 @@ mod tests {
         assert_eq!(prepared.summary().candidate_references, 2);
 
         let routable: RoutableDesign = r#"
-            rcir 2;
+            rcir 1;
             stage routable;
             target "redstone-v1";
             top "direct_duplicate_top";
@@ -2511,7 +2472,8 @@ mod tests {
                 dim: DimSize(8, 8, 4),
                 max_candidates: 1,
                 ..Default::default()
-            },
+            }
+            .into(),
             show_progress: false,
             physical_intent: Some(ResolvedPhysicalIntent {
                 format: physical_intent::PHYSICAL_INTENT_FORMAT.to_owned(),
@@ -2644,7 +2606,7 @@ mod tests {
             "#,
         )?)?;
         let config = GlobalPnrConfig {
-            candidate: d_latch_child_candidate_config(sequential_local_config()),
+            candidate: d_latch_child_candidate_config(sequential_local_config()).into(),
             placement: GlobalPlacementConfig {
                 spacing: 4,
                 shelf_width: 64,
@@ -2724,7 +2686,8 @@ mod tests {
                 max_candidates: 2,
                 combinational_sampling_limit: Some(sampling_limit),
                 ..d_latch_child_candidate_config(counter_local_config)
-            },
+            }
+            .into(),
             placement: GlobalPlacementConfig {
                 spacing: 4,
                 shelf_width: 64,
@@ -2787,9 +2750,21 @@ mod tests {
             )
         }));
         let routable_source = std::fs::read_to_string("test/counter.snapshot/ir/routable.rcir")?;
-        let routable: RoutableDesign = routable_source.parse()?;
-        assert_eq!(routable.top, "counter");
-        assert!(routable.modules.len() > 1);
+        let routable: crate::ir::RoutableDocument = routable_source.parse()?;
+        assert_eq!(routable.design.top, "counter");
+        assert!(routable.design.modules.len() > 1);
+        let design_profile = routable
+            .design_bindings
+            .get("counter")
+            .and_then(|name| routable.design_profiles.get(name))
+            .unwrap();
+        assert_eq!(design_profile.search.layout_combinations, layout_limit);
+        let mut embedded_config = GlobalPnrConfig::default();
+        apply_routable_document(&routable, &mut embedded_config)?;
+        assert_eq!(
+            pnr_spec_from_config(&embedded_config),
+            pnr_spec_from_config(&config)
+        );
         assert!(result
             .routed_nets
             .iter()

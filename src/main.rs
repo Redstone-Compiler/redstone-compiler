@@ -1,11 +1,11 @@
 use std::path::PathBuf;
 
 use mimalloc::MiMalloc;
-use redstone_compiler::ir::{CircuitIr, LogicalDesign};
+use redstone_compiler::ir::{LogicalDesign, RcirDocument};
 use redstone_compiler::snapshot::{compile_with_snapshot, SnapshotOptions};
 use redstone_compiler::transform::place_and_route::global_pnr::topology::ResolvedPnrTopology;
 use redstone_compiler::transform::place_and_route::global_pnr::{
-    emit_prepared_pnr_snapshot, load_prepared_pnr_snapshot,
+    apply_routable_document, emit_prepared_pnr_snapshot, load_prepared_pnr_snapshot,
     place_and_route_logical_design_with_visualization,
     place_and_route_routable_design_with_visualization, run_prepared_pnr_with_visualization,
     GlobalPnrConfig, PhysicalIntent, PnrPrepareConfig,
@@ -73,6 +73,7 @@ fn replay_snapshot_input(opt: CompilerOption) -> eyre::Result<()> {
     let (physical_intent, intent_source) =
         bind_physical_intent(opt.intent.as_deref(), prepared.topology())?;
     let mut config = base_config;
+    prepared.apply_snapshot_config(&mut config)?;
     config.physical_intent = physical_intent.or_else(|| prepared.snapshot_intent().cloned());
     compile_with_snapshot(options, || {
         emit_intent_source(intent_source.as_ref())?;
@@ -137,19 +138,19 @@ fn compile_verilog_input(opt: CompilerOption) -> eyre::Result<()> {
 
 fn compile_rcir_input(opt: CompilerOption) -> eyre::Result<()> {
     let source = std::fs::read_to_string(&opt.input)?;
-    let ir: CircuitIr = source.parse()?;
+    let ir: RcirDocument = source.parse()?;
     let Some(output) = opt.output else {
         match &ir {
-            CircuitIr::Logical(design) => println!(
+            RcirDocument::Logical(design) => println!(
                 "loaded logical IR: top={} modules={}",
                 design.top,
                 design.modules.len()
             ),
-            CircuitIr::Routable(design) => println!(
+            RcirDocument::Routable(document) => println!(
                 "loaded routable IR: top={} modules={} target={}",
-                design.top,
-                design.modules.len(),
-                design.target
+                document.design.top,
+                document.design.modules.len(),
+                document.design.target
             ),
         }
         return Ok(());
@@ -157,22 +158,28 @@ fn compile_rcir_input(opt: CompilerOption) -> eyre::Result<()> {
 
     let (snapshot_dir, snapshot_archive, options) = snapshot_options(&opt.input, &output);
     let routable = match &ir {
-        CircuitIr::Logical(design) => design.lower_to_routable()?,
-        CircuitIr::Routable(design) => design.clone(),
+        RcirDocument::Logical(design) => design.lower_to_routable()?,
+        RcirDocument::Routable(document) => document.design.clone(),
     };
     let topology = ResolvedPnrTopology::from_routable(&routable)?;
     let (physical_intent, intent_source) = bind_physical_intent(opt.intent.as_deref(), &topology)?;
     let mut config = GlobalPnrConfig::default();
-    config.physical_intent = physical_intent;
+    config.physical_intent = physical_intent.clone();
     config.candidate_cache_dir = opt.candidate_cache.clone();
+    if let RcirDocument::Routable(document) = &ir {
+        apply_routable_document(document, &mut config)?;
+        if physical_intent.is_some() {
+            config.physical_intent = physical_intent.clone();
+        }
+    }
     match &ir {
-        CircuitIr::Logical(design) => compile_with_snapshot(options, || {
+        RcirDocument::Logical(design) => compile_with_snapshot(options, || {
             emit_intent_source(intent_source.as_ref())?;
             place_and_route_logical_design_with_visualization(design, &config)
         })?,
-        CircuitIr::Routable(design) => compile_with_snapshot(options, || {
+        RcirDocument::Routable(document) => compile_with_snapshot(options, || {
             emit_intent_source(intent_source.as_ref())?;
-            place_and_route_routable_design_with_visualization(design, &config)
+            place_and_route_routable_design_with_visualization(&document.design, &config)
         })?,
     };
 

@@ -39,11 +39,18 @@ counter.snapshot/
 
 `ir/logical.rcir` preserves bus-level operations and state intent such as
 `inc` and `register`. It is emitted for Verilog and logical-IR inputs.
-`ir/routable.rcir` is the scalar, target-mapped IR accepted by global PnR.
+`ir/routable.rcir` is the self-contained scalar, target-mapped input accepted
+by global PnR. It includes the circuit plus the effective source-level PnR
+policy, input pin-search constraints, and physical intent. It can therefore be
+compiled without the original Verilog, `.rclayout`, or ad-hoc Rust config.
 The matching JSON files contain the same experimental data for tools that
 prefer a structured format. Each IR artifact is emitted immediately after its
 stage completes, so it remains available when later lowering, placement, or
 routing fails.
+
+`pnr/config.json` is the generated, typed expansion of the effective PnR policy
+plus runtime-only metadata. It is diagnostic output; the source of truth for a
+recompile is `ir/routable.rcir`.
 
 `candidates/` contains every verified local candidate retained by the prepared
 design, deduplicated by structural candidate set rather than copied once per

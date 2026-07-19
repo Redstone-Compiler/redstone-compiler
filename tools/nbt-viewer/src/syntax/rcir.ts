@@ -25,6 +25,31 @@ const KEYWORDS = new Set([
   'inputs',
   'edge',
   'self',
+  'pnr',
+  'profile',
+  'design',
+  'candidate',
+  'search-box',
+  'retain',
+  'combinational-samples',
+  'local-placer',
+  'placement',
+  'heuristic',
+  'routing',
+  'probe',
+  'primary',
+  'refinement',
+  'net-order',
+  'search',
+  'physical',
+  'region',
+  'require',
+  'lock',
+  'prefer',
+  'priority',
+  'inside',
+  'avoid',
+  'strength',
 ]);
 
 const TYPES = new Set(['bit', 'bits', 'const']);
@@ -40,9 +65,16 @@ const BUILTINS = new Set([
   'd_latch',
   'posedge',
   'negedge',
+  'free3d',
+  'layered3d',
+  'direct-greedy',
+  'greedy-beam',
+  'astar',
+  'breadth-first',
+  'pin_search',
 ]);
 
-const TOKEN_PATTERN = /#[^\r\n]*|"(?:\\.|[^"\\])*"|\b\d+\b|[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)*|\s+|./g;
+const TOKEN_PATTERN = /#[^\r\n]*|"(?:\\.|[^"\\])*"|\b\d+(?:\.\d+)?\b|@[A-Za-z_][A-Za-z0-9_.-]*|[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)*|\s+|./g;
 
 export function highlightRcir(source: string): DocumentFragment {
   const fragment = document.createDocumentFragment();
@@ -67,7 +99,8 @@ export function highlightRcir(source: string): DocumentFragment {
 function rcirTokenKind(token: string): string | undefined {
   if (token.startsWith('#')) return 'comment';
   if (token.startsWith('"')) return 'string';
-  if (/^\d+$/.test(token)) return 'number';
+  if (/^\d+(?:\.\d+)?$/.test(token)) return 'number';
+  if (token.startsWith('@')) return 'operation';
   if (KEYWORDS.has(token)) return 'keyword';
   if (TYPES.has(token)) return 'type';
   if (STAGES.has(token)) return 'stage';

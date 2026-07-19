@@ -54,7 +54,7 @@ fn logical_module_from_verilog(module: &VerilogModule) -> eyre::Result<LogicalMo
         && (!rtl.continuous_assigns.is_empty() || !synth.cells.is_empty())
     {
         eyre::bail!(
-            "logical IR v2 does not support mixing instances and local cells in module `{}`",
+            "logical RCIR does not support mixing instances and local cells in module `{}`",
             module.name
         );
     }

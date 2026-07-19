@@ -3,22 +3,18 @@
 ## Status
 
 This document is the language contract for the compiler's coordinate-free
-intermediate representations. The first `rcir 2` vertical slice is implemented:
+intermediate representations. The first `rcir 1` vertical slice is implemented:
 Verilog lowers to typed Logical IR, Logical IR lowers directly to Routable IR
 without reconstructing a Verilog AST, both stages have deterministic text
 round-trips, and compilation snapshots contain both files.
 
 The implemented Logical subset covers the counter/register path, scalar
 combinational primitives, and one-level structural hierarchy. References with
-slices, the complete arithmetic/mux schemas, deeper or mixed hierarchy, stable
-provenance sidecars, and the separate `*.rclayout` physical-intent input remain
-future work. The experimental implementation that preceded this document is
-not the specification.
-
-The new typed grammar uses `rcir 2`. An earlier experimental `rcir 1` prototype
-used a different, string-oriented syntax and must not be confused with this
-contract. A compatibility reader may translate v1 into v2, but new writers emit
-only v2. Readers must reject unknown major versions.
+slices, the complete arithmetic/mux schemas, deeper or mixed hierarchy, and
+stable provenance sidecars remain future work. Routable documents may embed
+candidate preparation, placement, routing, search, and physical intent in the
+same file. There is no compatibility reader for earlier experimental syntax;
+the implemented language is simply `rcir 1`.
 
 ## Goals
 
@@ -41,8 +37,10 @@ The boundaries have different purposes:
   incrementers, muxes, registers, clock edges, enables, and reset behavior.
 - Routable IR is target-selected and structural. Every value is scalar and
   every cell is supported by the selected target library or macro mapper.
-- Physical coordinates, bounding boxes, route paths, and Minecraft block
-  states belong to snapshot/physical data, not either circuit IR.
+- Physical results (selected coordinates, bounding boxes, route paths, and
+  Minecraft block states) belong to snapshots. Physical intent and PnR policy
+  may be embedded in a Routable RCIR document without becoming circuit graph
+  semantics.
 
 Both stages use one small textual container grammar. They resolve into separate
 typed Rust models and have separate operation schemas and validators. Sharing a
@@ -81,7 +79,7 @@ an implementation detail, but accepted programs and stage restrictions are
 part of the contract.
 
 ```text
-file              := version stage target? top module+
+file              := version stage target? top profile* module+ physical?
 version           := "rcir" unsigned_integer ";"
 stage             := "stage" ("logical" | "routable") ";"
 target            := "target" name ";"
@@ -117,6 +115,59 @@ constant          := "const" "<" positive_integer ">" "(" unsigned_integer ")"
 literal           := name | unsigned_integer | string | constant
 ```
 
+## Routable PnR dialect
+
+A Routable file is a typed container. Its circuit graph, algorithm policy, and
+physical intent are parsed into separate Rust models even though they travel in
+one file:
+
+```text
+RoutableDocument
+|- RoutableDesign
+|- named pnr.candidate profiles
+|- named pnr.design profiles
+|- explicit module/leaf profile bindings
+|- port-local @pnr.pin_search annotations
+`- PhysicalSpec
+```
+
+Profiles are inert declarations until a circuit definition explicitly binds
+one. A composite module uses `@pnr.design(profile = "...")`; a leaf uses
+`@pnr.candidate(profile = "...")`. There are no implicit default profiles.
+The top definition must select one design profile, and every participating leaf
+must select one candidate profile. This keeps settings next to the object they
+affect while allowing profile contents to be reused.
+
+```text
+profile pnr.candidate "cell-search" { ... }
+profile pnr.design "counter-free3d" { ... }
+
+@pnr.design(profile = "counter-free3d")
+module "counter" { ... }
+
+@pnr.candidate(profile = "cell-search")
+leaf "inv" { ... }
+```
+
+An input port may carry the object-local coordinate constraint
+`@pnr.pin_search(positions = [[x, y, z], ...])`. Placement heuristics are an
+ordered list, and a `free3d` entry represents a deterministic Cartesian sweep
+of clearances (outer loop) and seeds (inner loop). `physical {}` appears after
+the circuit modules and holds regions and multi-object constraints.
+
+The compileable boundary is the entire document:
+
+```rust
+let document: RoutableDocument = source.parse()?;
+let mut config = GlobalPnrConfig::default();
+apply_routable_document(&document, &mut config)?;
+place_and_route_routable_design(&document.design, &config)?;
+```
+
+Runtime integration fields such as progress display, verifier callbacks,
+candidate-cache paths, and experimental function hooks are deliberately not
+source language knobs.
+
 Lexical rules:
 
 - Source is UTF-8.
@@ -126,9 +177,9 @@ Lexical rules:
 - Quoted names use JSON-compatible string escaping and allow generated or
   otherwise unusual names.
 - Operation names are qualified, for example `logical.inc` or `std.xor`.
-- Integers are unsigned decimal in v2. Constants always carry an explicit bit
+- Integers are unsigned decimal in RCIR 1. Constants always carry an explicit bit
   width.
-- Statements use explicit semicolons; v2 has no includes, macros, implicit
+- Statements use explicit semicolons; RCIR 1 has no includes, macros, implicit
   nets, or expression-precedence grammar.
 
 Header order is canonical. `target` is forbidden for `stage logical` and
@@ -229,7 +280,7 @@ endmodule
 Canonical Logical RCIR:
 
 ```text
-rcir 2;
+rcir 1;
 stage logical;
 top counter;
 
@@ -306,7 +357,7 @@ instance low : counter_bit {
 ```
 
 Bindings are checked against the referenced module's typed port list. Recursive
-module-instantiation cycles are forbidden in v2. A compiler may flatten
+module-instantiation cycles are forbidden in RCIR. A compiler may flatten
 hierarchy during lowering, but the lowering map must retain the origin of every
 generated object.
 
@@ -364,8 +415,8 @@ The intended library boundary is:
 pub fn parse_verilog(source: &str, options: FrontendOptions)
     -> Result<LogicalDesign>;
 
-pub fn parse_rcir(source: &str)
-    -> Result<CircuitIr>;
+pub fn parse_rcir_document(source: &str)
+    -> Result<RcirDocument>;
 
 pub fn lower_to_routable(
     logical: &LogicalDesign,
@@ -374,8 +425,8 @@ pub fn lower_to_routable(
 ) -> Result<(RoutableDesign, LoweringMap)>;
 
 pub fn compile_routable(
-    routable: &RoutableDesign,
-    config: &GlobalPnrConfig,
+    document: &RoutableDocument,
+    runtime: RuntimePnrOptions,
 ) -> Result<GlobalPnrResult>;
 ```
 

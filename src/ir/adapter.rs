@@ -451,7 +451,7 @@ fn routable_port_direction(port_type: GraphModulePortType) -> eyre::Result<Routa
     if port_type.is_output() && !port_type.is_input() {
         return Ok(RoutablePortDirection::Output);
     }
-    eyre::bail!("inout GraphModule ports are not supported by routable IR v2")
+    eyre::bail!("inout GraphModule ports are not supported by routable RCIR")
 }
 
 fn graph_port_type(direction: RoutablePortDirection) -> GraphModulePortType {

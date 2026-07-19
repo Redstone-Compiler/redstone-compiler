@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use eyre::{Context, ContextCompat};
 use serde::{Deserialize, Serialize};
 
-pub const ROUTABLE_IR_VERSION: u32 = 2;
+pub const ROUTABLE_IR_VERSION: u32 = 1;
 pub const ROUTABLE_IR_TARGET: &str = "redstone-v1";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

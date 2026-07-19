@@ -522,7 +522,7 @@ impl Parser {
         match self.tokens.get(self.position).cloned() {
             Some(Token::Number(value)) => {
                 self.position += 1;
-                Ok(value)
+                value.parse().map_err(|_| self.unexpected("number"))
             }
             _ => Err(self.unexpected("number")),
         }
@@ -602,7 +602,7 @@ mod tests {
             "#,
         )?;
         let first = design.to_string();
-        let expected = r#"rcir 2;
+        let expected = r#"rcir 1;
 stage logical;
 top counter;
 
@@ -632,7 +632,7 @@ module counter {
         assert_eq!(reparsed_again, reparsed);
         assert_eq!(second, first);
         assert_eq!(first, expected);
-        assert!(first.contains("rcir 2;"));
+        assert!(first.contains("rcir 1;"));
         assert!(first.contains("cell next : logical.inc<2>"));
         assert!(first.contains("cell state : logical.register<2>"));
         assert!(!first.contains("origin"));
@@ -643,7 +643,7 @@ module counter {
     #[test]
     fn parses_hand_written_typed_counter() -> eyre::Result<()> {
         let source = r#"
-            rcir 2;
+            rcir 1;
             stage logical;
             top counter;
 

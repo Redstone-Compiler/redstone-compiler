@@ -6,22 +6,24 @@ This document records the design direction for human-authored physical intent,
 reusable local-cell layout recipes, and the physical representations produced by
 placement and routing.
 
-An initial, deliberately small `rclayout 1` subset is implemented:
+An initial, deliberately small physical subset is implemented in the trailing
+`physical {}` section of Routable RCIR:
 
 ```text
-rclayout 1;
-for design counter;
-
-region state = box x 0..63 y 0..47 z 2..9;
-region clock_keepout = box x 24..31 y 0..47 z 0..9;
-require instance q_0_master inside state;
-require instance q_0_master layer 2..6;
-lock instance q_0_slave at 20 10 4;
-priority net clk 100;
-require net clk avoid clock_keepout;
+physical {
+  region "state" box [0, 0, 2] [63, 47, 9];
+  region "clock_keepout" box [24, 0, 0] [31, 47, 9];
+  require "state-master" instance "q_0_master" inside "state";
+  require "master-layers" instance "q_0_master" layer 2..6;
+  lock "fixed-slave" instance "q_0_slave" at [20, 10, 4];
+  priority "clock-priority" net "clk" 100;
+  require "clock-keepout" net "clk" avoid "clock_keepout";
+}
 ```
 
-Pass the file with `--intent design.rclayout`. Hard placement constraints are
+The legacy `--intent design.rclayout` option remains an explicit command-line
+override, but snapshots and standalone Routable inputs store the same typed
+intent inside `routable.rcir`. Hard placement constraints are
 applied before routing, net priority affects routing order, and hard avoid
 regions reject intersecting routes. Source, resolved constraints, and a
 satisfaction report are stored under `intent/` in the snapshot. Larger syntax
@@ -29,9 +31,9 @@ examples below remain exploratory and are not all accepted by the parser.
 
 ## Decision summary
 
-- Physical constraints are not a third compileable RCIR stage. Logical and
-  Routable RCIR represent the circuit; physical intent is optional side input to
-  physical synthesis.
+- Physical constraints are not a third compileable RCIR stage. They are a
+  namespaced section of a Routable RCIR document and resolve into a separate
+  `PhysicalIntent` model before physical synthesis.
 - The physical flow changes character from semantic lowering to constrained
   optimization. It combines a Routable design, target rules, cell recipes,
   per-design intent, and search policy to construct a physical solution.

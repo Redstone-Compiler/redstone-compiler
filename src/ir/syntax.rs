@@ -4,7 +4,7 @@ use eyre::ContextCompat;
 pub(crate) enum Token {
     Word(String),
     String(String),
-    Number(u128),
+    Number(String),
     Symbol(char),
 }
 
@@ -23,7 +23,7 @@ pub(crate) fn tokenize(source: &str) -> eyre::Result<Vec<Token>> {
             }
             continue;
         }
-        if "{}[],:.;<>=()".contains(ch) {
+        if "{}[],:.;<>=()@".contains(ch) {
             tokens.push(Token::Symbol(ch));
             continue;
         }
@@ -64,7 +64,7 @@ pub(crate) fn tokenize(source: &str) -> eyre::Result<Vec<Token>> {
                 value.push(*next);
                 chars.next();
             }
-            tokens.push(Token::Number(value.parse()?));
+            tokens.push(Token::Number(value));
             continue;
         }
         if ch.is_ascii_alphabetic() || ch == '_' {
