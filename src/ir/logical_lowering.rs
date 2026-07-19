@@ -185,10 +185,7 @@ fn logical_node_location(
 
     match &node.kind {
         RoutableNodeKind::Input { name } | RoutableNodeKind::Output { name } => net_location(name),
-        RoutableNodeKind::Not
-        | RoutableNodeKind::And
-        | RoutableNodeKind::Or
-        | RoutableNodeKind::Xor => definition
+        RoutableNodeKind::Not | RoutableNodeKind::Or => definition
             .cells
             .iter()
             .find(|cell| cell.name == node.tag)
@@ -1073,6 +1070,10 @@ where
 }
 
 fn routable_leaf_from_graph(name: &str, graph: Graph) -> eyre::Result<RoutableModule> {
+    // Routable leaf bodies are the concrete logic graph consumed by local
+    // placement. Keep technology mapping here, before the Routable boundary,
+    // so candidate generation never performs hidden graph rewrites.
+    let graph = LogicGraph { graph }.prepare_place()?.graph;
     let ports = graph
         .nodes
         .iter()
@@ -1097,9 +1098,10 @@ fn routable_leaf_from_graph(name: &str, graph: Graph) -> eyre::Result<RoutableMo
                 GraphNodeKind::Output(name) => RoutableNodeKind::Output { name: name.clone() },
                 GraphNodeKind::Logic(logic) => match logic.logic_type {
                     LogicType::Not => RoutableNodeKind::Not,
-                    LogicType::And => RoutableNodeKind::And,
                     LogicType::Or => RoutableNodeKind::Or,
-                    LogicType::Xor => RoutableNodeKind::Xor,
+                    LogicType::And | LogicType::Xor => {
+                        eyre::bail!("unmapped logic node in Routable leaf")
+                    }
                 },
                 GraphNodeKind::Sequential(sequential) => RoutableNodeKind::Sequential {
                     primitive: match sequential.sequential_type {
@@ -1195,6 +1197,23 @@ fn net_value<'a>(value: &'a LogicalValue, role: &str) -> eyre::Result<&'a str> {
 mod tests {
     use super::*;
 
+    fn graph_signature(graph: &Graph) -> Vec<(usize, String, Vec<usize>, String)> {
+        let mut nodes = graph
+            .nodes
+            .iter()
+            .map(|node| {
+                (
+                    node.id,
+                    node.kind.name(),
+                    node.inputs.clone(),
+                    node.tag.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        nodes.sort_by_key(|node| node.0);
+        nodes
+    }
+
     #[test]
     fn counter_lowering_does_not_require_verilog_reconstruction() -> eyre::Result<()> {
         let logical = LogicalDesign::from_verilog_source(
@@ -1221,6 +1240,43 @@ mod tests {
         assert!(instances
             .iter()
             .any(|instance| instance.name == "q_1_slave"));
+        Ok(())
+    }
+
+    #[test]
+    fn routable_leaf_is_the_exact_prepared_local_placer_graph() -> eyre::Result<()> {
+        let logical = LogicalDesign::from_verilog_source(
+            r#"
+            module half_adder(a, b, sum, carry);
+              input a, b;
+              output sum, carry;
+              assign sum = a ^ b;
+              assign carry = a & b;
+            endmodule
+            "#,
+        )?;
+
+        let routable = lower_logical_to_routable(&logical)?;
+        let module = routable
+            .module("half_adder")
+            .context("missing half adder")?;
+        let graph = crate::ir::graph_from_routable_leaf(module)?;
+
+        assert!(graph.nodes.iter().all(|node| !matches!(
+            node.kind,
+            GraphNodeKind::Logic(Logic {
+                logic_type: LogicType::And | LogicType::Xor
+            })
+        )));
+        assert!(!routable.to_string().contains("logic and"));
+        assert!(!routable.to_string().contains("logic xor"));
+
+        let prepared_again = LogicGraph {
+            graph: graph.clone(),
+        }
+        .prepare_place()?
+        .graph;
+        assert_eq!(graph_signature(&prepared_again), graph_signature(&graph));
         Ok(())
     }
 }

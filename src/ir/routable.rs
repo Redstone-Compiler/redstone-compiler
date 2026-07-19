@@ -102,9 +102,7 @@ pub enum RoutableNodeKind {
         name: String,
     },
     Not,
-    And,
     Or,
-    Xor,
     Sequential {
         primitive: RoutableSequentialPrimitive,
         input_ports: Vec<String>,
@@ -425,9 +423,7 @@ fn validate_node_arity(node: &RoutableNode) -> eyre::Result<()> {
     let valid = match &node.kind {
         RoutableNodeKind::Input { .. } => node.inputs.is_empty(),
         RoutableNodeKind::Output { .. } | RoutableNodeKind::Not => node.inputs.len() == 1,
-        RoutableNodeKind::And | RoutableNodeKind::Or | RoutableNodeKind::Xor => {
-            node.inputs.len() >= 2
-        }
+        RoutableNodeKind::Or => node.inputs.len() == 2,
         RoutableNodeKind::Sequential { input_ports, .. } => node.inputs.len() == input_ports.len(),
     };
     if !valid {

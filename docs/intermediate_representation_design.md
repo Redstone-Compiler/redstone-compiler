@@ -28,7 +28,7 @@ Verilog source
   -> Logical IR                      ir/logical.rcir
   -> direct target/macro lowering
   -> Routable IR                     ir/routable.rcir
-  -> local candidate preparation
+  -> local candidate generation
   -> global placement and routing
   -> NBT and snapshot artifacts
 ```
@@ -37,8 +37,10 @@ The boundaries have different purposes:
 
 - Logical IR is target-independent, bus-aware, and preserves intent such as
   incrementers, muxes, registers, clock edges, enables, and reset behavior.
-- Routable IR is target-selected and structural. Every value is scalar and
-  every cell is supported by the selected target library or macro mapper.
+- Routable IR is target-selected, technology-mapped, and structural. Every
+  value is scalar and every node is directly supported by local placement.
+  Adapting a leaf to the placer graph must not decompose logic, run CSE, insert
+  buffers, or otherwise rewrite the graph.
 - Physical results (selected coordinates, bounding boxes, route paths, and
   Minecraft block states) belong to snapshots. Physical intent and PnR policy
   may be embedded in a Routable RCIR document without becoming circuit graph
@@ -324,21 +326,23 @@ Additional rules:
 - Module definitions and named instances remain distinct so one verified macro
   candidate pool can be reused by many instances.
 
-An initial `redstone-v1` target may accept operations such as `std.not`,
-`std.and`, `std.or`, `std.xor`, `std.buffer`, and `std.d_latch`. A macro such as
-`redstone.dff` may remain as one Routable cell only if the target declares a
-local-placement implementation for it. Otherwise Logical lowering expands it
-into supported latch cells.
+The initial `redstone-v1` Routable leaf graph accepts `not`, binary `or`, and
+supported sequential primitives. Logical lowering decomposes `and` and `xor`,
+runs structural CSE, removes redundant inversions, and inserts required signal
+buffers before constructing Routable IR. A macro such as `redstone.dff` may
+remain as one Routable cell only if local placement directly supports it.
 
-The local preparation pass may decompose `std.xor`, insert buffers, or choose a
-different implementation. Those derived nodes are not canonical Routable RCIR.
+Consequently `ir/routable.rcir` is the canonical graph seen by local placement,
+not a pre-mapping graph. Implementation choices belong to lowering; candidate
+generation may change coordinates and physical blocks but not circuit graph
+structure.
 
 Conceptual counter lowering:
 
 ```text
 logical.inc<2>
   -> q_next_0 = std.not(q_0)
-  -> q_next_1 = std.xor(q_1, q_0)
+  -> q_next_1 = mapped not/or network for xor(q_1, q_0)
 
 logical.register<2>
   -> two target-supported state cells or state macros

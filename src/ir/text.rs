@@ -698,9 +698,7 @@ fn write_leaf(
             RoutableNodeKind::Input { name } => write!(output, "input {}", quoted(name))?,
             RoutableNodeKind::Output { name } => write!(output, "output {}", quoted(name))?,
             RoutableNodeKind::Not => write!(output, "logic not")?,
-            RoutableNodeKind::And => write!(output, "logic and")?,
             RoutableNodeKind::Or => write!(output, "logic or")?,
-            RoutableNodeKind::Xor => write!(output, "logic xor")?,
             RoutableNodeKind::Sequential {
                 primitive,
                 input_ports,
@@ -1550,9 +1548,7 @@ impl Parser {
         } else if self.consume_keyword("logic") {
             match self.expect_word()?.as_str() {
                 "not" => RoutableNodeKind::Not,
-                "and" => RoutableNodeKind::And,
                 "or" => RoutableNodeKind::Or,
-                "xor" => RoutableNodeKind::Xor,
                 kind => eyre::bail!("unknown routable logic node `{kind}`"),
             }
         } else if self.consume_keyword("sequential") {
@@ -1972,6 +1968,16 @@ mod tests {
         };
 
         assert!(format!("{:#}", design.validate().unwrap_err()).contains("invalid driver"));
+    }
+
+    #[test]
+    fn routable_text_rejects_unmapped_logic_nodes() {
+        let source = sample_design()
+            .to_string()
+            .replace("logic not", "logic xor");
+
+        let error = source.parse::<RoutableDesign>().unwrap_err();
+        assert!(format!("{error:#}").contains("unknown routable logic node `xor`"));
     }
 
     fn sample_design() -> RoutableDesign {

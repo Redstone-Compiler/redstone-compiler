@@ -38,14 +38,8 @@ fn graph_node_kind(kind: &RoutableNodeKind) -> GraphNodeKind {
         RoutableNodeKind::Not => GraphNodeKind::Logic(Logic {
             logic_type: LogicType::Not,
         }),
-        RoutableNodeKind::And => GraphNodeKind::Logic(Logic {
-            logic_type: LogicType::And,
-        }),
         RoutableNodeKind::Or => GraphNodeKind::Logic(Logic {
             logic_type: LogicType::Or,
-        }),
-        RoutableNodeKind::Xor => GraphNodeKind::Logic(Logic {
-            logic_type: LogicType::Xor,
         }),
         RoutableNodeKind::Sequential {
             primitive,

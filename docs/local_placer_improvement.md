@@ -2,7 +2,9 @@
 
 ## Context
 
-The current `LocalPlacer` in `src/transform/place_and_route/local_placer.rs` places a prepared `LogicGraph` by walking nodes in topological order.
+The current `LocalPlacer` places a technology-mapped `LogicGraph` by walking
+nodes in topological order. For the RCIR compile path, that graph is a direct
+adapter view of the corresponding Routable leaf.
 
 The prepared graph is expected to contain only:
 
@@ -11,7 +13,9 @@ The prepared graph is expected to contain only:
 - `Not`
 - `Or`
 
-`prepare_place()` rewrites `And` and `Xor` into `Not`/`Or` forms before placement.
+Logical-to-Routable lowering rewrites `And` and `Xor` into `Not`/`Or`, performs
+structural CSE, and inserts required buffers. Local candidate generation does
+not repeat those transformations.
 
 The placer works by keeping a queue of candidate `(World3D, node_positions)` states. For each graph node it generates possible placements/routes, then samples the candidate queue to keep the search bounded.
 
@@ -24,7 +28,9 @@ s = (a ^ b) ^ cin
 cout = (a & b) | (s & cin)
 ```
 
-After `prepare_place()`, this becomes a decomposed `Not`/`Or` network. It is logically compact, but it does not give the local placer explicit intermediate routing points such as `a ^ b` or `a & b`.
+During Routable lowering, this becomes a decomposed `Not`/`Or` network. The
+mapped nodes are visible in `routable.rcir`, but the generic decomposition does
+not preserve convenient named routing points such as `a ^ b` or `a & b`.
 
 `buffered_full_adder_graph()` manually introduces intermediate signals:
 

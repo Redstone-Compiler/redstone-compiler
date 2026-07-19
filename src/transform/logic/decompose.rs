@@ -55,7 +55,12 @@ impl LogicGraphTransformer {
         Ok(())
     }
 
-    // a ^ b => (~a & b) | (a & ~b)
+    // a ^ b => (~((a & b) | ~a)) | (~((a & b) | ~b))
+    //
+    // Keeping the shared `a & b` term explicit lets structural CSE reuse a
+    // carry-generate node that already exists in arithmetic logic. It also
+    // produces the buffered XOR topology expected by local placement instead
+    // of two independent product terms.
     pub fn decompose_xor(&mut self) -> eyre::Result<()> {
         // check decomposable
         if self.graph.graph.nodes.iter().any(|node| match &node.kind {
@@ -81,7 +86,7 @@ impl LogicGraphTransformer {
             .map(|node| node.id)
             .collect_vec();
 
-        let xor_gate = LogicGraphBuilder::new("(~x&y)|(x&~y)".to_string())
+        let xor_gate = LogicGraphBuilder::new("(~((x&y)|~x))|(~((x&y)|~y))".to_string())
             .build("z".to_string())
             .unwrap();
 

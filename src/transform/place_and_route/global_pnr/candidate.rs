@@ -214,7 +214,9 @@ fn generate_unit_candidates(
     progress_label: Option<&str>,
     input_mode: CandidateInputMode,
 ) -> eyre::Result<Vec<LayoutCandidate>> {
-    let graph = LogicGraph { graph }.prepare_place()?;
+    // Routable leaf bodies are already technology-mapped. Candidate
+    // generation must preserve that graph exactly.
+    let graph = LogicGraph { graph };
     let placer = LocalPlacer::new(graph.clone(), config.local_config)?;
 
     let placed = placer.generate_with_outputs_and_input_constraints_progress(

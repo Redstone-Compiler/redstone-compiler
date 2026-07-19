@@ -55,8 +55,9 @@ examples below remain exploratory and are not all accepted by the parser.
   candidate may be slightly larger locally but have much better port access or
   routing behavior.
 - Constraints must refer to stable Routable definitions, instances, nets, and
-  public ports. They must not refer to graph indices or nodes created by
-  `prepare_place()`.
+  public ports. Mapping-created leaf nodes are now canonical Routable content,
+  but raw generated node indices are not stable authoring identities; internal
+  constraints require an explicit stable name or role.
 - Diagnostics must distinguish invalid or contradictory intent from search
   exhaustion. A heuristic placer failing to find a solution does not prove that
   the constraints are unsatisfiable.
@@ -420,9 +421,9 @@ Each variant may have a different stable internal Routable subgraph and layout
 recipe. Variant selection is target mapping or local implementation selection;
 it must preserve the public operation's behavior and ports.
 
-This avoids making nodes inserted by `prepare_place()` part of the public
-contract. A user who needs internal control refers to named objects in a stable
-implementation variant, not transient graph indices.
+The selected variant must be fully materialized in Routable IR before local
+placement. A user who needs internal control refers to named objects in that
+stable implementation variant, not transient or inferred graph indices.
 
 ### Physical contract
 
