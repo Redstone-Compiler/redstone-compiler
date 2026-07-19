@@ -1845,7 +1845,7 @@ mod tests {
     };
     use crate::transform::place_and_route::local_placer::{
         InputPlacementStrategy, LocalPlacerConfig, NotRouteStrategy, PlacementSamplingPolicy,
-        TorchPlacementStrategy,
+        PlacementSchedulePolicy, TorchPlacementStrategy,
     };
     use crate::transform::place_and_route::sampling::SamplingPolicy;
     use crate::transform::place_and_route::utils::world_to_logic_with_outputs;
@@ -1857,6 +1857,7 @@ mod tests {
     fn sequential_local_config() -> LocalPlacerConfig {
         LocalPlacerConfig {
             random_seed: 42,
+            schedule: PlacementSchedulePolicy::Topological,
             greedy_input_generation: true,
             input_placement_strategy: InputPlacementStrategy::Boundary,
             input_candidate_limit: None,
@@ -1983,6 +1984,7 @@ mod tests {
 
         let local_config = LocalPlacerConfig {
             random_seed: 29,
+            schedule: PlacementSchedulePolicy::Auto,
             greedy_input_generation: true,
             input_placement_strategy: InputPlacementStrategy::Boundary,
             input_candidate_limit: Some(25),

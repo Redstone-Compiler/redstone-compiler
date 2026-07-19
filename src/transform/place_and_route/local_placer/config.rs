@@ -7,6 +7,7 @@ use crate::world::position::Position;
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct LocalPlacerConfig {
     pub random_seed: u64,
+    pub schedule: PlacementSchedulePolicy,
     pub greedy_input_generation: bool,
     pub input_placement_strategy: InputPlacementStrategy,
     pub input_candidate_limit: Option<usize>,
@@ -30,6 +31,7 @@ impl Default for LocalPlacerConfig {
     fn default() -> Self {
         Self {
             random_seed: 42,
+            schedule: PlacementSchedulePolicy::Topological,
             greedy_input_generation: false,
             input_placement_strategy: InputPlacementStrategy::default(),
             input_candidate_limit: None,
@@ -46,6 +48,15 @@ impl Default for LocalPlacerConfig {
             route_step_sampling_policy: SamplingPolicy::default(),
         }
     }
+}
+
+#[derive(Default, Debug, Copy, Clone, PartialEq, Eq)]
+pub enum PlacementSchedulePolicy {
+    #[default]
+    Topological,
+    MinFrontier,
+    Reconvergence,
+    Auto,
 }
 
 #[derive(Default, Debug, Copy, Clone, PartialEq, Eq)]
@@ -163,6 +174,7 @@ impl LocalPlacerConfig {
     pub fn exhaustive(max_route_step: usize) -> Self {
         Self {
             random_seed: 42,
+            schedule: PlacementSchedulePolicy::Topological,
             greedy_input_generation: false,
             input_placement_strategy: InputPlacementStrategy::Anywhere,
             input_candidate_limit: None,

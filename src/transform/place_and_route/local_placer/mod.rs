@@ -25,14 +25,17 @@ use crate::world::World3D;
 mod config;
 mod debug;
 mod isolation;
+mod scheduler;
 mod state;
 
 pub use config::{
     InputPlacementStrategy, LocalPlacerConfig, LocalPlacerInputConstraints, NotRouteStrategy,
-    PlacementSamplingPolicy, TorchPlacementStrategy, K_MAX_LOCAL_PLACE_NODE_COUNT,
+    PlacementSamplingPolicy, PlacementSchedulePolicy, TorchPlacementStrategy,
+    K_MAX_LOCAL_PLACE_NODE_COUNT,
 };
 pub use debug::{LocalPlacerDebug, RouteDebug, RouteDepthDebug, RouteRejectReason, StepDebug};
 use isolation::RouteIsolation;
+pub use scheduler::{PlacementSchedule, PlacementScheduleMetrics, PlacementScheduler};
 use state::PlacementState;
 
 mod routing;
@@ -67,7 +70,17 @@ const FUTURE_JOIN_DISTANCE_COST_WEIGHT: usize = 8;
 
 impl LocalPlacer {
     pub fn new(graph: LogicGraph, config: LocalPlacerConfig) -> eyre::Result<Self> {
-        let visit_orders = graph.topological_order();
+        let visit_orders = PlacementScheduler::new(&graph)
+            .select(config.schedule)
+            .order;
+        Self::new_with_visit_order(graph, config, visit_orders)
+    }
+
+    pub(crate) fn new_with_visit_order(
+        graph: LogicGraph,
+        config: LocalPlacerConfig,
+        visit_orders: Vec<GraphNodeId>,
+    ) -> eyre::Result<Self> {
         let cost_join_pairs_by_step = build_cost_join_pairs_by_step(&graph, &visit_orders);
         let result = Self {
             graph,
@@ -85,6 +98,35 @@ impl LocalPlacer {
             self.graph.nodes.len() <= K_MAX_LOCAL_PLACE_NODE_COUNT,
             "too large graph"
         );
+        ensure!(
+            self.visit_orders.len() == self.graph.nodes.len()
+                && self
+                    .visit_orders
+                    .iter()
+                    .copied()
+                    .collect::<HashSet<_>>()
+                    .len()
+                    == self.graph.nodes.len(),
+            "placement schedule must contain every graph node exactly once"
+        );
+        let schedule_position = self
+            .visit_orders
+            .iter()
+            .enumerate()
+            .map(|(index, node_id)| (*node_id, index))
+            .collect::<HashMap<_, _>>();
+        for node in &self.graph.nodes {
+            for input in &node.inputs {
+                if let Some(input_position) = schedule_position.get(input) {
+                    ensure!(
+                        input_position < &schedule_position[&node.id],
+                        "placement schedule visits node {} before its input {}",
+                        node.id,
+                        input
+                    );
+                }
+            }
+        }
 
         for node_id in &self.graph.nodes {
             let kind = &self.graph.find_node_by_id(node_id.id).unwrap().kind;

@@ -13,7 +13,8 @@ use crate::transform::place_and_route::global_pnr::ir::{
     LayoutCandidate, PhysicalPort, PhysicalPortDirection, PortConnection,
 };
 use crate::transform::place_and_route::local_placer::{
-    LocalPlacer, LocalPlacerConfig, LocalPlacerInputConstraints,
+    LocalPlacer, LocalPlacerConfig, LocalPlacerInputConstraints, PlacementSchedulePolicy,
+    PlacementScheduler,
 };
 use crate::transform::place_and_route::placed_node::PlacedNode;
 use crate::world::block::Block;
@@ -217,38 +218,6 @@ fn generate_unit_candidates(
     // Routable leaf bodies are already technology-mapped. Candidate
     // generation must preserve that graph exactly.
     let graph = LogicGraph { graph };
-    let placer = LocalPlacer::new(graph.clone(), config.local_config)?;
-
-    let mut placed = match input_mode {
-        CandidateInputMode::ExternalPorts => placer
-            .generate_with_outputs_and_planned_inputs_progress(
-                config.dim,
-                None,
-                &config.input_constraints,
-                progress_label,
-            ),
-        CandidateInputMode::MaterializedSwitches => placer
-            .generate_with_outputs_and_input_constraints_progress(
-                config.dim,
-                None,
-                &config.input_constraints,
-                progress_label,
-            ),
-    };
-    if input_mode == CandidateInputMode::ExternalPorts && placed.is_empty() {
-        tracing::info!(
-            module = module_name,
-            "planned child inputs produced no candidates; retrying incremental input placement"
-        );
-        placed = placer.generate_with_outputs_and_input_constraints_progress(
-            config.dim,
-            None,
-            &config.input_constraints,
-            progress_label,
-        );
-    }
-    let generated_count = placed.len();
-
     let contains_sequential = graph
         .graph
         .nodes
@@ -256,39 +225,104 @@ fn generate_unit_candidates(
         .any(|node| matches!(node.kind, GraphNodeKind::Sequential(_)));
     let validate_truth_table = !contains_sequential;
     let mut candidates = Vec::new();
+    let mut generated_count = 0usize;
     let mut truth_table_rejections = 0usize;
     let mut port_rejections = 0usize;
-    for placed in placed {
+    let mut schedules = if config.local_config.schedule == PlacementSchedulePolicy::Auto {
+        PlacementScheduler::new(&graph).candidates()
+    } else {
+        vec![PlacementScheduler::new(&graph).select(config.local_config.schedule)]
+    };
+    // Keep auto mode performance-neutral for graphs already handled by the
+    // canonical order. Heuristic schedules are recovery paths, ranked by
+    // their static metrics, rather than speculative work paid on every run.
+    let topological_order = graph.topological_order();
+    schedules.sort_by_key(|schedule| (schedule.order != topological_order, schedule.metrics));
+    let schedule_count = schedules.len();
+    let mut attempted_schedules = 0usize;
+
+    for (schedule_attempt, schedule) in schedules.into_iter().enumerate() {
         if candidates.len() >= config.max_candidates {
             break;
         }
-        if validate_truth_table && !candidate_matches_truth_table(&graph, &placed)? {
-            truth_table_rejections += 1;
-            continue;
+        attempted_schedules += 1;
+        if schedule_count > 1 {
+            tracing::info!(
+                module = module_name,
+                schedule_attempt = schedule_attempt + 1,
+                schedule_count,
+                input_lifetime = schedule.metrics.input_lifetime,
+                peak_frontier = schedule.metrics.peak_frontier,
+                total_frontier = schedule.metrics.total_frontier,
+                edge_lifetime = schedule.metrics.edge_lifetime,
+                "trying local placement schedule"
+            );
         }
-        let (world, physical_ports) = candidate_layout(
-            &ports,
-            contains_sequential,
-            &config.input_constraints,
-            placed.world,
-            &placed.inputs,
-            &placed.outputs,
-            input_mode,
-        );
-        if !candidate_ports_cover_module_ports(&ports, &physical_ports) {
-            port_rejections += 1;
-            continue;
+        let placer =
+            LocalPlacer::new_with_visit_order(graph.clone(), config.local_config, schedule.order)?;
+        let mut placed = match input_mode {
+            CandidateInputMode::ExternalPorts => placer
+                .generate_with_outputs_and_planned_inputs_progress(
+                    config.dim,
+                    None,
+                    &config.input_constraints,
+                    progress_label,
+                ),
+            CandidateInputMode::MaterializedSwitches => placer
+                .generate_with_outputs_and_input_constraints_progress(
+                    config.dim,
+                    None,
+                    &config.input_constraints,
+                    progress_label,
+                ),
+        };
+        if input_mode == CandidateInputMode::ExternalPorts && placed.is_empty() {
+            tracing::info!(
+                module = module_name,
+                "planned child inputs produced no candidates; retrying incremental input placement"
+            );
+            placed = placer.generate_with_outputs_and_input_constraints_progress(
+                config.dim,
+                None,
+                &config.input_constraints,
+                progress_label,
+            );
         }
-        candidates.push(LayoutCandidate::from_world(
-            module_name.to_owned(),
-            world,
-            physical_ports,
-        )?);
+        generated_count += placed.len();
+
+        for placed in placed {
+            if candidates.len() >= config.max_candidates {
+                break;
+            }
+            if validate_truth_table && !candidate_matches_truth_table(&graph, &placed)? {
+                truth_table_rejections += 1;
+                continue;
+            }
+            let (world, physical_ports) = candidate_layout(
+                &ports,
+                contains_sequential,
+                &config.input_constraints,
+                placed.world,
+                &placed.inputs,
+                &placed.outputs,
+                input_mode,
+            );
+            if !candidate_ports_cover_module_ports(&ports, &physical_ports) {
+                port_rejections += 1;
+                continue;
+            }
+            candidates.push(LayoutCandidate::from_world(
+                module_name.to_owned(),
+                world,
+                physical_ports,
+            )?);
+        }
     }
     tracing::info!(
         module = module_name,
         generated = generated_count,
         accepted = candidates.len(),
+        attempted_schedules,
         truth_table_rejections,
         port_rejections,
         "local candidate validation completed"

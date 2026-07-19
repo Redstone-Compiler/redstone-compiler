@@ -29,6 +29,7 @@ fn torch(direction: Direction) -> Block {
 fn config(max_route_step: usize) -> LocalPlacerConfig {
     LocalPlacerConfig {
         random_seed: 42,
+        schedule: PlacementSchedulePolicy::Topological,
         greedy_input_generation: true,
         input_placement_strategy: InputPlacementStrategy::Boundary,
         input_candidate_limit: None,

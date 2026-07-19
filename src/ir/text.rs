@@ -10,9 +10,10 @@ use super::syntax::{tokenize, Token};
 use super::{
     CandidateSpec, CongestionSpec, Free3dSweepSpec, InputPlacementSpec, LayerAssignmentSpec,
     LocalPlacerSpec, NetOrderSpec, NotRouteSpec, ObjectiveSpec, PhysicalConstraintSpec,
-    PhysicalRegionSpec, PhysicalSpec, PlacementHeuristicSpec, PlacementSamplingSpec, PlacementSpec,
-    PnrSpec, PortRef, PreferenceSpec, RoutableDocument, RouteStageSpec, RouteStrategySpec,
-    RouteValidationSpec, RoutingSpec, SamplingSpec, SearchSpec, TorchPlacementSpec,
+    PhysicalRegionSpec, PhysicalSpec, PlacementHeuristicSpec, PlacementSamplingSpec,
+    PlacementScheduleSpec, PlacementSpec, PnrSpec, PortRef, PreferenceSpec, RoutableDocument,
+    RouteStageSpec, RouteStrategySpec, RouteValidationSpec, RoutingSpec, SamplingSpec, SearchSpec,
+    TorchPlacementSpec,
 };
 
 impl fmt::Display for RoutableDesign {
@@ -276,6 +277,16 @@ fn write_local_placer_body(
     indent: &str,
 ) -> fmt::Result {
     writeln!(output, "{indent}random-seed {};", local.random_seed)?;
+    writeln!(
+        output,
+        "{indent}schedule {};",
+        match local.schedule {
+            PlacementScheduleSpec::Topological => "topological",
+            PlacementScheduleSpec::MinFrontier => "min-frontier",
+            PlacementScheduleSpec::Reconvergence => "reconvergence",
+            PlacementScheduleSpec::Auto => "auto",
+        }
+    )?;
     writeln!(
         output,
         "{indent}greedy-input-generation {};",
@@ -959,6 +970,15 @@ impl Parser {
         self.expect_keyword("random-seed")?;
         let random_seed = self.expect_u64()?;
         self.expect_symbol(';')?;
+        self.expect_keyword("schedule")?;
+        let schedule = match self.expect_word()?.as_str() {
+            "topological" => PlacementScheduleSpec::Topological,
+            "min-frontier" => PlacementScheduleSpec::MinFrontier,
+            "reconvergence" => PlacementScheduleSpec::Reconvergence,
+            "auto" => PlacementScheduleSpec::Auto,
+            value => eyre::bail!("unknown placement schedule `{value}`"),
+        };
+        self.expect_symbol(';')?;
         self.expect_keyword("greedy-input-generation")?;
         let greedy_input_generation = self.expect_bool()?;
         self.expect_symbol(';')?;
@@ -1017,6 +1037,7 @@ impl Parser {
         self.expect_symbol('}')?;
         Ok(LocalPlacerSpec {
             random_seed,
+            schedule,
             greedy_input_generation,
             input_placement,
             input_candidate_limit,

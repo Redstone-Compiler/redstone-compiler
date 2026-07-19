@@ -59,6 +59,7 @@ pub struct CandidateSpec {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalPlacerSpec {
     pub random_seed: u64,
+    pub schedule: PlacementScheduleSpec,
     pub greedy_input_generation: bool,
     pub input_placement: InputPlacementSpec,
     pub input_candidate_limit: Option<usize>,
@@ -73,6 +74,16 @@ pub struct LocalPlacerSpec {
     pub not_route_step_sampling: SamplingSpec,
     pub max_route_step: usize,
     pub route_step_sampling: SamplingSpec,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlacementScheduleSpec {
+    #[default]
+    Topological,
+    MinFrontier,
+    Reconvergence,
+    Auto,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

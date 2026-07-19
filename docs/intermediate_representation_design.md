@@ -531,6 +531,30 @@ and typed ports; the node graph is adapted to the `Graph` consumed by the local
 placer. Composite hierarchy, candidate binding, global placement, and routing
 continue to use Routable definitions and `ResolvedPnrTopology`.
 
+Local placement scheduling is a separate, non-semantic layer between the
+Routable leaf graph and block search. Candidate profiles select it inside
+`local-placer`:
+
+```text
+local-placer {
+  schedule auto;
+  ...
+}
+```
+
+Supported policies are `topological`, `min-frontier`, `reconvergence`, and
+`auto`. The first preserves the legacy graph order. The two heuristic policies
+perform legal DAG list scheduling. `auto` first tries the canonical topological
+order so enabling it does not penalize graphs already handled by the established
+search. If that order cannot produce enough physically valid candidates, it
+ranks the remaining legal schedules by input-to-first-consumer lifetime, peak
+live frontier, accumulated frontier, and edge lifetime and tries them as a
+bounded recovery portfolio. Input lifetime is placement-specific: it favors
+introducing an external source near the logic cone that first consumes it
+instead of requiring every input to form an initial prefix. The
+schedule changes search order only; it does not mutate Routable IR or its cache
+identity as a circuit.
+
 Prepared/replayed global execution stores only the module name, resolved typed
 topology, candidate sets, and preparation metadata. Snapshot replay determines
 leaf/composite shape from the saved Routable IR. The old graph-module hierarchy,

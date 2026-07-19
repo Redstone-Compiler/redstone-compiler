@@ -5,10 +5,10 @@ use eyre::{ContextCompat, WrapErr};
 use crate::ir::{
     CandidateSpec, CongestionSpec, Free3dSweepSpec, InputPlacementSpec, LayerAssignmentSpec,
     LocalPlacerSpec, NetOrderSpec, NotRouteSpec, ObjectiveSpec, PhysicalConstraintSpec,
-    PhysicalRegionSpec, PhysicalSpec, PlacementHeuristicSpec, PlacementSamplingSpec, PlacementSpec,
-    PnrSpec, PortRef, PreferenceSpec, RoutableDesign, RoutableDocument, RoutableModuleBody,
-    RouteStageSpec, RouteStrategySpec, RouteValidationSpec, RoutingSpec, SamplingSpec, SearchSpec,
-    TorchPlacementSpec,
+    PhysicalRegionSpec, PhysicalSpec, PlacementHeuristicSpec, PlacementSamplingSpec,
+    PlacementScheduleSpec, PlacementSpec, PnrSpec, PortRef, PreferenceSpec, RoutableDesign,
+    RoutableDocument, RoutableModuleBody, RouteStageSpec, RouteStrategySpec, RouteValidationSpec,
+    RoutingSpec, SamplingSpec, SearchSpec, TorchPlacementSpec,
 };
 use crate::transform::place_and_route::global_pnr::candidate::{
     CandidatePolicySet, UnitCandidateConfig,
@@ -30,7 +30,7 @@ use crate::transform::place_and_route::global_pnr::topology::{
 use crate::transform::place_and_route::global_pnr::{GlobalPnrConfig, GlobalSearchConfig};
 use crate::transform::place_and_route::local_placer::{
     InputPlacementStrategy, LocalPlacerConfig, LocalPlacerInputConstraints, NotRouteStrategy,
-    PlacementSamplingPolicy, TorchPlacementStrategy,
+    PlacementSamplingPolicy, PlacementSchedulePolicy, TorchPlacementStrategy,
 };
 use crate::transform::place_and_route::sampling::SamplingPolicy;
 use crate::world::position::{DimSize, Position};
@@ -324,6 +324,12 @@ fn candidate_policy_from_spec(spec: &CandidateSpec) -> UnitCandidateConfig {
 fn local_spec(config: LocalPlacerConfig) -> LocalPlacerSpec {
     LocalPlacerSpec {
         random_seed: config.random_seed,
+        schedule: match config.schedule {
+            PlacementSchedulePolicy::Topological => PlacementScheduleSpec::Topological,
+            PlacementSchedulePolicy::MinFrontier => PlacementScheduleSpec::MinFrontier,
+            PlacementSchedulePolicy::Reconvergence => PlacementScheduleSpec::Reconvergence,
+            PlacementSchedulePolicy::Auto => PlacementScheduleSpec::Auto,
+        },
         greedy_input_generation: config.greedy_input_generation,
         input_placement: match config.input_placement_strategy {
             InputPlacementStrategy::Boundary => InputPlacementSpec::Boundary,
@@ -354,6 +360,12 @@ fn local_spec(config: LocalPlacerConfig) -> LocalPlacerSpec {
 fn local_config(spec: LocalPlacerSpec) -> LocalPlacerConfig {
     LocalPlacerConfig {
         random_seed: spec.random_seed,
+        schedule: match spec.schedule {
+            PlacementScheduleSpec::Topological => PlacementSchedulePolicy::Topological,
+            PlacementScheduleSpec::MinFrontier => PlacementSchedulePolicy::MinFrontier,
+            PlacementScheduleSpec::Reconvergence => PlacementSchedulePolicy::Reconvergence,
+            PlacementScheduleSpec::Auto => PlacementSchedulePolicy::Auto,
+        },
         greedy_input_generation: spec.greedy_input_generation,
         input_placement_strategy: match spec.input_placement {
             InputPlacementSpec::Boundary => InputPlacementStrategy::Boundary,
