@@ -212,6 +212,18 @@ impl LogicGraphTransformer {
 
         let src_inputs = g.find_node_by_id(src).unwrap().inputs.clone();
         let src_outputs = g.find_node_by_id(src).unwrap().outputs.clone();
+        let src_tag = g.find_node_by_id(src).unwrap().tag.clone();
+
+        // Every mapped node remains derived from the logical operation being
+        // replaced. Preserve that origin through decomposition so the emitted
+        // Routable nodes can participate in cross-stage source mapping.
+        if !src_tag.is_empty() {
+            for mut node in tar.nodes.iter_mut() {
+                if node.tag.is_empty() && node.kind.is_logic() {
+                    node.tag = src_tag.clone();
+                }
+            }
+        }
 
         let tar_inputs = tar.inputs();
         let tar_inputs_outputs = tar

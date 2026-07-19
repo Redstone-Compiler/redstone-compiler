@@ -22,12 +22,19 @@ impl LogicGraphTransformer {
         }
 
         for (from, to) in direct_edges {
+            let origin_tag = self
+                .graph
+                .graph
+                .find_node_by_id(from)
+                .map(|node| node.tag.clone())
+                .filter(|tag| !tag.is_empty())
+                .unwrap_or_else(|| "auto-buffer".to_owned());
             let first_not = self.graph.graph.add_node(GraphNode {
                 kind: GraphNodeKind::Logic(Logic {
                     logic_type: LogicType::Not,
                 }),
                 inputs: vec![from],
-                tag: "auto-buffer".to_owned(),
+                tag: origin_tag.clone(),
                 ..Default::default()
             });
             let second_not = self.graph.graph.add_node(GraphNode {
@@ -36,7 +43,7 @@ impl LogicGraphTransformer {
                 }),
                 inputs: vec![first_not],
                 outputs: vec![to],
-                tag: "auto-buffer".to_owned(),
+                tag: origin_tag,
             });
             self.graph
                 .graph
