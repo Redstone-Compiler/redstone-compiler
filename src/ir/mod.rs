@@ -1,6 +1,6 @@
-mod adapter;
 pub mod debug;
-pub(crate) use adapter::graph_from_routable_leaf;
+mod leaf_graph;
+pub(crate) use leaf_graph::graph_from_routable_leaf;
 pub mod logical;
 mod logical_adapter;
 mod logical_lowering;

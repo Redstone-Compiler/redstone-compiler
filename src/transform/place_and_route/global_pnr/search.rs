@@ -175,13 +175,12 @@ mod tests {
         layout_combinations, rank_child_candidates, rank_child_candidates_with_preferred,
         select_layout_combination, ChildCandidatePool, GlobalSolutionCost,
     };
-    use crate::graph::module::{GraphModulePortType, GraphModuleVariable};
     use crate::transform::place_and_route::estimate::BoundingBox;
     use crate::transform::place_and_route::global_pnr::ir::{
         LayoutCandidate, LayoutCandidateCost, PhysicalPort, PhysicalPortDirection, PortConnection,
     };
     use crate::transform::place_and_route::global_pnr::router::{
-        ordered_module_variables, NetOrderStrategy,
+        ordered_module_variables, NetOrderStrategy, RoutingConnection,
     };
     use crate::world::position::{DimSize, Position};
     use crate::world::World3D;
@@ -211,9 +210,8 @@ mod tests {
         }
     }
 
-    fn variable(source: &str, target: &str) -> GraphModuleVariable {
-        GraphModuleVariable {
-            var_type: GraphModulePortType::InputNet,
+    fn variable(source: &str, target: &str) -> RoutingConnection {
+        RoutingConnection {
             source: (source.to_owned(), "q".to_owned()),
             target: (target.to_owned(), "d".to_owned()),
         }

@@ -3,12 +3,10 @@ use std::fmt::Display;
 
 use indexmap::IndexMap;
 use itertools::Itertools;
-use module::GraphModuleBuilder;
 use petgraph::stable_graph::NodeIndex;
 use petgraph::visit::NodeRef;
 
 use self::cluster::ClusteredGraph;
-use self::module::GraphModule;
 use crate::cluster::{Clustered, ClusteredType};
 use crate::logic::Logic;
 use crate::sequential::SequentialPrimitive;
@@ -18,7 +16,6 @@ pub mod analysis;
 mod cluster;
 pub mod graphviz;
 pub mod logic;
-pub mod module;
 pub mod world;
 
 pub type GraphNodeId = usize;
@@ -1077,10 +1074,6 @@ impl Graph {
             .collect_vec();
         path.sort();
         path
-    }
-
-    pub fn to_module(self, builder: &mut GraphModuleBuilder, name: &str) -> GraphModule {
-        builder.to_graph_module(self, name)
     }
 
     pub fn remove_input(&mut self, input_name: &str) {

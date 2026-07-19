@@ -1,6 +1,3 @@
-use crate::graph::module::GraphModule;
-use crate::graph::{Graph, GraphNode, GraphNodeKind};
-use crate::sequential::{SequentialPrimitive, SequentialType};
 use crate::verilog::rtl::{
     RtlAssignKind, RtlExpr, RtlModule, RtlSensitivity, RtlSignalRef, RtlStmt,
 };
@@ -35,30 +32,6 @@ pub fn synthesize_module(module: &RtlModule) -> eyre::Result<SynthNetlist> {
         cells.push(synthesize_process(module, process)?);
     }
     Ok(SynthNetlist { cells })
-}
-
-pub fn graph_module_from_single_synth_cell(
-    rtl: &RtlModule,
-    netlist: &SynthNetlist,
-    instance_name: &str,
-) -> eyre::Result<Option<GraphModule>> {
-    let [cell] = netlist.cells.as_slice() else {
-        return Ok(None);
-    };
-
-    match cell {
-        SynthCell::DLatch {
-            output,
-            data,
-            enable,
-        } => Ok(Some(d_latch_graph_module(
-            instance_name,
-            rtl.signal_name(*data)?,
-            rtl.signal_name(*enable)?,
-            rtl.signal_name(*output)?,
-        ))),
-        SynthCell::Dff { .. } | SynthCell::Register { .. } => Ok(None),
-    }
 }
 
 fn synthesize_process(
@@ -173,46 +146,6 @@ fn ensure_nonblocking(kind: RtlAssignKind) -> eyre::Result<()> {
         eyre::bail!("only nonblocking sequential assignments are supported");
     }
     Ok(())
-}
-
-pub(crate) fn d_latch_graph_module(
-    name: &str,
-    data: &str,
-    enable: &str,
-    output: &str,
-) -> GraphModule {
-    let mut graph = Graph::from_nodes(vec![
-        GraphNode {
-            kind: GraphNodeKind::Input(data.to_owned()),
-            ..Default::default()
-        },
-        GraphNode {
-            kind: GraphNodeKind::Input(enable.to_owned()),
-            ..Default::default()
-        },
-        GraphNode {
-            kind: GraphNodeKind::Sequential(SequentialPrimitive::new(
-                SequentialType::DLatch,
-                vec![data.to_owned(), enable.to_owned()],
-                vec![output.to_owned()],
-            )),
-            inputs: vec![0, 1],
-            ..Default::default()
-        },
-        GraphNode {
-            kind: GraphNodeKind::Output(output.to_owned()),
-            inputs: vec![2],
-            ..Default::default()
-        },
-    ]);
-    graph.build_outputs();
-    graph.build_producers();
-    graph.build_consumers();
-    graph.verify().unwrap();
-
-    let mut module: GraphModule = graph.into();
-    module.name = name.to_owned();
-    module
 }
 
 #[cfg(test)]

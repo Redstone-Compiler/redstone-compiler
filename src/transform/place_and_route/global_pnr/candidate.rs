@@ -5,7 +5,6 @@ use std::ops::{Deref, DerefMut};
 use eyre::ContextCompat;
 
 use crate::graph::logic::LogicGraph;
-use crate::graph::module::{GraphModule, GraphModulePortTarget, GraphModulePortType};
 use crate::graph::{Graph, GraphNodeKind};
 use crate::ir::{graph_from_routable_leaf, RoutableModule, RoutablePortDirection};
 use crate::output::{OutputEndpoint, PlacedWorld};
@@ -125,46 +124,6 @@ impl Default for UnitCandidateConfig {
             combinational_sampling_limit: None,
         }
     }
-}
-
-pub fn generate_graph_module_candidates(
-    module: &GraphModule,
-    config: &UnitCandidateConfig,
-) -> eyre::Result<Vec<LayoutCandidate>> {
-    generate_graph_module_candidates_with_progress_label(module, config, None)
-}
-
-pub fn generate_graph_module_candidates_with_progress_label(
-    module: &GraphModule,
-    config: &UnitCandidateConfig,
-    progress_label: Option<&str>,
-) -> eyre::Result<Vec<LayoutCandidate>> {
-    let graph = module
-        .graph
-        .clone()
-        .context("only graph-backed GraphModule can generate unit layout candidates")?;
-    let ports = module
-        .ports
-        .iter()
-        .map(|port| match (&port.port_type, &port.target) {
-            (GraphModulePortType::InputNet, GraphModulePortTarget::Node(target)) => Some(
-                CandidatePort::new(&port.name, target, PhysicalPortDirection::Input),
-            ),
-            (GraphModulePortType::OutputNet, GraphModulePortTarget::Node(target)) => Some(
-                CandidatePort::new(&port.name, target, PhysicalPortDirection::Output),
-            ),
-            _ => None,
-        })
-        .map(|port| {
-            port.with_context(|| {
-                format!(
-                    "graph-backed module `{}` has a non-node or unsupported candidate port",
-                    module.name
-                )
-            })
-        })
-        .collect::<eyre::Result<Vec<_>>>()?;
-    generate_unit_candidates(&module.name, graph, ports, config, progress_label)
 }
 
 pub fn generate_routable_module_candidates_with_progress_label(

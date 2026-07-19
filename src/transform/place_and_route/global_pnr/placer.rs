@@ -2,11 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use eyre::{ContextCompat, WrapErr};
 
-use crate::graph::module::{GraphModule, GraphModulePortTarget};
 use crate::transform::place_and_route::estimate::BoundingBox;
-use crate::transform::place_and_route::global_pnr::free_3d::{
-    place_free_3d, place_free_3d_with_edges,
-};
+use crate::transform::place_and_route::global_pnr::free_3d::place_free_3d_with_edges;
 use crate::transform::place_and_route::global_pnr::heuristics::{
     GlobalHeuristicHooks, PlacementHeuristicContext,
 };
@@ -69,40 +66,6 @@ struct PlacementConnectivity {
 }
 
 impl PlacementConnectivity {
-    fn from_legacy(module: &GraphModule) -> Self {
-        let connections = module
-            .vars
-            .iter()
-            .map(|var| PlacementConnection {
-                source_instance: var.source.0.clone(),
-                source_port: var.source.1.clone(),
-                target_instance: var.target.0.clone(),
-                target_port: var.target.1.clone(),
-            })
-            .collect::<Vec<_>>();
-        let mut proximity_edges = connections
-            .iter()
-            .map(|connection| {
-                (
-                    connection.source_instance.clone(),
-                    connection.target_instance.clone(),
-                )
-            })
-            .collect::<Vec<_>>();
-        for port in &module.ports {
-            let targets = target_modules(&port.target);
-            for (index, left) in targets.iter().enumerate() {
-                for right in targets.iter().skip(index + 1) {
-                    proximity_edges.push((left.clone(), right.clone()));
-                }
-            }
-        }
-        Self {
-            connections,
-            proximity_edges,
-        }
-    }
-
     fn from_resolved(topology: &ResolvedPnrTopology) -> eyre::Result<Self> {
         let mut connections = Vec::new();
         let mut proximity_edges = Vec::new();
@@ -204,25 +167,8 @@ pub fn place_candidates_on_shelves(
     place_candidates_on_shelves_in_order(candidates, &order, config)
 }
 
-pub fn placement_candidates(
-    module: &GraphModule,
-    candidates: &[LayoutCandidate],
-    config: &GlobalPlacementConfig,
-    heuristics: &[PlacementHeuristic],
-) -> Vec<Vec<PlacedModule>> {
-    let connectivity = PlacementConnectivity::from_legacy(module);
-    placement_candidates_with_connectivity(
-        &connectivity,
-        Some(module),
-        candidates,
-        config,
-        heuristics,
-    )
-}
-
 fn placement_candidates_with_connectivity(
     connectivity: &PlacementConnectivity,
-    legacy_module: Option<&GraphModule>,
     candidates: &[LayoutCandidate],
     config: &GlobalPlacementConfig,
     heuristics: &[PlacementHeuristic],
@@ -235,10 +181,7 @@ fn placement_candidates_with_connectivity(
     for heuristic in heuristics {
         if let PlacementHeuristic::Free3D(free_3d) = heuristic {
             let edges = connectivity.candidate_edges(candidates);
-            let placed = legacy_module.map_or_else(
-                || place_free_3d_with_edges(candidates, &edges, *free_3d),
-                |module| place_free_3d(module, candidates, *free_3d),
-            );
+            let placed = place_free_3d_with_edges(candidates, &edges, *free_3d);
             if let Some(placed) = placed {
                 push_unique_placement(&mut placements, placed);
             }
@@ -405,7 +348,7 @@ pub fn placement_candidates_resolved(
 ) -> eyre::Result<Vec<Vec<PlacedModule>>> {
     let connectivity = PlacementConnectivity::from_resolved(topology)?;
     let mut placements =
-        placement_candidates_with_connectivity(&connectivity, None, candidates, config, heuristics);
+        placement_candidates_with_connectivity(&connectivity, candidates, config, heuristics);
     let context = PlacementHeuristicContext {
         topology,
         candidates,
@@ -1396,34 +1339,6 @@ fn net_aware_candidate_order(
     order
 }
 
-fn target_modules(target: &GraphModulePortTarget) -> Vec<String> {
-    match target {
-        GraphModulePortTarget::Module(module, _) => vec![module.clone()],
-        GraphModulePortTarget::Wire(targets) => targets
-            .iter()
-            .map(|(module, _)| module.clone())
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect(),
-        GraphModulePortTarget::Node(_) => Vec::new(),
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn placement_cost_breakdown(
-    module: &GraphModule,
-    candidates: &[LayoutCandidate],
-    placed: &[PlacedModule],
-    congestion_config: RoutingCongestionConfig,
-) -> PlacementCostBreakdown {
-    placement_cost_breakdown_connectivity(
-        &PlacementConnectivity::from_legacy(module),
-        candidates,
-        placed,
-        congestion_config,
-    )
-}
-
 fn placement_cost_breakdown_connectivity(
     connectivity: &PlacementConnectivity,
     candidates: &[LayoutCandidate],
@@ -1804,16 +1719,20 @@ mod tests {
         let candidates = (0..5)
             .map(|index| test_candidate(&format!("child_{index}"), &[]))
             .collect::<Vec<_>>();
-        let module = GraphModule::default();
+        let connectivity = PlacementConnectivity::default();
         let config = GlobalPlacementConfig {
             max_attempts: 128,
             ..Default::default()
         };
 
-        let shelf_only =
-            placement_candidates(&module, &candidates, &config, &[PlacementHeuristic::Shelf]);
-        let shelf_and_grid = placement_candidates(
-            &module,
+        let shelf_only = placement_candidates_with_connectivity(
+            &connectivity,
+            &candidates,
+            &config,
+            &[PlacementHeuristic::Shelf],
+        );
+        let shelf_and_grid = placement_candidates_with_connectivity(
+            &connectivity,
             &candidates,
             &config,
             &[PlacementHeuristic::Shelf, PlacementHeuristic::Grid],
@@ -1839,7 +1758,7 @@ mod tests {
             }],
             // This edge represents two sinks sharing a top-level input. It is
             // useful to placement cost/order, but was never a Free3D spring in
-            // the legacy GraphModule path.
+            // the pre-topology placement path.
             proximity_edges: vec![
                 ("source".to_owned(), "first_sink".to_owned()),
                 ("first_sink".to_owned(), "second_sink".to_owned()),
@@ -1854,8 +1773,8 @@ mod tests {
         let candidates = (0..4)
             .map(|index| test_candidate(&format!("child_{index}"), &[]))
             .collect::<Vec<_>>();
-        let placements = placement_candidates(
-            &GraphModule::default(),
+        let placements = placement_candidates_with_connectivity(
+            &PlacementConnectivity::default(),
             &candidates,
             &GlobalPlacementConfig::default(),
             &[PlacementHeuristic::Layered3D(LayeredPlacementConfig {
@@ -1882,8 +1801,8 @@ mod tests {
             test_candidate("q_0_master", &[("q", Position(5, 8, 1))]),
             test_candidate("q_0_slave", &[("q", Position(5, 10, 1))]),
         ];
-        let placements = placement_candidates(
-            &GraphModule::default(),
+        let placements = placement_candidates_with_connectivity(
+            &PlacementConnectivity::default(),
             &candidates,
             &GlobalPlacementConfig::default(),
             &[
@@ -1914,8 +1833,8 @@ mod tests {
             test_candidate("q_0_master", &[("q", Position(5, 8, 1))]),
             test_candidate("q_0_slave", &[("q", Position(5, 10, 1))]),
         ];
-        let placements = placement_candidates(
-            &GraphModule::default(),
+        let placements = placement_candidates_with_connectivity(
+            &PlacementConnectivity::default(),
             &candidates,
             &GlobalPlacementConfig::default(),
             &[PlacementHeuristic::Layered3D(LayeredPlacementConfig {
@@ -1948,7 +1867,7 @@ mod tests {
             test_candidate("q_1_master", &[("q", Position(5, 8, 1))]),
             test_candidate("q_1_slave", &[("q", Position(5, 10, 1))]),
         ];
-        let module = GraphModule::default();
+        let connectivity = PlacementConnectivity::default();
         let config = GlobalPlacementConfig {
             cost_weights: PlacementCostWeights {
                 placement_volume: 0,
@@ -1960,8 +1879,8 @@ mod tests {
             },
             ..Default::default()
         };
-        let placements = placement_candidates(
-            &module,
+        let placements = placement_candidates_with_connectivity(
+            &connectivity,
             &candidates,
             &config,
             &[
@@ -1972,8 +1891,13 @@ mod tests {
         let costs = placements
             .iter()
             .map(|placed| {
-                placement_cost_breakdown(&module, &candidates, placed, config.congestion)
-                    .weighted_total(config.cost_weights)
+                placement_cost_breakdown_connectivity(
+                    &connectivity,
+                    &candidates,
+                    placed,
+                    config.congestion,
+                )
+                .weighted_total(config.cost_weights)
             })
             .collect::<Vec<_>>();
 

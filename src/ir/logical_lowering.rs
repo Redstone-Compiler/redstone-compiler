@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use eyre::{ContextCompat, WrapErr};
 
@@ -6,27 +6,22 @@ use super::logical::{
     ClockEdge, LogicalCell, LogicalCellKind, LogicalDesign, LogicalModule, LogicalPortDirection,
     LogicalValue,
 };
-use super::RoutableDesign;
-use crate::graph::logic::LogicGraph;
-use crate::graph::module::{
-    GraphModule, GraphModuleContext, GraphModuleDesign, GraphModulePort, GraphModulePortTarget,
-    GraphModulePortType, GraphModuleVariable,
+use super::{
+    Endpoint, NetClass, RoutableDesign, RoutableInstance, RoutableModule, RoutableModuleBody,
+    RoutableNet, RoutableNode, RoutableNodeKind, RoutablePort, RoutablePortDirection,
+    RoutableSequentialPrimitive, ROUTABLE_IR_TARGET, ROUTABLE_IR_VERSION,
 };
+use crate::graph::logic::LogicGraph;
 use crate::graph::{Graph, GraphNode, GraphNodeKind};
 use crate::logic::{Logic, LogicType};
 use crate::sequential::{SequentialPrimitive, SequentialType};
 
 /// Lowers the typed logical netlist without reconstructing Verilog syntax.
 ///
-/// `GraphModuleDesign` remains a legacy adapter boundary for the current PnR
-/// implementation. The semantic lowering itself is driven exclusively by
-/// `LogicalDesign`; direct RCIR input and Verilog input therefore take the same
-/// path from this point onward.
 pub(crate) fn lower_logical_to_routable(design: &LogicalDesign) -> eyre::Result<RoutableDesign> {
     design.validate()?;
-    let graph_design = lower_logical_design(design)
+    let mut routable = lower_logical_design(design)
         .wrap_err("logical IR uses a construct not yet supported by redstone-v1 mapping")?;
-    let mut routable = RoutableDesign::from_graph_module_design(&graph_design)?;
     routable.debug = design.debug.clone();
     attach_routable_debug_locations(design, &mut routable);
     Ok(routable)
@@ -279,7 +274,7 @@ fn logical_net_location(
     design.debug.get(&logical_entity(&module.name, "net", base))
 }
 
-fn lower_logical_design(design: &LogicalDesign) -> eyre::Result<GraphModuleDesign> {
+fn lower_logical_design(design: &LogicalDesign) -> eyre::Result<RoutableDesign> {
     let definitions = design
         .modules
         .iter()
@@ -294,10 +289,7 @@ fn lower_logical_design(design: &LogicalDesign) -> eyre::Result<GraphModuleDesig
         if let Some(state_design) = lower_state_design(top)? {
             return Ok(state_design);
         }
-        return Ok(GraphModuleDesign::with_top_module(
-            GraphModuleContext::default(),
-            graph_backed_module(top, &top.name)?,
-        ));
+        return finish_design(&top.name, vec![graph_backed_module(top, &top.name)?]);
     }
 
     if !top.cells.is_empty() {
@@ -307,7 +299,7 @@ fn lower_logical_design(design: &LogicalDesign) -> eyre::Result<GraphModuleDesig
         );
     }
 
-    let mut context = GraphModuleContext::default();
+    let mut modules = Vec::new();
     for instance in &top.instances {
         let definition = definitions
             .get(instance.module.as_str())
@@ -324,16 +316,13 @@ fn lower_logical_design(design: &LogicalDesign) -> eyre::Result<GraphModuleDesig
                 instance.name
             );
         }
-        context.append(graph_backed_module(definition, &instance.name)?);
+        modules.push(graph_backed_module(definition, &instance.name)?);
     }
-
-    Ok(GraphModuleDesign::with_top_module(
-        context,
-        hierarchical_module(top, &definitions)?,
-    ))
+    modules.push(hierarchical_module(top, &definitions)?);
+    finish_design(&top.name, modules)
 }
 
-fn lower_state_design(module: &LogicalModule) -> eyre::Result<Option<GraphModuleDesign>> {
+fn lower_state_design(module: &LogicalModule) -> eyre::Result<Option<RoutableDesign>> {
     let sequential = module
         .cells
         .iter()
@@ -372,7 +361,7 @@ fn lower_state_design(module: &LogicalModule) -> eyre::Result<Option<GraphModule
         {
             eyre::bail!("redstone-v1 currently supports only `register <= register + 1`");
         }
-        return register_increment_design(&module.name, output, clock, width).map(Some);
+        return register_increment_design(module, output, clock, width).map(Some);
     }
 
     let next_expr = match driver {
@@ -392,82 +381,120 @@ fn lower_state_design(module: &LogicalModule) -> eyre::Result<Option<GraphModule
         Some(_) => eyre::bail!("unsupported scalar register data operation"),
         None => data.to_owned(),
     };
-    scalar_dff_design(&module.name, output, clock, &next_expr).map(Some)
+    scalar_dff_design(module, output, clock, &next_expr).map(Some)
 }
 
 fn scalar_dff_design(
-    module_name: &str,
+    logical: &LogicalModule,
     output: &str,
     clock: &str,
     next_expr: &str,
-) -> eyre::Result<GraphModuleDesign> {
+) -> eyre::Result<RoutableDesign> {
     let clock_inverter = format!("{output}_clk_inv");
     let next = format!("{output}_next");
     let master = format!("{output}_master");
     let slave = format!("{output}_slave");
 
-    let mut context = GraphModuleContext::default();
-    context.append(not_clock_module(&clock_inverter)?);
-    context.append(combinational_output_module(&next, next_expr, "d")?);
-    context.append(d_latch_graph_module(&master));
-    context.append(d_latch_graph_module(&slave));
-
-    let mut vars = vec![
-        module_var((&next, "d"), (&master, "d")),
-        module_var((&master, "q"), (&slave, "d")),
-        module_var((&clock_inverter, "clk_n"), (&master, "en")),
-    ];
-    if next_expr.contains(output) {
-        vars.push(module_var((&slave, "q"), (&next, output)));
+    let clock_module = not_clock_module(&clock_inverter)?;
+    let next_module = combinational_output_module(&next, next_expr, "d")?;
+    let master_module = d_latch_routable_module(&master);
+    let slave_module = d_latch_routable_module(&slave);
+    let mut connections = NetConnections::default();
+    connections.connect(
+        clock,
+        NetClass::Clock,
+        self_port(clock),
+        instance_port(&clock_inverter, "clk"),
+    );
+    connections.connect(
+        clock,
+        NetClass::Clock,
+        self_port(clock),
+        instance_port(&slave, "en"),
+    );
+    connections.connect(
+        "next_d",
+        NetClass::Data,
+        instance_port(&next, "d"),
+        instance_port(&master, "d"),
+    );
+    connections.connect(
+        "master_q",
+        NetClass::Data,
+        instance_port(&master, "q"),
+        instance_port(&slave, "d"),
+    );
+    connections.connect(
+        "clk_n",
+        NetClass::Clock,
+        instance_port(&clock_inverter, "clk_n"),
+        instance_port(&master, "en"),
+    );
+    connections.connect(
+        output,
+        NetClass::Io,
+        instance_port(&slave, "q"),
+        self_port(output),
+    );
+    for port in &next_module.ports {
+        if port.direction != RoutablePortDirection::Input {
+            continue;
+        }
+        if port.name == output {
+            connections.connect(
+                output,
+                NetClass::Data,
+                instance_port(&slave, "q"),
+                instance_port(&next, &port.name),
+            );
+        } else {
+            let top_port = logical
+                .ports
+                .iter()
+                .find(|candidate| candidate.net == port.name || candidate.name == port.name)
+                .with_context(|| {
+                    format!("next-state input `{}` is not a top-level port", port.name)
+                })?;
+            connections.connect(
+                &top_port.name,
+                NetClass::Io,
+                self_port(&top_port.name),
+                instance_port(&next, &port.name),
+            );
+        }
     }
-
-    Ok(GraphModuleDesign::with_top_module(
-        context,
-        GraphModule {
-            name: module_name.to_owned(),
-            graph: None,
-            instances: vec![clock_inverter.clone(), next.clone(), master, slave.clone()],
-            vars,
-            ports: vec![
-                GraphModulePort {
-                    name: clock.to_owned(),
-                    port_type: GraphModulePortType::InputNet,
-                    target: GraphModulePortTarget::Wire(vec![
-                        (clock_inverter, "clk".to_owned()),
-                        (slave.clone(), "en".to_owned()),
-                    ]),
-                },
-                GraphModulePort {
-                    name: output.to_owned(),
-                    port_type: GraphModulePortType::OutputNet,
-                    target: GraphModulePortTarget::Module(slave, "q".to_owned()),
-                },
-            ],
-        },
-    ))
+    let top = composite_module(
+        &logical.name,
+        logical_ports(logical)?,
+        [&clock_inverter, &next, &master, &slave],
+        connections.finish(),
+    );
+    finish_design(
+        &logical.name,
+        vec![clock_module, next_module, master_module, slave_module, top],
+    )
 }
 
 fn register_increment_design(
-    module_name: &str,
+    logical: &LogicalModule,
     output: &str,
     clock: &str,
     width: usize,
-) -> eyre::Result<GraphModuleDesign> {
-    let mut context = GraphModuleContext::default();
+) -> eyre::Result<RoutableDesign> {
+    let mut modules = Vec::new();
     let mut instances = Vec::new();
-    let mut vars = Vec::new();
-    let mut ports = Vec::new();
+    let mut connections = NetConnections::default();
 
     for carry_bit in 2..width {
         let carry = carry_module_name(output, carry_bit);
-        context.append(combinational_output_module(
+        modules.push(combinational_output_module(
             &carry,
             &carry_expr(output, carry_bit),
             &carry_signal_name(carry_bit),
         )?);
         instances.push(carry.clone());
         for input in carry_inputs(carry_bit) {
-            connect_increment_input(&mut vars, output, input, &carry);
+            connect_increment_input(&mut connections, output, input, &carry);
         }
     }
 
@@ -478,10 +505,10 @@ fn register_increment_design(
         let master = format!("{bit_name}_master");
         let slave = format!("{bit_name}_slave");
 
-        context.append(not_clock_module(&clock_inverter)?);
-        context.append(next_bit_module(&next, output, bit)?);
-        context.append(d_latch_graph_module(&master));
-        context.append(d_latch_graph_module(&slave));
+        modules.push(not_clock_module(&clock_inverter)?);
+        modules.push(next_bit_module(&next, output, bit)?);
+        modules.push(d_latch_routable_module(&master));
+        modules.push(d_latch_routable_module(&slave));
         instances.extend([
             clock_inverter.clone(),
             next.clone(),
@@ -489,51 +516,57 @@ fn register_increment_design(
             slave.clone(),
         ]);
 
-        vars.push(module_var((&next, "d"), (&master, "d")));
-        vars.push(module_var((&master, "q"), (&slave, "d")));
-        vars.push(module_var((&clock_inverter, "clk_n"), (&master, "en")));
+        connections.connect(
+            &format!("{next}_d"),
+            NetClass::Data,
+            instance_port(&next, "d"),
+            instance_port(&master, "d"),
+        );
+        connections.connect(
+            &format!("{master}_q"),
+            NetClass::Data,
+            instance_port(&master, "q"),
+            instance_port(&slave, "d"),
+        );
+        connections.connect(
+            &format!("{clock_inverter}_clk_n"),
+            NetClass::Clock,
+            instance_port(&clock_inverter, "clk_n"),
+            instance_port(&master, "en"),
+        );
         for input in next_bit_inputs(bit) {
-            connect_increment_input(&mut vars, output, input, &next);
+            connect_increment_input(&mut connections, output, input, &next);
         }
-        ports.push(GraphModulePort {
-            name: bit_name,
-            port_type: GraphModulePortType::OutputNet,
-            target: GraphModulePortTarget::Module(slave, "q".to_owned()),
-        });
+        connections.connect(
+            &bit_name,
+            NetClass::Io,
+            instance_port(&slave, "q"),
+            self_port(&bit_name),
+        );
+        connections.connect(
+            clock,
+            NetClass::Clock,
+            self_port(clock),
+            instance_port(&clock_inverter, "clk"),
+        );
+        connections.connect(
+            clock,
+            NetClass::Clock,
+            self_port(clock),
+            instance_port(&slave, "en"),
+        );
     }
-
-    ports.insert(
-        0,
-        GraphModulePort {
-            name: clock.to_owned(),
-            port_type: GraphModulePortType::InputNet,
-            target: GraphModulePortTarget::Wire(
-                (0..width)
-                    .flat_map(|bit| {
-                        let bit_name = bit_signal_name(output, bit);
-                        [
-                            (format!("{bit_name}_clk_inv"), "clk".to_owned()),
-                            (format!("{bit_name}_slave"), "en".to_owned()),
-                        ]
-                    })
-                    .collect(),
-            ),
-        },
+    let top = composite_module(
+        &logical.name,
+        logical_ports(logical)?,
+        instances.iter(),
+        connections.finish(),
     );
-
-    Ok(GraphModuleDesign::with_top_module(
-        context,
-        GraphModule {
-            name: module_name.to_owned(),
-            graph: None,
-            instances,
-            vars,
-            ports,
-        },
-    ))
+    modules.push(top);
+    finish_design(&logical.name, modules)
 }
 
-fn graph_backed_module(module: &LogicalModule, name: &str) -> eyre::Result<GraphModule> {
+fn graph_backed_module(module: &LogicalModule, name: &str) -> eyre::Result<RoutableModule> {
     if !module.instances.is_empty() {
         eyre::bail!("logical child module `{}` is not a leaf", module.name);
     }
@@ -600,20 +633,7 @@ fn graph_backed_module(module: &LogicalModule, name: &str) -> eyre::Result<Graph
     graph.build_producers();
     graph.build_consumers();
     graph.verify()?;
-    let mut graph_module: GraphModule = graph.into();
-    graph_module.name = name.to_owned();
-    for port in &mut graph_module.ports {
-        let logical = module
-            .ports
-            .iter()
-            .find(|candidate| candidate.name == port.name)
-            .with_context(|| format!("unknown logical port `{}`", port.name))?;
-        port.port_type = match logical.direction {
-            LogicalPortDirection::Input => GraphModulePortType::InputNet,
-            LogicalPortDirection::Output => GraphModulePortType::OutputNet,
-        };
-    }
-    Ok(graph_module)
+    routable_leaf_from_graph(name, graph)
 }
 
 fn emit_graph_cell(
@@ -710,12 +730,12 @@ fn emit_graph_cell(
 fn hierarchical_module(
     module: &LogicalModule,
     definitions: &HashMap<&str, &LogicalModule>,
-) -> eyre::Result<GraphModule> {
+) -> eyre::Result<RoutableModule> {
     if module.nets.iter().any(|net| net.width != 1) {
         eyre::bail!("hierarchical routable lowering currently requires scalar nets");
     }
-    let mut sources = HashMap::<String, Vec<(String, String)>>::new();
-    let mut sinks = HashMap::<String, Vec<(String, String)>>::new();
+    let mut sources = HashMap::<String, Vec<Endpoint>>::new();
+    let mut sinks = HashMap::<String, Vec<Endpoint>>::new();
     for instance in &module.instances {
         let definition = definitions
             .get(instance.module.as_str())
@@ -732,7 +752,7 @@ fn hierarchical_module(
                         instance.name, binding.port
                     )
                 })?;
-            let endpoint = (instance.name.clone(), binding.port.clone());
+            let endpoint = instance_port(&instance.name, &binding.port);
             match port.direction {
                 LogicalPortDirection::Input => {
                     sinks.entry(binding.net.clone()).or_default().push(endpoint)
@@ -745,64 +765,57 @@ fn hierarchical_module(
         }
     }
 
-    let top_ports = module
-        .ports
-        .iter()
-        .map(|port| port.net.as_str())
-        .collect::<HashSet<_>>();
-    let mut vars = Vec::new();
+    let mut nets = Vec::new();
     for net in &module.nets {
-        if top_ports.contains(net.name.as_str()) {
-            continue;
+        if net.width != 1 {
+            eyre::bail!("hierarchical routable lowering currently requires scalar nets");
         }
-        let Some(source) = single_endpoint(sources.get(&net.name)) else {
-            continue;
-        };
-        for target in sinks.get(&net.name).into_iter().flatten() {
-            vars.push(GraphModuleVariable {
-                var_type: GraphModulePortType::InputNet,
-                source: source.clone(),
-                target: target.clone(),
-            });
-        }
-    }
-
-    let ports = module
-        .ports
-        .iter()
-        .map(|port| GraphModulePort {
-            name: port.name.clone(),
-            port_type: match port.direction {
-                LogicalPortDirection::Input => GraphModulePortType::InputNet,
-                LogicalPortDirection::Output => GraphModulePortType::OutputNet,
-            },
-            target: match port.direction {
-                LogicalPortDirection::Input => target_from_endpoints(sinks.get(&port.net)),
-                LogicalPortDirection::Output => target_from_endpoints(sources.get(&port.net)),
-            },
-        })
-        .collect();
-
-    Ok(GraphModule {
-        name: module.name.clone(),
-        graph: None,
-        instances: module
-            .instances
+        let top_input = module
+            .ports
             .iter()
-            .map(|instance| instance.name.clone())
-            .collect(),
-        vars,
-        ports,
-    })
+            .find(|port| port.net == net.name && port.direction == LogicalPortDirection::Input);
+        let top_output = module
+            .ports
+            .iter()
+            .find(|port| port.net == net.name && port.direction == LogicalPortDirection::Output);
+        let driver = if let Some(port) = top_input {
+            self_port(&port.name)
+        } else {
+            single_endpoint(sources.get(&net.name))
+                .with_context(|| format!("logical net `{}` has no unique driver", net.name))?
+        };
+        let mut net_sinks = sinks.remove(&net.name).unwrap_or_default();
+        if let Some(port) = top_output {
+            net_sinks.push(self_port(&port.name));
+        }
+        if net_sinks.is_empty() {
+            continue;
+        }
+        nets.push(RoutableNet {
+            name: net.name.clone(),
+            class: classify_logical_net(&net.name, top_input.is_some() || top_output.is_some()),
+            driver,
+            sinks: net_sinks,
+            origin: Some(net.name.clone()),
+        });
+    }
+    Ok(composite_module(
+        &module.name,
+        logical_ports(module)?,
+        module.instances.iter().map(|instance| &instance.name),
+        nets,
+    ))
 }
 
-fn combinational_output_module(name: &str, expr: &str, output: &str) -> eyre::Result<GraphModule> {
-    let mut module: GraphModule = LogicGraph::from_stmt(expr, output)?.graph.into();
-    module.name = name.to_owned();
-    Ok(module)
+fn combinational_output_module(
+    name: &str,
+    expr: &str,
+    output: &str,
+) -> eyre::Result<RoutableModule> {
+    routable_leaf_from_graph(name, LogicGraph::from_stmt(expr, output)?.graph)
 }
 
-fn next_bit_module(name: &str, signal: &str, bit: usize) -> eyre::Result<GraphModule> {
+fn next_bit_module(name: &str, signal: &str, bit: usize) -> eyre::Result<RoutableModule> {
     let bit_name = bit_signal_name(signal, bit);
     if bit == 0 {
         return combinational_output_module(name, &format!("~{bit_name}"), "d");
@@ -820,7 +833,7 @@ fn buffered_xor_output_module(
     left: &str,
     right: &str,
     output: &str,
-) -> eyre::Result<GraphModule> {
+) -> eyre::Result<RoutableModule> {
     let product = format!("{output}_and");
     let mut graph = LogicGraph::from_stmt(&format!("{left}&{right}"), &product)?;
     graph.graph.merge(
@@ -831,16 +844,14 @@ fn buffered_xor_output_module(
         .graph,
     );
     graph.graph.remove_output(&product);
-    let mut module: GraphModule = graph.graph.into();
-    module.name = name.to_owned();
-    Ok(module)
+    routable_leaf_from_graph(name, graph.graph)
 }
 
-fn not_clock_module(name: &str) -> eyre::Result<GraphModule> {
+fn not_clock_module(name: &str) -> eyre::Result<RoutableModule> {
     combinational_output_module(name, "~clk", "clk_n")
 }
 
-fn d_latch_graph_module(name: &str) -> GraphModule {
+fn d_latch_routable_module(name: &str) -> RoutableModule {
     let mut graph = Graph::from_nodes(vec![
         GraphNode {
             kind: GraphNodeKind::Input("d".to_owned()),
@@ -871,9 +882,7 @@ fn d_latch_graph_module(name: &str) -> GraphModule {
     graph
         .verify()
         .expect("built-in D latch graph must be valid");
-    let mut module: GraphModule = graph.into();
-    module.name = name.to_owned();
-    module
+    routable_leaf_from_graph(name, graph).expect("built-in D latch must lower to Routable IR")
 }
 
 #[derive(Clone, Copy)]
@@ -899,12 +908,12 @@ fn carry_inputs(bit: usize) -> Vec<IncrementInput> {
 }
 
 fn connect_increment_input(
-    vars: &mut Vec<GraphModuleVariable>,
+    connections: &mut NetConnections,
     signal: &str,
     input: IncrementInput,
     target: &str,
 ) {
-    let source = match input {
+    let (source_instance, source_port) = match input {
         IncrementInput::Bit(bit) => (format!("{}_{}_slave", signal, bit), "q".to_owned()),
         IncrementInput::Carry(bit) => (carry_module_name(signal, bit), carry_signal_name(bit)),
     };
@@ -912,11 +921,12 @@ fn connect_increment_input(
         IncrementInput::Bit(bit) => bit_signal_name(signal, bit),
         IncrementInput::Carry(bit) => carry_signal_name(bit),
     };
-    vars.push(GraphModuleVariable {
-        var_type: GraphModulePortType::InputNet,
-        source,
-        target: (target.to_owned(), target_port),
-    });
+    connections.connect(
+        &format!("{source_instance}_{source_port}"),
+        NetClass::Data,
+        instance_port(&source_instance, &source_port),
+        instance_port(target, &target_port),
+    );
 }
 
 fn carry_expr(signal: &str, bit: usize) -> String {
@@ -947,27 +957,231 @@ fn carry_module_name(signal: &str, bit: usize) -> String {
     format!("{signal}_carry_{bit}")
 }
 
-fn module_var(source: (&str, &str), target: (&str, &str)) -> GraphModuleVariable {
-    GraphModuleVariable {
-        var_type: GraphModulePortType::InputNet,
-        source: (source.0.to_owned(), source.1.to_owned()),
-        target: (target.0.to_owned(), target.1.to_owned()),
-    }
-}
-
-fn target_from_endpoints(endpoints: Option<&Vec<(String, String)>>) -> GraphModulePortTarget {
-    match endpoints {
-        Some(endpoints) if endpoints.len() == 1 => {
-            GraphModulePortTarget::Module(endpoints[0].0.clone(), endpoints[0].1.clone())
-        }
-        Some(endpoints) => GraphModulePortTarget::Wire(endpoints.clone()),
-        None => GraphModulePortTarget::Wire(Vec::new()),
-    }
-}
-
-fn single_endpoint(endpoints: Option<&Vec<(String, String)>>) -> Option<(String, String)> {
+fn single_endpoint(endpoints: Option<&Vec<Endpoint>>) -> Option<Endpoint> {
     let endpoints = endpoints?;
     (endpoints.len() == 1).then(|| endpoints[0].clone())
+}
+
+#[derive(Default)]
+struct NetConnections {
+    by_driver: BTreeMap<Endpoint, (String, NetClass, Vec<Endpoint>)>,
+}
+
+impl NetConnections {
+    fn connect(&mut self, preferred_name: &str, class: NetClass, driver: Endpoint, sink: Endpoint) {
+        let entry = self
+            .by_driver
+            .entry(driver)
+            .or_insert_with(|| (preferred_name.to_owned(), class, Vec::new()));
+        if !entry.2.contains(&sink) {
+            entry.2.push(sink);
+        }
+        if class == NetClass::Io {
+            entry.1 = NetClass::Io;
+        }
+    }
+
+    fn finish(self) -> Vec<RoutableNet> {
+        let mut used = HashSet::new();
+        self.by_driver
+            .into_iter()
+            .map(|(driver, (preferred, class, sinks))| {
+                let mut name = preferred.clone();
+                let mut suffix = 1;
+                while !used.insert(name.clone()) {
+                    name = format!("{preferred}_{suffix}");
+                    suffix += 1;
+                }
+                RoutableNet {
+                    name,
+                    class,
+                    driver,
+                    sinks,
+                    origin: None,
+                }
+            })
+            .collect()
+    }
+}
+
+fn self_port(port: &str) -> Endpoint {
+    Endpoint::SelfPort {
+        port: port.to_owned(),
+    }
+}
+
+fn instance_port(instance: &str, port: &str) -> Endpoint {
+    Endpoint::InstancePort {
+        instance: instance.to_owned(),
+        port: port.to_owned(),
+    }
+}
+
+fn logical_ports(module: &LogicalModule) -> eyre::Result<Vec<RoutablePort>> {
+    let mut ports = Vec::new();
+    for port in &module.ports {
+        let width = module
+            .nets
+            .iter()
+            .find(|net| net.name == port.net)
+            .with_context(|| format!("port `{}` references missing net `{}`", port.name, port.net))?
+            .width;
+        let direction = match port.direction {
+            LogicalPortDirection::Input => RoutablePortDirection::Input,
+            LogicalPortDirection::Output => RoutablePortDirection::Output,
+        };
+        if width == 1 {
+            ports.push(RoutablePort {
+                name: port.name.clone(),
+                direction,
+            });
+        } else {
+            ports.extend((0..width).map(|bit| RoutablePort {
+                name: bit_signal_name(&port.name, bit),
+                direction,
+            }));
+        }
+    }
+    Ok(ports)
+}
+
+fn composite_module<I, S>(
+    name: &str,
+    ports: Vec<RoutablePort>,
+    instance_names: I,
+    nets: Vec<RoutableNet>,
+) -> RoutableModule
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    RoutableModule {
+        name: name.to_owned(),
+        ports,
+        body: RoutableModuleBody::Composite {
+            instances: instance_names
+                .into_iter()
+                .map(|name| RoutableInstance {
+                    name: name.as_ref().to_owned(),
+                    module: name.as_ref().to_owned(),
+                    origin: None,
+                })
+                .collect(),
+            nets,
+        },
+    }
+}
+
+fn routable_leaf_from_graph(name: &str, graph: Graph) -> eyre::Result<RoutableModule> {
+    let ports = graph
+        .nodes
+        .iter()
+        .filter_map(|node| match &node.kind {
+            GraphNodeKind::Input(name) => Some(RoutablePort {
+                name: name.clone(),
+                direction: RoutablePortDirection::Input,
+            }),
+            GraphNodeKind::Output(name) => Some(RoutablePort {
+                name: name.clone(),
+                direction: RoutablePortDirection::Output,
+            }),
+            _ => None,
+        })
+        .collect();
+    let nodes = graph
+        .nodes
+        .into_iter()
+        .map(|node| {
+            let kind = match &node.kind {
+                GraphNodeKind::Input(name) => RoutableNodeKind::Input { name: name.clone() },
+                GraphNodeKind::Output(name) => RoutableNodeKind::Output { name: name.clone() },
+                GraphNodeKind::Logic(logic) => match logic.logic_type {
+                    LogicType::Not => RoutableNodeKind::Not,
+                    LogicType::And => RoutableNodeKind::And,
+                    LogicType::Or => RoutableNodeKind::Or,
+                    LogicType::Xor => RoutableNodeKind::Xor,
+                },
+                GraphNodeKind::Sequential(sequential) => RoutableNodeKind::Sequential {
+                    primitive: match sequential.sequential_type {
+                        SequentialType::RsLatch => RoutableSequentialPrimitive::RsLatch,
+                        SequentialType::DLatch => RoutableSequentialPrimitive::DLatch,
+                    },
+                    input_ports: sequential.input_ports.clone(),
+                    output_ports: sequential.output_ports.clone(),
+                },
+                GraphNodeKind::None => eyre::bail!("routable leaf contains unresolved node"),
+                GraphNodeKind::Block(_) => {
+                    eyre::bail!("routable leaf contains physical block node")
+                }
+                GraphNodeKind::Clustered(_) => eyre::bail!("routable leaf contains clustered node"),
+            };
+            Ok(RoutableNode {
+                id: node.id,
+                kind,
+                inputs: node.inputs.clone(),
+                tag: node.tag.clone(),
+            })
+        })
+        .collect::<eyre::Result<Vec<_>>>()?;
+    Ok(RoutableModule {
+        name: name.to_owned(),
+        ports,
+        body: RoutableModuleBody::Leaf { nodes },
+    })
+}
+
+fn finish_design(top: &str, modules: Vec<RoutableModule>) -> eyre::Result<RoutableDesign> {
+    let mut canonical = HashMap::<String, String>::new();
+    let mut deduplicated = Vec::<RoutableModule>::new();
+    for module in modules {
+        let existing = if module.name != top
+            && matches!(module.body, RoutableModuleBody::Leaf { .. })
+        {
+            deduplicated
+                .iter()
+                .find(|candidate| candidate.ports == module.ports && candidate.body == module.body)
+                .map(|candidate| candidate.name.clone())
+        } else {
+            None
+        };
+        if let Some(existing) = existing {
+            canonical.insert(module.name, existing);
+        } else {
+            canonical.insert(module.name.clone(), module.name.clone());
+            deduplicated.push(module);
+        }
+    }
+    for module in &mut deduplicated {
+        if let RoutableModuleBody::Composite { instances, .. } = &mut module.body {
+            for instance in instances {
+                if let Some(name) = canonical.get(&instance.module) {
+                    instance.module = name.clone();
+                }
+            }
+        }
+    }
+    deduplicated.sort_by(|left, right| left.name.cmp(&right.name));
+    let design = RoutableDesign {
+        version: ROUTABLE_IR_VERSION,
+        target: ROUTABLE_IR_TARGET.to_owned(),
+        top: top.to_owned(),
+        modules: deduplicated,
+        debug: Default::default(),
+    };
+    design.validate()?;
+    Ok(design)
+}
+
+fn classify_logical_net(name: &str, is_io: bool) -> NetClass {
+    if is_io {
+        NetClass::Io
+    } else if name.contains("clk") || name.contains("clock") {
+        NetClass::Clock
+    } else if name.contains("reset") || name.starts_with("rst") {
+        NetClass::Reset
+    } else {
+        NetClass::Data
+    }
 }
 
 fn net_value<'a>(value: &'a LogicalValue, role: &str) -> eyre::Result<&'a str> {

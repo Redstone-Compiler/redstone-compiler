@@ -520,15 +520,16 @@ resolved topology rather than from the original legacy module. Routing retry
 feedback groups branches by `NetId`; labels remain presentation metadata and a
 compatibility fallback only.
 
-Routable preparation no longer reconstructs a `GraphModuleDesign`. At the local
-placement boundary, each Routable leaf supplies only its node graph and typed
-ports; the node graph is lowered directly to the `LogicGraph` consumed by the
-local placer. Composite hierarchy, candidate binding, global placement, and
-routing continue to use Routable definitions and `ResolvedPnrTopology`.
+Logical-to-Routable lowering constructs `RoutableDesign` directly. There is no
+hierarchical graph adapter or compatibility module between the two IR stages.
+At the local-placement boundary, each Routable leaf supplies only its node graph
+and typed ports; the node graph is adapted to the `Graph` consumed by the local
+placer. Composite hierarchy, candidate binding, global placement, and routing
+continue to use Routable definitions and `ResolvedPnrTopology`.
 
 Prepared/replayed global execution stores only the module name, resolved typed
 topology, candidate sets, and preparation metadata. Snapshot replay determines
-leaf/composite shape from the saved Routable IR and does not restore a legacy
-module. The public `GraphModule` preparation APIs remain as compatibility
-entry points for older callers, but the Logical/Routable pipeline does not pass
-through them.
+leaf/composite shape from the saved Routable IR. The old graph-module hierarchy,
+its conversion adapters, and its global-PnR entry points have been removed;
+`LogicalDesign`, `RoutableDesign`, and `PreparedPnrDesign` are the supported
+stage boundaries.

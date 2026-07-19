@@ -595,7 +595,7 @@ mod tests {
 
         assert!(map.documents["ir/routable.rcir"]
             .iter()
-            .any(|range| range.entity == routable_entity("d_flip_flop", "net", "inv_clk_n")));
+            .any(|range| range.entity == routable_entity("d_flip_flop", "net", "clk_n")));
         let latch_scope = logical_entity("d_latch", "module", "d_latch");
         assert_eq!(
             map.entities[&logical_entity("d_latch", "cell", "state")].parent_scope,

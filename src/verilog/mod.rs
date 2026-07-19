@@ -1,5 +1,4 @@
 pub mod ast;
-pub mod design;
 pub mod lexer;
 pub mod lower;
 pub mod parser;
@@ -10,19 +9,12 @@ use std::fs;
 use std::path::Path;
 
 use crate::graph::logic::LogicGraph;
-use crate::graph::module::GraphModuleDesign;
 use crate::ir::LogicalDesign;
 
 pub fn load_logic_graph(path: impl AsRef<Path>) -> eyre::Result<LogicGraph> {
     let source = fs::read_to_string(path)?;
     let modules = parser::parse_modules(&source)?;
     lower::lower_modules(&modules)
-}
-
-pub fn load_graph_module_design(path: impl AsRef<Path>) -> eyre::Result<GraphModuleDesign> {
-    let source = fs::read_to_string(path)?;
-    let modules = parser::parse_modules(&source)?;
-    design::lower_design_modules(&modules)
 }
 
 pub fn load_logical_design(path: impl AsRef<Path>) -> eyre::Result<LogicalDesign> {
