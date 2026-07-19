@@ -5,6 +5,7 @@ import { loadNbtFile, stringifyNbt } from './nbt/loadNbt';
 import { toStructureModel } from './nbt/toStructure';
 import { StructureViewer } from './render/StructureViewer';
 import { highlightRcir } from './syntax/rcir';
+import { highlightVerilog, type VerilogHighlightState } from './syntax/verilog';
 import {
   NbtSimulation,
   NbtSimulationError,
@@ -2330,6 +2331,7 @@ function createIrComparisonPane(path: string, source: string): HTMLElement {
   code.classList.toggle('language-rcir', path.toLowerCase().endsWith('.rcir'));
   code.classList.toggle('language-verilog', path.toLowerCase().endsWith('.v'));
   const lines = source.replace(/\r\n?/g, '\n').split('\n');
+  const verilogState: VerilogHighlightState = { inBlockComment: false };
   lines.forEach((line, index) => {
     const row = document.createElement('div');
     row.className = 'ir-code-line';
@@ -2360,6 +2362,8 @@ function createIrComparisonPane(path: string, source: string): HTMLElement {
     content.className = 'ir-line-content';
     if (path.toLowerCase().endsWith('.rcir')) {
       content.replaceChildren(highlightRcir(line || '\u200b'));
+    } else if (path.toLowerCase().endsWith('.v')) {
+      content.replaceChildren(highlightVerilog(line || '\u200b', verilogState));
     } else {
       content.textContent = line || '\u200b';
     }
@@ -2437,10 +2441,15 @@ async function renderArtifactContent(path: string): Promise<void> {
   if (!file) throw new Error(`Snapshot artifact is missing: ${path}`);
   const text = await file.text();
   const isRcir = path.toLowerCase().endsWith('.rcir');
+  const isVerilog = path.toLowerCase().endsWith('.v');
   artifactContent.classList.toggle('language-rcir', isRcir);
-  artifactContent.classList.toggle('language-verilog', path.toLowerCase().endsWith('.v'));
+  artifactContent.classList.toggle('language-verilog', isVerilog);
   if (isRcir) {
     artifactContent.replaceChildren(highlightRcir(text));
+    return;
+  }
+  if (isVerilog) {
+    artifactContent.replaceChildren(highlightVerilog(text));
     return;
   }
   try {

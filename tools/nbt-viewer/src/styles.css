@@ -1273,6 +1273,11 @@ input {
   tab-size: 2;
 }
 
+.artifact-content.language-verilog {
+  color: #c9d1d9;
+  tab-size: 2;
+}
+
 .rcir-comment {
   color: #708090;
   font-style: italic;
@@ -1302,6 +1307,42 @@ input {
 
 .rcir-number {
   color: #ffa657;
+}
+
+.verilog-comment {
+  color: #708090;
+  font-style: italic;
+}
+
+.verilog-keyword {
+  color: #ff7b72;
+  font-weight: 600;
+}
+
+.verilog-type {
+  color: #79c0ff;
+}
+
+.verilog-number,
+.verilog-constant {
+  color: #ffa657;
+}
+
+.verilog-string {
+  color: #a5d6ff;
+}
+
+.verilog-directive {
+  color: #d2a8ff;
+  font-weight: 600;
+}
+
+.verilog-system {
+  color: #d2a8ff;
+}
+
+.verilog-operator {
+  color: #ff9bce;
 }
 
 .graph-output svg g.node {
