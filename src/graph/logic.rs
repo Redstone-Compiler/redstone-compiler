@@ -53,7 +53,12 @@ impl LogicGraph {
         LogicTruthTable::from_graph(self)
     }
 
-    pub fn externally_observable_output_source_ids(&self) -> HashSet<GraphNodeId> {
+    /// Output sources whose signal terminates at the module boundary.
+    ///
+    /// A named output that is also consumed by internal logic is deliberately
+    /// excluded: local placement must keep routing that shared signal rather
+    /// than sealing it as a completed terminal.
+    pub fn sealed_output_source_ids(&self) -> HashSet<GraphNodeId> {
         self.nodes
             .iter()
             .filter_map(|node| match &node.kind {
@@ -127,9 +132,9 @@ impl LogicGraph {
         self.attach_outputs(outputs)
     }
 
-    pub fn externally_observable_truth_table(&self) -> eyre::Result<LogicTruthTable> {
+    pub fn sealed_output_truth_table(&self) -> eyre::Result<LogicTruthTable> {
         let table = self.truth_table()?;
-        let output_source_ids = self.externally_observable_output_source_ids();
+        let output_source_ids = self.sealed_output_source_ids();
         let mut output_names = self
             .nodes
             .iter()

@@ -718,8 +718,7 @@ impl LocalPlacer {
                     assert_eq!(node.inputs.len(), 2);
                     let input_a = state[&node.inputs[0]];
                     let input_b = state[&node.inputs[1]];
-                    let sealed_output_source_ids =
-                        self.graph.externally_observable_output_source_ids();
+                    let sealed_output_source_ids = self.graph.sealed_output_source_ids();
                     let mut protected_positions =
                         state.signal_positions_for_nodes(&sealed_output_source_ids);
                     protected_positions.extend(state.endpoint_positions().into_iter().filter_map(
@@ -848,7 +847,7 @@ impl LocalPlacer {
                 .chain(self.graph.nodes.iter().filter_map(|node| {
                     matches!(node.kind, GraphNodeKind::Input(_)).then_some(node.id)
                 }))
-                .chain(self.graph.externally_observable_output_source_ids())
+                .chain(self.graph.sealed_output_source_ids())
                 .chain(
                     self.config
                         .materialize_outputs
