@@ -131,6 +131,39 @@ pub fn generate_routable_module_candidates_with_progress_label(
     config: &UnitCandidateConfig,
     progress_label: Option<&str>,
 ) -> eyre::Result<Vec<LayoutCandidate>> {
+    generate_routable_module_candidates(
+        module,
+        config,
+        progress_label,
+        CandidateInputMode::ExternalPorts,
+    )
+}
+
+pub fn generate_routable_top_leaf_candidates_with_progress_label(
+    module: &RoutableModule,
+    config: &UnitCandidateConfig,
+    progress_label: Option<&str>,
+) -> eyre::Result<Vec<LayoutCandidate>> {
+    generate_routable_module_candidates(
+        module,
+        config,
+        progress_label,
+        CandidateInputMode::MaterializedSwitches,
+    )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CandidateInputMode {
+    ExternalPorts,
+    MaterializedSwitches,
+}
+
+fn generate_routable_module_candidates(
+    module: &RoutableModule,
+    config: &UnitCandidateConfig,
+    progress_label: Option<&str>,
+    input_mode: CandidateInputMode,
+) -> eyre::Result<Vec<LayoutCandidate>> {
     let graph = graph_from_routable_leaf(module)?;
     let ports = module
         .ports
@@ -146,7 +179,14 @@ pub fn generate_routable_module_candidates_with_progress_label(
             )
         })
         .collect();
-    generate_unit_candidates(&module.name, graph, ports, config, progress_label)
+    generate_unit_candidates(
+        &module.name,
+        graph,
+        ports,
+        config,
+        progress_label,
+        input_mode,
+    )
 }
 
 #[derive(Clone, Debug)]
@@ -172,6 +212,7 @@ fn generate_unit_candidates(
     ports: Vec<CandidatePort>,
     config: &UnitCandidateConfig,
     progress_label: Option<&str>,
+    input_mode: CandidateInputMode,
 ) -> eyre::Result<Vec<LayoutCandidate>> {
     let graph = LogicGraph { graph }.prepare_place()?;
     let placer = LocalPlacer::new(graph.clone(), config.local_config)?;
@@ -182,6 +223,7 @@ fn generate_unit_candidates(
         &config.input_constraints,
         progress_label,
     );
+    let generated_count = placed.len();
 
     let contains_sequential = graph
         .graph
@@ -190,22 +232,27 @@ fn generate_unit_candidates(
         .any(|node| matches!(node.kind, GraphNodeKind::Sequential(_)));
     let validate_truth_table = !contains_sequential;
     let mut candidates = Vec::new();
+    let mut truth_table_rejections = 0usize;
+    let mut port_rejections = 0usize;
     for placed in placed {
         if candidates.len() >= config.max_candidates {
             break;
         }
         if validate_truth_table && !candidate_matches_truth_table(&graph, &placed)? {
+            truth_table_rejections += 1;
             continue;
         }
-        let (world, physical_ports) = switchless_candidate_layout(
+        let (world, physical_ports) = candidate_layout(
             &ports,
             contains_sequential,
             &config.input_constraints,
             placed.world,
             &placed.inputs,
             &placed.outputs,
+            input_mode,
         );
         if !candidate_ports_cover_module_ports(&ports, &physical_ports) {
+            port_rejections += 1;
             continue;
         }
         candidates.push(LayoutCandidate::from_world(
@@ -214,6 +261,14 @@ fn generate_unit_candidates(
             physical_ports,
         )?);
     }
+    tracing::info!(
+        module = module_name,
+        generated = generated_count,
+        accepted = candidates.len(),
+        truth_table_rejections,
+        port_rejections,
+        "local candidate validation completed"
+    );
     Ok(candidates)
 }
 
@@ -314,13 +369,14 @@ fn candidate_matches_truth_table(
 // module port metadata로 다시 노출한다.
 // TODO(high-level): make LocalPlacer produce either standalone layouts with switches
 // or child-module layouts with PhysicalPort metadata, instead of rewriting switches here.
-fn switchless_candidate_layout(
+fn candidate_layout(
     module_ports: &[CandidatePort],
     contains_sequential: bool,
     input_constraints: &LocalPlacerInputConstraints,
     mut world: World3D,
     inputs: &[OutputEndpoint],
     outputs: &[OutputEndpoint],
+    input_mode: CandidateInputMode,
 ) -> (World3D, Vec<PhysicalPort>) {
     let mut ports = Vec::new();
     // Sequential child layout은 내부 feedback/state signal이 외부 route와 직접
@@ -348,6 +404,17 @@ fn switchless_candidate_layout(
                             .and_then(|positions| positions.into_iter().next())
                     });
                 if let Some(input_position) = position {
+                    if input_mode == CandidateInputMode::MaterializedSwitches {
+                        ports.push(PhysicalPort {
+                            name: port.name.clone(),
+                            direction: PhysicalPortDirection::Input,
+                            position: input_position,
+                            route_position: None,
+                            access_points: vec![input_position],
+                            connection: PortConnection::Direct,
+                        });
+                        continue;
+                    }
                     let Some(position) = expose_switchless_input_port(
                         &mut world,
                         input_position,
@@ -392,15 +459,17 @@ fn switchless_candidate_layout(
             }
         }
     }
-    for input in inputs {
-        let _ = expose_switchless_input_port(
-            &mut world,
-            input.position(),
-            preserve_switch_position_inputs,
-            use_direct_input_ports,
-        );
+    if input_mode == CandidateInputMode::ExternalPorts {
+        for input in inputs {
+            let _ = expose_switchless_input_port(
+                &mut world,
+                input.position(),
+                preserve_switch_position_inputs,
+                use_direct_input_ports,
+            );
+        }
+        remove_local_input_switches(&mut world);
     }
-    remove_local_input_switches(&mut world);
     ports.sort_by(|a, b| a.name.cmp(&b.name));
     world.initialize_redstone_states();
     (world, ports)

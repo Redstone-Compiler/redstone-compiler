@@ -40,7 +40,7 @@
     "name": "counter.rsnap",
     "file": "counter.rsnap",
     "path": "examples/counter.rsnap",
-    "size": 36505
+    "size": 36529
   },
   {
     "kind": "nbt",
@@ -62,7 +62,7 @@
     "name": "d-flip-flop.rsnap",
     "file": "d-flip-flop.rsnap",
     "path": "examples/d-flip-flop.rsnap",
-    "size": 18725
+    "size": 18745
   },
   {
     "kind": "nbt",
@@ -77,6 +77,13 @@
     "file": "full-adder.nbt",
     "path": "examples/full-adder.nbt",
     "size": 508
+  },
+  {
+    "kind": "snapshot",
+    "name": "full-adder.rsnap",
+    "file": "full-adder.rsnap",
+    "path": "examples/full-adder.rsnap",
+    "size": 20254
   },
   {
     "kind": "nbt",
