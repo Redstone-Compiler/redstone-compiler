@@ -329,6 +329,11 @@ fn write_clustering_body(
     )?;
     writeln!(
         output,
+        "{indent}candidate-seed-variants {};",
+        clustering.candidate_seed_variants
+    )?;
+    writeln!(
+        output,
         "{indent}max-alternative-combinations {};",
         clustering.max_alternative_combinations
     )?;
@@ -1220,6 +1225,9 @@ impl Parser {
         self.expect_keyword("candidates-per-cluster")?;
         let candidates_per_cluster = self.expect_usize()?;
         self.expect_symbol(';')?;
+        self.expect_keyword("candidate-seed-variants")?;
+        let candidate_seed_variants = self.expect_usize()?;
+        self.expect_symbol(';')?;
         self.expect_keyword("max-alternative-combinations")?;
         let max_alternative_combinations = self.expect_usize()?;
         self.expect_symbol(';')?;
@@ -1254,6 +1262,7 @@ impl Parser {
             max_logic_nodes,
             max_tagged_logic_nodes,
             candidates_per_cluster,
+            candidate_seed_variants,
             max_alternative_combinations,
             placement_spacings,
             shelf_width,
