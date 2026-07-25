@@ -672,6 +672,117 @@ impl Simulator {
         )
     }
 
+    /// Drive logical input endpoints without requiring every endpoint to be a
+    /// materialized switch. Routable child candidates expose redstone dust at
+    /// their boundary; treating that dust as an externally powered terminal
+    /// avoids adding a temporary switch whose own neighbor-powering behavior
+    /// can perturb a compact candidate during verification.
+    pub fn drive_inputs_with_limits(
+        &mut self,
+        states: Vec<(Position, bool)>,
+        max_cycles: usize,
+        max_events: usize,
+    ) -> eyre::Result<()> {
+        self.queue.push_back(VecDeque::new());
+        let mut changed = false;
+
+        for (pos, value) in states {
+            match &mut self.world[pos].kind {
+                BlockKind::Switch { is_on } => {
+                    if value == *is_on {
+                        continue;
+                    }
+                    *is_on = value;
+                    changed = true;
+
+                    pos.forwards_except(self.world[pos].direction)
+                        .into_iter()
+                        .map(|target_position| Event {
+                            id: None,
+                            from_id: None,
+                            event_type: if value {
+                                EventType::TorchOn
+                            } else {
+                                EventType::TorchOff
+                            },
+                            target_position,
+                            direction: target_position.diff(pos),
+                        })
+                        .chain(|| -> Option<Event> {
+                            let target_position = pos.walk(self.world[pos].direction)?;
+                            Some(Event {
+                                id: None,
+                                from_id: None,
+                                event_type: if value {
+                                    EventType::HardOn
+                                } else {
+                                    EventType::HardOff
+                                },
+                                target_position,
+                                direction: Direction::None,
+                            })
+                        }())
+                        .for_each(|event| self.push_event_to_current_tick(event));
+                }
+                BlockKind::Redstone { .. } => {
+                    let source_key = (pos, pos);
+                    if self.redstone_power_sources.contains(&source_key) == value {
+                        continue;
+                    }
+                    changed = true;
+                    self.push_event_to_current_tick(Event {
+                        id: None,
+                        from_id: None,
+                        event_type: if value {
+                            EventType::TorchOn
+                        } else {
+                            EventType::TorchOff
+                        },
+                        target_position: pos,
+                        direction: Direction::None,
+                    });
+                }
+                BlockKind::Cobble { .. } => {
+                    let source_key = (pos, pos);
+                    if self.hard_power_sources.contains(&source_key) == value {
+                        continue;
+                    }
+                    changed = true;
+                    self.push_event_to_current_tick(Event {
+                        id: None,
+                        from_id: None,
+                        event_type: if value {
+                            EventType::HardOn
+                        } else {
+                            EventType::HardOff
+                        },
+                        target_position: pos,
+                        direction: Direction::None,
+                    });
+                }
+                _ => eyre::bail!("you can drive only switch, redstone, or cobble input state!"),
+            }
+        }
+
+        if self.queue.back().is_some_and(VecDeque::is_empty) {
+            self.queue.pop_back();
+        }
+        self.fill_event_id();
+        self.run_inner(SimulationLimits {
+            max_cycles: Some(max_cycles),
+            max_events: Some(max_events),
+        })?;
+        if changed {
+            self.enqueue_torch_reevaluations();
+            self.fill_event_id();
+            self.run_inner(SimulationLimits {
+                max_cycles: Some(max_cycles),
+                max_events: Some(max_events),
+            })?;
+        }
+        Ok(())
+    }
+
     fn change_state_inner(
         &mut self,
         states: Vec<(Position, bool)>,
