@@ -8,6 +8,7 @@
 - Physical design intent and local cell recipes: `docs/physical_design_intent.md`
 - PnR logging and observability: `docs/pnr_logging.md`
 - Compilation snapshot artifacts: `docs/compilation_snapshots.md`
+- Text-editable physical cell laboratory: `docs/physical_cell_lab.md`
 
 When asked to create or preserve project documentation, add an appropriate file under `docs/` and link it from this file when it is useful for future agents.
 

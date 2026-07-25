@@ -1,0 +1,13 @@
+rcell 1;
+cell "inverter" size [2, 3, 2] {
+  glyph "T" = torch on y-;
+
+  input "a" at [0, 1, 1] on x+;
+  output "y" at [1, 2, 1];
+
+  plane yz at x=1 {
+    z=1 ".#T";
+  }
+
+  expect "y" = ~a;
+}
