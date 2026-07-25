@@ -189,6 +189,16 @@ pub struct SimulationWaveformSignal {
     pub values: Vec<usize>,
 }
 
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct SimulationPowerSource {
+    pub position: [usize; 3],
+    pub kind: String,
+    pub relation: String,
+    pub active: bool,
+    pub hard: bool,
+    pub strength: usize,
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 struct WaveformSignalDescriptor {
     position: Position,
@@ -371,6 +381,82 @@ impl SimulationLimits {
 }
 
 impl Simulator {
+    pub fn diagnostic_power_sources(&self, target: Position) -> Vec<SimulationPowerSource> {
+        if !self.world.size.bound_on(target) {
+            return Vec::new();
+        }
+        let mut sources = Vec::new();
+        let mut push = |position: Position, relation: &str, hard: bool| {
+            if !self.world.size.bound_on(position) {
+                return;
+            }
+            let block = self.world[position];
+            let strength = match block.kind {
+                BlockKind::Redstone { strength, .. } => strength,
+                _ => usize::from(block.kind.is_powered()) * 15,
+            };
+            let candidate = SimulationPowerSource {
+                position: [position.0, position.1, position.2],
+                kind: block.kind.name(),
+                relation: relation.to_owned(),
+                active: block.kind.is_powered(),
+                hard,
+                strength,
+            };
+            if !sources.iter().any(|existing: &SimulationPowerSource| {
+                existing.position == candidate.position && existing.relation == candidate.relation
+            }) {
+                sources.push(candidate);
+            }
+        };
+
+        match self.world[target].kind {
+            BlockKind::Cobble { .. } => {
+                for input in &self.cobble_power_inputs[target.index(&self.world.size).0] {
+                    push(input.source, "powers-block", input.hard);
+                }
+            }
+            BlockKind::Redstone { .. } => {
+                for source in &self.redstone_inputs[target.index(&self.world.size).0] {
+                    push(*source, "dust-neighbor", false);
+                }
+                for (powered_target, source) in &self.redstone_power_sources {
+                    if *powered_target == target {
+                        push(*source, "direct-power", false);
+                    }
+                }
+            }
+            BlockKind::Torch { .. } => {
+                if let Some(support) = target.walk(self.world[target].direction) {
+                    push(support, "torch-support", true);
+                }
+            }
+            BlockKind::Repeater { .. } => {
+                if let Some(input) = target.walk(self.world[target].direction) {
+                    push(input, "repeater-input", false);
+                }
+                for side in target
+                    .cardinal()
+                    .into_iter()
+                    .filter(|position| Some(*position) != target.walk(self.world[target].direction))
+                    .filter(|position| {
+                        Some(*position) != target.walk(self.world[target].direction.inverse())
+                    })
+                {
+                    push(side, "repeater-side", false);
+                }
+            }
+            BlockKind::Switch { .. } => {
+                if let Some(support) = target.walk(self.world[target].direction) {
+                    push(support, "switch-support", true);
+                }
+            }
+            _ => {}
+        }
+        sources.sort_by_key(|source| (source.position, source.relation.clone()));
+        sources
+    }
+
     pub fn from(world: &World) -> eyre::Result<Self> {
         Self::from_inner(world, SimulationLimits::cycles(None), DEFAULT_TRACE_LIMIT)
     }

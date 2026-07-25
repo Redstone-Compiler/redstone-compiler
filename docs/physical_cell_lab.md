@@ -116,6 +116,32 @@ Recompile when the source changes:
 cargo run --release --bin rcell -- test/inverter.rcell test/inverter.nbt --watch
 ```
 
+Run and explain one truth-table case:
+
+```powershell
+cargo run --release --bin rcell -- test/inverter.rcell test/inverter.nbt `
+  --case "a=1" `
+  --explain y `
+  --state-json target/inverter-debug.json
+```
+
+`--explain` accepts an output name or an `x,y,z` coordinate. It walks the
+settled simulator state backward through active dust, repeater, torch, and
+powered-block inputs. Dust traversal follows increasing signal strength to
+avoid expanding the same bidirectional wire repeatedly.
+
+Compare the block states produced by two input cases:
+
+```powershell
+cargo run --release --bin rcell -- test/inverter.rcell test/inverter.nbt `
+  --case "a=0" `
+  --compare-case "a=1"
+```
+
+The state JSON contains every non-air block's final power state, direction,
+candidate power sources, output labels, and the bounded simulator event trace.
+This is intended both for command-line diagnosis and later viewer overlays.
+
 Use `--no-verify` for an incomplete layout without `expect` statements. The NBT
 is exported before verification so a failing circuit can still be inspected.
 

@@ -16,4 +16,4 @@ pub use syntax::{
     AutoSupport, AxisDirection, CellExpectation, CellGlyph, CellInput, CellOutput, CellPlane,
     PhysicalCellDocument, PlaneAxes,
 };
-pub use verify::{PhysicalCellCaseFailure, PhysicalCellVerification};
+pub use verify::{PhysicalCellCaseFailure, PhysicalCellCaseSimulation, PhysicalCellVerification};
