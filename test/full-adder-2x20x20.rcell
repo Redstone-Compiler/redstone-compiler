@@ -1,0 +1,207 @@
+rcell 1;
+
+cell "full-adder-2x20x20" size [2, 20, 20] {
+  glyph "E" = torch on x+;
+  glyph "W" = torch on x-;
+  glyph "N" = torch on y+;
+  glyph "S" = torch on y-;
+  glyph "U" = torch on z-;
+  glyph "P" = repeater toward y- delay 1;
+  glyph "Q" = repeater toward y+ delay 1;
+
+  input "a" at [1, 0, 2] on y+;
+  input "b" at [1, 8, 2] on y-;
+  input "cin" at [1, 2, 8] on y+;
+  output "sum" at [0, 1, 9];
+  output "cout" at [0, 19, 17];
+
+  plane xy at z=1 {
+    y=9 ".#";
+  }
+
+  plane xy at z=2 {
+    y=1 "E#";
+    y=2 "#.";
+    y=3 "S#";
+    y=4 "#W";
+    y=5 "N.";
+    y=6 "#N";
+    y=7 ".#";
+    y=9 ".P";
+    y=10 ".#";
+  }
+
+  plane xy at z=3 {
+    y=3 ".U";
+    y=4 "U.";
+    y=5 "#.";
+    y=10 ".U";
+  }
+
+  plane xy at z=4 {
+    y=3 ".#";
+    y=5 "U.";
+    y=10 ".#";
+  }
+
+  plane xy at z=5 {
+    y=3 ".U";
+    y=5 "#W";
+    y=10 ".U";
+  }
+
+  plane xy at z=6 {
+    y=3 ".#";
+    y=4 "#S";
+    y=5 "E#";
+    y=10 ".#";
+  }
+
+  plane xy at z=7 {
+    y=0 "N.";
+    y=1 "#.";
+    y=2 "N.";
+    y=3 "#.";
+    y=4 "U.";
+    y=10 ".U";
+  }
+
+  plane xy at z=8 {
+    y=0 "#.";
+    y=3 "N#";
+    y=4 "#S";
+    y=10 ".#";
+  }
+
+  plane xy at z=9 {
+    y=0 "U.";
+    y=1 "#.";
+    y=2 "N.";
+    y=3 "#U";
+    y=4 "U.";
+    y=10 ".U";
+  }
+
+  plane xy at z=10 {
+    y=0 "#.";
+    y=4 "#.";
+    y=10 ".#";
+  }
+
+  plane xy at z=11 {
+    y=0 "U.";
+    y=4 "U.";
+    y=6 "##";
+    y=7 "#.";
+    y=8 "#.";
+    y=9 "#.";
+    y=10 "#U";
+    y=11 "#.";
+    y=12 "#.";
+    y=13 "#.";
+  }
+
+  plane xy at z=12 {
+    y=0 "#.";
+    y=1 "#.";
+    y=2 "#.";
+    y=3 "#.";
+    y=4 "#.";
+    y=5 "S.";
+    y=6 "rU";
+    y=7 "r.";
+    y=8 "r.";
+    y=9 "r.";
+    y=10 "r#";
+    y=11 "r.";
+    y=12 "r.";
+    y=13 "r#";
+    y=14 ".#";
+  }
+
+  plane xy at z=13 {
+    y=0 "U.";
+    y=1 "P.";
+    y=2 "##";
+    y=3 "Q#";
+    y=4 "U#";
+    y=5 ".#";
+    y=6 ".#";
+    y=7 ".#";
+    y=8 "##";
+    y=9 "#.";
+    y=10 ".U";
+  }
+
+  plane xy at z=14 {
+    y=2 "Ur";
+    y=3 ".P";
+    y=4 "#P";
+    y=5 ".P";
+    y=6 ".P";
+    y=7 ".P";
+    y=8 "rr";
+    y=9 "P.";
+    y=10 "##";
+    y=11 "##";
+    y=12 "##";
+    y=13 "#.";
+    y=16 "#.";
+    y=17 "##";
+  }
+
+  plane xy at z=15 {
+    y=2 "#.";
+    y=4 "U.";
+    y=10 "UU";
+    y=11 "PP";
+    y=12 "rr";
+    y=13 "P.";
+    y=14 "#.";
+    y=15 "S.";
+    y=16 "P.";
+    y=17 "r.";
+    y=18 "#.";
+  }
+
+  plane xy at z=16 {
+    y=4 "##";
+    y=5 ".#";
+    y=6 ".#";
+    y=7 ".#";
+    y=8 ".#";
+    y=9 ".#";
+    y=10 ".#";
+    y=11 ".#";
+    y=12 ".#";
+    y=13 ".#";
+    y=14 ".#";
+    y=15 ".#";
+    y=16 ".#";
+    y=17 ".#";
+    y=18 "r#";
+    y=19 "##";
+  }
+
+  plane xy at z=17 {
+    y=4 "Ur";
+    y=5 ".P";
+    y=6 ".r";
+    y=7 ".r";
+    y=8 ".P";
+    y=9 ".P";
+    y=10 ".P";
+    y=11 ".P";
+    y=12 ".P";
+    y=13 ".r";
+    y=14 ".r";
+    y=15 ".r";
+    y=16 ".r";
+    y=17 ".r";
+    y=18 ".r";
+    y=19 "rr";
+  }
+
+  expect "sum" = a^b^cin;
+  expect "cout" = a&b|a&cin|b&cin;
+}
