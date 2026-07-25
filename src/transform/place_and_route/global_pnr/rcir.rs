@@ -788,6 +788,8 @@ fn route_stage_config(spec: RouteStageSpec) -> GlobalRoutingConfig {
             RouteValidationSpec::Incremental => RouteValidationMode::Incremental,
             RouteValidationSpec::Deferred => RouteValidationMode::Deferred,
         },
+        top_inputs_last: false,
+        defer_feedback_cycles: false,
     }
 }
 fn net_order_spec(value: NetOrderStrategy) -> NetOrderSpec {

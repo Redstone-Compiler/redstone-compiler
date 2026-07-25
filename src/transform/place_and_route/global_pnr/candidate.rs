@@ -25,7 +25,7 @@ use crate::transform::place_and_route::local_placer::{
 };
 use crate::transform::place_and_route::placed_node::PlacedNode;
 use crate::transform::place_and_route::sampling::SamplingPolicy;
-use crate::world::block::Block;
+use crate::world::block::{Block, BlockKind};
 use crate::world::position::{DimSize, Position};
 use crate::world::simulator::Simulator;
 use crate::world::{World, World3D};
@@ -227,8 +227,22 @@ fn generate_routable_module_candidates(
         progress_label,
         input_mode,
     )?;
-    if clustered.is_some() && !config.clustering.keep_monolithic {
-        return Ok(clustered.unwrap());
+    let clustering_was_requested = config.clustering.enabled
+        && graph
+            .nodes
+            .iter()
+            .filter(|node| matches!(node.kind, GraphNodeKind::Logic(_)))
+            .count()
+            >= config.clustering.trigger_logic_nodes
+        && !graph
+            .nodes
+            .iter()
+            .any(|node| matches!(node.kind, GraphNodeKind::Sequential(_)));
+    if clustering_was_requested && !config.clustering.keep_monolithic {
+        // `keep-monolithic false` makes clustering a forced representation,
+        // including its failure semantics. Retrying the same large graph here
+        // both ignores the profile and can dominate a failed compact search.
+        return Ok(clustered.unwrap_or_default());
     }
     let mut candidates = generate_unit_candidates(
         &module.name,
@@ -295,6 +309,7 @@ fn generate_unit_candidates(
     let mut generated_count = 0usize;
     let mut truth_table_rejections = 0usize;
     let mut port_rejections = 0usize;
+    let mut missing_port_rejections = BTreeMap::<String, usize>::new();
     let mut contract_rejections = 0usize;
     let mut schedules = if config.local_config.schedule == PlacementSchedulePolicy::Auto {
         PlacementScheduler::new(&graph).candidates()
@@ -452,6 +467,9 @@ fn generate_unit_candidates(
             );
             if !candidate_ports_cover_module_ports(&ports, &physical_ports) {
                 port_rejections += 1;
+                for missing in missing_candidate_ports(&ports, &physical_ports) {
+                    *missing_port_rejections.entry(missing).or_default() += 1;
+                }
                 continue;
             }
             let mut candidate =
@@ -482,6 +500,7 @@ fn generate_unit_candidates(
         attempted_schedules,
         truth_table_rejections,
         port_rejections,
+        missing_ports = ?missing_port_rejections,
         contract_rejections,
         "local candidate validation completed"
     );
@@ -496,6 +515,7 @@ fn generate_unit_candidates(
         accepted: candidates.len(),
         truth_table_rejections,
         port_rejections,
+        missing_port_rejections,
         attempts: schedule_reports,
         candidates: candidates
             .iter()
@@ -503,6 +523,8 @@ fn generate_unit_candidates(
             .map(|(index, candidate)| LocalCandidateQuality {
                 index,
                 volume: candidate.cost.bbox_volume,
+                width: candidate.bbox.width(),
+                depth: candidate.bbox.depth(),
                 footprint: candidate.cost.bbox_footprint,
                 height: candidate.cost.bbox_height,
                 blocks: candidate.cost.block_count,
@@ -628,6 +650,7 @@ struct LocalCandidateSearchReport<'a> {
     accepted: usize,
     truth_table_rejections: usize,
     port_rejections: usize,
+    missing_port_rejections: BTreeMap<String, usize>,
     attempts: Vec<LocalScheduleAttemptReport>,
     candidates: Vec<LocalCandidateQuality>,
 }
@@ -649,6 +672,8 @@ struct LocalScheduleAttemptReport {
 struct LocalCandidateQuality {
     index: usize,
     volume: usize,
+    width: usize,
+    depth: usize,
     footprint: usize,
     height: usize,
     blocks: usize,
@@ -767,9 +792,28 @@ fn grow_placement_sampling(
 }
 
 fn candidate_ports_cover_module_ports(expected: &[CandidatePort], actual: &[PhysicalPort]) -> bool {
+    if !missing_candidate_ports(expected, actual).is_empty() {
+        return false;
+    }
+    let input_positions = actual
+        .iter()
+        .filter(|port| port.direction == PhysicalPortDirection::Input)
+        .map(|port| port.primary_route_position())
+        .collect::<Vec<_>>();
+    input_positions
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>()
+        .len()
+        == input_positions.len()
+}
+
+fn missing_candidate_ports(expected: &[CandidatePort], actual: &[PhysicalPort]) -> Vec<String> {
     expected
         .iter()
-        .all(|expected| actual.iter().any(|port| port.name == expected.name))
+        .filter(|expected| !actual.iter().any(|port| port.name == expected.name))
+        .map(|port| format!("{:?}:{}", port.direction, port.name))
+        .collect()
 }
 
 fn candidate_matches_truth_table(
@@ -781,11 +825,14 @@ fn candidate_matches_truth_table(
         .input_names
         .iter()
         .map(|name| {
-            placed
+            let positions = placed
                 .inputs
                 .iter()
-                .find(|input| input.name == *name)
+                .filter(|input| input.name == *name)
                 .map(|input| input.position())
+                .collect::<Vec<_>>();
+            (!positions.is_empty())
+                .then_some(positions)
                 .with_context(|| format!("missing input endpoint `{name}`"))
         })
         .collect::<eyre::Result<Vec<_>>>()?;
@@ -806,11 +853,15 @@ fn candidate_matches_truth_table(
     for mask in 0..(1usize << inputs.len()) {
         let mut sim = Simulator::from_with_limits_and_trace(&world, 256, 50_000, 0)
             .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
-        sim.change_state_with_limits(
+        sim.drive_inputs_with_limits(
             inputs
                 .iter()
                 .enumerate()
-                .map(|(index, position)| (*position, (mask & (1 << index)) != 0))
+                .flat_map(|(index, positions)| {
+                    positions
+                        .iter()
+                        .map(move |position| (*position, (mask & (1 << index)) != 0))
+                })
                 .collect(),
             256,
             50_000,
@@ -820,7 +871,54 @@ fn candidate_matches_truth_table(
             let Some(expected_output) = expected.output_tables.get(*output_name) else {
                 return Ok(false);
             };
-            if sim.world()[*output_position].kind.is_powered() != expected_output[mask] {
+            let actual = sim.world()[*output_position].kind.is_powered();
+            if actual != expected_output[mask] {
+                tracing::debug!(
+                    mask,
+                    output = *output_name,
+                    expected = expected_output[mask],
+                    actual,
+                    position = ?output_position,
+                    input_names = ?expected.input_names,
+                    input_positions = ?inputs,
+                    input_blocks = ?inputs
+                        .iter()
+                        .flatten()
+                        .map(|position| {
+                            (
+                                *position,
+                                sim.world()[*position],
+                                position
+                                    .cardinal()
+                                    .into_iter()
+                                    .filter(|neighbor| sim.world().size.bound_on(*neighbor))
+                                    .map(|neighbor| (neighbor, sim.world()[neighbor]))
+                                    .collect::<Vec<_>>(),
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                    input_repeater_targets = ?inputs
+                        .iter()
+                        .flatten()
+                        .flat_map(|position| position.cardinal())
+                        .filter(|position| sim.world().size.bound_on(*position))
+                        .filter_map(|position| {
+                            sim.world()[position]
+                                .kind
+                                .is_repeater()
+                                .then(|| {
+                                    let target = position
+                                        .walk(sim.world()[position].direction.inverse())?;
+                                    sim.world()
+                                        .size
+                                        .bound_on(target)
+                                        .then(|| (position, target, sim.world()[target]))
+                                })
+                                .flatten()
+                        })
+                        .collect::<Vec<_>>(),
+                    "candidate truth-table mismatch"
+                );
                 return Ok(false);
             }
         }
@@ -835,11 +933,15 @@ fn candidate_matches_truth_table(
         .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
     let mask_count = 1usize << inputs.len();
     for mask in (0..mask_count).chain((0..mask_count).rev()) {
-        sim.change_state_with_limits(
+        sim.drive_inputs_with_limits(
             inputs
                 .iter()
                 .enumerate()
-                .map(|(index, position)| (*position, (mask & (1 << index)) != 0))
+                .flat_map(|(index, positions)| {
+                    positions
+                        .iter()
+                        .map(move |position| (*position, (mask & (1 << index)) != 0))
+                })
                 .collect(),
             256,
             50_000,
@@ -848,7 +950,16 @@ fn candidate_matches_truth_table(
             let Some(expected_output) = expected.output_tables.get(*output_name) else {
                 return Ok(false);
             };
-            if sim.world()[*output_position].kind.is_powered() != expected_output[mask] {
+            let actual = sim.world()[*output_position].kind.is_powered();
+            if actual != expected_output[mask] {
+                tracing::debug!(
+                    mask,
+                    output = *output_name,
+                    expected = expected_output[mask],
+                    actual,
+                    position = ?output_position,
+                    "candidate transition truth-table mismatch"
+                );
                 return Ok(false);
             }
         }
@@ -909,21 +1020,31 @@ fn candidate_layout(
                         });
                         continue;
                     }
-                    let Some(position) = expose_switchless_input_port(
+                    let positions = expose_switchless_input_ports(
                         &mut world,
                         input_position,
                         preserve_switch_position_inputs,
                         use_direct_input_ports,
-                    ) else {
+                    );
+                    let Some(&position) = positions.first() else {
                         continue;
                     };
                     ports.push(PhysicalPort {
                         name: port.name.clone(),
                         direction: PhysicalPortDirection::Input,
                         position,
-                        route_position: None,
-                        access_points: vec![position],
-                        connection: if needs_input_isolation || world[position].kind.is_redstone() {
+                        // Keep the LocalPlacer switch site as the preferred
+                        // drive point even though ExternalPorts removes the
+                        // standalone switch. `access_points` are the required
+                        // physical ingress taps; the switch site is a source
+                        // location and must not be mistaken for another sink.
+                        route_position: (input_mode == CandidateInputMode::ExternalPorts)
+                            .then_some(input_position),
+                        access_points: positions,
+                        connection: if needs_input_isolation
+                            || input_mode == CandidateInputMode::ExternalPorts
+                            || world[position].kind.is_redstone()
+                        {
                             PortConnection::InputDiode
                         } else {
                             PortConnection::Direct
@@ -980,23 +1101,52 @@ fn remove_local_input_switches(world: &mut World3D) {
 // Torch/switch/repeater 같은 출력 블록은 바로 route하기 어려울 수 있으므로,
 // 해당 출력이 실제로 power하는 redstone tap들을 route access point로 노출한다.
 fn expose_routeable_output_ports(world: &World3D, output_position: Position) -> Vec<Position> {
-    if !world.size.bound_on(output_position)
-        || (!world[output_position].kind.is_torch()
-            && !world[output_position].kind.is_switch()
-            && !world[output_position].kind.is_repeater())
-    {
+    if !world.size.bound_on(output_position) {
         return vec![output_position];
     }
 
-    let mut access_points = world
-        .iter_block()
-        .into_iter()
-        .filter(|(position, block)| {
-            block.kind.is_redstone()
-                && detailed_router::target_powers_position(world, output_position, *position)
-        })
-        .map(|(position, _)| position)
-        .collect::<Vec<_>>();
+    let output_block = world[output_position];
+    let output_is_route_terminal = output_block.kind.is_redstone()
+        || output_block.kind.is_torch()
+        || output_block.kind.is_switch()
+        || output_block.kind.is_repeater()
+        || matches!(output_block.kind, BlockKind::RedstoneBlock);
+    let mut access_points = if output_block.kind.is_redstone() {
+        redstone_network_positions(world, &[output_position])
+    } else if output_block.kind.is_torch()
+        || output_block.kind.is_switch()
+        || output_block.kind.is_repeater()
+        || matches!(output_block.kind, BlockKind::RedstoneBlock)
+    {
+        let direct = world
+            .iter_block()
+            .into_iter()
+            .filter(|(position, block)| {
+                block.kind.is_redstone()
+                    && detailed_router::target_powers_position(world, output_position, *position)
+            })
+            .map(|(position, _)| position)
+            .collect::<Vec<_>>();
+        redstone_network_positions(world, &direct)
+    } else {
+        // Observable outputs can be solid blocks powered by dust. The block
+        // remains the logical observation point, but routing must branch from
+        // the upstream dust network rather than treating cobble as a signal
+        // terminal.
+        let direct = world
+            .iter_block()
+            .into_iter()
+            .filter_map(|(position, block)| {
+                (block.kind.is_redstone()
+                    && detailed_router::target_powers_position(world, position, output_position))
+                .then_some(position)
+            })
+            .collect::<Vec<_>>();
+        redstone_network_positions(world, &direct)
+    };
+    if output_is_route_terminal {
+        access_points.push(output_position);
+    }
     access_points.sort_by_key(|position| {
         (
             output_position.manhattan_distance(position),
@@ -1033,6 +1183,28 @@ fn expose_switchless_input_port(
         return Some(input_position);
     }
 
+    // A combinational cluster with multiple logical inputs must preserve one
+    // independent physical terminal per input. Two switches can both power
+    // the same downstream redstone in the standalone local layout; exposing
+    // that shared wire as both ports aliases the inputs after composition even
+    // though the pre-rewrite truth-table check passed.
+    if preserve_switch_position_input && use_direct_input_port {
+        if let Some(target) = input_position
+            .walk(world[input_position].direction)
+            .filter(|position| world.size.bound_on(*position) && world[*position].kind.is_cobble())
+        {
+            world[input_position] = Block::default();
+            return Some(target);
+        }
+        if let Some(port_position) = switch_powered_redstone_port(world, input_position, true) {
+            world[input_position] = Block::default();
+            return Some(port_position);
+        }
+        // With no distinct downstream contact, keep the switch site as the
+        // cluster boundary. The fallback below either turns it into supported
+        // redstone or leaves an empty terminal for global route materialization.
+    }
+
     let switch_target = input_position.walk(world[input_position].direction);
     if let Some(target) = switch_target
         .filter(|position| world.size.bound_on(*position) && world[*position].kind.is_cobble())
@@ -1047,9 +1219,20 @@ fn expose_switchless_input_port(
         return Some(target);
     }
 
-    if preserve_switch_position_input && switch_powers_redstone(world, input_position) {
-        ensure_redstone_support(world, input_position)?;
-        world[input_position] = PlacedNode::new_redstone(input_position).block;
+    // A clustered candidate can feed a NOT gate directly from its local input
+    // switch, without an intermediate redstone wire.  That switch still marks
+    // a valid external boundary: replace it with supported redstone so the
+    // global router can drive the same position.  Requiring an already-powered
+    // redstone neighbor here used to silently drop those boundary ports.
+    if preserve_switch_position_input {
+        if ensure_redstone_support(world, input_position).is_some() {
+            world[input_position] = PlacedNode::new_redstone(input_position).block;
+        } else {
+            // The candidate may sit on its local floor or already occupy the
+            // support cell. Keep an empty terminal in that case; placement adds
+            // floor margin and the global router materializes the final route.
+            world[input_position] = Block::default();
+        }
         return Some(input_position);
     }
 
@@ -1067,11 +1250,50 @@ fn expose_switchless_input_port(
     })
 }
 
-fn switch_powers_redstone(world: &World3D, input_position: Position) -> bool {
-    world.iter_block().into_iter().any(|(position, block)| {
-        block.kind.is_redstone()
-            && detailed_router::target_powers_position(world, input_position, position)
-    })
+fn expose_switchless_input_ports(
+    world: &mut World3D,
+    input_position: Position,
+    preserve_switch_position_input: bool,
+    use_direct_input_port: bool,
+) -> Vec<Position> {
+    if world.size.bound_on(input_position)
+        && world[input_position].kind.is_switch()
+        && preserve_switch_position_input
+        && use_direct_input_port
+    {
+        let mut positions = Vec::new();
+        if let Some(target) = input_position
+            .walk(world[input_position].direction)
+            .filter(|position| world.size.bound_on(*position) && world[*position].kind.is_cobble())
+        {
+            positions.push(target);
+        }
+        positions.extend(
+            world
+                .iter_block()
+                .into_iter()
+                .filter_map(|(position, block)| {
+                    (block.kind.is_redstone()
+                        && detailed_router::target_powers_position(world, input_position, position))
+                    .then_some(position)
+                }),
+        );
+        positions.sort_unstable();
+        positions.dedup();
+        if !positions.is_empty() {
+            world[input_position] = Block::default();
+            return positions;
+        }
+    }
+
+    expose_switchless_input_port(
+        world,
+        input_position,
+        preserve_switch_position_input,
+        use_direct_input_port,
+    )
+    .into_iter()
+    .collect()
 }
 
 fn ensure_redstone_support(world: &mut World3D, position: Position) -> Option<()> {
@@ -1379,6 +1601,7 @@ mod tests {
             accepted: 1,
             truth_table_rejections: 2,
             port_rejections: 1,
+            missing_port_rejections: BTreeMap::from([("sum".to_owned(), 1)]),
             attempts: vec![LocalScheduleAttemptReport {
                 attempt: 1,
                 input_lifetime: 3,
@@ -1393,6 +1616,8 @@ mod tests {
             candidates: vec![LocalCandidateQuality {
                 index: 0,
                 volume: 245,
+                width: 7,
+                depth: 7,
                 footprint: 49,
                 height: 5,
                 blocks: 65,
@@ -1461,6 +1686,41 @@ mod tests {
             expose_switchless_input_port(&mut world, switch, false, true).expect("input port");
 
         assert_eq!(port, input_redstone);
+        assert!(world[switch].kind.is_air());
+    }
+
+    #[test]
+    fn preserved_switch_position_becomes_a_cluster_boundary_port_without_wire_fanout() {
+        let switch = Position(1, 1, 1);
+        let support = Position(1, 1, 0);
+        let mut world = World3D::new(DimSize(3, 3, 3));
+        world[support] = PlacedNode::new_cobble(support).block;
+        world[switch] = Block {
+            kind: BlockKind::Switch { is_on: false },
+            direction: Direction::East,
+        };
+
+        let port =
+            expose_switchless_input_port(&mut world, switch, true, true).expect("input port");
+
+        assert_eq!(port, switch);
+        assert!(world[switch].kind.is_redstone());
+        assert!(world[support].kind.is_cobble());
+    }
+
+    #[test]
+    fn preserved_floor_switch_remains_an_empty_routing_terminal() {
+        let switch = Position(0, 1, 0);
+        let mut world = World3D::new(DimSize(2, 3, 2));
+        world[switch] = Block {
+            kind: BlockKind::Switch { is_on: false },
+            direction: Direction::East,
+        };
+
+        let port =
+            expose_switchless_input_port(&mut world, switch, true, true).expect("input port");
+
+        assert_eq!(port, switch);
         assert!(world[switch].kind.is_air());
     }
 }
