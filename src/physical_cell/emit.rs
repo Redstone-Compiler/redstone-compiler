@@ -58,7 +58,14 @@ impl fmt::Display for PhysicalCellDocument {
                 cell_output.position.2
             )?;
         }
-        if !self.inputs.is_empty() || !self.outputs.is_empty() {
+        for probe in &self.probes {
+            writeln!(
+                output,
+                "  probe \"{}\" at [{}, {}, {}];",
+                probe.name, probe.position.0, probe.position.1, probe.position.2
+            )?;
+        }
+        if !self.inputs.is_empty() || !self.outputs.is_empty() || !self.probes.is_empty() {
             writeln!(output)?;
         }
         for plane in &self.planes {

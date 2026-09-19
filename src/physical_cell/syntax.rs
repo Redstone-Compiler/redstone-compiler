@@ -132,6 +132,12 @@ pub struct CellOutput {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CellProbe {
+    pub name: String,
+    pub position: Position,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CellExpectation {
     pub output: String,
     pub expression: String,
@@ -144,6 +150,7 @@ pub struct PhysicalCellDocument {
     pub auto_support: AutoSupport,
     pub glyphs: BTreeMap<char, CellGlyph>,
     pub inputs: Vec<CellInput>,
+    pub probes: Vec<CellProbe>,
     pub outputs: Vec<CellOutput>,
     pub planes: Vec<CellPlane>,
     pub expectations: Vec<CellExpectation>,

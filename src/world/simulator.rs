@@ -500,7 +500,6 @@ impl Simulator {
                 snapshots: sim.snapshots,
             });
         }
-
         Ok(sim)
     }
 
@@ -522,7 +521,6 @@ impl Simulator {
         sim.world.initialize_redstone_states();
         sim.rebuild_connectivity_cache();
         sim.init();
-        sim.enqueue_torch_reevaluations();
 
         tracing::debug!("queue: {:?}", sim.queue);
 
@@ -535,7 +533,6 @@ impl Simulator {
                 snapshots: sim.snapshots,
             });
         }
-
         Ok(sim)
     }
 
@@ -553,6 +550,7 @@ impl Simulator {
         sim.rebuild_connectivity_cache();
         sim.normalize_torches_on();
         sim.init();
+        sim.enqueue_torch_reevaluations();
 
         tracing::debug!("queue: {:?}", sim.queue);
 
@@ -641,16 +639,9 @@ impl Simulator {
             let mut targets = Vec::new();
             match source_block.kind {
                 BlockKind::Torch { .. } => {
-                    let soft_targets = match source_block.direction {
-                        Direction::Bottom => source.cardinal(),
-                        Direction::East | Direction::West | Direction::South | Direction::North => {
-                            let mut positions = source.cardinal_except(source_block.direction);
-                            positions.extend(source.down());
-                            positions
-                        }
-                        _ => Vec::new(),
-                    };
-                    targets.extend(soft_targets.into_iter().map(|target| (target, false)));
+                    // A torch directly powers adjacent components, but it does
+                    // not weakly power adjacent solid blocks. Only the block
+                    // above the torch is strongly powered.
                     targets.push((source.up(), true));
                 }
                 BlockKind::Switch { .. } => {
@@ -668,7 +659,7 @@ impl Simulator {
                     targets.extend(
                         self.redstone_propagate_targets(source, state)
                             .into_iter()
-                            .map(|target| (target, true)),
+                            .map(|target| (target, false)),
                     );
                 }
                 BlockKind::RedstoneBlock => {
@@ -940,6 +931,10 @@ impl Simulator {
         &self.world
     }
 
+    pub fn is_torch_burned_out(&self, position: Position) -> bool {
+        self.burned_out_torches.contains(&position)
+    }
+
     pub fn advance_idle_cycles(&mut self, cycles: usize) -> eyre::Result<()> {
         eyre::ensure!(
             self.queue.is_empty(),
@@ -1068,6 +1063,9 @@ impl Simulator {
             _ => unreachable!(),
         }
         .into_iter()
+        .filter(|position| {
+            !self.world.size.bound_on(*position) || !self.world[*position].kind.is_cobble()
+        })
         .flat_map(|pos_src| {
             vec![Event {
                 id: None,
@@ -1102,7 +1100,7 @@ impl Simulator {
                 if !self.world.size.bound_on(support) || !self.world[support].kind.is_cobble() {
                     return None;
                 }
-                let support_is_powered = self.cobble_power_counts(support).1 > 0;
+                let support_is_powered = self.cobble_disables_attached_torch(support);
                 Some(Event {
                     id: None,
                     from_id: None,
@@ -1159,12 +1157,11 @@ impl Simulator {
         propagate_targets
     }
 
-    fn redstone_output_event_type(&self, target: Position, is_on: bool) -> EventType {
-        match (self.world[target].kind.is_cobble(), is_on) {
-            (true, true) => EventType::HardOn,
-            (true, false) => EventType::HardOff,
-            (false, true) => EventType::SoftOn,
-            (false, false) => EventType::SoftOff,
+    fn redstone_output_event_type(&self, _target: Position, is_on: bool) -> EventType {
+        if is_on {
+            EventType::SoftOn
+        } else {
+            EventType::SoftOff
         }
     }
 
@@ -1201,15 +1198,40 @@ impl Simulator {
                     } else {
                         self.redstone_input_strength(pos)
                     };
-                    (next_strength != strength).then_some((pos, next_strength))
+                    (next_strength != strength).then_some((pos, strength, next_strength, block))
                 })
                 .collect::<Vec<_>>();
 
-            for (pos, next_strength) in next_strengths {
+            for (pos, previous_strength, next_strength, block) in next_strengths {
                 let BlockKind::Redstone { strength, .. } = &mut self.world[pos].kind else {
                     continue;
                 };
                 *strength = next_strength;
+                if previous_strength > 0 && next_strength == 0 {
+                    let BlockKind::Redstone { state, .. } = block.kind else {
+                        unreachable!()
+                    };
+                    for target in self.redstone_propagate_targets(pos, state) {
+                        if !self.world.size.bound_on(target) {
+                            continue;
+                        }
+                        let event_type = if self.world[target].kind.is_redstone() {
+                            EventType::RedstoneOff
+                        } else {
+                            self.redstone_output_event_type(target, false)
+                        };
+                        self.schedule_event(
+                            0,
+                            Event {
+                                id: None,
+                                from_id: None,
+                                event_type,
+                                target_position: target,
+                                direction: target.diff(pos),
+                            },
+                        );
+                    }
+                }
                 changed = true;
                 any_changed = true;
             }
@@ -1306,6 +1328,22 @@ impl Simulator {
             }
         }
         (sources, hard_sources)
+    }
+
+    fn cobble_disables_attached_torch(&self, target: Position) -> bool {
+        self.cobble_power_inputs[target.index(&self.world.size).0]
+            .iter()
+            .any(|input| {
+                let active = match self.world[input.source].kind {
+                    BlockKind::Torch { is_on }
+                    | BlockKind::Switch { is_on }
+                    | BlockKind::Repeater { is_on, .. } => is_on,
+                    BlockKind::Redstone { strength, .. } => strength > 0,
+                    BlockKind::RedstoneBlock => true,
+                    _ => false,
+                };
+                active && (input.hard || self.world[input.source].kind.is_redstone())
+            })
     }
 
     fn init_switch_event(&mut self, dir: Direction, pos: Position) {
@@ -1498,41 +1536,76 @@ impl Simulator {
             block.count_down(event.event_type.is_hard())?;
         }
 
-        let BlockKind::Cobble { on_base_count, .. } = block.kind else {
+        let BlockKind::Cobble {
+            on_count,
+            on_base_count,
+        } = block.kind
+        else {
             unreachable!()
         };
 
         let count_condition = if event.event_type.is_on() { 1 } else { 0 };
-
-        if !is_hard || on_base_count != count_condition {
+        let overall_power_changed = on_count == count_condition;
+        let hard_power_changed = is_hard && on_base_count == count_condition;
+        if !overall_power_changed && !hard_power_changed {
             return Ok(());
         }
 
         tracing::trace!("trigger cobble event: {event:?}, {block:?}");
 
-        let events = event
+        let adjacent = event
             .target_position
             .forwards()
             .into_iter()
-            .filter(|&pos| self.world.size.bound_on(pos))
-            .filter(|&pos| !self.world[pos].kind.is_cobble())
-            .filter(|&pos| pos != source_position)
-            .map(|pos_src| Event {
-                id: None,
-                from_id: event.id,
-                event_type: if event.event_type.is_on() {
-                    EventType::HardOn
-                } else {
-                    EventType::HardOff
-                },
-                target_position: pos_src,
-                direction: pos_src.diff(event.target_position),
-            })
+            .filter(|position| self.world.size.bound_on(*position))
+            .filter(|position| *position != source_position)
             .collect::<Vec<_>>();
 
-        events.into_iter().for_each(|event| {
-            self.push_event_to_current_tick(event);
-        });
+        if overall_power_changed {
+            let events = adjacent
+                .iter()
+                .copied()
+                .filter(|position| {
+                    !self.world[*position].kind.is_cobble()
+                        && !self.world[*position].kind.is_redstone()
+                })
+                .map(|target_position| Event {
+                    id: None,
+                    from_id: event.id,
+                    event_type: if event.event_type.is_on() {
+                        EventType::SoftOn
+                    } else {
+                        EventType::SoftOff
+                    },
+                    target_position,
+                    direction: target_position.diff(event.target_position),
+                })
+                .collect::<Vec<_>>();
+            events
+                .into_iter()
+                .for_each(|event| self.push_event_to_current_tick(event));
+        }
+
+        if hard_power_changed {
+            let events = adjacent
+                .into_iter()
+                .filter(|position| self.world[*position].kind.is_redstone())
+                .map(|target_position| Event {
+                    id: None,
+                    from_id: event.id,
+                    event_type: if event.event_type.is_on() {
+                        EventType::HardOn
+                    } else {
+                        EventType::HardOff
+                    },
+                    target_position,
+                    direction: target_position.diff(event.target_position),
+                })
+                .collect::<Vec<_>>();
+            events
+                .into_iter()
+                .for_each(|event| self.push_event_to_current_tick(event));
+        }
 
         Ok(())
     }
@@ -1851,7 +1924,9 @@ impl Simulator {
             eyre::bail!("unreachable");
         };
 
-        let support_is_powered = self.cobble_power_counts(support_position).1 > 0;
+        // Both weak and strong power disable a torch attached to the block.
+        // Only strong power is allowed to propagate onward through the solid.
+        let support_is_powered = self.cobble_disables_attached_torch(support_position);
         let next_is_on = !support_is_powered;
         if *is_on == next_is_on {
             return Ok(());
@@ -1870,7 +1945,7 @@ impl Simulator {
             *is_on = next_is_on;
         }
 
-        match block.direction {
+        let events = match block.direction {
             Direction::Bottom => event.target_position.cardinal(),
             Direction::East | Direction::West | Direction::South | Direction::North => {
                 let mut positions = event.target_position.cardinal_except(block.direction);
@@ -1880,6 +1955,9 @@ impl Simulator {
             _ => unreachable!(),
         }
         .into_iter()
+        .filter(|position| {
+            !self.world.size.bound_on(*position) || !self.world[*position].kind.is_cobble()
+        })
         .map(|pos_src| Event {
             id: None,
             from_id: event.id,
@@ -1902,7 +1980,8 @@ impl Simulator {
             target_position: event.target_position.up(),
             direction: Direction::None,
         }))
-        .for_each(|event| {
+        .collect::<Vec<_>>();
+        events.into_iter().for_each(|event| {
             self.push_event_to_next_tick(event);
         });
 
@@ -2092,8 +2171,12 @@ mod test {
         );
         for (torch, torch_block) in torches {
             let support = torch.walk(torch_block.direction).unwrap();
-            let support_is_powered = sim.cobble_power_counts(support).1 > 0;
-            assert!(!sim.burned_out_torches.contains(&torch));
+            let support_is_powered = sim.cobble_disables_attached_torch(support);
+            assert!(
+                !sim.burned_out_torches.contains(&torch),
+                "torch at {torch:?} burned out during preserving initialization; toggle history={:?}",
+                sim.torch_toggle_cycles.get(&torch)
+            );
             assert!(
                 matches!(
                     sim.world()[torch].kind,
@@ -2487,7 +2570,7 @@ mod test {
     }
 
     #[test]
-    fn simulator_torch_weak_power_does_not_conduct_through_solid() -> eyre::Result<()> {
+    fn simulator_side_torch_does_not_power_solid_with_wall_torch() -> eyre::Result<()> {
         let source_torch = Position(1, 1, 1);
         let weak_support = Position(1, 2, 1);
         let attached_torch = Position(1, 3, 1);
@@ -2519,7 +2602,7 @@ mod test {
         assert!(matches!(
             sim.world()[weak_support].kind,
             BlockKind::Cobble {
-                on_count: 1,
+                on_count: 0,
                 on_base_count: 0
             }
         ));
@@ -2573,7 +2656,7 @@ mod test {
     }
 
     #[test]
-    fn simulator_connected_wire_directly_powers_solid_without_self_feedback() -> eyre::Result<()> {
+    fn simulator_connected_wire_weakly_powers_solid_without_self_feedback() -> eyre::Result<()> {
         let input_support = Position(1, 0, 0);
         let input_switch = Position(1, 0, 1);
         let wire = Position(1, 1, 1);
@@ -2619,7 +2702,8 @@ mod test {
         assert!(matches!(
             sim.world()[output_support].kind,
             BlockKind::Cobble {
-                on_base_count: 1,
+                on_count: 1,
+                on_base_count: 0,
                 ..
             }
         ));
@@ -2635,6 +2719,152 @@ mod test {
                 ..
             }
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn powered_dust_weakly_powers_solid_without_repowering_adjacent_dust() -> eyre::Result<()> {
+        let switch = Position(0, 0, 1);
+        let source_wire = Position(1, 0, 1);
+        let source_support = Position(1, 0, 0);
+        let weakly_powered_solid = Position(2, 0, 1);
+        let attached_torch = Position(2, 1, 1);
+        let isolated_wire = Position(3, 0, 1);
+        let isolated_support = Position(3, 0, 0);
+        let world = World {
+            size: DimSize(4, 2, 2),
+            blocks: vec![
+                (
+                    switch,
+                    Block {
+                        kind: BlockKind::Switch { is_on: false },
+                        direction: Direction::West,
+                    },
+                ),
+                (source_support, test_cobble(0, 0)),
+                (
+                    source_wire,
+                    Block {
+                        kind: BlockKind::Redstone {
+                            on_count: 0,
+                            state: RedstoneState::East as usize,
+                            strength: 0,
+                        },
+                        direction: Direction::None,
+                    },
+                ),
+                (weakly_powered_solid, test_cobble(0, 0)),
+                (
+                    attached_torch,
+                    Block {
+                        kind: BlockKind::Torch { is_on: true },
+                        direction: Direction::South,
+                    },
+                ),
+                (isolated_support, test_cobble(0, 0)),
+                (
+                    isolated_wire,
+                    Block {
+                        kind: BlockKind::Redstone {
+                            on_count: 0,
+                            state: RedstoneState::East as usize,
+                            strength: 0,
+                        },
+                        direction: Direction::None,
+                    },
+                ),
+            ],
+        };
+
+        let mut sim = Simulator::from_with_limits_and_trace(&world, 64, 2_000, 100)
+            .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
+
+        sim.change_state(vec![(switch, true)])?;
+        assert!(matches!(
+            sim.world()[source_wire].kind,
+            BlockKind::Redstone { strength: 15, .. }
+        ));
+        assert!(matches!(
+            sim.world()[weakly_powered_solid].kind,
+            BlockKind::Cobble {
+                on_count: 1,
+                on_base_count: 0
+            }
+        ));
+        assert!(matches!(
+            sim.world()[isolated_wire].kind,
+            BlockKind::Redstone { strength: 0, .. }
+        ));
+        assert!(matches!(
+            sim.world()[attached_torch].kind,
+            BlockKind::Torch { is_on: false }
+        ));
+
+        sim.change_state(vec![(switch, false)])?;
+        assert!(matches!(
+            sim.world()[source_wire].kind,
+            BlockKind::Redstone { strength: 0, .. }
+        ));
+        assert!(matches!(
+            sim.world()[weakly_powered_solid].kind,
+            BlockKind::Cobble {
+                on_count: 0,
+                on_base_count: 0
+            }
+        ));
+        assert!(matches!(
+            sim.world()[isolated_wire].kind,
+            BlockKind::Redstone { strength: 0, .. }
+        ));
+        assert!(matches!(
+            sim.world()[attached_torch].kind,
+            BlockKind::Torch { is_on: true }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn side_torch_does_not_power_adjacent_solid_or_disable_its_torch() -> eyre::Result<()> {
+        let source_support = Position(0, 0, 0);
+        let source_torch = Position(0, 0, 1);
+        let target_support = Position(1, 0, 1);
+        let target_torch = Position(1, 0, 2);
+        let world = World {
+            size: DimSize(2, 1, 3),
+            blocks: vec![
+                (source_support, test_cobble(0, 0)),
+                (
+                    source_torch,
+                    Block {
+                        kind: BlockKind::Torch { is_on: true },
+                        direction: Direction::Bottom,
+                    },
+                ),
+                (target_support, test_cobble(0, 0)),
+                (
+                    target_torch,
+                    Block {
+                        kind: BlockKind::Torch { is_on: true },
+                        direction: Direction::Bottom,
+                    },
+                ),
+            ],
+        };
+
+        let sim = Simulator::from_with_limits_and_trace(&world, 64, 2_000, 0)
+            .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
+        assert!(matches!(
+            sim.world()[target_support].kind,
+            BlockKind::Cobble {
+                on_count: 0,
+                on_base_count: 0
+            }
+        ));
+        assert!(matches!(
+            sim.world()[target_torch].kind,
+            BlockKind::Torch { is_on: true }
+        ));
+
         Ok(())
     }
 
@@ -2676,6 +2906,126 @@ mod test {
                 on_count: 1,
                 on_base_count: 0
             }
+        ));
+        assert!(matches!(
+            sim.world()[wire].kind,
+            BlockKind::Redstone { strength: 0, .. }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn dust_and_its_support_do_not_stay_on_without_an_external_source() -> eyre::Result<()> {
+        let torch = Position(1, 1, 0);
+        let support = Position(1, 1, 1);
+        let wire = Position(1, 1, 2);
+        let world = World {
+            size: DimSize(3, 3, 3),
+            blocks: vec![
+                (
+                    torch,
+                    Block {
+                        kind: BlockKind::Torch { is_on: true },
+                        direction: Direction::Bottom,
+                    },
+                ),
+                (support, test_cobble(0, 0)),
+                (
+                    wire,
+                    Block {
+                        kind: BlockKind::Redstone {
+                            on_count: 0,
+                            state: 0,
+                            strength: 0,
+                        },
+                        direction: Direction::None,
+                    },
+                ),
+            ],
+        };
+
+        let mut sim = Simulator::from_with_limits_and_trace(&world, 32, 1_000, 0)
+            .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
+        assert!(matches!(
+            sim.world()[wire].kind,
+            BlockKind::Redstone { strength: 15, .. }
+        ));
+
+        sim.world[torch].kind = BlockKind::Torch { is_on: false };
+        sim.queue.push_back(VecDeque::from([Event {
+            id: None,
+            from_id: None,
+            event_type: EventType::HardOff,
+            target_position: support,
+            direction: Direction::None,
+        }]));
+        sim.run_with_max_cycles(32)?;
+
+        assert!(matches!(
+            sim.world()[wire].kind,
+            BlockKind::Redstone { strength: 0, .. }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn dust_support_cycle_drops_when_neighboring_wire_turns_off() -> eyre::Result<()> {
+        let switch_support = Position(0, 0, 0);
+        let switch = Position(0, 0, 1);
+        let source_support = Position(0, 1, 0);
+        let source_wire = Position(0, 1, 1);
+        let support = Position(0, 2, 0);
+        let wire = Position(0, 2, 1);
+        let world = World {
+            size: DimSize(1, 3, 2),
+            blocks: vec![
+                (switch_support, test_cobble(0, 0)),
+                (
+                    switch,
+                    Block {
+                        kind: BlockKind::Switch { is_on: false },
+                        direction: Direction::Bottom,
+                    },
+                ),
+                (source_support, test_cobble(0, 0)),
+                (
+                    source_wire,
+                    Block {
+                        kind: BlockKind::Redstone {
+                            on_count: 0,
+                            state: 0,
+                            strength: 0,
+                        },
+                        direction: Direction::None,
+                    },
+                ),
+                (support, test_cobble(0, 0)),
+                (
+                    wire,
+                    Block {
+                        kind: BlockKind::Redstone {
+                            on_count: 0,
+                            state: 0,
+                            strength: 0,
+                        },
+                        direction: Direction::None,
+                    },
+                ),
+            ],
+        };
+
+        let mut sim = Simulator::from_with_limits_and_trace(&world, 64, 2_000, 0)
+            .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
+        sim.change_state(vec![(switch, true)])?;
+        assert!(matches!(
+            sim.world()[wire].kind,
+            BlockKind::Redstone { strength, .. } if strength > 0
+        ));
+
+        sim.change_state(vec![(switch, false)])?;
+        assert!(matches!(
+            sim.world()[source_wire].kind,
+            BlockKind::Redstone { strength: 0, .. }
         ));
         assert!(matches!(
             sim.world()[wire].kind,
@@ -2955,15 +3305,40 @@ mod test {
         }
     }
 
-    fn signal_snapshot(world: &World3D) -> Vec<(Position, BlockKind)> {
+    #[derive(Debug, PartialEq, Eq)]
+    enum FunctionalSignalState {
+        Switch(bool),
+        Torch(bool),
+        Redstone { state: usize, powered: bool },
+        Cobble { powered: bool, hard_powered: bool },
+    }
+
+    fn signal_snapshot(world: &World3D) -> Vec<(Position, FunctionalSignalState)> {
         let mut snapshot = world
             .iter_block()
             .into_iter()
             .filter_map(|(pos, block)| match block.kind {
-                BlockKind::Switch { .. }
-                | BlockKind::Torch { .. }
-                | BlockKind::Redstone { .. }
-                | BlockKind::Cobble { .. } => Some((pos, block.kind.clone())),
+                BlockKind::Switch { is_on } => Some((pos, FunctionalSignalState::Switch(is_on))),
+                BlockKind::Torch { is_on } => Some((pos, FunctionalSignalState::Torch(is_on))),
+                BlockKind::Redstone {
+                    state, strength, ..
+                } => Some((
+                    pos,
+                    FunctionalSignalState::Redstone {
+                        state,
+                        powered: strength > 0,
+                    },
+                )),
+                BlockKind::Cobble {
+                    on_count,
+                    on_base_count,
+                } => Some((
+                    pos,
+                    FunctionalSignalState::Cobble {
+                        powered: on_count > 0,
+                        hard_powered: on_base_count > 0,
+                    },
+                )),
                 _ => None,
             })
             .collect::<Vec<_>>();

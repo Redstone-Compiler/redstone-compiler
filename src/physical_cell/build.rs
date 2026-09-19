@@ -12,11 +12,27 @@ use crate::world::World3D;
 pub struct PhysicalCellBuild {
     pub world: World3D,
     pub inputs: BTreeMap<String, Position>,
+    pub input_contacts: BTreeMap<String, Vec<Position>>,
+    pub probes: BTreeMap<String, Position>,
     pub outputs: BTreeMap<String, Position>,
     pub auto_supports: BTreeSet<Position>,
 }
 
 impl PhysicalCellBuild {
+    pub fn observation_position(&self, name: &str) -> Option<Position> {
+        self.probes
+            .get(name)
+            .or_else(|| self.outputs.get(name))
+            .copied()
+    }
+
+    pub fn observations(&self) -> impl Iterator<Item = (&str, Position)> {
+        self.probes
+            .iter()
+            .chain(self.outputs.iter())
+            .map(|(name, position)| (name.as_str(), *position))
+    }
+
     pub(crate) fn from_document(document: &PhysicalCellDocument) -> eyre::Result<Self> {
         ensure!(
             document.size.0 > 0 && document.size.1 > 0 && document.size.2 > 0,
@@ -93,6 +109,7 @@ impl PhysicalCellBuild {
         }
 
         let mut inputs = BTreeMap::new();
+        let mut input_contacts = BTreeMap::<String, Vec<Position>>::new();
         let mut input_positions = HashSet::new();
         for input in &document.inputs {
             ensure!(
@@ -100,11 +117,11 @@ impl PhysicalCellBuild {
                 "input `{}` is outside the cell",
                 input.name
             );
-            ensure!(
-                inputs.insert(input.name.clone(), input.position).is_none(),
-                "duplicate input `{}`",
-                input.name
-            );
+            inputs.entry(input.name.clone()).or_insert(input.position);
+            input_contacts
+                .entry(input.name.clone())
+                .or_default()
+                .push(input.position);
             ensure!(
                 input_positions.insert(input.position),
                 "multiple inputs occupy {:?}",
@@ -188,10 +205,37 @@ impl PhysicalCellBuild {
             );
         }
 
+        let mut probes = BTreeMap::new();
+        for probe in &document.probes {
+            ensure!(
+                document.size.bound_on(probe.position),
+                "probe `{}` is outside the cell",
+                probe.name
+            );
+            ensure!(
+                probes.insert(probe.name.clone(), probe.position).is_none(),
+                "duplicate probe `{}`",
+                probe.name
+            );
+            ensure!(
+                !outputs.contains_key(&probe.name),
+                "observation `{}` is declared as both an output and a probe",
+                probe.name
+            );
+            ensure!(
+                !world[probe.position].kind.is_air(),
+                "probe `{}` points to air at {:?}",
+                probe.name,
+                probe.position
+            );
+        }
+
         world.initialize_redstone_states();
         Ok(Self {
             world,
             inputs,
+            input_contacts,
+            probes,
             outputs,
             auto_supports,
         })

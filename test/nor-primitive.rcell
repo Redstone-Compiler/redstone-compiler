@@ -1,0 +1,17 @@
+rcell 1;
+
+// Minimal directly-powered NOR cell used as the legal building block for the
+// feed-forward full-adder floorplan.
+cell "nor-primitive" size [2, 3, 2] {
+  glyph "T" = torch on y-;
+
+  input "a" at [0, 1, 1] on x+;
+  input "b" at [1, 0, 1] on y+;
+  output "y" at [1, 2, 1];
+
+  plane yz at x=1 {
+    z=1 ".#T";
+  }
+
+  expect "y" = ~a&~b;
+}

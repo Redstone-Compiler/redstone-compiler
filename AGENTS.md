@@ -9,6 +9,7 @@
 - PnR logging and observability: `docs/pnr_logging.md`
 - Compilation snapshot artifacts: `docs/compilation_snapshots.md`
 - Text-editable physical cell laboratory: `docs/physical_cell_lab.md`
+- Bounded local-only full-adder diagnostic: `docs/local_full_adder_diagnostic.md`
 
 When asked to create or preserve project documentation, add an appropriate file under `docs/` and link it from this file when it is useful for future agents.
 

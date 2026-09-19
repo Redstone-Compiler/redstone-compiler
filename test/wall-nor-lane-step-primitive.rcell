@@ -1,0 +1,35 @@
+rcell 1;
+
+// A primary-input wall-torch NOR shares an output height with a top-output
+// derived gate, then crosses through the same dust/repeater diode.
+cell "wall-nor-lane-step-primitive" size [2, 6, 4] {
+  glyph "S" = torch on y-;
+  glyph "U" = torch on z-;
+  glyph "P" = repeater toward y- delay 1;
+
+  auto-support dust repeater;
+
+  input "a" at [0, 2, 1] on z+;
+  input "b" at [0, 1, 2] on y+;
+  probe "nor" at [0, 3, 2];
+  output "or" at [1, 5, 3];
+
+  plane xy at z=1 {
+    y=3 ".#";
+    y=4 ".#";
+  }
+
+  plane xy at z=2 {
+    y=2 "#.";
+    y=3 "Sr";
+    y=4 ".P";
+    y=5 ".#";
+  }
+
+  plane xy at z=3 {
+    y=5 ".U";
+  }
+
+  expect "nor" = ~(a|b);
+  expect "or" = a|b;
+}

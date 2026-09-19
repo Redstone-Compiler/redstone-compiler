@@ -9,13 +9,14 @@ use crate::world::position::Position;
 #[derive(Debug, Default)]
 pub struct LocalPlacerDebug {
     pub steps: Vec<StepDebug>,
+    pub time_limit_reached: bool,
 }
 
 impl LocalPlacerDebug {
     pub fn print_summary(&self) {
         for step in &self.steps {
             println!(
-                "[{}/{}] node={} kind={} inputs={:?} queue={} generated={} sampled={}",
+                "[{}/{}] node={} kind={} inputs={:?} queue={} generated={} compacted={} sampled={} generation_us={} total_us={}",
                 step.step + 1,
                 step.total_steps,
                 step.node_id,
@@ -23,7 +24,10 @@ impl LocalPlacerDebug {
                 step.input_node_ids,
                 step.input_queue_len,
                 step.generated_len,
+                step.compacted_len,
                 step.sampled_len,
+                step.generation_us,
+                step.total_us,
             );
             if let Some(route) = &step.route_debug {
                 println!(
@@ -162,6 +166,9 @@ pub struct StepDebug {
     pub input_queue_len: usize,
     pub generated_len: usize,
     pub sampled_len: usize,
+    pub compacted_len: usize,
+    pub generation_us: u128,
+    pub total_us: u128,
     pub route_debug: Option<RouteDebug>,
 }
 
@@ -226,6 +233,7 @@ mod tests {
     #[test]
     fn failure_reports_the_stage_that_first_exhausted_the_frontier() {
         let debug = LocalPlacerDebug {
+            time_limit_reached: false,
             steps: vec![
                 StepDebug {
                     sampled_len: 4,

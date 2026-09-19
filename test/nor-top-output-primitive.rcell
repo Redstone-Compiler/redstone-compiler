@@ -1,0 +1,29 @@
+rcell 1;
+
+// A NOR primitive for two-wide layered trees. Inputs enter from opposite
+// Y directions through repeaters, and the result rises one Z level.
+cell "nor-top-output-primitive" size [2, 5, 3] {
+  glyph "U" = torch on z-;
+  glyph "P" = repeater toward y- delay 1;
+  glyph "Q" = repeater toward y+ delay 1;
+
+  auto-support repeater;
+
+  input "a" at [0, 0, 1] on x+;
+  input "b" at [0, 4, 1] on x+;
+  output "y" at [0, 2, 2];
+
+  plane xy at z=1 {
+    y=0 ".#";
+    y=1 "P.";
+    y=2 "#.";
+    y=3 "Q.";
+    y=4 ".#";
+  }
+
+  plane xy at z=2 {
+    y=2 "U.";
+  }
+
+  expect "y" = ~(a|b);
+}

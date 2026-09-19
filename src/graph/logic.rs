@@ -504,7 +504,12 @@ impl LogicGraphBuilder {
                         self.next();
                         self.new_input_node(ident)
                     }
-                    LogicStringTokenType::ParStart => self.parse_or(),
+                    LogicStringTokenType::ParStart => {
+                        self.next();
+                        let node = self.parse_or();
+                        assert_eq!(self.next(), LogicStringTokenType::ParEnd);
+                        node
+                    }
                     _ => panic!(),
                 };
                 self.new_logic_node(LogicType::Not, vec![node])
@@ -611,6 +616,14 @@ mod tests {
         assert_eq!(table.input_names, vec!["a", "b"]);
         assert_eq!(table.output_tables["s"], vec![false, true, true, false]);
 
+        Ok(())
+    }
+
+    #[test]
+    fn parenthesized_not_does_not_consume_following_operator() -> eyre::Result<()> {
+        let parsed = LogicGraph::from_stmt("~(a|b)|c", "y")?.truth_table()?;
+        let equivalent = LogicGraph::from_stmt("(~a&~b)|c", "y")?.truth_table()?;
+        assert_eq!(parsed, equivalent);
         Ok(())
     }
 

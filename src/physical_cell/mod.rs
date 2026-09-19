@@ -6,14 +6,22 @@
 //! `Simulator`.
 
 mod build;
+mod compact;
 mod emit;
 mod parser;
 mod syntax;
 mod verify;
 
 pub use build::PhysicalCellBuild;
+pub use compact::{
+    PhysicalCellBounds, PhysicalCellCompactReport, PhysicalCellDustComponent,
+    PhysicalCellRepeaterChain, PhysicalCellSafeMutation,
+};
 pub use syntax::{
     AutoSupport, AxisDirection, CellExpectation, CellGlyph, CellInput, CellOutput, CellPlane,
-    PhysicalCellDocument, PlaneAxes,
+    CellProbe, PhysicalCellDocument, PlaneAxes,
 };
-pub use verify::{PhysicalCellCaseFailure, PhysicalCellCaseSimulation, PhysicalCellVerification};
+pub use verify::{
+    PhysicalCellCaseFailure, PhysicalCellCaseSimulation, PhysicalCellDivergence,
+    PhysicalCellTruthSignature, PhysicalCellVerification,
+};

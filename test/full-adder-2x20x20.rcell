@@ -1,207 +1,254 @@
 rcell 1;
 
+// A fully isolated 9-NOR full adder. Every derived signal crosses a repeater
+// before hard-powering the next torch support.
 cell "full-adder-2x20x20" size [2, 20, 20] {
-  glyph "E" = torch on x+;
-  glyph "W" = torch on x-;
-  glyph "N" = torch on y+;
-  glyph "S" = torch on y-;
   glyph "U" = torch on z-;
+  glyph "W" = torch on x-;
   glyph "P" = repeater toward y- delay 1;
   glyph "Q" = repeater toward y+ delay 1;
 
-  input "a" at [1, 0, 2] on y+;
-  input "b" at [1, 8, 2] on y-;
-  input "cin" at [1, 2, 8] on y+;
-  output "sum" at [0, 1, 9];
-  output "cout" at [0, 19, 17];
+  auto-support dust repeater;
+
+  input "a" at [0, 5, 1] on x+;
+  input "b" at [0, 13, 1] on x+;
+  input "cin" at [1, 19, 1] on x-;
+
+  probe "a_lift" at [1, 4, 3];
+  probe "b_lift" at [1, 13, 3];
+  probe "cin_lift" at [0, 16, 3];
+  probe "n1" at [0, 9, 2];
+  probe "n1_keep" at [1, 19, 7];
+  probe "n2" at [1, 6, 4];
+  probe "n3" at [0, 11, 5];
+  probe "n4" at [0, 8, 8];
+  probe "n4_keep" at [0, 9, 11];
+  probe "n4_final" at [0, 6, 14];
+  probe "cin_keep" at [0, 14, 11];
+  probe "cin_final" at [0, 12, 14];
+  probe "n1_final" at [1, 19, 14];
+  probe "n5" at [1, 11, 12];
+  probe "n6" at [1, 8, 15];
+  probe "n7" at [1, 14, 15];
+  output "sum" at [1, 11, 18];
+  output "cout" at [0, 16, 18];
 
   plane xy at z=1 {
-    y=9 ".#";
+    y=3 "r.";
+    y=4 "r.";
+    y=5 ".#";
+    y=6 "r.";
+    y=7 "r.";
+    y=8 "P.";
+    y=9 "#.";
+    y=10 "Q.";
+    y=11 "r.";
+    y=12 "r.";
+    y=13 ".#";
+    y=14 "r.";
+    y=15 ".#";
+    y=17 "#.";
+    y=18 "r.";
+    y=19 "#.";
   }
 
   plane xy at z=2 {
-    y=1 "E#";
-    y=2 "#.";
-    y=3 "S#";
-    y=4 "#W";
-    y=5 "N.";
-    y=6 "#N";
-    y=7 ".#";
-    y=9 ".P";
-    y=10 ".#";
+    y=3 ".r";
+    y=4 ".#";
+    y=8 ".#";
+    y=9 "Ur";
+    y=14 ".r";
+    y=16 "#.";
+    y=17 "r.";
   }
 
   plane xy at z=3 {
-    y=3 ".U";
-    y=4 "U.";
-    y=5 "#.";
-    y=10 ".U";
+    y=4 ".r";
+    y=5 ".P";
+    y=6 ".#";
+    y=7 ".Q";
+    y=8 "#r";
+    y=9 ".#";
+    y=13 ".r";
+    y=14 "#.";
+    y=16 "r.";
+    y=19 "#.";
   }
 
   plane xy at z=4 {
-    y=3 ".#";
-    y=5 "U.";
-    y=10 ".#";
+    y=6 ".U";
+    y=9 "rr";
+    y=10 "Pr";
+    y=11 "#P";
+    y=12 "Q#";
+    y=13 "r.";
+    y=14 "r.";
+    y=16 ".r";
+    y=17 ".P";
+    y=18 "rr";
+    y=19 "r.";
   }
 
   plane xy at z=5 {
-    y=3 ".U";
-    y=5 "#W";
-    y=10 ".U";
+    y=6 ".#";
+    y=11 "U.";
+    y=12 ".r";
+    y=13 ".#";
+    y=17 "r.";
   }
 
   plane xy at z=6 {
-    y=3 ".#";
-    y=4 "#S";
-    y=5 "E#";
-    y=10 ".#";
+    y=5 ".#";
+    y=6 ".r";
+    y=11 "#.";
+    y=13 ".r";
+    y=14 ".P";
+    y=15 ".P";
+    y=16 "rP";
+    y=17 ".P";
+    y=18 ".P";
+    y=19 ".#";
   }
 
   plane xy at z=7 {
-    y=0 "N.";
-    y=1 "#.";
-    y=2 "N.";
-    y=3 "#.";
-    y=4 "U.";
-    y=10 ".U";
+    y=5 "rr";
+    y=6 "r.";
+    y=7 "P.";
+    y=8 "#.";
+    y=9 "Q.";
+    y=10 "r.";
+    y=11 "r.";
+    y=15 "r.";
+    y=17 "#.";
+    y=18 ".#";
+    y=19 ".r";
   }
 
   plane xy at z=8 {
-    y=0 "#.";
-    y=3 "N#";
-    y=4 "#S";
-    y=10 ".#";
+    y=8 "U.";
+    y=14 "r.";
+    y=16 "#.";
+    y=17 "r.";
+    y=18 ".r";
   }
 
   plane xy at z=9 {
-    y=0 "U.";
-    y=1 "#.";
-    y=2 "N.";
-    y=3 "#U";
-    y=4 "U.";
-    y=10 ".U";
+    y=8 "#.";
+    y=9 "P.";
+    y=10 "#.";
+    y=14 ".r";
+    y=15 "#r";
+    y=16 "r.";
+    y=18 "r.";
   }
 
   plane xy at z=10 {
-    y=0 "#.";
-    y=4 "#.";
-    y=10 ".#";
+    y=9 "#.";
+    y=10 "r.";
+    y=14 "#.";
+    y=15 "r.";
+    y=16 "#.";
+    y=19 "r#";
   }
 
   plane xy at z=11 {
-    y=0 "U.";
-    y=4 "U.";
-    y=6 "##";
-    y=7 "#.";
     y=8 "#.";
-    y=9 "#.";
-    y=10 "#U";
-    y=11 "#.";
-    y=12 "#.";
-    y=13 "#.";
+    y=9 "rr";
+    y=10 ".P";
+    y=11 ".#";
+    y=12 "#Q";
+    y=13 "Qr";
+    y=14 "rr";
+    y=16 "r.";
+    y=17 "#.";
+    y=18 ".#";
+    y=19 ".r";
   }
 
   plane xy at z=12 {
-    y=0 "#.";
-    y=1 "#.";
-    y=2 "#.";
-    y=3 "#.";
-    y=4 "#.";
-    y=5 "S.";
-    y=6 "rU";
-    y=7 "r.";
+    y=7 "#.";
     y=8 "r.";
-    y=9 "r.";
-    y=10 "r#";
-    y=11 "r.";
-    y=12 "r.";
-    y=13 "r#";
-    y=14 ".#";
+    y=11 ".U";
+    y=12 "U.";
+    y=16 "#.";
+    y=17 "r.";
+    y=18 "rr";
   }
 
   plane xy at z=13 {
-    y=0 "U.";
-    y=1 "P.";
-    y=2 "##";
-    y=3 "Q#";
-    y=4 "U#";
-    y=5 ".#";
-    y=6 ".#";
-    y=7 ".#";
-    y=8 "##";
-    y=9 "#.";
-    y=10 ".U";
+    y=6 "#.";
+    y=7 "r.";
+    y=11 ".#";
+    y=12 "#.";
+    y=15 "#.";
+    y=18 ".#";
+    y=19 "r.";
   }
 
   plane xy at z=14 {
-    y=2 "Ur";
-    y=3 ".P";
-    y=4 "#P";
-    y=5 ".P";
-    y=6 ".P";
+    y=6 "rr";
     y=7 ".P";
-    y=8 "rr";
-    y=9 "P.";
-    y=10 "##";
-    y=11 "##";
-    y=12 "##";
-    y=13 "#.";
-    y=16 "#.";
-    y=17 "##";
+    y=8 ".#";
+    y=9 ".Q";
+    y=10 ".r";
+    y=11 "#r";
+    y=12 "UP";
+    y=13 "rP";
+    y=14 "P#";
+    y=15 "#Q";
+    y=16 "rr";
+    y=17 "rr";
+    y=19 ".r";
   }
 
   plane xy at z=15 {
-    y=2 "#.";
-    y=4 "U.";
-    y=10 "UU";
-    y=11 "PP";
-    y=12 "rr";
-    y=13 "P.";
-    y=14 "#.";
-    y=15 "S.";
-    y=16 "P.";
-    y=17 "r.";
-    y=18 "#.";
+    y=8 ".U";
+    y=11 "U.";
+    y=14 ".U";
   }
 
   plane xy at z=16 {
-    y=4 "##";
-    y=5 ".#";
-    y=6 ".#";
-    y=7 ".#";
     y=8 ".#";
-    y=9 ".#";
-    y=10 ".#";
-    y=11 ".#";
-    y=12 ".#";
-    y=13 ".#";
+    y=11 "#.";
+    y=13 "#.";
     y=14 ".#";
-    y=15 ".#";
-    y=16 ".#";
-    y=17 ".#";
-    y=18 "r#";
-    y=19 "##";
   }
 
   plane xy at z=17 {
-    y=4 "Ur";
-    y=5 ".P";
-    y=6 ".r";
-    y=7 ".r";
-    y=8 ".P";
-    y=9 ".P";
+    y=8 ".r";
+    y=9 ".r";
     y=10 ".P";
-    y=11 ".P";
-    y=12 ".P";
-    y=13 ".r";
-    y=14 ".r";
-    y=15 ".r";
-    y=16 ".r";
-    y=17 ".r";
-    y=18 ".r";
-    y=19 "rr";
+    y=11 "U#";
+    y=12 "rQ";
+    y=13 "Pr";
+    y=14 "Pr";
+    y=15 "P.";
+    y=16 "#.";
+    y=17 "Q.";
+    y=18 "r.";
   }
 
+  plane xy at z=18 {
+    y=11 ".U";
+    y=16 "U.";
+  }
+
+  expect "a_lift" = a;
+  expect "b_lift" = b;
+  expect "cin_lift" = cin;
+  expect "n1" = ~(a|b);
+  expect "n1_keep" = ~(a|b);
+  expect "n2" = ~(a|~(a|b));
+  expect "n3" = ~(b|~(a|b));
+  expect "n4" = ~(~(a|~(a|b))|~(b|~(a|b)));
+  expect "n4_keep" = ~(~(a|~(a|b))|~(b|~(a|b)));
+  expect "n4_final" = ~(~(a|~(a|b))|~(b|~(a|b)));
+  expect "cin_keep" = cin;
+  expect "cin_final" = cin;
+  expect "n1_final" = ~(a|b);
+  expect "n5" = ~(~(~(a|~(a|b))|~(b|~(a|b)))|cin);
+  expect "n6" = ~(~(~(a|~(a|b))|~(b|~(a|b)))|~(~(~(a|~(a|b))|~(b|~(a|b)))|cin));
+  expect "n7" = ~(cin|~(~(~(a|~(a|b))|~(b|~(a|b)))|cin));
   expect "sum" = a^b^cin;
   expect "cout" = a&b|a&cin|b&cin;
 }

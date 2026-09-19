@@ -12,6 +12,391 @@ fn empty_world() -> World3D {
     World3D::new(DimSize(6, 6, 4))
 }
 
+#[test]
+fn local_or_repeater_crosses_side_signal_without_merging_it() -> eyre::Result<()> {
+    // The only two-step corridor is A -> repeater -> dust <- B. The
+    // independent C switch beside the middle site would contaminate dust.
+    let mut world = World3D::new(DimSize(3, 5, 2));
+    for position in [Position(1, 1, 0), Position(2, 3, 0), Position(0, 2, 0),
+        Position(2, 1, 1), Position(2, 2, 1)] {
+        place_node(&mut world, PlacedNode::new_cobble(position));
+    }
+    let from = Position(1, 1, 1);
+    let to = Position(2, 3, 1);
+    for position in [from, to] {
+        place_node(&mut world, PlacedNode::new(position, torch(Direction::Bottom)));
+    }
+    let drivers = [Position(1, 0, 0), Position(2, 4, 0), Position(0, 2, 1)];
+    for (position, direction) in drivers.into_iter().zip([Direction::North, Direction::South, Direction::Bottom]) {
+        place_node(&mut world, PlacedNode::new(position, switch(direction)));
+    }
+    let cfg = config(2);
+    assert!(generate_or_routes(&cfg, &world, from, to).routes.is_empty());
+    assert!(generate_or_routes(&cfg, &world, to, from).routes.is_empty());
+    let result = generate_or_routes_with_fallbacks(&cfg, &world, from, to);
+    assert!(!result.routes.is_empty(), "diode corridor must be expressible");
+    let isolation = RouteIsolation::new(&world, [from, to], HashSet::new());
+    let mut verified = 0;
+    for (candidate, path) in result.routes {
+        if !isolation.accepts_or_route(&candidate, &path) { continue; }
+        assert!(candidate.iter_block().iter().any(|(_, block)| block.kind.is_repeater()));
+        let world = crate::world::World::from(&candidate);
+        let mut valid = true;
+        for mask in 0..8 {
+            let a = mask & 1 != 0;
+            let b = mask & 2 != 0;
+            let c = mask & 4 != 0;
+            let mut sim = crate::world::simulator::Simulator::from_with_limits_and_trace(&world, 256, 50_000, 0)
+                .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
+            sim.drive_inputs_with_limits(drivers.into_iter().zip([a,b,c]).collect(), 256, 50_000)?;
+            valid &= sim.world()[from].kind.is_powered() == !a;
+            valid &= sim.world()[to].kind.is_powered() == !b;
+            valid &= sim.world()[*path.last().unwrap()].kind.is_powered() == (!a || !b);
+        }
+        verified += usize::from(valid);
+    }
+    assert!(verified > 0, "side signal must not influence the OR result");
+    Ok(())
+}
+
+#[test]
+fn bounded_torch_sites_keep_legal_routes_and_respect_zero_budget() -> eyre::Result<()> {
+    let mut world = empty_world();
+    let source = Position(1, 1, 1);
+    place_node(&mut world, PlacedNode::new_cobble(Position(2, 1, 1)));
+    place_node(&mut world, PlacedNode::new(source, switch(Direction::East)));
+    let mut cfg = config(2);
+    cfg.route_torch_directly = false;
+    cfg.torch_placement_strategy = TorchPlacementStrategy::AnywhereNonAdjacent;
+    cfg.not_route_strategy = NotRouteStrategy::DirectAndRedstone;
+    cfg.not_route_step_sampling_policy = SamplingPolicy::Random(4);
+    let kind = BlockKind::Torch { is_on: false };
+    assert!(
+        generate_torch_place_and_routes_bounded(&cfg, &world, source, kind, Some(0)).is_empty()
+    );
+    let sites = torch_sites(&cfg, &world, source, kind, Some(8));
+    assert_eq!(sites.len(), 8);
+    let candidates = generate_torch_place_and_routes_bounded(&cfg, &world, source, kind, Some(8));
+    assert!(!candidates.is_empty());
+    for (candidate, output) in candidates {
+        assert!(sites.iter().any(|(_, position)| *position == output));
+        let world = crate::world::World::from(&candidate);
+        for input in [false, true] {
+            let mut sim = crate::world::simulator::Simulator::from_with_limits_and_trace(
+                &world, 256, 50_000, 0,
+            )
+            .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
+            sim.drive_inputs_with_limits(vec![(source, input)], 256, 50_000)?;
+            assert_eq!(sim.world()[output].kind.is_powered(), !input);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "bounded last-NOT repair of a frozen full-adder prefix"]
+fn repair_full_adder_xor_join() -> eyre::Result<()> {
+    let mut graph = predefined_logics::buffered_full_adder_graph()?;
+    for name in ["c", "i", "d"] {
+        graph.graph.remove_output(name);
+    }
+    let baseline = LocalPlacerConfig {
+        greedy_input_generation: true,
+        step_sampling_policy: SamplingPolicy::Random(64),
+        placement_sampling_policy: LocalPlacerConfig::ranked_sampling(56, 8, 0),
+        max_route_step: 8,
+        route_step_sampling_policy: SamplingPolicy::Random(32),
+        ..Default::default()
+    };
+    let mut placer = LocalPlacer::new(graph, baseline)?.with_not_site_limit(64);
+    let queue = placer.generate_queue(DimSize(2, 10, 10), Some(11), None, None, None);
+    println!("REPAIR frozen_parents={}", queue.len());
+    placer.config.route_torch_directly = false;
+    placer.config.torch_placement_strategy = TorchPlacementStrategy::AnywhereNonAdjacent;
+    placer.config.not_route_strategy = NotRouteStrategy::DirectAndRedstone;
+    placer.config.max_not_route_step = 4;
+    placer.config.not_route_step_sampling_policy = SamplingPolicy::Random(8);
+    let started = Instant::now();
+    let expansion = placer.do_step(11, queue, None, None).queue;
+    println!(
+        "REPAIR not_expansion={} ms={}",
+        expansion.len(),
+        started.elapsed().as_millis()
+    );
+    // Keep the pre-join alternatives (bounded by at most 64 torch poses per
+    // parent); ranking them before the join could hide the very rescue tested.
+    let joined = placer.do_step(12, expansion, None, None).queue;
+    println!(
+        "REPAIR joined={} total_ms={}",
+        joined.len(),
+        started.elapsed().as_millis()
+    );
+    Ok(())
+}
+
+#[test]
+fn reverse_or_fallback_preserves_live_full_adder_signals() -> eyre::Result<()> {
+    // A frozen, simulator-verified prefix: route (~a) | (a & b).
+    // Its original expansion direction has no route within this budget.
+    let mut world = World3D::new(DimSize(2, 10, 10));
+    for position in [
+        Position(1, 1, 5),
+        Position(0, 2, 5),
+        Position(1, 3, 5),
+        Position(1, 4, 5),
+        Position(1, 0, 6),
+        Position(1, 2, 6),
+        Position(0, 3, 6),
+        Position(1, 3, 7),
+    ] {
+        place_node(&mut world, PlacedNode::new_cobble(position));
+    }
+    let drivers = [Position(0, 1, 5), Position(0, 3, 5), Position(0, 0, 6)];
+    for position in drivers {
+        place_node(
+            &mut world,
+            PlacedNode::new(position, switch(Direction::East)),
+        );
+    }
+    for (position, direction) in [
+        (Position(1, 2, 5), Direction::South),
+        (Position(1, 5, 5), Direction::South),
+        (Position(1, 1, 6), Direction::South),
+        (Position(1, 3, 6), Direction::Bottom),
+        (Position(0, 4, 6), Direction::South),
+    ] {
+        place_node(&mut world, PlacedNode::new(position, torch(direction)));
+    }
+    for position in [Position(0, 2, 6), Position(1, 4, 6), Position(0, 3, 7)] {
+        place_node(&mut world, PlacedNode::new_redstone(position));
+    }
+    for position in [Position(0, 2, 6), Position(1, 4, 6), Position(0, 3, 7)] {
+        world.update_redstone_states(position);
+    }
+    let mut config = config(8);
+    config.route_step_sampling_policy = SamplingPolicy::Random(32);
+    let a_not = Position(1, 2, 5);
+    let carry = Position(0, 4, 6);
+    assert!(generate_or_routes(&config, &world, a_not, carry)
+        .routes
+        .is_empty());
+    let result = generate_or_routes_with_fallbacks(&config, &world, a_not, carry);
+    assert_eq!(result.debug.route_calls, 2);
+    assert!(!result.routes.is_empty());
+    let isolation = RouteIsolation::new(&world, [a_not, carry], HashSet::new());
+    let mut verified = 0;
+    for (candidate, path) in result.routes {
+        if !isolation.accepts_or_route(&candidate, &path) {
+            continue;
+        }
+        let world = crate::world::World::from(&candidate);
+        let mut valid = true;
+        for mask in 0..8 {
+            let a = mask & 1 != 0;
+            let b = mask & 2 != 0;
+            let cin = mask & 4 != 0;
+            let mut sim = crate::world::simulator::Simulator::from_with_limits_and_trace(
+                &world, 256, 50_000, 0,
+            )
+            .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
+            sim.drive_inputs_with_limits(
+                drivers.into_iter().zip([a, b, cin]).collect(),
+                256,
+                50_000,
+            )?;
+            for (position, expected) in [
+                (a_not, !a),
+                (carry, a && b),
+                (Position(1, 3, 6), !b),
+                (Position(1, 5, 5), b && !(a && b)),
+                (Position(1, 1, 6), !cin),
+                (*path.last().unwrap(), !a || (a && b)),
+            ] {
+                valid &= sim.world()[position].kind.is_powered() == expected;
+            }
+        }
+        verified += usize::from(valid);
+    }
+    assert!(
+        verified > 0,
+        "reverse route must preserve every live signal, not only reach the target"
+    );
+    Ok(())
+}
+
+#[test]
+#[ignore = "fixed-prefix full-adder route replay; run explicitly"]
+fn replay_full_adder_first_failed_join() -> eyre::Result<()> {
+    let mut graph = predefined_logics::buffered_full_adder_graph()?;
+    for name in ["c", "i", "d"] {
+        graph.graph.remove_output(name);
+    }
+    let step = std::env::var("LOCAL_REPLAY_STEP")
+        .unwrap_or_else(|_| "10".to_owned())
+        .parse::<usize>()?;
+    let width = std::env::var("LOCAL_FA_WIDTH")
+        .unwrap_or_else(|_| "2".to_owned()).parse::<usize>()?;
+    eyre::ensure!((1..=10).contains(&width), "replay width out of range");
+    let depth = std::env::var("LOCAL_FA_DEPTH")
+        .unwrap_or_else(|_| "4".to_owned())
+        .parse::<usize>()?;
+    let beam = std::env::var("LOCAL_FA_ROUTE_BEAM")
+        .unwrap_or_else(|_| "8".to_owned())
+        .parse::<usize>()?;
+    eyre::ensure!(
+        step < 24 && depth <= 8 && beam <= 32,
+        "replay budget out of range"
+    );
+    let baseline = LocalPlacerConfig {
+        greedy_input_generation: true,
+        step_sampling_policy: SamplingPolicy::Random(64),
+        placement_sampling_policy: LocalPlacerConfig::ranked_sampling(56, 8, 0),
+        max_route_step: depth,
+        route_step_sampling_policy: SamplingPolicy::Random(beam),
+        ..Default::default()
+    };
+    let placer = LocalPlacer::new(graph, baseline)?;
+    let queue = placer.generate_queue(DimSize(width, 10, 10), Some(step), None, None, None);
+    let node = placer
+        .graph
+        .find_node_by_id(placer.visit_orders[step])
+        .unwrap();
+    eyre::ensure!(
+        matches!(&node.kind, GraphNodeKind::Logic(logic) if logic.logic_type == LogicType::Or),
+        "replay step must be an OR"
+    );
+    println!("REPLAY node={node} parents={}", queue.len());
+    let mut escapes = std::collections::BTreeMap::new();
+    for (world, state) in &queue {
+        let a = generate_output_routes(world, state[&node.inputs[0]]).len();
+        let b = generate_output_routes(world, state[&node.inputs[1]]).len();
+        *escapes.entry((a, b)).or_insert(0usize) += 1;
+    }
+    println!("REPLAY dust_escape_pairs={escapes:?}");
+    let taps = placer
+        .graph
+        .nodes
+        .iter()
+        .filter(|node| !node.kind.is_output())
+        .map(|node| (format!("tap_{}", node.id), node.id))
+        .collect::<Vec<_>>();
+    let truth = placer.graph.clone().attach_outputs(taps)?.truth_table()?;
+    let mut valid_prefixes = 0;
+    for (parent, (world, state)) in queue.iter().enumerate() {
+        let mut valid = true;
+        for mask in 0..8 {
+            let world = crate::world::World::from(world);
+            let mut sim = crate::world::simulator::Simulator::from_with_limits_and_trace(
+                &world, 256, 50_000, 0,
+            )
+            .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
+            let drivers = placer
+                .input_endpoints(state)
+                .iter()
+                .map(|input| {
+                    let bit = truth
+                        .input_names
+                        .iter()
+                        .position(|name| *name == input.name)
+                        .unwrap();
+                    (input.position(), mask & (1 << bit) != 0)
+                })
+                .collect();
+            sim.drive_inputs_with_limits(drivers, 256, 50_000)?;
+            for (endpoint, position) in state.endpoint_positions() {
+                let state::PlacementEndpoint::Node(id) = endpoint else {
+                    continue;
+                };
+                let Some(expected) = truth.output_tables.get(&format!("tap_{id}")) else {
+                    continue;
+                };
+                if sim.world()[position].kind.is_powered() != expected[mask] {
+                    if parent == 0 {
+                        println!("REPLAY prefix_mismatch mask={mask} node={id} position={position:?} expected={}", expected[mask]);
+                    }
+                    valid = false;
+                    break;
+                }
+            }
+            if !valid {
+                break;
+            }
+        }
+        valid_prefixes += usize::from(valid);
+    }
+    println!("REPLAY valid_prefixes={valid_prefixes}/{}", queue.len());
+    for (depth, beam) in [(depth, beam), (16, 32)] {
+        let config = LocalPlacerConfig {
+            max_route_step: depth,
+            route_step_sampling_policy: SamplingPolicy::Random(beam),
+            ..baseline
+        };
+        for reverse in [false, true] {
+            let started = Instant::now();
+            let mut raw = 0;
+            let mut accepted = 0;
+            for (parent, (world, state)) in queue.iter().enumerate() {
+                let a = state[&node.inputs[0]];
+                let b = state[&node.inputs[1]];
+                let isolation = RouteIsolation::new(world, [a, b], HashSet::new());
+                let (from, to) = if reverse { (b, a) } else { (a, b) };
+                let result = if std::env::var("LOCAL_REPLAY_REPEATERS").as_deref() == Ok("1") {
+                    generate_or_routes_with_repeaters(&config, world, from, to)
+                } else {
+                    generate_or_routes(&config, world, from, to)
+                };
+                raw += result.routes.len();
+                if reverse && !result.routes.is_empty() {
+                    println!("REPLAY rescued_parent={parent} a={a:?} b={b:?}");
+                }
+                accepted += result
+                    .routes
+                    .iter()
+                    .filter(|(world, path)| isolation.accepts_or_route(world, path))
+                    .count();
+            }
+            println!("REPLAY depth={depth} beam={beam} reverse={reverse} raw={raw} accepted={accepted} ms={}", started.elapsed().as_millis());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn local_time_limit_does_not_return_incomplete_candidates() -> eyre::Result<()> {
+    let placer = LocalPlacer::new(LogicGraph::from_stmt("~a", "out")?, config(1))?
+        .with_time_limit(Duration::ZERO);
+    let mut debug = LocalPlacerDebug::default();
+    let worlds = placer.generate_with_debug(DimSize(2, 4, 4), None, &mut debug);
+    assert!(worlds.is_empty());
+    assert!(debug.time_limit_reached);
+    assert!(debug.steps.is_empty());
+    assert!(debug.failure().is_none());
+    Ok(())
+}
+
+#[test]
+fn local_empty_frontier_stops_at_first_failed_step() -> eyre::Result<()> {
+    let placer = LocalPlacer::new(LogicGraph::from_stmt("~a", "out")?, config(1))?;
+    let constraints =
+        LocalPlacerInputConstraints::new().with_input_positions("a", [Position(99, 99, 99)]);
+    let mut debug = LocalPlacerDebug::default();
+    let worlds = placer.generate_with_outputs_and_input_constraints_debug_progress(
+        DimSize(2, 4, 4),
+        None,
+        &constraints,
+        Some(&mut debug),
+        None,
+    );
+    assert!(worlds.is_empty());
+    assert_eq!(debug.steps.len(), 1);
+    assert!(!debug.time_limit_reached);
+    assert_eq!(
+        debug.failure().unwrap().kind,
+        LocalPlacementFailureKind::NoLegalPlacement
+    );
+    Ok(())
+}
+
 fn switch(direction: Direction) -> Block {
     Block {
         kind: BlockKind::Switch { is_on: false },

@@ -31,6 +31,8 @@ use crate::world::simulator::Simulator;
 use crate::world::{World, World3D};
 
 mod clustering;
+#[cfg(test)]
+mod local_diagnostic;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UnitCandidateConfig {

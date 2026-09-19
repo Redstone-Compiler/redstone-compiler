@@ -1,0 +1,37 @@
+rcell 1;
+
+// A top-output NOR followed by an isolated lateral dust/repeater lane change.
+// The second torch proves that an off source cannot be back-powered downstream.
+cell "nor-lane-step-primitive" size [2, 5, 4] {
+  glyph "U" = torch on z-;
+  glyph "P" = repeater toward y- delay 1;
+  glyph "Q" = repeater toward y+ delay 1;
+
+  auto-support dust repeater;
+
+  input "a" at [0, 0, 1] on x+;
+  input "b" at [0, 4, 1] on x+;
+  probe "nor" at [0, 2, 2];
+  output "or" at [1, 4, 3];
+
+  plane xy at z=1 {
+    y=0 ".#";
+    y=1 "P.";
+    y=2 "##";
+    y=3 "Q#";
+    y=4 ".#";
+  }
+
+  plane xy at z=2 {
+    y=2 "Ur";
+    y=3 ".P";
+    y=4 ".#";
+  }
+
+  plane xy at z=3 {
+    y=4 ".U";
+  }
+
+  expect "nor" = ~(a|b);
+  expect "or" = a|b;
+}

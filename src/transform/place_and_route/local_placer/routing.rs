@@ -95,18 +95,6 @@ pub(super) fn input_placements(
     generated
 }
 
-pub(super) fn generate_place_and_routes(
-    config: &LocalPlacerConfig,
-    world: &World3D,
-    start: Position,
-    kind: BlockKind,
-) -> Vec<(World3D, Position)> {
-    match kind {
-        BlockKind::Torch { .. } => generate_torch_place_and_routes(config, world, start, kind),
-        _ => unimplemented!(),
-    }
-}
-
 pub(super) fn generate_output_routes(
     world: &World3D,
     source: Position,
@@ -128,12 +116,32 @@ pub(super) fn generate_output_routes(
         .collect()
 }
 
-pub(super) fn generate_torch_place_and_routes(
+pub(super) fn generate_torch_place_and_routes_bounded(
     config: &LocalPlacerConfig,
     world: &World3D,
     source: Position,
     kind: BlockKind,
+    site_limit: Option<usize>,
 ) -> Vec<(World3D, Position)> {
+    torch_sites(config, world, source, kind, site_limit)
+        .into_iter()
+        .flat_map(|(torch, torch_pos)| place_torch_with_cobble(world, torch, torch_pos))
+        .flat_map(|(world, torch_pos, cobble_pos)| {
+            generate_routes_to_cobble(config, &world, source, torch_pos, cobble_pos)
+                .into_iter()
+                .map(|(world, _)| (world, torch_pos))
+                .collect_vec()
+        })
+        .collect()
+}
+
+pub(super) fn torch_sites(
+    config: &LocalPlacerConfig,
+    world: &World3D,
+    source: Position,
+    kind: BlockKind,
+    site_limit: Option<usize>,
+) -> Vec<(Block, Position)> {
     let torch_strategy =
         Direction::iter_direction_without_top().map(|direction| Block { kind, direction });
 
@@ -150,18 +158,24 @@ pub(super) fn generate_torch_place_and_routes(
                 || source.manhattan_distance(pos) == 2
         });
 
-    torch_strategy
+    let mut sites = torch_strategy
         .cartesian_product(place_strategy)
-        // 1. Place Torch and Cobble
-        .flat_map(|(torch, torch_pos)| place_torch_with_cobble(world, torch, torch_pos))
-        // 2. Route Source with Torch Place Target Position
-        .flat_map(|(world, torch_pos, cobble_pos)| {
-            generate_routes_to_cobble(config, &world, source, torch_pos, cobble_pos)
-                .into_iter()
-                .map(|(world, _)| (world, torch_pos))
-                .collect_vec()
-        })
-        .collect()
+        .filter(|(torch, position)| legal_torch_support(world, *torch, *position).is_some())
+        .collect_vec();
+    if let Some(limit) = site_limit {
+        // Preserve zero-wire connections before geometric proximity: nearby
+        // supports on the wrong side of a switch may not be drivable at all.
+        let direct_bounds = PlacedNode::new(source, world[source]).propagation_bound(Some(world));
+        sites.sort_by_key(|(torch, position)| {
+            let support = position.walk(torch.direction).unwrap();
+            let direct = direct_bounds.iter().any(|bound| {
+                RouteGoal::PowerCobble { cobble: support }.accepts_direct_bound(*bound)
+            });
+            (!direct, source.manhattan_distance(&support))
+        });
+        sites.truncate(limit);
+    }
+    sites
 }
 
 fn place_output_redstone(
@@ -219,6 +233,14 @@ pub(super) fn place_torch_with_cobble(
     torch: Block,
     torch_pos: Position,
 ) -> Option<(World3D, Position, Position)> {
+    let cobble_pos = legal_torch_support(world, torch, torch_pos)?;
+    let mut new_world = world.clone();
+    place_node(&mut new_world, PlacedNode::new_cobble(cobble_pos));
+    place_node(&mut new_world, PlacedNode::new(torch_pos, torch));
+    Some((new_world, torch_pos, cobble_pos))
+}
+
+fn legal_torch_support(world: &World3D, torch: Block, torch_pos: Position) -> Option<Position> {
     let cobble_pos = torch_pos.walk(torch.direction)?;
     let cobble_node = PlacedNode::new_cobble(cobble_pos);
     let torch_node = PlacedNode::new(torch_pos, torch);
@@ -228,10 +250,7 @@ pub(super) fn place_torch_with_cobble(
         return None;
     }
 
-    let mut new_world = world.clone();
-    place_node(&mut new_world, cobble_node);
-    place_node(&mut new_world, torch_node);
-    Some((new_world, torch_pos, cobble_pos))
+    Some(cobble_pos)
 }
 
 pub(super) fn generate_routes_to_cobble(
@@ -617,11 +636,59 @@ pub(super) fn generate_routes_to_cobble_init_states(
     states
 }
 
+/// OR is commutative, but source expansion and target access are geometrically
+/// asymmetric. Try the other direction, then allow directional repeaters when
+/// dust-only routing in both directions has no route.
+/// A redstone-only target cannot be used as this router's diode source.
+pub(super) fn generate_or_routes_with_fallbacks(
+    config: &LocalPlacerConfig,
+    world: &World3D,
+    from: Position,
+    to: Position,
+) -> RouteResult {
+    let mut result = generate_or_routes(config, world, from, to);
+    if result.routes.is_empty() && PlacedNode::new(to, world[to]).is_diode() {
+        let reverse = generate_or_routes(config, world, to, from);
+        result.debug.merge(reverse.debug);
+        result.routes = reverse.routes;
+    }
+    if result.routes.is_empty() {
+        let mixed = generate_or_routes_with_repeaters(config, world, from, to);
+        result.debug.merge(mixed.debug);
+        result.routes = mixed.routes;
+    }
+    if result.routes.is_empty() && PlacedNode::new(to, world[to]).is_diode() {
+        let mixed = generate_or_routes_with_repeaters(config, world, to, from);
+        result.debug.merge(mixed.debug);
+        result.routes = mixed.routes;
+    }
+    result
+}
+
 pub(super) fn generate_or_routes(
     config: &LocalPlacerConfig,
     world: &World3D,
     from: Position,
     to: Position,
+) -> RouteResult {
+    generate_or_routes_inner(config, world, from, to, false)
+}
+
+pub(super) fn generate_or_routes_with_repeaters(
+    config: &LocalPlacerConfig,
+    world: &World3D,
+    from: Position,
+    to: Position,
+) -> RouteResult {
+    generate_or_routes_inner(config, world, from, to, true)
+}
+
+fn generate_or_routes_inner(
+    config: &LocalPlacerConfig,
+    world: &World3D,
+    from: Position,
+    to: Position,
+    allow_repeaters: bool,
 ) -> RouteResult {
     let (mut queue, mut debug) = generate_or_routes_init_states(world, from, to);
     let goal = RouteGoal::ConnectPosition { target: to };
@@ -648,6 +715,34 @@ pub(super) fn generate_or_routes(
                 if !world.size.bound_on(bound.position()) {
                     debug.reject(RouteRejectReason::OutOfBounds);
                     continue;
+                }
+
+                // A horizontal diode can pass an unrelated side signal without
+                // joining it. Dust-only routing cannot express this local move.
+                if allow_repeaters
+                    && bound.position().2 == prev_pos.2
+                    && bound.position().manhattan_distance(&prev_pos) == 1
+                {
+                    let direction = bound.position().diff(prev_pos);
+                    if let detailed_router::PlaceRepeaterResult::Placed(new_world, repeater) =
+                        detailed_router::place_repeater_with_cobble(
+                            &world, bound, prev_pos, to, direction, None,
+                        )
+                    {
+                        // The rear input is exactly prev_pos. Reject lateral
+                        // repeater drivers, which would introduce locking.
+                        let side_lock = repeater.position.cardinal().into_iter().any(|position| {
+                            new_world.size.bound_on(position)
+                                && position != prev_pos
+                                && new_world[position].kind.is_repeater()
+                                && position.walk(new_world[position].direction.inverse()) == Some(repeater.position)
+                        });
+                        if !side_lock {
+                            let path = prevs.iter().copied().chain([repeater.position]).collect_vec();
+                            let nexts = repeater.propagation_bound(Some(&new_world));
+                            next_queue.push((new_world, path, nexts));
+                        }
+                    }
                 }
 
                 let (new_world, redstone_node) =
@@ -679,8 +774,7 @@ pub(super) fn generate_or_routes(
 
         depth_debug.next_frontier_before_sampling = next_queue.len();
         queue = config.route_step_sampling_policy.sample_with_seed(
-            next_queue,
-            config.sampling_seed(OR_ROUTE_STEP_SAMPLE_SCOPE, step),
+            next_queue, config.sampling_seed(OR_ROUTE_STEP_SAMPLE_SCOPE, step),
         );
         depth_debug.next_frontier_after_sampling = queue.len();
         debug.depths.push(depth_debug);

@@ -5,7 +5,7 @@ use eyre::{bail, Context, ContextCompat};
 
 use super::{
     AutoSupport, AxisDirection, CellExpectation, CellGlyph, CellInput, CellOutput, CellPlane,
-    PhysicalCellDocument, PlaneAxes,
+    CellProbe, PhysicalCellDocument, PlaneAxes,
 };
 use crate::world::position::{DimSize, Position};
 
@@ -58,6 +58,7 @@ impl Parser {
             auto_support: AutoSupport::default(),
             glyphs: BTreeMap::new(),
             inputs: Vec::new(),
+            probes: Vec::new(),
             outputs: Vec::new(),
             planes: Vec::new(),
             expectations: Vec::new(),
@@ -88,6 +89,10 @@ impl Parser {
                 document
                     .outputs
                     .push(parse_output(&line).wrap_err_with(|| format!("line {line_number}"))?);
+            } else if line.starts_with("probe ") {
+                document
+                    .probes
+                    .push(parse_probe(&line).wrap_err_with(|| format!("line {line_number}"))?);
             } else if line.starts_with("expect ") {
                 document.expectations.push(
                     parse_expectation(&line).wrap_err_with(|| format!("line {line_number}"))?,
@@ -272,6 +277,20 @@ fn parse_output(line: &str) -> eyre::Result<CellOutput> {
         bail!("unexpected text after output position");
     }
     Ok(CellOutput { name, position })
+}
+
+fn parse_probe(line: &str) -> eyre::Result<CellProbe> {
+    let line = strip_semicolon(line.strip_prefix("probe ").unwrap())?;
+    let (name, rest) = take_quoted(line)?;
+    let rest = rest
+        .trim()
+        .strip_prefix("at ")
+        .context("expected probe position")?;
+    let (position, rest) = take_position(rest)?;
+    if !rest.trim().is_empty() {
+        bail!("unexpected text after probe position");
+    }
+    Ok(CellProbe { name, position })
 }
 
 fn parse_expectation(line: &str) -> eyre::Result<CellExpectation> {

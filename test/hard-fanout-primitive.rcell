@@ -1,0 +1,32 @@
+rcell 1;
+
+// One lever drives two repeaters. Each repeater hard-powers an independent
+// torch support, proving a physically real two-way fanout.
+cell "hard-fanout-primitive" size [2, 7, 3] {
+  glyph "P" = repeater toward y- delay 1;
+  glyph "Q" = repeater toward y+ delay 1;
+  glyph "U" = torch on z-;
+  auto-support repeater;
+
+  input "a" at [0, 3, 1] on x+;
+  output "left" at [0, 1, 2];
+  output "right" at [0, 5, 2];
+
+  plane xy at z=1 {
+    y=0 "#.";
+    y=1 "#.";
+    y=2 "Q.";
+    y=3 ".#";
+    y=4 "P.";
+    y=5 "#.";
+    y=6 "#.";
+  }
+
+  plane xy at z=2 {
+    y=1 "U.";
+    y=5 "U.";
+  }
+
+  expect "left" = ~a;
+  expect "right" = ~a;
+}

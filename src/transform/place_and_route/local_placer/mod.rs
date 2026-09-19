@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use eyre::ensure;
 use indicatif::{ParallelProgressIterator, ProgressStyle};
@@ -60,6 +60,8 @@ pub struct LocalPlacer {
     cost_weights: LocalPlacementCostWeights,
     visit_orders: Vec<GraphNodeId>,
     cost_join_pairs_by_step: Vec<Vec<FutureJoinPair>>,
+    time_limit: Option<Duration>,
+    not_site_limit: Option<usize>,
 }
 
 type PlacerQueue = Vec<(World3D, PlacementState)>;
@@ -104,9 +106,25 @@ impl LocalPlacer {
             cost_weights,
             visit_orders,
             cost_join_pairs_by_step,
+            time_limit: None,
+            not_site_limit: None,
         };
         result.verify()?;
         Ok(result)
+    }
+
+    /// Cooperative limit checked between placement steps. A single step may
+    /// overrun it; incomplete worlds are never returned as finished candidates.
+    pub fn with_time_limit(mut self, limit: Duration) -> Self {
+        self.time_limit = Some(limit);
+        self
+    }
+
+    /// Limits legal torch/support poses per parent before world cloning and
+    /// routing. This is an explicitly heuristic search budget, not a constraint.
+    pub fn with_not_site_limit(mut self, limit: usize) -> Self {
+        self.not_site_limit = Some(limit);
+        self
     }
 
     fn verify(&self) -> eyre::Result<()> {
@@ -535,8 +553,19 @@ impl LocalPlacer {
 
         let mut step = 0;
         while step < self.visit_orders.len() && Some(step) != finish_step {
+            if self
+                .time_limit
+                .is_some_and(|limit| started.elapsed() >= limit)
+            {
+                if let Some(debug) = debug.as_deref_mut() {
+                    debug.time_limit_reached = true;
+                }
+                return Vec::new();
+            }
+            let step_started = Instant::now();
             let prev_len = queue.len();
             let result = self.do_step(step, queue, input_constraints, Some(progress));
+            let generation_elapsed = step_started.elapsed();
             let next_len = result.queue.len();
 
             let compacted = self.compact_queue_after_step(step, result.queue);
@@ -546,6 +575,9 @@ impl LocalPlacer {
             if let Some(debug) = debug.as_deref_mut() {
                 let mut step_debug = result.debug;
                 step_debug.sampled_len = sampled_len;
+                step_debug.compacted_len = compacted_len;
+                step_debug.generation_us = generation_elapsed.as_micros();
+                step_debug.total_us = step_started.elapsed().as_micros();
                 debug.steps.push(step_debug);
             }
 
@@ -560,6 +592,9 @@ impl LocalPlacer {
                 sampled_candidates = sampled_len,
                 "local placement step completed"
             );
+            if queue.is_empty() {
+                break;
+            }
         }
 
         tracing::info!(
@@ -645,6 +680,9 @@ impl LocalPlacer {
             input_queue_len,
             generated_len: next_queue.len(),
             sampled_len: 0,
+            compacted_len: 0,
+            generation_us: 0,
+            total_us: 0,
             route_debug: has_route_debug.then_some(route_debug),
         };
 
@@ -709,11 +747,12 @@ impl LocalPlacer {
                 LogicType::Not => not_node_kind()
                     .into_iter()
                     .flat_map(|kind| {
-                        generate_place_and_routes(
+                        generate_torch_place_and_routes_bounded(
                             &self.config,
                             &world,
                             state[&node.inputs[0]],
                             kind,
+                            self.not_site_limit,
                         )
                     })
                     .map(|(world, position)| {
@@ -747,7 +786,12 @@ impl LocalPlacer {
                     ));
                     let isolation =
                         RouteIsolation::new(&world, [input_a, input_b], protected_positions);
-                    let result = generate_or_routes(&self.config, &world, input_a, input_b);
+                    let result = generate_or_routes_with_fallbacks(
+                        &self.config,
+                        &world,
+                        input_a,
+                        input_b,
+                    );
                     route_debug = Some(result.debug);
                     result
                         .routes
