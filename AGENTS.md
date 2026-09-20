@@ -17,6 +17,6 @@ When asked to create or preserve project documentation, add an appropriate file 
 
 When committing changes, include the intent behind the change in the commit message body.
 
-## Testing
+## Building, Testing, and Running
 
-Run local placer and place-and-route tests with `cargo test --release`; debug builds are too slow for these search-heavy tests.
+Always use release mode for all builds, unit tests, and executions: `cargo build --release`, `cargo test --release`, and `cargo run --release`. Do not use debug builds for this project. This applies to all targets, not only local placer and place-and-route tests; the search-heavy tests are especially slow in debug mode.
