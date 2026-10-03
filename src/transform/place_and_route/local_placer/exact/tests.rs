@@ -1112,6 +1112,9 @@ fn encoders_accept_each_others_layouts() {
         for legacy in [true, false] {
             let mut config = ExactPlacerConfig::new(dim);
             config.legacy_encoder = legacy;
+            config
+                .model_params
+                .insert("legacy_semantics".to_owned(), rsdsl::IValue::Bool(true));
             config.time_limit = Some(Duration::from_secs(60));
             let placement = expect_placed(&placer, &config);
             let mut other = config.clone();
@@ -1343,6 +1346,9 @@ fn encoders_admit_the_same_layouts() {
         for legacy in [true, false] {
             let mut config = ExactPlacerConfig::new(dim);
             config.legacy_encoder = legacy;
+            config
+                .model_params
+                .insert("legacy_semantics".to_owned(), rsdsl::IValue::Bool(true));
             // Bound the count on larger boxes.
             config.max_blocks = max_blocks;
             let encoding = Encoding::build(&netlist, &config).unwrap();
@@ -1361,5 +1367,116 @@ fn encoders_admit_the_same_layouts() {
             "LAYOUTS {dim:?} max_blocks={max_blocks:?}: {}",
             sets[0].len()
         );
+    }
+}
+
+/// Solves a small problem with one worker and dumps every simulator
+/// rejection: `EXACT_DUMP_REJECTIONS=<dir> REJECT_CASE=or|nor|xor`.
+#[test]
+#[ignore = "diagnostic; run explicitly with --nocapture"]
+fn dump_rejections() {
+    let (graph, dim) = match std::env::var("REJECT_CASE").as_deref() {
+        Ok("nor") => (graph(&[("out", "~(a|b)")]), DimSize(1, 4, 2)),
+        Ok("xor") => (graph(&[("out", "a^b")]), DimSize(2, 6, 4)),
+        Ok("and") => (graph(&[("out", "a&b")]), DimSize(1, 6, 3)),
+        _ => (graph(&[("out", "a|b")]), DimSize(1, 5, 3)),
+    };
+    let placer = ExactLocalPlacer::new(&graph).unwrap();
+    let mut config = ExactPlacerConfig::new(dim);
+    config.workers = 1;
+    config.seed = env_usize("REJECT_SEED", 1) as u32;
+    config.max_refinements = env_usize("REJECT_LIMIT", 64);
+    config.time_limit = Some(Duration::from_secs(env_usize("SECONDS", 120) as u64));
+    let started = std::time::Instant::now();
+    let (outcome, stats) = placer.place(&config).unwrap();
+    let label = match outcome {
+        ExactOutcome::Placed(_) => "placed".to_owned(),
+        ExactOutcome::Infeasible => "infeasible".to_owned(),
+        ExactOutcome::Unknown { last_rejection } => format!("unknown ({last_rejection:?})"),
+    };
+    println!(
+        "REJECT {label} refinements={} elapsed={:?}",
+        stats.refinements,
+        started.elapsed()
+    );
+}
+
+/// Explains one block of a dumped rejection: `EXPLAIN_RCELL=<path>
+/// EXPLAIN_AT=x,y,z EXPLAIN_CASE=a=1,b=0,...` prints its final state, whether
+/// it burned out, and every trace event that targeted it or its neighbors.
+#[test]
+#[ignore = "diagnostic; run explicitly with --nocapture"]
+fn explain_rejected_block() {
+    use crate::world::simulator::Simulator;
+    let source = std::fs::read_to_string(std::env::var("EXPLAIN_RCELL").unwrap()).unwrap();
+    let source = source
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("expect"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let document: crate::physical_cell::PhysicalCellDocument = source.parse().unwrap();
+    let build = document.build().unwrap();
+    let at = std::env::var("EXPLAIN_AT").unwrap();
+    let coords = at
+        .split(',')
+        .map(|v| v.parse::<usize>().unwrap())
+        .collect::<Vec<_>>();
+    let target = crate::world::position::Position(coords[0], coords[1], coords[2]);
+    let assignments = std::env::var("EXPLAIN_CASE").unwrap_or_default();
+    let mut inputs = Vec::new();
+    for assignment in assignments.split(',').filter(|a| !a.is_empty()) {
+        let (name, value) = assignment.split_once('=').unwrap();
+        let input = document
+            .inputs
+            .iter()
+            .find(|input| input.name == name)
+            .unwrap();
+        inputs.push((input.position, value == "1"));
+    }
+    let world = crate::world::World::from(&build.world);
+    let mut simulator = Simulator::from_with_limits_and_trace(&world, 256, 50_000, 200_000)
+        .map_err(|error| error.message().to_owned())
+        .unwrap();
+    simulator
+        .drive_inputs_with_limits(inputs, 256, 50_000)
+        .unwrap();
+    println!(
+        "EXPLAIN {at}: {:?} burned_out={}",
+        simulator.world()[target],
+        simulator.is_torch_burned_out(target)
+    );
+    let mut near = vec![target];
+    near.extend(
+        target
+            .forwards()
+            .into_iter()
+            .filter(|p| world.size.bound_on(*p)),
+    );
+    if let Ok(extra) = std::env::var("EXPLAIN_ALSO") {
+        for item in extra.split(';') {
+            let c = item
+                .split(',')
+                .map(|v| v.parse::<usize>().unwrap())
+                .collect::<Vec<_>>();
+            near.push(crate::world::position::Position(c[0], c[1], c[2]));
+        }
+    }
+    let limit = env_usize("EXPLAIN_CYCLES", 40);
+    for entry in simulator.trace() {
+        let position = crate::world::position::Position(
+            entry.target_position[0],
+            entry.target_position[1],
+            entry.target_position[2],
+        );
+        if near.contains(&position) && entry.cycle <= limit {
+            println!(
+                "  c{:>4} {:?} {} dir={} before={}",
+                entry.cycle,
+                entry.target_position,
+                entry.event_type,
+                entry.direction,
+                entry.block_before
+            );
+        }
     }
 }

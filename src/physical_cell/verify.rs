@@ -116,7 +116,12 @@ impl PhysicalCellDocument {
             .collect::<BTreeMap<_, _>>();
 
         let world = World::from(&build.world);
-        let mut simulator = Simulator::from_with_limits_and_trace(&world, 256, 50_000, trace_limit)
+        let simulator = if self.settled_start {
+            Simulator::from_settled_with_limits_and_trace(&world, 256, 50_000, trace_limit)
+        } else {
+            Simulator::from_with_limits_and_trace(&world, 256, 50_000, trace_limit)
+        };
+        let mut simulator = simulator
             .map_err(|error| eyre::eyre!(error.message().to_owned()))
             .context("failed to initialize physical cell simulation")?;
         simulator.drive_inputs_with_limits(

@@ -43,7 +43,10 @@ pub(super) fn decode(encoding: &Encoding, solver: &SatSolver, netlist: &NorNetli
             options.push((CellKind::Torch(attach), encoding.torch[cell][index]));
         }
         for (index, direction) in CARDINALS.into_iter().enumerate() {
-            options.push((CellKind::Repeater(direction), encoding.repeater[cell][index]));
+            options.push((
+                CellKind::Repeater(direction),
+                encoding.repeater[cell][index],
+            ));
         }
         for site in encoding.switches.iter().filter(|site| site.cell == cell) {
             options.push((CellKind::Switch(site.attach), site.lit));
@@ -148,25 +151,34 @@ fn case_inputs(
         .collect()
 }
 
+/// Settles the circuit (start-up toggles do not burn torches out, as for a
+/// cell exported with its settled torch states), then drives `case`.
 fn settle_case(
     world: &World,
     netlist: &NorNetlist,
-    inputs: &[(String, Position)],
+    decoded: &Decoded,
     case: usize,
 ) -> Result<Simulator, ExactVerificationFailure> {
-    let mut simulator = Simulator::from_with_limits_and_trace(world, 256, 50_000, 0).map_err(|error| {
-        ExactVerificationFailure {
+    let mut simulator = Simulator::from_settled_with_limits_and_trace(world, 256, 50_000, 0)
+        .map_err(|error| ExactVerificationFailure {
             message: format!("initial simulation failed: {}", error.message()),
             position: None,
-        }
-    })?;
+        })?;
     simulator
-        .drive_inputs_with_limits(case_inputs(netlist, inputs, case), 256, 50_000)
+        .drive_inputs_with_limits(case_inputs(netlist, &decoded.inputs, case), 256, 50_000)
         .map_err(|error| ExactVerificationFailure {
             message: format!("case {case} did not settle: {error}"),
             position: None,
         })?;
     Ok(simulator)
+}
+
+/// The settled world with every input off: what an exported cell should
+/// store, so that pasting it starts stable.
+pub(super) fn settled_world(world: &World3D) -> Option<World3D> {
+    let simulator =
+        Simulator::from_settled_with_limits_and_trace(&World::from(world), 256, 50_000, 0).ok()?;
+    Some(simulator.world().clone())
 }
 
 /// Checks every net-labelled element in every input case, then every settled
@@ -179,14 +191,10 @@ pub(super) fn verify(
     let case_count = 1usize << netlist.input_names().len();
     let world = World::from(world);
     let dim = world.size;
-    let observed = decoded
-        .observed
-        .iter()
-        .cloned()
-        .collect::<BTreeMap<_, _>>();
+    let observed = decoded.observed.iter().cloned().collect::<BTreeMap<_, _>>();
 
     for case in 0..case_count {
-        let simulator = settle_case(&world, netlist, &decoded.inputs, case)?;
+        let simulator = settle_case(&world, netlist, decoded, case)?;
         for (cell, function) in decoded.functions.iter().enumerate() {
             let Some(function) = function else {
                 continue;
@@ -197,11 +205,7 @@ pub(super) fn verify(
             ) {
                 continue;
             }
-            let position = Position(
-                cell % dim.0,
-                (cell / dim.0) % dim.1,
-                cell / (dim.0 * dim.1),
-            );
+            let position = Position(cell % dim.0, (cell / dim.0) % dim.1, cell / (dim.0 * dim.1));
             let actual = simulator.world()[position].kind.is_powered();
             let expected = function & (1 << case) != 0;
             if actual != expected {
@@ -221,7 +225,7 @@ pub(super) fn verify(
 
     for from in 0..case_count {
         for to in 0..case_count {
-            let mut simulator = settle_case(&world, netlist, &decoded.inputs, from)?;
+            let mut simulator = settle_case(&world, netlist, decoded, from)?;
             simulator
                 .advance_idle_cycles(MANUAL_INPUT_IDLE_CYCLES)
                 .map_err(|error| ExactVerificationFailure {
@@ -267,6 +271,119 @@ fn axis(direction: Direction) -> AxisDirection {
     }
 }
 
+/// Writes a simulator-rejected layout as an RCELL file whose header comments
+/// give the reason and the signal the model assigned to every element
+/// (diagnostics: `EXACT_DUMP_REJECTIONS=<dir>`).
+pub(super) fn dump_rejection(
+    directory: &str,
+    netlist: &NorNetlist,
+    dim: DimSize,
+    decoded: &Decoded,
+    failure: &ExactVerificationFailure,
+    diagnosis: &str,
+) {
+    static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let index = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut text = format!(
+        "// rejected: {}\n// at: {:?}\n{diagnosis}// model signals (function bits by case):\n",
+        failure.message, failure.position
+    );
+    for (cell, kind) in decoded.kinds.iter().enumerate() {
+        if matches!(kind, CellKind::Air) {
+            continue;
+        }
+        let position = Position(cell % dim.0, (cell / dim.0) % dim.1, cell / (dim.0 * dim.1));
+        let name = decoded.class_names[cell].as_deref().unwrap_or("-");
+        let function = decoded.functions[cell].map_or(String::from("-"), |f| format!("{f:b}"));
+        text += &format!("//   {position:?} {kind:?} {name} {function}\n");
+    }
+    text += &to_rcell("rejected", dim, netlist, decoded).to_string();
+    let path = std::path::Path::new(directory).join(format!("{index:04}.rcell"));
+    let _ = std::fs::create_dir_all(directory);
+    let _ = std::fs::write(path, text);
+}
+
+/// Localizes a model/simulator disagreement: per input case, the cells whose
+/// simulated power differs from the model while every model source of the
+/// cell (active relations, or a torch's support) agrees. Those are the places
+/// where the model's local physics is wrong.
+pub(super) fn diagnose(
+    encoding: &Encoding,
+    solver: &SatSolver,
+    netlist: &NorNetlist,
+    decoded: &Decoded,
+    world: &World3D,
+) -> String {
+    let geometry = encoding.geometry;
+    let world = World::from(world);
+    let active = encoding
+        .relations
+        .iter()
+        .filter(|relation| solver.value(relation.lit))
+        .collect::<Vec<_>>();
+    let model = |cell: usize, case: usize| decoded.functions[cell].map(|f| f & (1 << case) != 0);
+    let mut out = String::new();
+    for case in 0..encoding.cases {
+        let simulator = match settle_case(&world, netlist, decoded, case) {
+            Ok(simulator) => simulator,
+            Err(error) => {
+                out += &format!("// diagnose case {case}: {}\n", error.message);
+                continue;
+            }
+        };
+        let actual = |cell: usize| simulator.world()[geometry.position(cell)].kind.is_powered();
+        for cell in 0..geometry.len() {
+            let Some(expected) = model(cell, case) else {
+                continue;
+            };
+            if matches!(decoded.kinds[cell], CellKind::Switch(_)) || actual(cell) == expected {
+                continue;
+            }
+            let mut sources = active
+                .iter()
+                .filter(|relation| relation.sink == cell)
+                .map(|relation| {
+                    (
+                        relation.source,
+                        format!("{:?}->{:?}", relation.source_kind, relation.sink_kind),
+                    )
+                })
+                .collect::<Vec<_>>();
+            if let CellKind::Torch(attach) = decoded.kinds[cell] {
+                if let Some(support) = geometry.step(cell, attach) {
+                    sources.push((support, "support".to_owned()));
+                }
+            }
+            let agree = sources
+                .iter()
+                .all(|&(source, _)| model(source, case).is_none_or(|m| m == actual(source)));
+            if !agree {
+                continue;
+            }
+            let describe = sources
+                .iter()
+                .map(|(source, how)| {
+                    format!(
+                        "{:?} {:?} {how} model={:?} sim={}",
+                        geometry.position(*source),
+                        decoded.kinds[*source],
+                        model(*source, case),
+                        actual(*source)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            out += &format!(
+                "// ROOT case {case}: {:?} {:?} model={expected} sim={} <- [{describe}]\n",
+                geometry.position(cell),
+                decoded.kinds[cell],
+                actual(cell)
+            );
+        }
+    }
+    out
+}
+
 /// Boolean expression of a net over the inputs, in RCELL `expect` syntax.
 pub(super) fn net_expression(netlist: &NorNetlist, net: usize) -> String {
     match &netlist.nets[net].driver {
@@ -292,7 +409,10 @@ pub(super) fn to_rcell(
 ) -> PhysicalCellDocument {
     let mut glyphs = BTreeMap::new();
     let mut glyph_of = BTreeMap::new();
-    let mut next = ['T', 'U', 'V', 'W', 'X', 'Y', 'P', 'Q', 'R', 'S', 'A', 'B', 'C', 'D'].into_iter();
+    let mut next = [
+        'T', 'U', 'V', 'W', 'X', 'Y', 'P', 'Q', 'R', 'S', 'A', 'B', 'C', 'D',
+    ]
+    .into_iter();
     let mut planes = Vec::new();
     for x in 0..dim.0 {
         let mut rows = BTreeMap::new();
@@ -369,6 +489,8 @@ pub(super) fn to_rcell(
         name: name.to_owned(),
         size: dim,
         auto_support: AutoSupport::default(),
+        // Exported worlds store settled torch states (see `settled_world`).
+        settled_start: true,
         glyphs,
         inputs,
         probes: Vec::new(),

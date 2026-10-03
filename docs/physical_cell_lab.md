@@ -131,6 +131,19 @@ Automatic supports are reported separately by `PhysicalCellBuild`. Torches and
 switches still require their declared support block to exist because attachment
 is part of their logic.
 
+By default every simulation starts with all torches lit, and toggles while the
+cell settles from that start count toward torch burnout. A cell exported with
+its settled torch states never sees that transient, so it may declare:
+
+```text
+start settled;
+```
+
+Simulation then settles first without counting burnout (a cell with no stable
+state still fails by exceeding the limits); every input change after that
+counts as usual. The exact placer emits this line, and its NBT exports store
+the settled torch states.
+
 Expected combinational behavior reuses the existing logic-expression parser:
 
 ```text

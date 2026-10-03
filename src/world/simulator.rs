@@ -101,6 +101,8 @@ pub struct Simulator {
     redstone_power_sources: HashSet<(Position, Position)>,
     torch_toggle_cycles: HashMap<Position, VecDeque<usize>>,
     burned_out_torches: HashSet<Position>,
+    /// Whether torch toggles count toward burnout; see `from_settled_with_limits_and_trace`.
+    count_torch_burnout: bool,
     trace: Vec<SimulationTraceEntry>,
     snapshots: Vec<SimulationSnapshot>,
     trace_limit: usize,
@@ -503,6 +505,42 @@ impl Simulator {
         Ok(sim)
     }
 
+    /// Like `from_with_limits_and_trace`, but the settle from the artificial
+    /// all-torches-lit start does not burn torches out: a built (or pasted
+    /// with saved torch states) circuit never sees that transient. Later
+    /// input changes count toward burnout as usual. A circuit with no stable
+    /// state still fails by exceeding the limits.
+    pub fn from_settled_with_limits_and_trace(
+        world: &World,
+        max_cycles: usize,
+        max_events: usize,
+        trace_limit: usize,
+    ) -> Result<Self, SimulationTraceError> {
+        let mut sim = Self::new(world, trace_limit);
+        sim.count_torch_burnout = false;
+        let limits = SimulationLimits {
+            max_cycles: Some(max_cycles),
+            max_events: Some(max_events),
+        };
+        sim.queue.push_back(VecDeque::new());
+        sim.world.initialize_redstone_states();
+        sim.rebuild_connectivity_cache();
+        sim.normalize_torches_on();
+        sim.init();
+        sim.fill_event_id();
+        let settled = sim.run_inner(limits);
+        sim.count_torch_burnout = true;
+        sim.torch_toggle_cycles.clear();
+        if let Err(error) = settled {
+            return Err(SimulationTraceError {
+                message: error.to_string(),
+                trace: sim.trace,
+                snapshots: sim.snapshots,
+            });
+        }
+        Ok(sim)
+    }
+
     pub fn from_preserving_torch_states_with_limits_and_trace(
         world: &World,
         max_cycles: usize,
@@ -606,6 +644,7 @@ impl Simulator {
             redstone_power_sources: HashSet::new(),
             torch_toggle_cycles: HashMap::new(),
             burned_out_torches: HashSet::new(),
+            count_torch_burnout: true,
             trace: Vec::new(),
             snapshots: Vec::new(),
             trace_limit,
@@ -1994,6 +2033,9 @@ impl Simulator {
     }
 
     fn record_torch_toggle(&mut self, position: Position) -> bool {
+        if !self.count_torch_burnout {
+            return false;
+        }
         self.prune_torch_toggle_history(position);
         let history = self.torch_toggle_cycles.entry(position).or_default();
         history.push_back(self.cycle);

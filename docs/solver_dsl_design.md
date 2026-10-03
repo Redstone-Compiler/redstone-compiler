@@ -333,6 +333,10 @@ matters.
   simulation that does not settle) and the window grows. The encoders admit
   the same layouts, so this is a model-fidelity gap shared by both, and now
   fixable by adding rules to `exact_placer.rsdsl`.
+- Closing that gap (`exact_local_placer.md`, "Closing model–simulator gaps"):
+  per-case strong power as a model rule, a simulator fix, and a settled start
+  for verification and export. Seed-1 construction then takes 27 s with zero
+  rejections; the full pipeline compacts it to 2x14x9 (171 blocks) in 900 s.
 
 R15 is met for formula size and solver load, not for grounding time; search
 speed is within the run-to-run variance measured so far.

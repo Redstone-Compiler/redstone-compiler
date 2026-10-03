@@ -90,10 +90,45 @@ labels. The model therefore accepts known-good dense layouts.
   opposite directions in different input cases. The 2x20x20 manual cell does
   this at its carry-out support (n1 and n5 meet through one dust cell), so
   that cell is rejected. Fixing it needs per-case ranks, about 8x the cost.
-- A solid that is both strongly and weakly powered is treated as powering
-  adjacent dust whenever it is powered at all. The simulator only uses the
-  strong part, so such layouts are rejected by verification, not accepted
-  wrongly.
+
+### Closing model–simulator gaps (2026-10-03)
+
+Simulator rejections, not search, dominated slow construction steps: on the
+full adder (seed 1) every worker of a step used up its eight rejections. Two
+diagnostics find the cause: `EXACT_DUMP_REJECTIONS=<dir>` writes every
+rejected layout as an RCELL whose header lists, per input case, the *root*
+mismatches (cells whose simulated power differs from the model while all of
+their modeled sources agree), and the ignored test `explain_rejected_block`
+traces one block's events. Three causes, in order of frequency:
+
+1. **Start-up burnout.** The simulator starts with every torch lit; settling
+   from there sends glitch waves through deep NOR networks, and a torch that
+   toggles eight times in 60 cycles burns out for good. A cell built in place,
+   or pasted with saved torch states, never sees that transient. The verifier
+   now settles with `Simulator::from_settled_with_limits_and_trace` (no burnout
+   accounting during the initial settle; every later input change counts), the
+   exported NBT stores the settled torch states, and generated RCELL files
+   declare `start settled;` so the RCELL verifier uses the same start.
+2. **Strong power is per case.** A block powers adjacent dust only while one
+   of its strong sources (torch below, repeater facing it, attached switch) is
+   on. The model used the block's total power whenever such a source merely
+   existed. `Strong[k, c]` in `exact_placer.rsdsl` fixes the soundness rule
+   for solid→dust relations (`legacy_semantics = true` restores the old rule
+   for parity tests).
+3. **Simulator bug: sources on one block.** Switches (and torches below a
+   block) sent hard power without naming their source, so two of them on one
+   block shared a bookkeeping key and turning one off unpowered the block.
+   They now carry their source direction, like repeaters.
+
+Tried and dropped: requiring stage order on every connection, not only on
+contributing ones (to forbid gated feedback). The burnouts turned out to be
+start-up glitches, not feedback, and the rule made search slower.
+
+Effect: OR 1x5x3 went from 64 rejections (Unknown) to 0; full-adder
+construction, seed 1, from 438 s with 258 rejections to 27 s with none, and the
+generated cell passes `rcell` verification. Seed 2 still fails to place gate
+`s` within four slices, now on search time alone (the legacy encoder also
+fails that seed).
 
 ## Search strategies
 

@@ -351,6 +351,18 @@ impl ExactLocalPlacer {
                 }
                 Err(failure) => {
                     tracing::debug!(?failure, "exact placer layout rejected by simulator");
+                    if let Ok(directory) = std::env::var("EXACT_DUMP_REJECTIONS") {
+                        let diagnosis =
+                            verify::diagnose(encoding, &solver, &self.netlist, &decoded, &world);
+                        verify::dump_rejection(
+                            &directory,
+                            &self.netlist,
+                            config.dim,
+                            &decoded,
+                            &failure,
+                            &diagnosis,
+                        );
+                    }
                     last_rejection = Some(format!("{} at {:?}", failure.message, failure.position));
                     *refinements.lock().unwrap() += 1;
                     rejections += 1;
@@ -389,6 +401,8 @@ impl ExactLocalPlacer {
             .filter(|(_, kind)| !matches!(kind, CellKind::Switch(_)))
             .count();
         let rcell = verify::to_rcell(&self.name, dim, &self.netlist, decoded);
+        // Store settled torch states, so pasting the cell starts stable.
+        let world = verify::settled_world(&world).unwrap_or(world);
         ExactPlacement {
             placed: PlacedWorld {
                 world,

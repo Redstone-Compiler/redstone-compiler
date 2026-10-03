@@ -56,6 +56,7 @@ impl Parser {
             name,
             size: DimSize(size.0, size.1, size.2),
             auto_support: AutoSupport::default(),
+            settled_start: false,
             glyphs: BTreeMap::new(),
             inputs: Vec::new(),
             probes: Vec::new(),
@@ -69,7 +70,16 @@ impl Parser {
             if line == "}" {
                 break;
             }
-            if line.starts_with("auto-support ") {
+            if line.starts_with("start ") {
+                document.settled_start = match strip_semicolon(line.strip_prefix("start ").unwrap())
+                    .wrap_err_with(|| format!("line {line_number}"))?
+                    .trim()
+                {
+                    "settled" => true,
+                    "lit" => false,
+                    other => bail!("line {line_number}: unknown start state `{other}`"),
+                };
+            } else if line.starts_with("auto-support ") {
                 parse_auto_support(&line, &mut document.auto_support)
                     .wrap_err_with(|| format!("line {line_number}"))?;
             } else if line.starts_with("glyph ") {

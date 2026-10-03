@@ -148,6 +148,10 @@ pub struct PhysicalCellDocument {
     pub name: String,
     pub size: DimSize,
     pub auto_support: AutoSupport,
+    /// `start settled;`: simulate from the cell's settled state instead of
+    /// the all-torches-lit start, so start-up glitches do not burn torches
+    /// out (for cells exported with their settled torch states).
+    pub settled_start: bool,
     pub glyphs: BTreeMap<char, CellGlyph>,
     pub inputs: Vec<CellInput>,
     pub probes: Vec<CellProbe>,
