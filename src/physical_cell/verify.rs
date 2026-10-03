@@ -269,6 +269,8 @@ mod tests {
     const FULL_ADDER_RIGHT_INPUTS: &str =
         include_str!("../../test/full-adder-right-inputs-2x14x10.rcell");
     const FULL_ADDER_EXACT: &str = include_str!("../../test/full-adder-exact-2x13x7.rcell");
+    const FULL_ADDER_EXACT_OPTIMIZED: &str =
+        include_str!("../../test/full-adder-exact-optimized-2x14x9.rcell");
     const FULL_ADDER_RIGHT_INPUTS_COMPACTED: &str =
         include_str!("../../test/full-adder-right-inputs-compacted-2x10x10.rcell");
     const DISCONNECTED_FULL_ADDER: &str =
@@ -485,6 +487,25 @@ mod tests {
     #[test]
     fn generated_exact_full_adder_passes_all_settled_input_transitions() -> eyre::Result<()> {
         verify_full_adder_transitions(FULL_ADDER_EXACT)
+    }
+
+    /// The rsdsl-model pipeline's cell: settled start, operands on the Y-min
+    /// face, sum on the Y-max face.
+    #[test]
+    fn optimized_exact_full_adder_keeps_interface_and_passes_all_cases() -> eyre::Result<()> {
+        verify_full_adder(FULL_ADDER_EXACT_OPTIMIZED, DimSize(2, 14, 9))?;
+        let document: PhysicalCellDocument = FULL_ADDER_EXACT_OPTIMIZED.parse()?;
+        assert!(document.settled_start);
+        let build = document.build()?;
+        assert_eq!(build.inputs["a"].1, 0);
+        assert_eq!(build.inputs["b"].1, 0);
+        assert_eq!(build.outputs["sum"].1, document.size.1 - 1);
+        Ok(())
+    }
+
+    #[test]
+    fn optimized_exact_full_adder_passes_all_settled_input_transitions() -> eyre::Result<()> {
+        verify_full_adder_transitions(FULL_ADDER_EXACT_OPTIMIZED)
     }
 
     #[test]

@@ -110,6 +110,17 @@ fn exact_placer_builds_a_verified_xor() {
     expect_placed(&placer, &config);
 }
 
+#[test]
+fn exact_placer_builds_verified_and_and_or_gates() {
+    for expr in ["a&b", "a|b"] {
+        let placer = ExactLocalPlacer::new(&graph(&[("out", expr)])).unwrap();
+        let mut config = ExactPlacerConfig::new(DimSize(2, 4, 3));
+        config.workers = 4;
+        config.time_limit = Some(Duration::from_secs(60));
+        expect_placed(&placer, &config);
+    }
+}
+
 fn env_usize(name: &str, default: usize) -> usize {
     std::env::var(name)
         .ok()
