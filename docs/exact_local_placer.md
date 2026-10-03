@@ -146,7 +146,20 @@ now uses this instead of re-encoding for every bound.
 Small boxes are proven optimal in well under a second (inverter 1x4x2, NOR
 1x5x2). XOR 2x6x4 drops from 44 to 30 blocks within a second and to 28 in
 two minutes, without a proof: showing that no smaller layout exists is the
-hard direction (`measure_optimize`).
+hard direction (`measure_optimize`). AND 2x4x3 finds its optimum (9) in
+0.3 s and spends the remaining ~9 s proving that 8 is impossible.
+
+Compaction's block-reduction phase now optimizes each 3-slice window in one
+solve (`CompactionConfig::optimize_windows`) instead of asking for one block
+fewer per attempt; a window proven optimal is skipped until the layout
+changes. On the seed-1 full adder (same 900 s budget, same 2x14x9 box) this
+reaches 153 blocks instead of 171.
+
+Tried and left off by default: the model's `symmetry_breaking` rules (one
+contributing source per dust/repeater; zero rank/stage without an incoming
+contribution). They are sound but did not speed up proofs (AND 2x4x3: 10.5 s
+vs 10.3 s) and were mixed for finding layouts (XOR 2x6x4, six seeds: faster
+on four, one timeout), measured by `compare_symmetry_breaking`.
 
 ## Search strategies
 

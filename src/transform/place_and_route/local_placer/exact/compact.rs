@@ -22,6 +22,9 @@ pub struct CompactionConfig {
     pub max_window_radius: usize,
     /// After shrinking, re-solve sliding windows with one block fewer.
     pub minimize_blocks: bool,
+    /// Minimize each block-reduction window's cost in one solve (`optimize`)
+    /// instead of asking for one block fewer per attempt (rsdsl model only).
+    pub optimize_windows: bool,
     pub attempt_time_limit: Duration,
     pub time_limit: Option<Duration>,
     pub workers: usize,
@@ -42,6 +45,7 @@ impl Default for CompactionConfig {
             window_radius: 1,
             max_window_radius: 2,
             minimize_blocks: true,
+            optimize_windows: true,
             attempt_time_limit: Duration::from_secs(20),
             time_limit: None,
             workers: 8,
@@ -132,15 +136,44 @@ impl ExactLocalPlacer {
             break;
         }
         if config.minimize_blocks {
-            // Slide a three-slice window along Y, asking for one block fewer.
+            // Slide a three-slice window along Y, asking for fewer blocks. With
+            // `optimize_windows` each window is minimized in one solve, and a
+            // window proven optimal stays done until the layout changes.
+            let optimize = config.optimize_windows && !config.legacy_encoder;
+            let mut settled = std::collections::BTreeSet::new();
             'shrink: loop {
                 for low in 0..layout.dim.1 {
                     if expired() {
                         break 'shrink;
                     }
+                    if settled.contains(&low) {
+                        continue;
+                    }
                     let limit = layout.cells.len().saturating_sub(1);
                     report.attempts += 1;
                     let window = (low, low + 3);
+                    if optimize {
+                        let (placement, optimal) =
+                            self.optimize_window(&layout, window, limit, config);
+                        if optimal {
+                            settled.insert(low);
+                        }
+                        let Some(placement) = placement else {
+                            continue;
+                        };
+                        tracing::info!(
+                            low,
+                            blocks = placement.block_count,
+                            optimal,
+                            "compaction block reduction"
+                        );
+                        layout = ExactLayout::from_placement(layout.dim, &placement);
+                        best = Some(placement);
+                        report.block_reductions += 1;
+                        // Any change alters every other window's fixed cells.
+                        settled.clear();
+                        continue 'shrink;
+                    }
                     if let Some(placement) =
                         self.resolve_window(&layout, 1, window, Some(limit), config)
                     {
@@ -160,6 +193,39 @@ impl ExactLocalPlacer {
         }
         report.elapsed = started.elapsed();
         Ok((layout, best, report))
+    }
+
+    /// Minimizes the block count inside a Y window (at most `limit` blocks
+    /// overall). Returns the improved placement, if any, and whether the
+    /// window is proven optimal (no layout with fewer blocks exists there).
+    fn optimize_window(
+        &self,
+        layout: &ExactLayout,
+        window: (usize, usize),
+        limit: usize,
+        config: &CompactionConfig,
+    ) -> (Option<ExactPlacement>, bool) {
+        match self.window_config(layout, 1, window, Some(limit), config) {
+            Ok(mut exact) => {
+                exact.optimize = true;
+                match self.place(&exact) {
+                    Ok((ExactOutcome::Placed(placement), stats)) => {
+                        (Some(*placement), stats.optimal)
+                    }
+                    // No layout with fewer blocks: the window is optimal.
+                    Ok((ExactOutcome::Infeasible, _)) => (None, true),
+                    Ok(_) => (None, false),
+                    Err(error) => {
+                        tracing::debug!(?window, %error, "compaction window rejected");
+                        (None, false)
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::debug!(?window, %error, "compaction window rejected");
+                (None, false)
+            }
+        }
     }
 
     /// Re-solves the slices `window.0..window.1` along `axis`, keeping every
@@ -189,6 +255,24 @@ impl ExactLocalPlacer {
         max_blocks: Option<usize>,
         config: &CompactionConfig,
     ) -> eyre::Result<Option<ExactPlacement>> {
+        let exact = self.window_config(cut, axis, window, max_blocks, config)?;
+        let (outcome, _) = self.place(&exact)?;
+        Ok(match outcome {
+            ExactOutcome::Placed(placement) => Some(*placement),
+            _ => None,
+        })
+    }
+
+    /// The placer configuration that frees `window` along `axis` and fixes
+    /// every other cell of `cut`.
+    fn window_config(
+        &self,
+        cut: &ExactLayout,
+        axis: usize,
+        window: (usize, usize),
+        max_blocks: Option<usize>,
+        config: &CompactionConfig,
+    ) -> eyre::Result<ExactPlacerConfig> {
         let dim = cut.dim;
         let coordinate = |position: Position| if axis == 1 { position.1 } else { position.2 };
         let (low, high) = window;
@@ -229,11 +313,7 @@ impl ExactLocalPlacer {
                 exact.driving_outputs.insert(name.clone());
             }
         }
-        let (outcome, _) = self.place(&exact)?;
-        Ok(match outcome {
-            ExactOutcome::Placed(placement) => Some(*placement),
-            _ => None,
-        })
+        Ok(exact)
     }
 }
 

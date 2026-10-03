@@ -1557,6 +1557,8 @@ fn measure_optimize() {
     let (graph, dim) = match std::env::var("OPT_CASE").as_deref() {
         Ok("nor") => (graph(&[("out", "~(a|b)")]), DimSize(1, 5, 2)),
         Ok("and") => (graph(&[("out", "a&b")]), DimSize(2, 4, 3)),
+        Ok("xor-small") => (graph(&[("out", "a^b")]), DimSize(2, 5, 3)),
+        Ok("nor-wide") => (graph(&[("out", "~(a|b)")]), DimSize(2, 4, 3)),
         _ => (graph(&[("out", "a^b")]), DimSize(2, 6, 4)),
     };
     let placer = ExactLocalPlacer::new(&graph).unwrap();
@@ -1564,6 +1566,11 @@ fn measure_optimize() {
     config.workers = env_usize("WORKERS", 8);
     config.time_limit = Some(Duration::from_secs(env_usize("SECONDS", 120) as u64));
     config.optimize = true;
+    if std::env::var("OPT_SYMMETRY").as_deref() == Ok("0") {
+        config
+            .model_params
+            .insert("symmetry_breaking".to_owned(), rsdsl::IValue::Bool(false));
+    }
     let started = std::time::Instant::now();
     let (outcome, stats) = placer.place(&config).unwrap();
     println!(
@@ -1577,5 +1584,66 @@ fn measure_optimize() {
     );
     if let ExactOutcome::Placed(placement) = outcome {
         println!("{}", placement.rcell);
+    }
+}
+
+/// A/B of the model's symmetry-breaking rules: time to a first layout (XOR
+/// 2x6x4, several seeds) and time to an optimality proof (small boxes):
+/// `SEEDS=6 SECONDS=60 PROOF_SECONDS=120`.
+#[test]
+#[ignore = "measurement; run explicitly with --nocapture"]
+fn compare_symmetry_breaking() {
+    let seeds = env_usize("SEEDS", 6) as u32;
+    let seconds = env_usize("SECONDS", 60) as u64;
+    let proof_seconds = env_usize("PROOF_SECONDS", 120) as u64;
+    let with = |config: &mut ExactPlacerConfig, on: bool| {
+        config
+            .model_params
+            .insert("symmetry_breaking".to_owned(), rsdsl::IValue::Bool(on));
+    };
+    if std::env::var("SKIP_FEASIBLE").is_err() {
+        let placer = ExactLocalPlacer::new(&graph(&[("out", "a^b")])).unwrap();
+        for on in [false, true] {
+            let mut times = Vec::new();
+            for seed in 0..seeds {
+                let mut config = ExactPlacerConfig::new(DimSize(2, 6, 4));
+                config.workers = 4;
+                config.seed = 1 + seed * 104_729;
+                config.time_limit = Some(Duration::from_secs(seconds));
+                with(&mut config, on);
+                let started = std::time::Instant::now();
+                let (outcome, _) = placer.place(&config).unwrap();
+                let label = if matches!(outcome, ExactOutcome::Placed(_)) {
+                    "ok"
+                } else {
+                    "--"
+                };
+                times.push(format!("{label}{:.1}", started.elapsed().as_secs_f64()));
+            }
+            println!("SYM feasible xor symmetry={on} {times:?}");
+        }
+    }
+    for (name, assignments, dim) in [
+        ("nor-1x5x2", vec![("out", "~(a|b)")], DimSize(1, 5, 2)),
+        ("nor-2x4x2", vec![("out", "~(a|b)")], DimSize(2, 4, 2)),
+        ("or-2x4x3", vec![("out", "a|b")], DimSize(2, 4, 3)),
+        ("and-2x4x3", vec![("out", "a&b")], DimSize(2, 4, 3)),
+    ] {
+        let placer = ExactLocalPlacer::new(&graph(&assignments)).unwrap();
+        for on in [false, true] {
+            let mut config = ExactPlacerConfig::new(dim);
+            config.workers = 4;
+            config.optimize = true;
+            config.time_limit = Some(Duration::from_secs(proof_seconds));
+            with(&mut config, on);
+            let started = std::time::Instant::now();
+            let (_, stats) = placer.place(&config).unwrap();
+            println!(
+                "SYM proof {name} symmetry={on} cost={:?} optimal={} elapsed={:.1}s",
+                stats.cost,
+                stats.optimal,
+                started.elapsed().as_secs_f64()
+            );
+        }
     }
 }

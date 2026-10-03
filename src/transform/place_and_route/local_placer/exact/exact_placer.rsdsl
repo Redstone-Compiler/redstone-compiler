@@ -47,6 +47,9 @@ param torch_cost: int = 0;
 // The hand-written encoder's semantics (a powered solid powers adjacent dust
 // whenever it has a strong source, even if that source is off); parity tests only.
 param legacy_semantics: bool = false;
+// Rules that remove equivalent duplicates of a layout (sound: every layout
+// keeps at least one representative); they speed up proofs.
+param symmetry_breaking: bool = false;
 
 fn dir(a: Attach) -> Dir6 = match a {
     Floor => Down, East => East, West => West, North => North, South => South,
@@ -348,6 +351,35 @@ rule "토치는 받침 블록의 반대, 받침보다 높은 단계" {
         }
         if stage_levels > 0 {
             require Kind[c] is Torch(a) -> Stage[support] < Stage[c];
+        }
+    }
+}
+
+// ===== symmetry breaking =====================================================
+
+rule "대칭 제거: 가루·리피터는 기여 원천을 하나만 고름" {
+    // Coverage needs one contributor; more only add order constraints, so
+    // a layout justified by several is also justified by one of them.
+    if symmetry_breaking and not legacy_semantics {
+        forall c: Cell {
+            require at_most_one(Contrib(s, t, f, to)
+                                for (s, t, f, to) in Feeds where t == c and to != SolidSink);
+        }
+    }
+}
+
+rule "대칭 제거: 받는 기여가 없으면 순위·단계는 0 (토치 단계는 예외)" {
+    // Lowering such a cell to 0 keeps every order constraint satisfied; this
+    // also fixes the otherwise free integers of air cells.
+    if symmetry_breaking and not legacy_semantics {
+        forall c: Cell {
+            let fed = any(Contrib(s, t, f, to) for (s, t, f, to) in Feeds where t == c);
+            if rank_levels > 0 {
+                require Rank[c] >= 1 -> fed;
+            }
+            if stage_levels > 0 {
+                require Stage[c] >= 1 -> fed or Kind[c] is Torch(_);
+            }
         }
     }
 }
