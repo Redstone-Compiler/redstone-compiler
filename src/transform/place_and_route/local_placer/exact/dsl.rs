@@ -16,7 +16,7 @@ use rsdsl::{GroundOptions, IValue, Instance, Model};
 use super::cnf::Cnf;
 use super::encode::{
     default_input_sites, vocabulary, CellKind, Encoding, Geometry, ObjectiveBound, OutputSite,
-    Relation, SinkKind, SourceKind, SwitchSite, CARDINALS, TORCH_ATTACH,
+    Relation, SignalClass, SinkKind, SourceKind, SwitchSite, CARDINALS, TORCH_ATTACH,
 };
 use super::netlist::{NetId, NorNetlist};
 use super::ExactPlacerConfig;
@@ -30,6 +30,11 @@ const SOURCE: &str = include_str!("exact_placer.rsdsl");
 const SOUNDNESS_RULE: &str =
     "건전성: 원천이 켜지면 받는 쪽도 켜짐 (가루·리피터는 원천과 똑같은 신호)";
 const COVERAGE_RULE: &str = "켜진 것은 켜진 원천이 있어야 함";
+
+/// Signal functions are `u64` truth tables over input cases (2^6 = 64).
+const MAX_INPUTS: usize = 6;
+/// The torch lower-bound search tracks sets of classes as `u64` masks.
+const MAX_BOUND_CLASSES: usize = 64;
 
 pub(super) fn model() -> &'static Model {
     static MODEL: OnceLock<Model> = OnceLock::new();
@@ -89,48 +94,205 @@ fn net_function(values: &[Vec<bool>], net: NetId) -> u64 {
         .fold(0u64, |mask, (case, &on)| mask | (u64::from(on) << case))
 }
 
-impl Encoding {
-    pub(super) fn build_dsl(
-        netlist: &NorNetlist,
-        config: &ExactPlacerConfig,
-    ) -> eyre::Result<Self> {
-        Self::build_dsl_with(netlist, config, false)
-    }
+/// A signal that must be observable somewhere.
+struct Observation {
+    name: String,
+    /// Its symbol in the model's `Output` domain.
+    symbol: String,
+    function: u64,
+    class: usize,
+    /// Candidate observation cells.
+    cells: Vec<usize>,
+}
 
-    /// `provenance` records which rule instance emitted each clause, for
-    /// explained DIMACS exports.
-    pub(super) fn build_dsl_with(
-        netlist: &NorNetlist,
-        config: &ExactPlacerConfig,
-        provenance: bool,
-    ) -> eyre::Result<Self> {
+/// The compile-time world of one placement problem, computed and validated
+/// in Rust before it becomes an rsdsl instance.
+struct Prepared {
+    geometry: Geometry,
+    classes: Vec<SignalClass>,
+    class_names: Vec<String>,
+    cases: usize,
+    /// Switch candidates of the present inputs as `(cell, attach, net)`.
+    sites: Vec<(usize, Direction, NetId)>,
+    present_classes: Vec<usize>,
+    observations: Vec<Observation>,
+}
+
+impl Prepared {
+    fn new(netlist: &NorNetlist, config: &ExactPlacerConfig) -> eyre::Result<Self> {
         let geometry = Geometry { dim: config.dim };
         ensure!(geometry.len() > 0, "empty placement box");
         let input_count = netlist.input_names().len();
-        ensure!(input_count <= 6, "exact placer supports at most 6 inputs");
+        ensure!(
+            input_count <= MAX_INPUTS,
+            "exact placer supports at most {MAX_INPUTS} inputs"
+        );
         let classes = vocabulary(netlist);
-        let cases = 1usize << input_count;
         let class_names = unique_names(classes.iter().map(|class| class.name.as_str()));
-        let class_of_net = |net: NetId| {
-            classes
-                .iter()
-                .position(|class| class.input == Some(net))
-                .expect("every input has a class")
+        let mut prepared = Self {
+            geometry,
+            classes,
+            class_names,
+            cases: 1 << input_count,
+            sites: Vec::new(),
+            present_classes: Vec::new(),
+            observations: Vec::new(),
         };
+        prepared.collect_sites(netlist, config)?;
+        prepared.collect_observations(netlist, config)?;
+        Ok(prepared)
+    }
 
-        let mut instance = Instance::new("exact");
-        let dim = config.dim;
-        instance
-            .grid("Cell", (dim.0, dim.1, dim.2))
-            .domain("Case", (0..cases).map(IValue::from))
-            .domain("Class", class_names.iter().map(IValue::sym))
-            .param("rank_levels", config.rank_levels)
-            .param("stage_levels", config.stage_levels)
-            .param(
+    fn class_of_net(&self, net: NetId) -> usize {
+        self.classes
+            .iter()
+            .position(|class| class.input == Some(net))
+            .expect("every input has a class")
+    }
+
+    /// Switch sites per present input, as the hand-written encoder chooses them.
+    fn collect_sites(
+        &mut self,
+        netlist: &NorNetlist,
+        config: &ExactPlacerConfig,
+    ) -> eyre::Result<()> {
+        let geometry = self.geometry;
+        for name in netlist.input_names() {
+            if config.absent_inputs.contains(&name) {
+                continue;
+            }
+            let net = netlist.input_net(&name).unwrap();
+            self.present_classes.push(self.class_of_net(net));
+            let candidates = match config.input_sites.get(&name) {
+                Some(sites) => sites.clone(),
+                None => default_input_sites(config.dim),
+            };
+            ensure!(
+                !candidates.is_empty(),
+                "input `{name}` has no candidate site"
+            );
+            let mut legal = false;
+            for (position, attach) in candidates {
+                ensure!(
+                    config.dim.bound_on(position),
+                    "input `{name}` site {position:?} is outside the box"
+                );
+                let cell = geometry.index(position);
+                if geometry.step(cell, attach).is_none() {
+                    continue;
+                }
+                legal = true;
+                if !self.sites.contains(&(cell, attach, net)) {
+                    self.sites.push((cell, attach, net));
+                }
+            }
+            if !legal {
+                bail!("input `{name}` has no legal switch site");
+            }
+        }
+        Ok(())
+    }
+
+    /// Observed signals (the outputs, or `config.observations`) and where
+    /// each may be observed.
+    fn collect_observations(
+        &mut self,
+        netlist: &NorNetlist,
+        config: &ExactPlacerConfig,
+    ) -> eyre::Result<()> {
+        let values = netlist.net_values();
+        let requested = match &config.observations {
+            Some(observations) => observations
+                .iter()
+                .map(|(net, sites)| (netlist.nets[*net].name.clone(), *net, Some(sites.clone())))
+                .collect::<Vec<_>>(),
+            None => netlist
+                .outputs
+                .iter()
+                .map(|(name, net)| (name.clone(), *net, config.output_sites.get(name).cloned()))
+                .collect(),
+        };
+        let symbols = unique_names(requested.iter().map(|(name, ..)| name.as_str()));
+        for ((name, net, positions), symbol) in requested.into_iter().zip(symbols) {
+            let function = net_function(&values, net);
+            let Some(class) = self
+                .classes
+                .iter()
+                .position(|class| class.function == function)
+            else {
+                bail!("output `{name}` is constant; the exact placer needs a driven signal");
+            };
+            let cells = match positions {
+                Some(positions) => positions
+                    .iter()
+                    .map(|position| {
+                        ensure!(
+                            config.dim.bound_on(*position),
+                            "output `{name}` site {position:?} is outside the box"
+                        );
+                        Ok(self.geometry.index(*position))
+                    })
+                    .collect::<eyre::Result<Vec<_>>>()?,
+                None => (0..self.geometry.len()).collect(),
+            };
+            self.observations.push(Observation {
+                name,
+                symbol,
+                function,
+                class,
+                cells,
+            });
+        }
+        Ok(())
+    }
+
+    /// Every model param the placer sets. `config.model_params` are applied
+    /// after these, so they override both these and the model's defaults.
+    fn params(&self, config: &ExactPlacerConfig) -> Vec<(&'static str, IValue)> {
+        // The implied torch bound speeds up optimality proofs (AND 2x4x3:
+        // about 20% faster) but slowed finding a first layout in
+        // measurements, so it is only set when optimizing.
+        let min_torches = if config.optimize {
+            let targets = self
+                .observations
+                .iter()
+                .map(|o| o.class)
+                .collect::<Vec<_>>();
+            min_torches(
+                &self.classes,
+                &self.present_classes,
+                &targets,
+                config.tuning.torch_bound_max_states,
+            )
+        } else {
+            0
+        };
+        vec![
+            ("rank_levels", config.rank_levels.into()),
+            ("stage_levels", config.stage_levels.into()),
+            (
                 "max_blocks",
                 config.max_blocks.map_or(IValue::None, IValue::from),
-            )
-            .param("allow_unpowered_wires", config.allow_unpowered_wires);
+            ),
+            ("allow_unpowered_wires", config.allow_unpowered_wires.into()),
+            ("min_torches", min_torches.into()),
+        ]
+    }
+
+    /// The rsdsl instance: grid, domains, facts, and params.
+    fn instance(&self, config: &ExactPlacerConfig) -> eyre::Result<Instance> {
+        let geometry = &self.geometry;
+        let names = &self.class_names;
+        let dim = config.dim;
+        let mut instance = Instance::new("exact");
+        instance
+            .grid("Cell", (dim.0, dim.1, dim.2))
+            .domain("Case", (0..self.cases).map(IValue::from))
+            .domain("Class", names.iter().map(IValue::sym))
+            .domain(
+                "Output",
+                self.observations.iter().map(|o| IValue::sym(&o.symbol)),
+            );
         for fact in [
             "on",
             "unpowered",
@@ -144,125 +306,48 @@ impl Encoding {
         ] {
             instance.fact(fact);
         }
-        for (class, name) in classes.iter().zip(&class_names).skip(1) {
-            for case in 0..cases {
+        for (class, name) in self.classes.iter().zip(names).skip(1) {
+            for case in 0..self.cases {
                 if class.value(case) {
                     instance.row("on", vec![IValue::sym(name), case.into()]);
                 }
             }
         }
-        instance.row("unpowered", vec![IValue::sym(&class_names[0])]);
-        for (class, name) in classes.iter().zip(&class_names) {
+        instance.row("unpowered", vec![IValue::sym(&names[0])]);
+        for (class, name) in self.classes.iter().zip(names) {
             if class.input.is_some() {
                 instance.row("input_class", vec![IValue::sym(name)]);
             }
         }
-
-        // Switch sites per present input, as the hand-written encoder chooses them.
-        let mut sites = Vec::<(usize, Direction, NetId)>::new();
-        let mut present_classes = Vec::new();
-        for name in netlist.input_names() {
-            if config.absent_inputs.contains(&name) {
-                continue;
-            }
-            let net = netlist.input_net(&name).unwrap();
-            present_classes.push(class_of_net(net));
-            instance.row(
-                "present",
-                vec![IValue::sym(&class_names[class_of_net(net)])],
-            );
-            let candidates = match config.input_sites.get(&name) {
-                Some(sites) => sites.clone(),
-                None => default_input_sites(dim),
-            };
-            ensure!(
-                !candidates.is_empty(),
-                "input `{name}` has no candidate site"
-            );
-            let mut legal = false;
-            for (position, attach) in candidates {
-                ensure!(
-                    dim.bound_on(position),
-                    "input `{name}` site {position:?} is outside the box"
-                );
-                let cell = geometry.index(position);
-                if geometry.step(cell, attach).is_none() {
-                    continue;
-                }
-                legal = true;
-                if !sites.contains(&(cell, attach, net)) {
-                    sites.push((cell, attach, net));
-                }
-            }
-            if !legal {
-                bail!("input `{name}` has no legal switch site");
-            }
+        for &class in &self.present_classes {
+            instance.row("present", vec![IValue::sym(&names[class])]);
         }
-        for &(cell, attach, net) in &sites {
+        for &(cell, attach, net) in &self.sites {
             instance.row(
                 "switch_site",
                 vec![
-                    cell_value(&geometry, cell),
+                    cell_value(geometry, cell),
                     IValue::sym(attach_name(attach)),
-                    IValue::sym(&class_names[class_of_net(net)]),
+                    IValue::sym(&names[self.class_of_net(net)]),
                 ],
             );
         }
-
-        // Observed signals and where they may be observed.
-        let values = netlist.net_values();
-        let observations = match &config.observations {
-            Some(observations) => observations
-                .iter()
-                .map(|(net, sites)| (netlist.nets[*net].name.clone(), *net, Some(sites.clone())))
-                .collect::<Vec<_>>(),
-            None => netlist
-                .outputs
-                .iter()
-                .map(|(name, net)| (name.clone(), *net, config.output_sites.get(name).cloned()))
-                .collect(),
-        };
-        let output_names = unique_names(observations.iter().map(|(name, ..)| name.as_str()));
-        instance.domain("Output", output_names.iter().map(IValue::sym));
-        let mut observed = Vec::new();
-        let mut observation_cells = Vec::new();
-        let mut target_classes = Vec::new();
-        for ((name, net, positions), symbol) in observations.iter().zip(&output_names) {
-            let function = net_function(&values, *net);
-            let Some(class) = classes.iter().position(|class| class.function == function) else {
-                bail!("output `{name}` is constant; the exact placer needs a driven signal");
-            };
-            observed.push((name.clone(), function));
-            target_classes.push(class);
-            let cells = match positions {
-                Some(positions) => positions
-                    .iter()
-                    .map(|position| {
-                        ensure!(
-                            dim.bound_on(*position),
-                            "output `{name}` site {position:?} is outside the box"
-                        );
-                        Ok(geometry.index(*position))
-                    })
-                    .collect::<eyre::Result<Vec<_>>>()?,
-                None => (0..geometry.len()).collect(),
-            };
-            for &cell in &cells {
+        for observation in &self.observations {
+            let symbol = IValue::sym(&observation.symbol);
+            for &cell in &observation.cells {
                 instance.row(
                     "output_site",
-                    vec![IValue::sym(symbol), cell_value(&geometry, cell)],
+                    vec![symbol.clone(), cell_value(geometry, cell)],
                 );
             }
             instance.row(
                 "output_class",
-                vec![IValue::sym(symbol), IValue::sym(&class_names[class])],
+                vec![symbol.clone(), IValue::sym(&names[observation.class])],
             );
-            if config.driving_outputs.contains(name) {
-                instance.row("driving", vec![IValue::sym(symbol)]);
+            if config.driving_outputs.contains(&observation.name) {
+                instance.row("driving", vec![symbol]);
             }
-            observation_cells.push((name.clone(), symbol.clone(), cells));
         }
-
         for (&position, &kind) in &config.fixed_cells {
             ensure!(
                 dim.bound_on(position),
@@ -280,8 +365,10 @@ impl Encoding {
                     IValue::member("Repeater", vec![IValue::sym(direction_name(direction))])
                 }
                 CellKind::Switch(attach) => {
-                    let Some(&(_, _, net)) =
-                        sites.iter().find(|&&(c, a, _)| c == cell && a == attach)
+                    let Some(&(_, _, net)) = self
+                        .sites
+                        .iter()
+                        .find(|&&(c, a, _)| c == cell && a == attach)
                     else {
                         bail!("fixed cell {position:?} cannot hold {kind:?}");
                     };
@@ -289,63 +376,44 @@ impl Encoding {
                         "Switch",
                         vec![
                             IValue::sym(attach_name(attach)),
-                            IValue::sym(&class_names[class_of_net(net)]),
+                            IValue::sym(&names[self.class_of_net(net)]),
                         ],
                     )
                 }
             };
-            instance.row("fixed", vec![cell_value(&geometry, cell), member]);
+            instance.row("fixed", vec![cell_value(geometry, cell), member]);
         }
-
-        // The implied torch bound speeds up optimality proofs (AND 2x4x3: about
-        // 20% faster) but slowed finding a first layout in measurements, so it
-        // is only set when optimizing.
-        let torches = if config.optimize {
-            min_torches(&classes, &present_classes, &target_classes, 200_000)
-        } else {
-            0
-        };
-        instance.param("min_torches", torches);
+        for (name, value) in self.params(config) {
+            instance.param(name, value);
+        }
         for (name, value) in &config.model_params {
             instance.param(name, value.clone());
         }
+        Ok(instance)
+    }
 
-        let options = GroundOptions {
-            guards: config.relax_soundness,
-            provenance,
-            positive_or_aux: false,
-        };
-        let custom;
-        let model = match &config.model_file {
-            Some(path) => {
-                let source = std::fs::read_to_string(path)
-                    .map_err(|error| eyre!("cannot read model {}: {error}", path.display()))?;
-                custom = Model::parse(&path.display().to_string(), &source)
-                    .map_err(|error| eyre!("{error}"))?;
-                &custom
-            }
-            None => model(),
-        };
-        let mut program = model
-            .ground(&instance, options)
-            .map_err(|error| eyre!("grounding {} failed:\n{error}", model.name()))?;
-
-        // Read the grounded families back into the encoder's layout.
-        let kind = |program: &rsdsl::Program, cell: usize, member: &str, payload: &[IValue]| {
+    /// Reads the grounded families back into the encoder's layout.
+    fn read_back(
+        &self,
+        program: &rsdsl::Program,
+        config: &ExactPlacerConfig,
+    ) -> eyre::Result<Encoding> {
+        let geometry = self.geometry;
+        let kind = |cell: usize, member: &str, payload: &[IValue]| {
             program
                 .option_lit("Kind", &[cell_value(&geometry, cell)], member, payload)
                 .unwrap_or(-1)
         };
-        let def = |program: &rsdsl::Program, name: &str, key: &[IValue]| {
+        let def = |name: &str, key: &[IValue]| {
             program
                 .def_lit(name, key)
                 .unwrap_or_else(|| panic!("model has no `{name}` at {key:?}"))
         };
-        let mut encoding = Self {
+        let mut encoding = Encoding {
             geometry,
             cnf: Cnf::new(),
-            classes: classes.clone(),
-            cases,
+            classes: self.classes.clone(),
+            cases: self.cases,
             air: Vec::new(),
             solid: Vec::new(),
             dust: Vec::new(),
@@ -368,81 +436,63 @@ impl Encoding {
             sections: Vec::new(),
             relaxations: Vec::new(),
             coverage_relaxations: Vec::new(),
-            observed,
+            observed: self
+                .observations
+                .iter()
+                .map(|o| (o.name.clone(), o.function))
+                .collect(),
             program: None,
             objective: None,
         };
         for cell in 0..geometry.len() {
             let at = cell_value(&geometry, cell);
-            let air = kind(&program, cell, "Air", &[]);
+            let here = std::slice::from_ref(&at);
+            let air = kind(cell, "Air", &[]);
             encoding.air.push(air);
             encoding.block_lits.push(-air);
-            encoding.solid.push(kind(&program, cell, "Solid", &[]));
-            encoding.dust.push(kind(&program, cell, "Dust", &[]));
+            encoding.solid.push(kind(cell, "Solid", &[]));
+            encoding.dust.push(kind(cell, "Dust", &[]));
             encoding.torch.push(
-                TORCH_ATTACH.map(|attach| {
-                    kind(&program, cell, "Torch", &[IValue::sym(attach_name(attach))])
-                }),
+                TORCH_ATTACH.map(|attach| kind(cell, "Torch", &[IValue::sym(attach_name(attach))])),
             );
             encoding.repeater.push(CARDINALS.map(|direction| {
-                kind(
-                    &program,
-                    cell,
-                    "Repeater",
-                    &[IValue::sym(direction_name(direction))],
-                )
+                kind(cell, "Repeater", &[IValue::sym(direction_name(direction))])
             }));
             encoding.class_lits.push(
-                class_names
+                self.class_names
                     .iter()
                     .map(|name| {
                         program
-                            .option_lit(
-                                "Sig",
-                                std::slice::from_ref(&at),
-                                "Carry",
-                                &[IValue::sym(name)],
-                            )
+                            .option_lit("Sig", here, "Carry", &[IValue::sym(name)])
                             .expect("every class is a signal option")
                     })
                     .collect(),
             );
             encoding.values.push(
-                (0..cases)
-                    .map(|case| def(&program, "Powered", &[case.into(), at.clone()]))
+                (0..self.cases)
+                    .map(|case| def("Powered", &[case.into(), at.clone()]))
                     .collect(),
             );
             let per_direction = |name: &str| {
                 CARDINALS.map(|direction| {
-                    def(
-                        &program,
-                        name,
-                        &[at.clone(), IValue::sym(direction_name(direction))],
-                    )
+                    def(name, &[at.clone(), IValue::sym(direction_name(direction))])
                 })
             };
             encoding.conn.push(per_direction("Conn"));
             encoding.points.push(per_direction("Points"));
-            encoding
-                .hard
-                .push(def(&program, "Hard", std::slice::from_ref(&at)));
+            encoding.hard.push(def("Hard", here));
             if config.rank_levels > 0 {
-                encoding
-                    .ranks
-                    .push(program.int_lits("Rank", std::slice::from_ref(&at)).unwrap());
+                encoding.ranks.push(program.int_lits("Rank", here).unwrap());
             }
             if config.stage_levels > 0 {
-                encoding.stages.push(
-                    program
-                        .int_lits("Stage", std::slice::from_ref(&at))
-                        .unwrap(),
-                );
+                encoding
+                    .stages
+                    .push(program.int_lits("Stage", here).unwrap());
             }
         }
-        for &(cell, attach, net) in &sites {
-            let class = &class_names[class_of_net(net)];
+        for &(cell, attach, net) in &self.sites {
+            let class = &self.class_names[self.class_of_net(net)];
             let lit = kind(
-                &program,
                 cell,
                 "Switch",
                 &[IValue::sym(attach_name(attach)), IValue::sym(class)],
@@ -486,17 +536,19 @@ impl Encoding {
             });
         }
 
-        for (name, symbol, cells) in &observation_cells {
+        for observation in &self.observations {
             let before = encoding.output_sites.len();
-            for &cell in cells {
+            for &cell in &observation.cells {
                 let lit = def(
-                    &program,
                     "Observe",
-                    &[IValue::sym(symbol), cell_value(&geometry, cell)],
+                    &[
+                        IValue::sym(&observation.symbol),
+                        cell_value(&geometry, cell),
+                    ],
                 );
                 if lit != -1 {
                     encoding.output_sites.push(OutputSite {
-                        name: name.clone(),
+                        name: observation.name.clone(),
                         cell,
                         lit,
                     });
@@ -504,7 +556,8 @@ impl Encoding {
             }
             ensure!(
                 encoding.output_sites.len() > before,
-                "output `{name}` has no legal site"
+                "output `{}` has no legal site",
+                observation.name
             );
         }
 
@@ -523,6 +576,56 @@ impl Encoding {
                 "one soundness guard per relation"
             );
         }
+        Ok(encoding)
+    }
+}
+
+/// Grounds the configured model (the built-in one unless `model_file` is set).
+fn ground(
+    config: &ExactPlacerConfig,
+    instance: &Instance,
+    provenance: bool,
+) -> eyre::Result<rsdsl::Program> {
+    let options = GroundOptions {
+        guards: config.relax_soundness,
+        provenance,
+        positive_or_aux: false,
+    };
+    let custom;
+    let model = match &config.model_file {
+        Some(path) => {
+            let source = std::fs::read_to_string(path)
+                .map_err(|error| eyre!("cannot read model {}: {error}", path.display()))?;
+            custom = Model::parse(&path.display().to_string(), &source)
+                .map_err(|error| eyre!("{error}"))?;
+            &custom
+        }
+        None => model(),
+    };
+    model
+        .ground(instance, options)
+        .map_err(|error| eyre!("grounding {} failed:\n{error}", model.name()))
+}
+
+impl Encoding {
+    pub(super) fn build_dsl(
+        netlist: &NorNetlist,
+        config: &ExactPlacerConfig,
+    ) -> eyre::Result<Self> {
+        Self::build_dsl_with(netlist, config, false)
+    }
+
+    /// `provenance` records which rule instance emitted each clause, for
+    /// explained DIMACS exports.
+    pub(super) fn build_dsl_with(
+        netlist: &NorNetlist,
+        config: &ExactPlacerConfig,
+        provenance: bool,
+    ) -> eyre::Result<Self> {
+        let prepared = Prepared::new(netlist, config)?;
+        let instance = prepared.instance(config)?;
+        let mut program = ground(config, &instance, provenance)?;
+        let mut encoding = prepared.read_back(&program, config)?;
 
         if config.optimize {
             let objective = program
@@ -530,8 +633,9 @@ impl Encoding {
                 .ok_or_else(|| eyre!("optimize needs a `minimize` objective in the model"))?;
             let total = objective.total_weight();
             ensure!(
-                total <= 100_000,
-                "objective weights sum to {total}; too large for the cost counter"
+                total <= config.tuning.max_objective_weight,
+                "objective weights sum to {total}, above tuning.max_objective_weight ({})",
+                config.tuning.max_objective_weight
             );
             let at_least = program.objective_counter(total);
             encoding.objective = Some(ObjectiveBound {
@@ -541,6 +645,7 @@ impl Encoding {
         }
 
         // The fixed-cell rule silently fails on impossible kinds; report them.
+        let geometry = prepared.geometry;
         for (&position, &kind) in &config.fixed_cells {
             if encoding.kind_lit(geometry.index(position), kind).is_none() {
                 bail!("fixed cell {position:?} cannot hold {kind:?}");
@@ -550,7 +655,7 @@ impl Encoding {
             let mut clause = Vec::new();
             let mut excluded = false;
             for &(position, kind) in layout {
-                if !dim.bound_on(position) {
+                if !config.dim.bound_on(position) {
                     continue;
                 }
                 match encoding.kind_lit(geometry.index(position), kind) {
@@ -595,12 +700,12 @@ impl Encoding {
 /// available classes finds the fewest torches; if it would visit more than
 /// `max_states` sets, the depth reached so far is returned (still a bound).
 pub(super) fn min_torches(
-    classes: &[super::encode::SignalClass],
+    classes: &[SignalClass],
     inputs: &[usize],
     targets: &[usize],
     max_states: usize,
 ) -> usize {
-    if classes.len() > 64 {
+    if classes.len() > MAX_BOUND_CLASSES {
         return 0;
     }
     let goal = targets.iter().fold(0u64, |set, &class| set | 1 << class);

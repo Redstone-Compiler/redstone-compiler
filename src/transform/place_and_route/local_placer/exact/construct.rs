@@ -16,7 +16,7 @@ use eyre::bail;
 use super::encode::{CellKind, TORCH_ATTACH};
 use super::layout::{ExactLayout, InputPolicy, OutputPolicy};
 use super::netlist::{NetDriver, NetId};
-use super::{ExactLocalPlacer, ExactOutcome, ExactPlacement, ExactPlacerConfig};
+use super::{ExactLocalPlacer, ExactOutcome, ExactPlacement, ExactPlacerConfig, ExactTuning};
 use crate::world::block::Direction;
 use crate::world::position::{DimSize, Position};
 
@@ -40,6 +40,10 @@ pub struct ConstructionConfig {
     pub output_policies: BTreeMap<String, OutputPolicy>,
     /// Times an earlier step may be re-solved after a later step fails.
     pub max_backtracks: usize,
+    /// Simulator rejections each step's workers may hit before giving up.
+    pub max_refinements: usize,
+    /// Search and verification constants for every step.
+    pub tuning: ExactTuning,
     /// Diagnostic only: see `ExactPlacerConfig::legacy_encoder`.
     #[doc(hidden)]
     pub legacy_encoder: bool,
@@ -61,6 +65,8 @@ impl Default for ConstructionConfig {
             input_policies: BTreeMap::new(),
             output_policies: BTreeMap::new(),
             max_backtracks: 6,
+            max_refinements: 8,
+            tuning: ExactTuning::default(),
             legacy_encoder: false,
         }
     }
@@ -228,7 +234,8 @@ impl ExactLocalPlacer {
             exact.stage_levels = config.stage_levels;
             exact.legacy_encoder = config.legacy_encoder;
             exact.time_limit = Some(config.step_time_limit);
-            exact.max_refinements = 8;
+            exact.max_refinements = config.max_refinements;
+            exact.tuning = config.tuning.clone();
             exact.blocked = blocked.to_vec();
             for (position, kind) in &state.cells {
                 if position.1 < frozen {

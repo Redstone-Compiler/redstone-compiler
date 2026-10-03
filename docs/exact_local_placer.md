@@ -290,6 +290,25 @@ Two encoding details mattered for these runs:
   Without the overlap slice, a step could expose a signal in a form the next
   step cannot extend, such as an outward repeater.
 
+## Configuration
+
+`ExactPlacerConfig` holds the problem (box, pins, fixed cells, observations,
+`optimize`, model file and params). Constants that were measured rather than
+derived live in `ExactPlacerConfig::tuning` (`ExactTuning`), with the measured
+values as defaults: worker seed stride (7919), simulator cycle and event limits
+per settle (256, 50 000), the torch-bound search state limit (200 000), and the
+largest total objective weight (100 000). `ConstructionConfig` and
+`CompactionConfig` pass a `tuning` through to every solve and also expose
+their per-step `max_refinements` (8) and, for compaction, the block-reduction
+`reduction_window` (3 slices). Two limits are structural, not tunable: at
+most 6 inputs (functions are `u64` truth tables) and 64 signal classes for the
+torch bound (class sets are `u64` masks).
+
+`dsl.rs` sets every model param the placer derives from the config in one
+place (`Prepared::params`: `rank_levels`, `stage_levels`, `max_blocks`,
+`allow_unpowered_wires`, `min_torches`); `model_params` are applied after
+them and override them.
+
 ## Running
 
 ```sh

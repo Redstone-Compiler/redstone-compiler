@@ -116,8 +116,40 @@ pub struct ExactPlacerConfig {
     /// `Stage`, `Observe`) and the instance facts and params it fills.
     pub model_file: Option<std::path::PathBuf>,
     /// Extra model params, for example `max_repeaters`; they override the
-    /// model's defaults.
+    /// model's defaults and the params the placer derives from this config.
     pub model_params: BTreeMap<String, rsdsl::IValue>,
+    /// Search and verification constants.
+    pub tuning: ExactTuning,
+}
+
+/// Search and verification constants. The defaults are the values the placer
+/// was measured with; they are fields so experiments need no code edits.
+#[derive(Debug, Clone)]
+pub struct ExactTuning {
+    /// Seed spacing between portfolio workers (`seed + worker * stride`).
+    pub worker_seed_stride: u32,
+    /// Simulator cycle limit for each settle during verification.
+    pub sim_max_cycles: usize,
+    /// Simulator event limit for each settle during verification.
+    pub sim_max_events: usize,
+    /// Sets of signal classes the torch lower-bound search may visit; past
+    /// this it returns the depth reached, a weaker but valid bound.
+    pub torch_bound_max_states: usize,
+    /// Largest total objective weight; the cost counter takes one input per
+    /// unit of weight.
+    pub max_objective_weight: u64,
+}
+
+impl Default for ExactTuning {
+    fn default() -> Self {
+        Self {
+            worker_seed_stride: 7919,
+            sim_max_cycles: 256,
+            sim_max_events: 50_000,
+            torch_bound_max_states: 200_000,
+            max_objective_weight: 100_000,
+        }
+    }
 }
 
 impl ExactPlacerConfig {
@@ -145,6 +177,7 @@ impl ExactPlacerConfig {
             core_guided: false,
             model_file: None,
             model_params: BTreeMap::new(),
+            tuning: ExactTuning::default(),
         }
     }
 
@@ -228,6 +261,12 @@ enum WorkerResult {
     Unknown(Option<String>),
     /// With `optimize`: the shared best layout is proven optimal.
     Optimal,
+}
+
+fn worker_seed(config: &ExactPlacerConfig, worker: usize) -> u32 {
+    config
+        .seed
+        .wrapping_add(worker as u32 * config.tuning.worker_seed_stride)
 }
 
 /// State the portfolio workers share.
@@ -399,7 +438,7 @@ impl ExactLocalPlacer {
         if config.core_guided && worker + 1 == config.workers.max(1) && shared.incumbent.is_some() {
             return self.run_core_guided(encoding, config, worker, shared);
         }
-        let seed = config.seed.wrapping_add(worker as u32 * 7919);
+        let seed = worker_seed(config, worker);
         let mut solver = SatSolver::new(seed);
         // Diversify the portfolio: sparse-first (phase 0) and stable-mode variants.
         solver.set_option("phase", i32::from(worker % 2 == 1));
@@ -474,13 +513,13 @@ impl ExactLocalPlacer {
             }
             let decoded = verify::decode(encoding, &solver, &self.netlist);
             let world = verify::build_world(config.dim, &decoded.kinds);
-            match verify::verify(&self.netlist, &decoded, &world) {
+            match verify::verify(&self.netlist, &decoded, &world, &config.tuning) {
                 Ok(()) => {
                     let cost = encoding
                         .objective
                         .as_ref()
                         .map(|bound| bound.objective.cost(|lit| solver.value(lit)));
-                    let placement = self.placement(config.dim, &decoded, world);
+                    let placement = self.placement(config, &decoded, world);
                     match (cost, shared.incumbent) {
                         (Some(cost), Some(incumbent)) => incumbent.offer(cost, placement, seed),
                         _ => return WorkerResult::Placed(Box::new(placement), seed),
@@ -489,8 +528,14 @@ impl ExactLocalPlacer {
                 Err(failure) => {
                     tracing::debug!(?failure, "exact placer layout rejected by simulator");
                     if let Ok(directory) = std::env::var("EXACT_DUMP_REJECTIONS") {
-                        let diagnosis =
-                            verify::diagnose(encoding, &solver, &self.netlist, &decoded, &world);
+                        let diagnosis = verify::diagnose(
+                            encoding,
+                            &solver,
+                            &self.netlist,
+                            &decoded,
+                            &world,
+                            &config.tuning,
+                        );
                         verify::dump_rejection(
                             &directory,
                             &self.netlist,
@@ -552,7 +597,7 @@ impl ExactLocalPlacer {
             .as_ref()
             .expect("optimize has an objective");
         let incumbent = shared.incumbent.expect("optimize shares an incumbent");
-        let seed = config.seed.wrapping_add(worker as u32 * 7919);
+        let seed = worker_seed(config, worker);
         let mut solver = SatSolver::new(seed);
         solver.add_cnf(&encoding.cnf);
         let signal = StopSignal {
@@ -655,10 +700,10 @@ impl ExactLocalPlacer {
                     }
                     let decoded = verify::decode(encoding, &solver, &self.netlist);
                     let world = verify::build_world(config.dim, &decoded.kinds);
-                    match verify::verify(&self.netlist, &decoded, &world) {
+                    match verify::verify(&self.netlist, &decoded, &world, &config.tuning) {
                         Ok(()) => {
                             let cost = bound.objective.cost(|lit| solver.value(lit));
-                            let placement = self.placement(config.dim, &decoded, world);
+                            let placement = self.placement(config, &decoded, world);
                             incumbent.offer(cost, placement, seed);
                             // Every assumption holds, so nothing is cheaper.
                             incumbent.lower.fetch_max(cost, Ordering::Relaxed);
@@ -687,10 +732,11 @@ impl ExactLocalPlacer {
 
     fn placement(
         &self,
-        dim: DimSize,
+        config: &ExactPlacerConfig,
         decoded: &verify::Decoded,
         world: crate::world::World3D,
     ) -> ExactPlacement {
+        let dim = config.dim;
         let cells = decoded
             .kinds
             .iter()
@@ -709,7 +755,7 @@ impl ExactLocalPlacer {
             .count();
         let rcell = verify::to_rcell(&self.name, dim, &self.netlist, decoded);
         // Store settled torch states, so pasting the cell starts stable.
-        let world = verify::settled_world(&world).unwrap_or(world);
+        let world = verify::settled_world(&world, &config.tuning).unwrap_or(world);
         ExactPlacement {
             placed: PlacedWorld {
                 world,

@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use super::encode::{CellKind, Encoding, CARDINALS, TORCH_ATTACH};
 use super::netlist::{NetDriver, NorNetlist};
 use super::solver::SatSolver;
+use super::ExactTuning;
 use crate::physical_cell::{
     AutoSupport, AxisDirection, CellExpectation, CellGlyph, CellInput, CellOutput, CellPlane,
     PhysicalCellDocument, PlaneAxes,
@@ -158,14 +159,24 @@ fn settle_case(
     netlist: &NorNetlist,
     decoded: &Decoded,
     case: usize,
+    tuning: &ExactTuning,
 ) -> Result<Simulator, ExactVerificationFailure> {
-    let mut simulator = Simulator::from_settled_with_limits_and_trace(world, 256, 50_000, 0)
-        .map_err(|error| ExactVerificationFailure {
-            message: format!("initial simulation failed: {}", error.message()),
-            position: None,
-        })?;
+    let mut simulator = Simulator::from_settled_with_limits_and_trace(
+        world,
+        tuning.sim_max_cycles,
+        tuning.sim_max_events,
+        0,
+    )
+    .map_err(|error| ExactVerificationFailure {
+        message: format!("initial simulation failed: {}", error.message()),
+        position: None,
+    })?;
     simulator
-        .drive_inputs_with_limits(case_inputs(netlist, &decoded.inputs, case), 256, 50_000)
+        .drive_inputs_with_limits(
+            case_inputs(netlist, &decoded.inputs, case),
+            tuning.sim_max_cycles,
+            tuning.sim_max_events,
+        )
         .map_err(|error| ExactVerificationFailure {
             message: format!("case {case} did not settle: {error}"),
             position: None,
@@ -175,9 +186,14 @@ fn settle_case(
 
 /// The settled world with every input off: what an exported cell should
 /// store, so that pasting it starts stable.
-pub(super) fn settled_world(world: &World3D) -> Option<World3D> {
-    let simulator =
-        Simulator::from_settled_with_limits_and_trace(&World::from(world), 256, 50_000, 0).ok()?;
+pub(super) fn settled_world(world: &World3D, tuning: &ExactTuning) -> Option<World3D> {
+    let simulator = Simulator::from_settled_with_limits_and_trace(
+        &World::from(world),
+        tuning.sim_max_cycles,
+        tuning.sim_max_events,
+        0,
+    )
+    .ok()?;
     Some(simulator.world().clone())
 }
 
@@ -187,6 +203,7 @@ pub(super) fn verify(
     netlist: &NorNetlist,
     decoded: &Decoded,
     world: &World3D,
+    tuning: &ExactTuning,
 ) -> Result<(), ExactVerificationFailure> {
     let case_count = 1usize << netlist.input_names().len();
     let world = World::from(world);
@@ -194,7 +211,7 @@ pub(super) fn verify(
     let observed = decoded.observed.iter().cloned().collect::<BTreeMap<_, _>>();
 
     for case in 0..case_count {
-        let simulator = settle_case(&world, netlist, decoded, case)?;
+        let simulator = settle_case(&world, netlist, decoded, case, tuning)?;
         for (cell, function) in decoded.functions.iter().enumerate() {
             let Some(function) = function else {
                 continue;
@@ -225,7 +242,7 @@ pub(super) fn verify(
 
     for from in 0..case_count {
         for to in 0..case_count {
-            let mut simulator = settle_case(&world, netlist, decoded, from)?;
+            let mut simulator = settle_case(&world, netlist, decoded, from, tuning)?;
             simulator
                 .advance_idle_cycles(MANUAL_INPUT_IDLE_CYCLES)
                 .map_err(|error| ExactVerificationFailure {
@@ -233,7 +250,11 @@ pub(super) fn verify(
                     position: None,
                 })?;
             simulator
-                .drive_inputs_with_limits(case_inputs(netlist, &decoded.inputs, to), 256, 50_000)
+                .drive_inputs_with_limits(
+                    case_inputs(netlist, &decoded.inputs, to),
+                    tuning.sim_max_cycles,
+                    tuning.sim_max_events,
+                )
                 .map_err(|error| ExactVerificationFailure {
                     message: format!("transition {from}->{to} did not settle: {error}"),
                     position: None,
@@ -313,6 +334,7 @@ pub(super) fn diagnose(
     netlist: &NorNetlist,
     decoded: &Decoded,
     world: &World3D,
+    tuning: &ExactTuning,
 ) -> String {
     let geometry = encoding.geometry;
     let world = World::from(world);
@@ -324,7 +346,7 @@ pub(super) fn diagnose(
     let model = |cell: usize, case: usize| decoded.functions[cell].map(|f| f & (1 << case) != 0);
     let mut out = String::new();
     for case in 0..encoding.cases {
-        let simulator = match settle_case(&world, netlist, decoded, case) {
+        let simulator = match settle_case(&world, netlist, decoded, case, tuning) {
             Ok(simulator) => simulator,
             Err(error) => {
                 out += &format!("// diagnose case {case}: {}\n", error.message);

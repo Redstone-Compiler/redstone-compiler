@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use super::encode::CellKind;
 use super::layout::{ExactLayout, OutputPolicy};
-use super::{ExactLocalPlacer, ExactOutcome, ExactPlacement, ExactPlacerConfig};
+use super::{ExactLocalPlacer, ExactOutcome, ExactPlacement, ExactPlacerConfig, ExactTuning};
 use crate::world::position::Position;
 
 #[derive(Debug, Clone)]
@@ -25,6 +25,12 @@ pub struct CompactionConfig {
     /// Minimize each block-reduction window's cost in one solve (`optimize`)
     /// instead of asking for one block fewer per attempt (rsdsl model only).
     pub optimize_windows: bool,
+    /// Y slices re-solved together in each block-reduction window.
+    pub reduction_window: usize,
+    /// Simulator rejections each attempt's workers may hit before giving up.
+    pub max_refinements: usize,
+    /// Search and verification constants for every attempt.
+    pub tuning: ExactTuning,
     pub attempt_time_limit: Duration,
     pub time_limit: Option<Duration>,
     pub workers: usize,
@@ -46,6 +52,9 @@ impl Default for CompactionConfig {
             max_window_radius: 2,
             minimize_blocks: true,
             optimize_windows: true,
+            reduction_window: 3,
+            max_refinements: 8,
+            tuning: ExactTuning::default(),
             attempt_time_limit: Duration::from_secs(20),
             time_limit: None,
             workers: 8,
@@ -136,7 +145,7 @@ impl ExactLocalPlacer {
             break;
         }
         if config.minimize_blocks {
-            // Slide a three-slice window along Y, asking for fewer blocks. With
+            // Slide a `reduction_window`-slice window along Y, asking for fewer blocks. With
             // `optimize_windows` each window is minimized in one solve, and a
             // window proven optimal stays done until the layout changes.
             let optimize = config.optimize_windows && !config.legacy_encoder;
@@ -151,7 +160,7 @@ impl ExactLocalPlacer {
                     }
                     let limit = layout.cells.len().saturating_sub(1);
                     report.attempts += 1;
-                    let window = (low, low + 3);
+                    let window = (low, low + config.reduction_window);
                     if optimize {
                         let (placement, optimal) =
                             self.optimize_window(&layout, window, limit, config);
@@ -287,7 +296,8 @@ impl ExactLocalPlacer {
         exact.stage_levels = config.stage_levels;
         exact.legacy_encoder = config.legacy_encoder;
         exact.time_limit = Some(config.attempt_time_limit);
-        exact.max_refinements = 8;
+        exact.max_refinements = config.max_refinements;
+        exact.tuning = config.tuning.clone();
         exact.max_blocks = max_blocks;
         for (name, position, attach) in &cut.inputs {
             exact = exact.with_input_site(name.clone(), *position, *attach);
