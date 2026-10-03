@@ -24,6 +24,8 @@ use crate::world::World3D;
 
 mod config;
 mod debug;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod exact;
 mod isolation;
 mod scheduler;
 mod state;

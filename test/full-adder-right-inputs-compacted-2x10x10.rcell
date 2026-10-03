@@ -1,0 +1,48 @@
+rcell 1;
+
+// The hand-made full-adder-right-inputs-2x14x10 cell after automatic
+// compaction by the exact placer: four Y slices removed and blocks traded
+// away by exact window re-solves (docs/exact_local_placer.md). Operands stay
+// on the Y-min face and the sum still drives out of the Y-max face.
+cell "full-adder-right-inputs-compacted-2x10x10" size [2, 10, 10] {
+  glyph "T" = repeater toward y- delay 1;
+  glyph "U" = repeater toward y+ delay 1;
+  glyph "V" = torch on z-;
+  glyph "W" = torch on x+;
+  glyph "X" = torch on y-;
+  glyph "Y" = torch on x-;
+
+  input "b" at [0, 0, 1] on x+;
+  input "a" at [0, 0, 3] on x+;
+  input "cin" at [0, 9, 5] on x+;
+  output "cout" at [1, 2, 9];
+  output "sum" at [0, 9, 8];
+
+  plane yz at x=0 {
+    z=9 "..#U#UV...";
+    z=8 "..V#.##WrT";
+    z=7 "#.#W..W.##";
+    z=6 "..VV..#r#.";
+    z=5 "..##U#r#r.";
+    z=4 "..V.#.#U#.";
+    z=3 ".T#Ur..#..";
+    z=2 ".#r##r....";
+    z=1 "..#..#....";
+  }
+
+  plane yz at x=1 {
+    z=9 "..Y#Xr....";
+    z=8 "...Y.#T#Ur";
+    z=7 "...#UU#.##";
+    z=6 "...V##Vr.V";
+    z=5 ".rT#Xr##T#";
+    z=4 ".##V.#..#.";
+    z=3 "#X.#U#....";
+    z=2 "V..Y#X....";
+    z=1 "#TT#X.....";
+    z=0 ".##.......";
+  }
+
+  expect "cout" = a&b|a&cin|b&cin;
+  expect "sum" = a^b^cin;
+}

@@ -16,6 +16,7 @@
 - Height-10 full adder and low XNOR composition rules: `docs/height10_full_adder.md`
 - Further 2x13x9 compaction and carry bridge clearance: `docs/compact_full_adder_shrink.md`
 - Full adder with operand switches on the same boundary: `docs/full_adder_input_boundary.md`
+- Exact SAT-based local placer, survey, and construct/compact pipeline: `docs/exact_local_placer.md`
 
 When asked to create or preserve project documentation, add an appropriate file under `docs/` and link it from this file when it is useful for future agents.
 
