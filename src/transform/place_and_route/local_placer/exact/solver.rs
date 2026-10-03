@@ -133,7 +133,6 @@ impl SatSolver {
 
 impl SatSolver {
     /// After an unsatisfiable solve: whether assumption `lit` was in the core.
-    #[allow(dead_code)]
     pub(super) fn failed(&self, lit: Lit) -> bool {
         // SAFETY: only called after an unsatisfiable solve with assumptions.
         unsafe { ccadical_failed(self.raw, lit) != 0 }

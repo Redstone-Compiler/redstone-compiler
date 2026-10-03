@@ -42,6 +42,7 @@ pub use layout::{ExactLayout, InputPolicy, OutputPolicy};
 pub use netlist::{Net, NetDriver, NetId, NorNetlist};
 pub use verify::ExactVerificationFailure;
 
+use self::cnf::Lit;
 use self::encode::Encoding;
 use self::solver::{SatSolver, SolveResult, StopSignal};
 use crate::graph::logic::LogicGraph;
@@ -102,6 +103,13 @@ pub struct ExactPlacerConfig {
     /// is an assumption on one incremental solver per worker, and workers
     /// share the best layout found so far.
     pub optimize: bool,
+    /// With `optimize`, the last worker raises a proven lower bound with
+    /// core-guided search (OLL) instead of lowering the best cost; optimality
+    /// is proven once the two meet. With one worker the search is pure OLL.
+    /// Off by default: on the cells measured so far the bound rose one unit
+    /// per core with each core slower than the last, and the direct proof
+    /// finished first (see docs/exact_local_placer.md).
+    pub core_guided: bool,
     /// A model file to ground instead of the built-in `exact_placer.rsdsl`.
     /// It must declare the families the placer reads back (`Kind`, `Sig`,
     /// `Powered`, `Conn`, `Points`, `Hard`, `Feeds`, `Contrib`, `Rank`,
@@ -134,6 +142,7 @@ impl ExactPlacerConfig {
             relax_soundness: false,
             legacy_encoder: false,
             optimize: false,
+            core_guided: false,
             model_file: None,
             model_params: BTreeMap::new(),
         }
@@ -185,6 +194,8 @@ pub struct ExactPlacerStats {
     pub cost: Option<i64>,
     pub optimal: bool,
     pub improvements: usize,
+    /// The best proven lower bound on the cost (core-guided search).
+    pub lower_bound: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -234,6 +245,8 @@ struct Incumbent {
     cost: std::sync::atomic::AtomicI64,
     proven: AtomicBool,
     improvements: std::sync::atomic::AtomicUsize,
+    /// Proven lower bound on the cost (`i64::MIN` until one is known).
+    lower: std::sync::atomic::AtomicI64,
 }
 
 impl Incumbent {
@@ -243,7 +256,18 @@ impl Incumbent {
             cost: std::sync::atomic::AtomicI64::new(i64::MAX),
             proven: AtomicBool::new(false),
             improvements: std::sync::atomic::AtomicUsize::new(0),
+            lower: std::sync::atomic::AtomicI64::new(i64::MIN),
         }
+    }
+
+    /// Whether the best layout meets the lower bound (and is thus optimal).
+    fn closed(&self) -> bool {
+        let best = self.cost.load(Ordering::Relaxed);
+        let closed = best != i64::MAX && self.lower.load(Ordering::Relaxed) >= best;
+        if closed {
+            self.proven.store(true, Ordering::Relaxed);
+        }
+        closed
     }
 
     fn offer(&self, cost: i64, placement: ExactPlacement, seed: u32) {
@@ -334,6 +358,8 @@ impl ExactLocalPlacer {
         if let Some(incumbent) = incumbent {
             stats.optimal = incumbent.proven.load(Ordering::Relaxed);
             stats.improvements = incumbent.improvements.load(Ordering::Relaxed);
+            let lower = incumbent.lower.load(Ordering::Relaxed);
+            stats.lower_bound = (lower != i64::MIN).then_some(lower);
             if let Some((cost, placement, seed)) = incumbent.best.into_inner().unwrap() {
                 stats.cost = Some(cost);
                 stats.winning_seed = Some(seed);
@@ -370,6 +396,9 @@ impl ExactLocalPlacer {
         worker: usize,
         shared: &WorkerShared,
     ) -> WorkerResult {
+        if config.core_guided && worker + 1 == config.workers.max(1) && shared.incumbent.is_some() {
+            return self.run_core_guided(encoding, config, worker, shared);
+        }
         let seed = config.seed.wrapping_add(worker as u32 * 7919);
         let mut solver = SatSolver::new(seed);
         // Diversify the portfolio: sparse-first (phase 0) and stable-mode variants.
@@ -389,6 +418,9 @@ impl ExactLocalPlacer {
             // With an objective, ask for a layout cheaper than the best so far.
             let mut assumptions = Vec::new();
             if let (Some(bound), Some(incumbent)) = (&encoding.objective, shared.incumbent) {
+                if incumbent.closed() {
+                    return WorkerResult::Optimal;
+                }
                 // Restart this solve as soon as another worker improves the bound.
                 signal.restart = Some((
                     &incumbent.improvements,
@@ -477,6 +509,176 @@ impl ExactLocalPlacer {
                         .map(|&lit| -lit)
                         .collect::<Vec<_>>();
                     solver.add_clause(&blocking);
+                }
+            }
+        }
+        WorkerResult::Unknown(last_rejection)
+    }
+
+    /// Core-guided lower bounding (OLL; Andres et al. 2012, as in RC2).
+    /// Every cost literal is assumed false; an unsatisfiable core says at
+    /// least one of its literals must hold, so the bound rises by the core's
+    /// smallest weight and the core is relaxed through a totalizer (assuming
+    /// "fewer than two of them", then three, ...). The first verified model
+    /// that satisfies every assumption is optimal.
+    fn run_core_guided(
+        &self,
+        encoding: &Encoding,
+        config: &ExactPlacerConfig,
+        worker: usize,
+        shared: &WorkerShared,
+    ) -> WorkerResult {
+        struct Soft {
+            assumption: Lit,
+            weight: u64,
+            /// The totalizer and output index this soft bounds, if any.
+            sum: Option<(usize, usize)>,
+        }
+        struct Sink<'a> {
+            solver: &'a mut SatSolver,
+            aux: &'a mut acyclic::AuxVars,
+        }
+        impl rsdsl::formula::ClauseSink for Sink<'_> {
+            fn fresh(&mut self) -> Lit {
+                self.aux.fresh()
+            }
+            fn add(&mut self, clause: &[Lit]) {
+                self.solver.add_clause(clause);
+            }
+        }
+
+        let bound = encoding
+            .objective
+            .as_ref()
+            .expect("optimize has an objective");
+        let incumbent = shared.incumbent.expect("optimize shares an incumbent");
+        let seed = config.seed.wrapping_add(worker as u32 * 7919);
+        let mut solver = SatSolver::new(seed);
+        solver.add_cnf(&encoding.cnf);
+        let signal = StopSignal {
+            stop: shared.stop,
+            deadline: shared.deadline,
+            restart: None,
+        };
+        let index = acyclic::LazyIndex::new(encoding);
+        let mut aux = acyclic::AuxVars::new(encoding);
+        let mut softs = bound
+            .objective
+            .terms
+            .iter()
+            .map(|&(weight, lit)| Soft {
+                assumption: -lit,
+                weight,
+                sum: None,
+            })
+            .collect::<Vec<_>>();
+        let mut sums: Vec<(Vec<Lit>, u64)> = Vec::new();
+        let mut extended = std::collections::HashSet::new();
+        let mut lower = bound.objective.offset;
+        let mut last_rejection = None;
+        let mut rejections = 0;
+        while rejections <= config.max_refinements {
+            if incumbent.closed() {
+                return WorkerResult::Optimal;
+            }
+            let assumptions = softs
+                .iter()
+                .filter(|soft| soft.weight > 0)
+                .map(|soft| soft.assumption)
+                .collect::<Vec<_>>();
+            match solver.solve(&assumptions, &signal) {
+                SolveResult::Interrupted => return WorkerResult::Unknown(last_rejection),
+                SolveResult::Unsat => {
+                    let core = (0..softs.len())
+                        .filter(|&i| softs[i].weight > 0 && solver.failed(softs[i].assumption))
+                        .collect::<Vec<_>>();
+                    if core.is_empty() {
+                        // Unsatisfiable without assumptions.
+                        return if last_rejection.is_none()
+                            && incumbent.cost.load(Ordering::Relaxed) == i64::MAX
+                        {
+                            WorkerResult::Infeasible
+                        } else {
+                            WorkerResult::Unknown(last_rejection)
+                        };
+                    }
+                    let weight = core.iter().map(|&i| softs[i].weight).min().unwrap();
+                    lower += weight as i64;
+                    incumbent.lower.fetch_max(lower, Ordering::Relaxed);
+                    tracing::info!(lower, core = core.len(), "core-guided lower bound");
+                    for &i in &core {
+                        softs[i].weight -= weight;
+                    }
+                    // A relaxed sum whose bound is in the core may now admit
+                    // one more violation, at the sum's weight.
+                    for &i in &core {
+                        if let Some((sum, j)) = softs[i].sum {
+                            let (outputs, sum_weight) = &sums[sum];
+                            if j + 1 < outputs.len() && extended.insert((sum, j)) {
+                                softs.push(Soft {
+                                    assumption: -outputs[j + 1],
+                                    weight: *sum_weight,
+                                    sum: Some((sum, j + 1)),
+                                });
+                            }
+                        }
+                    }
+                    if core.len() > 1 {
+                        let violated = core
+                            .iter()
+                            .map(|&i| -softs[i].assumption)
+                            .collect::<Vec<_>>();
+                        let mut sink = Sink {
+                            solver: &mut solver,
+                            aux: &mut aux,
+                        };
+                        let outputs =
+                            rsdsl::formula::totalizer(&mut sink, &violated, violated.len() - 1);
+                        // One violation is already paid for; allow it, charge the second.
+                        softs.push(Soft {
+                            assumption: -outputs[1],
+                            weight,
+                            sum: Some((sums.len(), 1)),
+                        });
+                        sums.push((outputs, weight));
+                    }
+                }
+                SolveResult::Sat => {
+                    let mut worker_lazy = acyclic::LazyStats::default();
+                    let added =
+                        acyclic::refine(encoding, &index, &mut solver, &mut aux, &mut worker_lazy);
+                    if added > 0 {
+                        let mut total = shared.lazy.lock().unwrap();
+                        total.loop_formulas += worker_lazy.loop_formulas;
+                        total.feedback_cuts += worker_lazy.feedback_cuts;
+                        continue;
+                    }
+                    let decoded = verify::decode(encoding, &solver, &self.netlist);
+                    let world = verify::build_world(config.dim, &decoded.kinds);
+                    match verify::verify(&self.netlist, &decoded, &world) {
+                        Ok(()) => {
+                            let cost = bound.objective.cost(|lit| solver.value(lit));
+                            let placement = self.placement(config.dim, &decoded, world);
+                            incumbent.offer(cost, placement, seed);
+                            // Every assumption holds, so nothing is cheaper.
+                            incumbent.lower.fetch_max(cost, Ordering::Relaxed);
+                            if incumbent.closed() {
+                                return WorkerResult::Optimal;
+                            }
+                        }
+                        Err(failure) => {
+                            last_rejection =
+                                Some(format!("{} at {:?}", failure.message, failure.position));
+                            *shared.refinements.lock().unwrap() += 1;
+                            rejections += 1;
+                            let blocking = decoded
+                                .kind_lits
+                                .iter()
+                                .map(|&lit| -lit)
+                                .collect::<Vec<_>>();
+                            solver.add_clause(&blocking);
+                        }
+                    }
                 }
             }
         }

@@ -1566,6 +1566,7 @@ fn measure_optimize() {
     config.workers = env_usize("WORKERS", 8);
     config.time_limit = Some(Duration::from_secs(env_usize("SECONDS", 120) as u64));
     config.optimize = true;
+    config.core_guided = std::env::var("OPT_CORES").as_deref() != Ok("0");
     if std::env::var("OPT_SYMMETRY").as_deref() == Ok("0") {
         config
             .model_params
@@ -1574,9 +1575,10 @@ fn measure_optimize() {
     let started = std::time::Instant::now();
     let (outcome, stats) = placer.place(&config).unwrap();
     println!(
-        "OPT {:?} cost={:?} optimal={} improvements={} rejections={} elapsed={:?}",
+        "OPT {:?} cost={:?} lower={:?} optimal={} improvements={} rejections={} elapsed={:?}",
         dim,
         stats.cost,
+        stats.lower_bound,
         stats.optimal,
         stats.improvements,
         stats.refinements,
@@ -1644,6 +1646,32 @@ fn compare_symmetry_breaking() {
                 stats.optimal,
                 started.elapsed().as_secs_f64()
             );
+        }
+    }
+}
+
+/// Pure core-guided search (one worker running OLL) proves the same optimum,
+/// and its lower bound meets the cost.
+#[test]
+fn core_guided_search_proves_the_optimum() {
+    for (graph, dim, expected) in [
+        (graph(&[("out", "~a")]), DimSize(1, 4, 2), None),
+        (graph(&[("out", "~(a|b)")]), DimSize(1, 5, 2), Some(4)),
+    ] {
+        let placer = ExactLocalPlacer::new(&graph).unwrap();
+        let mut config = ExactPlacerConfig::new(dim);
+        config.workers = 1;
+        config.optimize = true;
+        config.time_limit = Some(Duration::from_secs(60));
+        let (_, direct) = placer.place(&config).unwrap();
+        config.core_guided = true;
+        let (outcome, stats) = placer.place(&config).unwrap();
+        assert!(matches!(outcome, ExactOutcome::Placed(_)), "{outcome:?}");
+        assert!(stats.optimal, "{dim:?}: {stats:?}");
+        assert_eq!(stats.cost, direct.cost, "{dim:?}");
+        assert_eq!(stats.lower_bound, stats.cost, "{dim:?}");
+        if let Some(expected) = expected {
+            assert_eq!(stats.cost, Some(expected));
         }
     }
 }

@@ -155,6 +155,17 @@ fewer per attempt; a window proven optimal is skipped until the layout
 changes. On the seed-1 full adder (same 900 s budget, same 2x14x9 box) this
 reaches 153 blocks instead of 171.
 
+Proof time, not search, limits optimality. `ExactPlacerConfig::core_guided`
+adds core-guided lower bounding (OLL, the algorithm behind the RC2 MaxSAT
+solver) on the last worker: every cost literal is assumed false, each
+unsatisfiable core raises the bound by its smallest weight, and the core is
+relaxed through a totalizer built into the running solver. It is correct
+(pure OLL proves the same optima, with the bound meeting the cost) but off by
+default: the bound rises one unit per core and each core takes longer than
+the last. On AND 2x4x3 it reaches 8 after 7.9 s while the direct proof of 9
+finishes at 9.4 s; on XOR 2x6x4 it reaches only 8 in two minutes against a
+best layout of 30.
+
 Tried and left off by default: the model's `symmetry_breaking` rules (one
 contributing source per dust/repeater; zero rank/stage without an incoming
 contribution). They are sound but did not speed up proofs (AND 2x4x3: 10.5 s

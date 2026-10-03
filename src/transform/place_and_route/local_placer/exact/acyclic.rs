@@ -55,7 +55,7 @@ impl AuxVars {
         lit
     }
 
-    fn fresh(&mut self) -> Lit {
+    pub(super) fn fresh(&mut self) -> Lit {
         let lit = self.next;
         self.next += 1;
         lit
