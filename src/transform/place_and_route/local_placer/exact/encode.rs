@@ -266,11 +266,39 @@ pub(super) struct Encoding {
     pub(super) observed: Vec<(String, u64)>,
     /// The grounded rsdsl program behind `cnf` (absent for the legacy encoder).
     pub(super) program: Option<Box<rsdsl::Program>>,
+    /// The model's cost and its incremental bound (with `optimize`).
+    pub(super) objective: Option<ObjectiveBound>,
+}
+
+/// `at_least[j]` is implied by `cost - offset >= j + 1`; assuming
+/// `-at_least[b]` asks for a layout of cost at most `offset + b`.
+pub(super) struct ObjectiveBound {
+    pub(super) objective: rsdsl::Objective,
+    pub(super) at_least: Vec<Lit>,
+}
+
+impl ObjectiveBound {
+    /// Assumptions for "cost below `best`", or `None` when nothing cheaper
+    /// is possible.
+    pub(super) fn below(&self, best: i64) -> Option<Vec<Lit>> {
+        let bound = best - 1 - self.objective.offset;
+        if bound < 0 {
+            return None;
+        }
+        Some(match self.at_least.get(bound as usize) {
+            Some(&lit) => vec![-lit],
+            None => Vec::new(),
+        })
+    }
 }
 
 impl Encoding {
     pub(super) fn build(netlist: &NorNetlist, config: &ExactPlacerConfig) -> eyre::Result<Self> {
         if config.legacy_encoder {
+            ensure!(
+                !config.optimize,
+                "the legacy encoder has no objective; optimize needs the rsdsl model"
+            );
             Self::build_legacy(netlist, config)
         } else {
             Self::build_dsl(netlist, config)
@@ -313,6 +341,7 @@ impl Encoding {
             coverage_relaxations: Vec::new(),
             observed: Vec::new(),
             program: None,
+            objective: None,
         };
         let mut sections = Vec::new();
         let mark = |name: &'static str, cnf: &Cnf, sections: &mut Vec<_>| {

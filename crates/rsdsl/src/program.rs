@@ -112,6 +112,31 @@ pub struct Guard {
     pub lit: Lit,
 }
 
+/// A cost to minimize: `offset + Σ weight · [lit]`, weights positive.
+#[derive(Debug, Clone, Default)]
+pub struct Objective {
+    pub terms: Vec<(u64, Lit)>,
+    pub offset: i64,
+}
+
+impl Objective {
+    /// The cost of an assignment, given each literal's value.
+    pub fn cost(&self, value: impl Fn(Lit) -> bool) -> i64 {
+        self.offset
+            + self
+                .terms
+                .iter()
+                .filter(|(_, lit)| value(*lit))
+                .map(|(weight, _)| *weight as i64)
+                .sum::<i64>()
+    }
+
+    /// Sum of all weights: the largest cost above `offset`.
+    pub fn total_weight(&self) -> u64 {
+        self.terms.iter().map(|(weight, _)| weight).sum()
+    }
+}
+
 /// How much explanation `write_dimacs` adds as comment lines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Comments {
@@ -157,6 +182,59 @@ impl Program {
             .map(|w| w.render(&self.sources))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// The model's summed `minimize`/`maximize` items, if it declares any.
+    pub fn objective(&self) -> Option<Objective> {
+        self.objective.as_ref().map(|(terms, offset)| Objective {
+            terms: terms.clone(),
+            offset: *offset,
+        })
+    }
+
+    /// Adds a totalizer over the objective's weighted literals (a weight `w`
+    /// counts as `w` inputs) and returns its outputs: `outputs[j]` is implied
+    /// by `cost - offset >= j + 1`, up to `cap + 1`. Assume `-outputs[b]` to
+    /// require `cost <= offset + b`.
+    pub fn objective_counter(&mut self, cap: u64) -> Vec<Lit> {
+        let Some((terms, _)) = &self.objective else {
+            return Vec::new();
+        };
+        let inputs = terms
+            .iter()
+            .flat_map(|&(weight, lit)| std::iter::repeat(lit).take(weight as usize))
+            .collect::<Vec<_>>();
+        let origin = self.origins.len() as u32;
+        self.origins
+            .push(("목적함수 카운터".to_owned(), String::new()));
+        self.encoder.origin = origin;
+        let outputs = self.encoder.totalizer(&inputs, cap as usize);
+        self.encoder.origin = 0;
+        outputs
+    }
+
+    /// Writes weighted partial MaxSAT (WCNF, MaxSAT Evaluation 2022 format):
+    /// every clause is hard (`h ...`), each objective term `w · [l]` is a soft
+    /// unit clause `w -l`. The optimum is `offset +` the solver's cost.
+    pub fn write_wcnf(&self, out: &mut dyn Write, header: &[String]) -> io::Result<()> {
+        for line in header {
+            writeln!(out, "c {line}")?;
+        }
+        let (terms, offset) = self.objective.clone().unwrap_or_default();
+        writeln!(out, "c cost = {offset} + MaxSAT cost")?;
+        let mut clause = Vec::new();
+        for &lit in &self.encoder.literals {
+            if lit != 0 {
+                clause.push(lit.to_string());
+                continue;
+            }
+            writeln!(out, "h {} 0", clause.join(" "))?;
+            clause.clear();
+        }
+        for (weight, lit) in terms {
+            writeln!(out, "{weight} {} 0", -lit)?;
+        }
+        Ok(())
     }
 
     /// `(rule, clauses, grounding time)` in declaration order.

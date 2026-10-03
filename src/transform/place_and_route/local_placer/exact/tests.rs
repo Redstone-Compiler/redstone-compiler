@@ -344,6 +344,7 @@ fn assert_encoder_accepts_rcell(
     let signal = StopSignal {
         stop: &stop,
         deadline: Some(std::time::Instant::now() + Duration::from_secs(120)),
+        restart: None,
     };
     let result = solver.solve(&assumptions, &signal);
     if result == SolveResult::Unsat {
@@ -596,6 +597,7 @@ fn measure_routing_with_manual_torches() {
                     let signal = StopSignal {
                         stop,
                         deadline: Some(std::time::Instant::now() + Duration::from_secs(300)),
+                        restart: None,
                     };
                     let result = solver.solve(assumptions, &signal);
                     if result != SolveResult::Interrupted {
@@ -742,6 +744,7 @@ fn measure_completion_after_manual_prefix() {
                     let signal = StopSignal {
                         stop,
                         deadline: Some(std::time::Instant::now() + Duration::from_secs(seconds)),
+                        restart: None,
                     };
                     let result = solver.solve(assumptions, &signal);
                     if result != SolveResult::Interrupted {
@@ -1037,6 +1040,7 @@ fn compare_encoders() {
             let signal = StopSignal {
                 stop: &stop,
                 deadline: Some(std::time::Instant::now() + Duration::from_secs(seconds)),
+                restart: None,
             };
             let started = std::time::Instant::now();
             let result = solver.solve(&[], &signal);
@@ -1156,6 +1160,7 @@ fn encoders_accept_each_others_layouts() {
             let signal = StopSignal {
                 stop: &stop,
                 deadline: Some(std::time::Instant::now() + Duration::from_secs(60)),
+                restart: None,
             };
             assert_eq!(
                 solver.solve(&assumptions, &signal),
@@ -1306,6 +1311,7 @@ fn admitted_layouts(
     let signal = StopSignal {
         stop: &stop,
         deadline: None,
+        restart: None,
     };
     let mut layouts = std::collections::BTreeSet::new();
     while solver.solve(&[], &signal) == SolveResult::Sat {
@@ -1478,5 +1484,98 @@ fn explain_rejected_block() {
                 entry.block_before
             );
         }
+    }
+}
+
+/// `optimize` returns a layout whose cost is proven minimal: one block fewer
+/// is infeasible, and a plain placement is never cheaper.
+#[test]
+fn optimize_finds_and_proves_the_cheapest_layout() {
+    for (graph, dim) in [
+        (graph(&[("out", "~a")]), DimSize(1, 4, 2)),
+        (graph(&[("out", "~(a|b)")]), DimSize(1, 5, 2)),
+    ] {
+        let placer = ExactLocalPlacer::new(&graph).unwrap();
+        let mut config = ExactPlacerConfig::new(dim);
+        config.workers = 2;
+        config.time_limit = Some(Duration::from_secs(60));
+        let plain = expect_placed(&placer, &config);
+        config.optimize = true;
+        let (outcome, stats) = placer.place(&config).unwrap();
+        let ExactOutcome::Placed(best) = outcome else {
+            panic!("expected a placement, got {outcome:?}");
+        };
+        // The default cost counts non-air blocks, switches included.
+        let blocks = best.cells.len() as i64;
+        assert_eq!(stats.cost, Some(blocks), "{dim:?}");
+        assert!(stats.optimal, "{dim:?}: {stats:?}");
+        assert!(blocks <= plain.cells.len() as i64);
+        let mut tighter = config.clone();
+        tighter.optimize = false;
+        tighter.max_blocks = Some(best.cells.len() - 1);
+        let (outcome, _) = placer.place(&tighter).unwrap();
+        assert!(
+            matches!(outcome, ExactOutcome::Infeasible),
+            "{dim:?}: {outcome:?}"
+        );
+    }
+}
+
+/// Cost weights come from model params, so preferences change without code.
+#[test]
+fn optimize_uses_the_model_cost_weights() {
+    let placer = ExactLocalPlacer::new(&graph(&[("out", "~(a|b)")])).unwrap();
+    let mut config = ExactPlacerConfig::new(DimSize(1, 5, 2));
+    config.workers = 2;
+    config.time_limit = Some(Duration::from_secs(60));
+    config.optimize = true;
+    config
+        .model_params
+        .insert("torch_cost".to_owned(), rsdsl::IValue::Int(10));
+    let (outcome, stats) = placer.place(&config).unwrap();
+    let ExactOutcome::Placed(best) = outcome else {
+        panic!("expected a placement, got {outcome:?}");
+    };
+    let torches = best
+        .cells
+        .iter()
+        .filter(|(_, kind)| matches!(kind, CellKind::Torch(_)))
+        .count() as i64;
+    assert_eq!(stats.cost, Some(best.cells.len() as i64 + 10 * torches));
+    assert!(stats.optimal);
+    assert_eq!(torches, 1, "a NOR needs exactly one torch");
+}
+
+/// Prints how far `optimize` gets: `OPT_CASE=xor|nor SECONDS=120 WORKERS=8`.
+#[test]
+#[ignore = "measurement; run explicitly with --nocapture"]
+fn measure_optimize() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_test_writer()
+        .try_init();
+    let (graph, dim) = match std::env::var("OPT_CASE").as_deref() {
+        Ok("nor") => (graph(&[("out", "~(a|b)")]), DimSize(1, 5, 2)),
+        Ok("and") => (graph(&[("out", "a&b")]), DimSize(2, 4, 3)),
+        _ => (graph(&[("out", "a^b")]), DimSize(2, 6, 4)),
+    };
+    let placer = ExactLocalPlacer::new(&graph).unwrap();
+    let mut config = ExactPlacerConfig::new(dim);
+    config.workers = env_usize("WORKERS", 8);
+    config.time_limit = Some(Duration::from_secs(env_usize("SECONDS", 120) as u64));
+    config.optimize = true;
+    let started = std::time::Instant::now();
+    let (outcome, stats) = placer.place(&config).unwrap();
+    println!(
+        "OPT {:?} cost={:?} optimal={} improvements={} rejections={} elapsed={:?}",
+        dim,
+        stats.cost,
+        stats.optimal,
+        stats.improvements,
+        stats.refinements,
+        started.elapsed()
+    );
+    if let ExactOutcome::Placed(placement) = outcome {
+        println!("{}", placement.rcell);
     }
 }

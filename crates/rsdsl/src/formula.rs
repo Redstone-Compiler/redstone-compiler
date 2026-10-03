@@ -552,6 +552,53 @@ impl Encoder {
         }
     }
 
+    /// Totalizer (Bailleux & Boufkhad 2003) over `inputs`, truncated at
+    /// `cap + 1`: `outputs[j]` is implied by "at least j + 1 inputs are true".
+    /// Only that direction is encoded, which is what upper bounds need:
+    /// assuming `-outputs[b]` allows at most `b` true inputs. Bounds stay
+    /// assumptions, so one solver can tighten them incrementally.
+    pub fn totalizer(&mut self, inputs: &[Lit], cap: usize) -> Vec<Lit> {
+        if inputs.is_empty() {
+            return Vec::new();
+        }
+        let limit = cap + 1;
+        let origin = self.origin;
+        let mut level: Vec<Vec<Lit>> = inputs.iter().map(|&l| vec![l]).collect();
+        while level.len() > 1 {
+            let mut next = Vec::with_capacity(level.len().div_ceil(2));
+            let mut pairs = level.into_iter();
+            while let Some(left) = pairs.next() {
+                let Some(right) = pairs.next() else {
+                    next.push(left);
+                    break;
+                };
+                let width = (left.len() + right.len()).min(limit);
+                let outputs: Vec<Lit> = (0..width)
+                    .map(|_| self.new_var(VarOrigin::Aux(origin)))
+                    .collect();
+                for i in 0..=left.len() {
+                    for j in 0..=right.len() {
+                        if i + j == 0 {
+                            continue;
+                        }
+                        let target = outputs[(i + j).min(width) - 1];
+                        let mut clause = vec![target];
+                        if i > 0 {
+                            clause.push(-left[i - 1]);
+                        }
+                        if j > 0 {
+                            clause.push(-right[j - 1]);
+                        }
+                        self.clause(&clause);
+                    }
+                }
+                next.push(outputs);
+            }
+            level = next;
+        }
+        level.pop().unwrap()
+    }
+
     /// Totalizer-style reification: outputs `ge[j]` mean "at least j + 1".
     fn reified_card(&mut self, card: &Card, pol: Pol) -> Lit {
         let lits: Vec<Lit> = card

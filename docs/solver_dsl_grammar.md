@@ -458,10 +458,24 @@ rule "켜진 것은 켜진 원천이 있어야 함" {
 
 ### 6.6 Objectives
 
-`minimize e;` with an int term `e` asks the solver driver for a smallest value.
-Today this is a bound search, as in `place_minimizing_blocks`; a MaxSAT backend
-could replace it later. A model has at most one objective. The exact placer
-does not use one.
+`minimize e;` and `maximize e;` take an integer term built from counts,
+order-encoded integers, constants, `+`, `-`, and multiplication by a constant
+(weights may come from params, so `block_cost * count(...)` with
+`block_cost = 0` drops the term). All objective items are summed, `maximize`
+negated, into `offset + Σ weight · [literal]` with positive weights; negative
+terms are rewritten as `w + |w| · [not f]`. Terms are encoded in both
+directions, so the cost of a model can be read from it.
+
+Grounding only records the cost. A driver bounds it through a totalizer
+(`Program::objective_counter`), whose outputs it assumes false to ask for a
+cheaper model on the same incremental solver, so a run is anytime: it keeps
+the best model so far and is optimal once a bound is unsatisfiable.
+`Program::write_wcnf` writes the same problem as weighted partial MaxSAT
+(hard clauses plus one soft unit per term) for external MaxSAT solvers.
+
+Weighted sums can only be optimized; comparing one with a constant is an
+error (E0441), since that needs a pseudo-Boolean encoding. The exact placer's
+model minimizes non-air blocks plus optional repeater and torch weights.
 
 ## 7. Annotations
 

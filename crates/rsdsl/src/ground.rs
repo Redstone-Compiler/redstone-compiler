@@ -250,6 +250,11 @@ enum IntTerm {
         items: Vec<F>,
         offset: i64,
     },
+    /// `constant + Σ weight · [formula]`, for weighted sums (objectives).
+    Linear {
+        terms: Vec<(i64, F)>,
+        constant: i64,
+    },
 }
 
 /// A resolved pattern alternative over one choice.
@@ -323,6 +328,11 @@ pub struct Program {
     pub warnings: Vec<Diagnostic>,
     pub(crate) sources: crate::diag::SourceMap,
     type_values: HashMap<Type, Arc<[Value]>>,
+    /// `minimize`/`maximize` items, grounded after the rules.
+    objectives: Vec<(bool, Expr, Span)>,
+    /// The summed objective as `(weight, literal)` costs plus a constant:
+    /// cost = constant + Σ weight · [literal]. Weights are positive.
+    pub(crate) objective: Option<(Vec<(u64, Lit)>, i64)>,
     /// Grounding-time caches keyed by source span: an AST node always
     /// resolves the same way, so names and declarations are looked up once.
     name_cache: HashMap<(Span, Option<Type>), Val>,
@@ -374,6 +384,8 @@ impl Program {
             name_cache: HashMap::default(),
             decl_cache: HashMap::default(),
             member_cache: HashMap::default(),
+            objectives: Vec::new(),
+            objective: None,
         };
         p.encoder.or_as_negated_and = !p.options.positive_or_aux;
         p.declare(file, instance, instance_file)?;
@@ -1228,12 +1240,8 @@ impl Program {
                     )
                     .with_help("inline the included declarations"));
                 }
-                ItemKind::Objective { .. } => {
-                    self.warnings.push(Diagnostic::warning(
-                        "W0201",
-                        "objectives are recorded but not encoded yet; use a bound instead",
-                        item.span,
-                    ));
+                ItemKind::Objective { minimize, expr } => {
+                    self.objectives.push((*minimize, expr.clone(), item.span));
                 }
                 _ => {}
             }
@@ -1570,8 +1578,72 @@ impl Program {
         for i in 0..self.ints.len() {
             self.ground_int(i as u32)?;
         }
+        self.ground_objectives()?;
         self.encoder.origin = 0;
         self.encoder.guard = None;
+        Ok(())
+    }
+
+    /// Sums every `minimize` (and negated `maximize`) item into positive
+    /// weighted literals; terms are encoded exactly (both directions), so
+    /// the cost of a model can be read from those literals.
+    fn ground_objectives(&mut self) -> Result<()> {
+        if self.objectives.is_empty() {
+            return Ok(());
+        }
+        let objectives = std::mem::take(&mut self.objectives);
+        self.encoder.origin = self.new_origin("목적함수".to_owned(), String::new());
+        let mut weights = HashMap::<Lit, i64>::default();
+        let mut order = Vec::new();
+        let mut constant = 0i64;
+        for (minimize, expr, span) in objectives {
+            let value = self.eval(&expr, &mut Vec::new(), Some(&Type::Int))?;
+            let term = match value {
+                Val::I(term) => term,
+                Val::C(Value::Int(k)) => IntTerm::Const(k),
+                _ => {
+                    return Err(err(
+                        "E0442",
+                        "an objective must be an integer expression",
+                        span,
+                    ))
+                }
+            };
+            let (terms, offset) = into_linear(if minimize { term } else { scale(term, -1) });
+            constant += offset;
+            for (weight, formula) in terms {
+                let (weight, formula) = match formula {
+                    F::Const(true) => {
+                        constant += weight;
+                        continue;
+                    }
+                    F::Const(false) => continue,
+                    f if weight < 0 => {
+                        // w·[f] = w + |w|·[not f]
+                        constant += weight;
+                        (-weight, f.not())
+                    }
+                    f => (weight, f),
+                };
+                let lit = self.encoder.lit_of(&formula, Pol::Both);
+                match lit {
+                    1 => constant += weight,
+                    -1 => {}
+                    _ => {
+                        if !weights.contains_key(&lit) {
+                            order.push(lit);
+                        }
+                        *weights.entry(lit).or_default() += weight;
+                    }
+                }
+            }
+        }
+        let terms = order
+            .into_iter()
+            .map(|lit| (weights[&lit] as u64, lit))
+            .filter(|(weight, _)| *weight > 0)
+            .collect();
+        self.objective = Some((terms, constant));
         Ok(())
     }
 
@@ -2491,9 +2563,20 @@ impl Program {
                     (Val::C(Value::Int(k)), Val::I(t)) if op == BinOp::Add => {
                         Ok(Val::I(shift(t, k)))
                     }
+                    (Val::C(Value::Int(k)), Val::I(t)) if op == BinOp::Sub => {
+                        Ok(Val::I(add(IntTerm::Const(k), t, -1)))
+                    }
+                    (Val::I(a), Val::I(b)) if matches!(op, BinOp::Add | BinOp::Sub) => {
+                        Ok(Val::I(add(a, b, if op == BinOp::Add { 1 } else { -1 })))
+                    }
+                    (Val::I(t), Val::C(Value::Int(k))) | (Val::C(Value::Int(k)), Val::I(t))
+                        if op == BinOp::Mul =>
+                    {
+                        Ok(Val::I(scale(t, k)))
+                    }
                     _ => Err(err(
                         "E0441",
-                        "only a solver integer plus or minus a constant is supported",
+                        "solver integers support +, -, and multiplication by a constant",
                         span,
                     )),
                 }
@@ -2679,9 +2762,10 @@ impl Program {
             }
             _ => Err(err(
                 "E0441",
-                "comparing a count with a solver integer is not supported",
+                "this integer comparison is not supported",
                 span,
-            )),
+            )
+            .with_help("counts and order-encoded integers compare with each other and with constants; weighted sums can only be minimized or maximized")),
         }
     }
 
@@ -3352,7 +3436,57 @@ fn shift(t: IntTerm, k: i64) -> IntTerm {
             items,
             offset: offset + k,
         },
+        IntTerm::Linear { terms, constant } => IntTerm::Linear {
+            terms,
+            constant: constant + k,
+        },
     }
+}
+
+/// An integer term as `(Σ weight · [formula], constant)`.
+fn into_linear(t: IntTerm) -> (Vec<(i64, F)>, i64) {
+    match t {
+        IntTerm::Const(c) => (Vec::new(), c),
+        IntTerm::Var { lits, lo, offset } => {
+            (lits.iter().map(|&l| (1, F::Lit(l))).collect(), lo + offset)
+        }
+        IntTerm::Count { items, offset } => (items.into_iter().map(|f| (1, f)).collect(), offset),
+        IntTerm::Linear { terms, constant } => (terms, constant),
+    }
+}
+
+/// The simplest term for a weighted sum: unit weights stay a count, so they
+/// can still be compared with cardinality encodings.
+fn from_linear(terms: Vec<(i64, F)>, constant: i64) -> IntTerm {
+    let terms = terms
+        .into_iter()
+        .filter(|(w, f)| *w != 0 && *f != F::Const(false))
+        .collect::<Vec<_>>();
+    if terms.is_empty() {
+        return IntTerm::Const(constant);
+    }
+    if terms.iter().all(|(w, _)| *w == 1) {
+        return IntTerm::Count {
+            items: terms.into_iter().map(|(_, f)| f).collect(),
+            offset: constant,
+        };
+    }
+    IntTerm::Linear { terms, constant }
+}
+
+fn scale(t: IntTerm, k: i64) -> IntTerm {
+    let (terms, constant) = into_linear(t);
+    from_linear(
+        terms.into_iter().map(|(w, f)| (w * k, f)).collect(),
+        constant * k,
+    )
+}
+
+fn add(a: IntTerm, b: IntTerm, sign: i64) -> IntTerm {
+    let (mut terms, constant) = into_linear(a);
+    let (other, other_constant) = into_linear(b);
+    terms.extend(other.into_iter().map(|(w, f)| (w * sign, f)));
+    from_linear(terms, constant + sign * other_constant)
 }
 
 /// Literal for `x >= v` of an order-encoded integer with base `lo`.

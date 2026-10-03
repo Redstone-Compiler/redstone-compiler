@@ -3,7 +3,7 @@
 //! here directly.
 
 use std::ffi::{c_char, c_int, c_void, CString};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Instant;
 
 use super::cnf::{Cnf, Lit};
@@ -36,15 +36,28 @@ extern "C" {
 pub(super) struct StopSignal<'a> {
     pub(super) stop: &'a AtomicBool,
     pub(super) deadline: Option<Instant>,
+    /// Also stop once this counter moves past the given value (another worker
+    /// found a cheaper layout, so the current bound is stale).
+    pub(super) restart: Option<(&'a AtomicUsize, usize)>,
+}
+
+impl StopSignal<'_> {
+    /// Stopped for good (not merely asked to restart with a new bound).
+    pub(super) fn finished(&self) -> bool {
+        self.stop.load(Ordering::Relaxed)
+            || self
+                .deadline
+                .is_some_and(|deadline| Instant::now() >= deadline)
+    }
 }
 
 extern "C" fn terminate_callback(state: *mut c_void) -> c_int {
     // SAFETY: `state` points to the `StopSignal` borrowed for the whole solve call.
     let signal = unsafe { &*(state as *const StopSignal) };
-    let expired = signal
-        .deadline
-        .is_some_and(|deadline| Instant::now() >= deadline);
-    c_int::from(expired || signal.stop.load(Ordering::Relaxed))
+    let stale = signal
+        .restart
+        .is_some_and(|(counter, seen)| counter.load(Ordering::Relaxed) != seen);
+    c_int::from(stale || signal.finished())
 }
 
 pub(super) struct SatSolver {

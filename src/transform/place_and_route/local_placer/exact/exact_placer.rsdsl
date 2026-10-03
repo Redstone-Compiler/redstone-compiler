@@ -40,6 +40,10 @@ param stage_levels: int = 24;
 param max_blocks: int? = none;
 param max_repeaters: int? = none;      // e.g. 0 forbids repeaters
 param allow_unpowered_wires: bool = false;
+// Cost weights for `optimize` (see the objective at the end).
+param block_cost: int = 1;
+param repeater_cost: int = 0;
+param torch_cost: int = 0;
 // The hand-written encoder's semantics (a powered solid powers adjacent dust
 // whenever it has a strong source, even if that source is off); parity tests only.
 param legacy_semantics: bool = false;
@@ -366,3 +370,11 @@ rule "출력: 허용된 위치에서 관측" {
         require any(Observe[o, c] for c: Cell where output_site(o, c));
     }
 }
+
+// ===== cost ==================================================================
+
+// What `optimize` minimizes: non-air blocks (switches included), plus extra
+// weight per repeater and torch when the weights are set.
+minimize block_cost * count(not Kind[c] is Air for c: Cell)
+       + repeater_cost * count(Kind[c] is Repeater(_) for c: Cell)
+       + torch_cost * count(Kind[c] is Torch(_) for c: Cell);

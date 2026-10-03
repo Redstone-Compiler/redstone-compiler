@@ -15,8 +15,8 @@ use rsdsl::{GroundOptions, IValue, Instance, Model};
 
 use super::cnf::Cnf;
 use super::encode::{
-    default_input_sites, vocabulary, CellKind, Encoding, Geometry, OutputSite, Relation, SinkKind,
-    SourceKind, SwitchSite, CARDINALS, TORCH_ATTACH,
+    default_input_sites, vocabulary, CellKind, Encoding, Geometry, ObjectiveBound, OutputSite,
+    Relation, SinkKind, SourceKind, SwitchSite, CARDINALS, TORCH_ATTACH,
 };
 use super::netlist::{NetId, NorNetlist};
 use super::ExactPlacerConfig;
@@ -357,6 +357,7 @@ impl Encoding {
             coverage_relaxations: Vec::new(),
             observed,
             program: None,
+            objective: None,
         };
         for cell in 0..geometry.len() {
             let at = cell_value(&geometry, cell);
@@ -508,6 +509,22 @@ impl Encoding {
                 encoding.relaxations.len() == encoding.relations.len(),
                 "one soundness guard per relation"
             );
+        }
+
+        if config.optimize {
+            let objective = program
+                .objective()
+                .ok_or_else(|| eyre!("optimize needs a `minimize` objective in the model"))?;
+            let total = objective.total_weight();
+            ensure!(
+                total <= 100_000,
+                "objective weights sum to {total}; too large for the cost counter"
+            );
+            let at_least = program.objective_counter(total);
+            encoding.objective = Some(ObjectiveBound {
+                objective,
+                at_least,
+            });
         }
 
         // The fixed-cell rule silently fails on impossible kinds; report them.

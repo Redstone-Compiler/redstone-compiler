@@ -96,6 +96,12 @@ pub struct ExactPlacerConfig {
     /// grounding `exact_placer.rsdsl`.
     #[doc(hidden)]
     pub legacy_encoder: bool,
+    /// After the first verified layout, keep asking for a cheaper one (the
+    /// model's `minimize` cost, by default the number of non-air blocks)
+    /// until a cheaper one is proven impossible or time runs out. The bound
+    /// is an assumption on one incremental solver per worker, and workers
+    /// share the best layout found so far.
+    pub optimize: bool,
     /// A model file to ground instead of the built-in `exact_placer.rsdsl`.
     /// It must declare the families the placer reads back (`Kind`, `Sig`,
     /// `Powered`, `Conn`, `Points`, `Hard`, `Feeds`, `Contrib`, `Rank`,
@@ -127,6 +133,7 @@ impl ExactPlacerConfig {
             allow_unpowered_wires: false,
             relax_soundness: false,
             legacy_encoder: false,
+            optimize: false,
             model_file: None,
             model_params: BTreeMap::new(),
         }
@@ -173,6 +180,11 @@ pub struct ExactPlacerStats {
     pub relations: usize,
     /// Cumulative `(section, variables, clauses)` after each encoding step.
     pub sections: Vec<(String, i32, usize)>,
+    /// With `optimize`: cost of the returned layout, whether no cheaper one
+    /// exists, and how many times a cheaper layout was found.
+    pub cost: Option<i64>,
+    pub optimal: bool,
+    pub improvements: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -203,6 +215,50 @@ enum WorkerResult {
     Placed(Box<ExactPlacement>, u32),
     Infeasible,
     Unknown(Option<String>),
+    /// With `optimize`: the shared best layout is proven optimal.
+    Optimal,
+}
+
+/// State the portfolio workers share.
+struct WorkerShared<'a> {
+    stop: &'a AtomicBool,
+    deadline: Option<Instant>,
+    refinements: &'a Mutex<usize>,
+    lazy: &'a Mutex<acyclic::LazyStats>,
+    incumbent: Option<&'a Incumbent>,
+}
+
+/// The best verified layout found by any worker (with `optimize`).
+struct Incumbent {
+    best: Mutex<Option<(i64, Box<ExactPlacement>, u32)>>,
+    cost: std::sync::atomic::AtomicI64,
+    proven: AtomicBool,
+    improvements: std::sync::atomic::AtomicUsize,
+}
+
+impl Incumbent {
+    fn new() -> Self {
+        Self {
+            best: Mutex::new(None),
+            cost: std::sync::atomic::AtomicI64::new(i64::MAX),
+            proven: AtomicBool::new(false),
+            improvements: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn offer(&self, cost: i64, placement: ExactPlacement, seed: u32) {
+        let mut best = self.best.lock().unwrap();
+        if best
+            .as_ref()
+            .is_some_and(|(current, _, _)| *current <= cost)
+        {
+            return;
+        }
+        tracing::info!(cost, seed, "exact placer found a cheaper layout");
+        *best = Some((cost, Box::new(placement), seed));
+        self.cost.store(cost, Ordering::Relaxed);
+        self.improvements.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 impl ExactLocalPlacer {
@@ -241,26 +297,24 @@ impl ExactLocalPlacer {
         let stop = AtomicBool::new(false);
         let refinements = Mutex::new(0usize);
         let lazy = Mutex::new(acyclic::LazyStats::default());
+        let incumbent = encoding.objective.as_ref().map(|_| Incumbent::new());
+        let shared = WorkerShared {
+            stop: &stop,
+            deadline,
+            refinements: &refinements,
+            lazy: &lazy,
+            incumbent: incumbent.as_ref(),
+        };
         let workers = config.workers.max(1);
         let results = std::thread::scope(|scope| {
             let handles = (0..workers)
                 .map(|worker| {
                     let encoding = &encoding;
-                    let stop = &stop;
-                    let refinements = &refinements;
-                    let lazy = &lazy;
+                    let shared = &shared;
                     scope.spawn(move || {
-                        let result = self.run_worker(
-                            encoding,
-                            config,
-                            worker,
-                            stop,
-                            deadline,
-                            refinements,
-                            lazy,
-                        );
+                        let result = self.run_worker(encoding, config, worker, shared);
                         if !matches!(result, WorkerResult::Unknown(_)) {
-                            stop.store(true, Ordering::Relaxed);
+                            shared.stop.store(true, Ordering::Relaxed);
                         }
                         result
                     })
@@ -277,6 +331,15 @@ impl ExactLocalPlacer {
         stats.loop_formulas = lazy.loop_formulas;
         stats.feedback_cuts = lazy.feedback_cuts;
 
+        if let Some(incumbent) = incumbent {
+            stats.optimal = incumbent.proven.load(Ordering::Relaxed);
+            stats.improvements = incumbent.improvements.load(Ordering::Relaxed);
+            if let Some((cost, placement, seed)) = incumbent.best.into_inner().unwrap() {
+                stats.cost = Some(cost);
+                stats.winning_seed = Some(seed);
+                return Ok((ExactOutcome::Placed(placement), stats));
+            }
+        }
         let mut last_rejection = None;
         let mut infeasible = false;
         for result in results {
@@ -289,6 +352,7 @@ impl ExactLocalPlacer {
                 WorkerResult::Unknown(rejection) => {
                     last_rejection = last_rejection.or(rejection);
                 }
+                WorkerResult::Optimal => {}
             }
         }
         let outcome = if infeasible {
@@ -304,10 +368,7 @@ impl ExactLocalPlacer {
         encoding: &Encoding,
         config: &ExactPlacerConfig,
         worker: usize,
-        stop: &AtomicBool,
-        deadline: Option<Instant>,
-        refinements: &Mutex<usize>,
-        lazy: &Mutex<acyclic::LazyStats>,
+        shared: &WorkerShared,
     ) -> WorkerResult {
         let seed = config.seed.wrapping_add(worker as u32 * 7919);
         let mut solver = SatSolver::new(seed);
@@ -315,14 +376,46 @@ impl ExactLocalPlacer {
         solver.set_option("phase", i32::from(worker % 2 == 1));
         solver.set_option("stabilizeonly", i32::from(worker % 4 >= 2));
         solver.add_cnf(&encoding.cnf);
-        let signal = StopSignal { stop, deadline };
+        let mut signal = StopSignal {
+            stop: shared.stop,
+            deadline: shared.deadline,
+            restart: None,
+        };
         let index = acyclic::LazyIndex::new(encoding);
         let mut aux = acyclic::AuxVars::new(encoding);
         let mut last_rejection = None;
         let mut rejections = 0;
         while rejections <= config.max_refinements {
-            match solver.solve(&[], &signal) {
+            // With an objective, ask for a layout cheaper than the best so far.
+            let mut assumptions = Vec::new();
+            if let (Some(bound), Some(incumbent)) = (&encoding.objective, shared.incumbent) {
+                // Restart this solve as soon as another worker improves the bound.
+                signal.restart = Some((
+                    &incumbent.improvements,
+                    incumbent.improvements.load(Ordering::Relaxed),
+                ));
+                let best = incumbent.cost.load(Ordering::Relaxed);
+                if best != i64::MAX {
+                    match bound.below(best) {
+                        Some(lits) => assumptions = lits,
+                        None => {
+                            // Nothing can be cheaper than the best layout.
+                            incumbent.proven.store(true, Ordering::Relaxed);
+                            return WorkerResult::Optimal;
+                        }
+                    }
+                }
+            }
+            match solver.solve(&assumptions, &signal) {
                 SolveResult::Unsat => {
+                    if let Some(incumbent) = shared.incumbent {
+                        if incumbent.cost.load(Ordering::Relaxed) != i64::MAX {
+                            // Blocking clauses only remove simulator-rejected
+                            // layouts, so this proves no valid layout is cheaper.
+                            incumbent.proven.store(true, Ordering::Relaxed);
+                            return WorkerResult::Optimal;
+                        }
+                    }
                     // Blocking clauses only remove simulator-rejected layouts,
                     // so Unsat after a rejection is not an infeasibility proof.
                     return if last_rejection.is_none() {
@@ -331,13 +424,18 @@ impl ExactLocalPlacer {
                         WorkerResult::Unknown(last_rejection)
                     };
                 }
-                SolveResult::Interrupted => return WorkerResult::Unknown(last_rejection),
+                SolveResult::Interrupted => {
+                    if signal.restart.is_some() && !signal.finished() {
+                        continue;
+                    }
+                    return WorkerResult::Unknown(last_rejection);
+                }
                 SolveResult::Sat => {}
             }
             let mut worker_lazy = acyclic::LazyStats::default();
             let added = acyclic::refine(encoding, &index, &mut solver, &mut aux, &mut worker_lazy);
             if added > 0 {
-                let mut total = lazy.lock().unwrap();
+                let mut total = shared.lazy.lock().unwrap();
                 total.loop_formulas += worker_lazy.loop_formulas;
                 total.feedback_cuts += worker_lazy.feedback_cuts;
                 continue;
@@ -346,8 +444,15 @@ impl ExactLocalPlacer {
             let world = verify::build_world(config.dim, &decoded.kinds);
             match verify::verify(&self.netlist, &decoded, &world) {
                 Ok(()) => {
+                    let cost = encoding
+                        .objective
+                        .as_ref()
+                        .map(|bound| bound.objective.cost(|lit| solver.value(lit)));
                     let placement = self.placement(config.dim, &decoded, world);
-                    return WorkerResult::Placed(Box::new(placement), seed);
+                    match (cost, shared.incumbent) {
+                        (Some(cost), Some(incumbent)) => incumbent.offer(cost, placement, seed),
+                        _ => return WorkerResult::Placed(Box::new(placement), seed),
+                    }
                 }
                 Err(failure) => {
                     tracing::debug!(?failure, "exact placer layout rejected by simulator");
@@ -364,7 +469,7 @@ impl ExactLocalPlacer {
                         );
                     }
                     last_rejection = Some(format!("{} at {:?}", failure.message, failure.position));
-                    *refinements.lock().unwrap() += 1;
+                    *shared.refinements.lock().unwrap() += 1;
                     rejections += 1;
                     let blocking = decoded
                         .kind_lits
@@ -429,6 +534,22 @@ impl ExactLocalPlacer {
         &self,
         config: &ExactPlacerConfig,
     ) -> eyre::Result<(Option<ExactPlacement>, bool, ExactPlacerStats)> {
+        if !config.legacy_encoder {
+            // One incremental solve per worker with the block count as cost.
+            let mut attempt = config.clone();
+            attempt.optimize = true;
+            for (name, weight) in [("block_cost", 1), ("repeater_cost", 0), ("torch_cost", 0)] {
+                attempt
+                    .model_params
+                    .insert(name.to_owned(), rsdsl::IValue::Int(weight));
+            }
+            let (outcome, stats) = self.place(&attempt)?;
+            let optimal = stats.optimal;
+            return Ok(match outcome {
+                ExactOutcome::Placed(placement) => (Some(*placement), optimal, stats),
+                _ => (None, false, stats),
+            });
+        }
         let started = Instant::now();
         let mut best: Option<ExactPlacement> = None;
         let mut total = ExactPlacerStats::default();

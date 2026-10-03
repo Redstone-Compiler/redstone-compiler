@@ -26,4 +26,4 @@ pub use diag::{Diagnostic, Error, SourceMap};
 pub use formula::Lit;
 pub use ground::{GroundOptions, Program};
 pub use instance::{IValue, Instance};
-pub use program::{Comments, Guard, Model};
+pub use program::{Comments, Guard, Model, Objective};

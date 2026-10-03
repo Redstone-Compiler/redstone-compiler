@@ -244,3 +244,100 @@ fn grounds_the_reference_instance() {
     let text = String::from_utf8(text).unwrap();
     assert!(text.contains("(0,0,1) Dust"), "{text}");
 }
+
+/// The grounded objective's minimum over all models matches a hand count,
+/// including weights, a negative constant, and a negated `maximize`.
+#[test]
+fn objective_cost_matches_brute_force() {
+    let source = format!(
+        "{}\nminimize 3 * count(Paint[c] is Dot(Red) for c: Cell) + count(Painted[c] for c: Cell) - 1;\nmaximize count(Paint[c] is Dot(Green) for c: Cell);\n",
+        TINY
+    );
+    let model = Model::parse("objective.rsdsl", &source).unwrap_or_else(|e| panic!("{e}"));
+    let mut instance = crate::Instance::new("two");
+    instance.grid("Cell", (2, 1, 1));
+    let program = model
+        .ground(&instance, GroundOptions::default())
+        .unwrap_or_else(|e| panic!("{e}"));
+    let objective = program.objective().expect("objective");
+    let n = program.num_vars() as usize;
+    assert!(n <= 24, "{n} variables");
+    let clauses = clauses(&program);
+    let mut best = i64::MAX;
+    for mask in 0u64..(1 << n) {
+        let value = |lit: Lit| (mask >> (lit.unsigned_abs() - 1) & 1 == 1) == (lit > 0);
+        if clauses
+            .iter()
+            .all(|clause| clause.iter().any(|&lit| value(lit)))
+        {
+            best = best.min(objective.cost(value));
+        }
+    }
+    // Both cells painted in different colors (the used pair):
+    // 3·red + painted - 1 - green = 3 + 2 - 1 - 1.
+    assert_eq!(best, 3);
+    let mut wcnf = Vec::new();
+    program.write_wcnf(&mut wcnf, &[]).unwrap();
+    let wcnf = String::from_utf8(wcnf).unwrap();
+    assert_eq!(
+        wcnf.lines().filter(|l| l.starts_with("h ")).count(),
+        program.clause_count()
+    );
+    assert_eq!(
+        wcnf.lines()
+            .filter(|l| !l.starts_with('h') && !l.starts_with('c'))
+            .count(),
+        objective.terms.len()
+    );
+}
+
+/// With `-outputs[b]` assumed, an assignment of the inputs extends to a model
+/// exactly when at most `b` inputs are true (for every bound below the cap).
+#[test]
+fn totalizer_bounds_count_exactly() {
+    for (inputs, cap) in [(5usize, 5usize), (5, 2), (4, 0)] {
+        let mut encoder = crate::formula::Encoder::new();
+        let lits = (0..inputs)
+            .map(|_| encoder.new_var(crate::formula::VarOrigin::Aux(0)))
+            .collect::<Vec<_>>();
+        let outputs = encoder.totalizer(&lits, cap);
+        let clauses = encoder
+            .literals
+            .split(|&lit| lit == 0)
+            .filter(|clause| !clause.is_empty())
+            .map(<[Lit]>::to_vec)
+            .collect::<Vec<_>>();
+        let n = encoder.num_vars as usize;
+        assert!(n <= 24, "{n} variables");
+        // reachable[pattern][b]: some model has these inputs and -outputs[b].
+        let mut reachable = vec![vec![false; outputs.len()]; 1 << inputs];
+        for mask in 0u64..(1 << n) {
+            let value = |lit: Lit| (mask >> (lit.unsigned_abs() - 1) & 1 == 1) == (lit > 0);
+            if !clauses
+                .iter()
+                .all(|clause| clause.iter().any(|&lit| value(lit)))
+            {
+                continue;
+            }
+            let pattern = lits
+                .iter()
+                .enumerate()
+                .fold(0usize, |p, (i, &l)| p | (usize::from(value(l)) << i));
+            for (b, &output) in outputs.iter().enumerate() {
+                if !value(output) {
+                    reachable[pattern][b] = true;
+                }
+            }
+        }
+        for (pattern, row) in reachable.iter().enumerate() {
+            let ones = pattern.count_ones() as usize;
+            for (b, &ok) in row.iter().enumerate() {
+                assert_eq!(
+                    ok,
+                    ones <= b,
+                    "inputs={inputs} cap={cap} pattern={pattern:b} bound={b}"
+                );
+            }
+        }
+    }
+}

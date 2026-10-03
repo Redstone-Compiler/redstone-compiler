@@ -130,6 +130,24 @@ generated cell passes `rcell` verification. Seed 2 still fails to place gate
 `s` within four slices, now on search time alone (the legacy encoder also
 fails that seed).
 
+### Optimizing a cost (2026-10-03)
+
+`ExactPlacerConfig::optimize` keeps searching after the first verified layout
+for a cheaper one under the model's `minimize` cost (default: non-air blocks,
+switches included; `model_params` `block_cost`, `repeater_cost`, `torch_cost`
+change the weights). Each worker keeps one incremental CaDiCaL instance and
+assumes "cost below the best so far" through a totalizer over the cost
+literals; a better layout from any worker interrupts the others so they
+resume with the tighter bound. The result is the best layout found, with
+`stats.cost`, `stats.improvements`, and `stats.optimal` (set when a bound was
+proven unsatisfiable: no valid layout is cheaper). `place_minimizing_blocks`
+now uses this instead of re-encoding for every bound.
+
+Small boxes are proven optimal in well under a second (inverter 1x4x2, NOR
+1x5x2). XOR 2x6x4 drops from 44 to 30 blocks within a second and to 28 in
+two minutes, without a proof: showing that no smaller layout exists is the
+hard direction (`measure_optimize`).
+
 ## Search strategies
 
 ### Monolithic solve (`ExactLocalPlacer::place`)

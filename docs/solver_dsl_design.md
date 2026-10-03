@@ -338,6 +338,11 @@ matters.
   for verification and export. Seed-1 construction then takes 27 s with zero
   rejections; the full pipeline compacts it to 2x14x9 (171 blocks) in 900 s.
 
+Objectives are implemented: `minimize`/`maximize` ground to weighted cost
+literals, `Program::objective_counter` adds a totalizer for incremental bounds,
+and `Program::write_wcnf` exports weighted partial MaxSAT. The exact placer's
+`optimize` uses them (anytime, optimal when a bound is unsatisfiable).
+
 R15 is met for formula size and solver load, not for grounding time; search
 speed is within the run-to-run variance measured so far.
 
