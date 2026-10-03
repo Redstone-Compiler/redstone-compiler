@@ -37,3 +37,5 @@ zip = { version = "2.2", default-features = false, features = ["deflate"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 mimalloc = "0.1.43"
+# Bundled CaDiCaL SAT solver for the exact local placer (C++ build, not for wasm).
+cadical = "0.1.16"

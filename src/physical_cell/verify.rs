@@ -263,6 +263,9 @@ mod tests {
     const FULL_ADDER_SMALL: &str = include_str!("../../test/full-adder-2x13x9.rcell");
     const FULL_ADDER_RIGHT_INPUTS: &str =
         include_str!("../../test/full-adder-right-inputs-2x14x10.rcell");
+    const FULL_ADDER_EXACT: &str = include_str!("../../test/full-adder-exact-2x13x7.rcell");
+    const FULL_ADDER_RIGHT_INPUTS_COMPACTED: &str =
+        include_str!("../../test/full-adder-right-inputs-compacted-2x10x10.rcell");
     const DISCONNECTED_FULL_ADDER: &str =
         include_str!("../../test/rcell/archive/full-adder-2x20x20-disconnected.rcell");
 
@@ -449,6 +452,47 @@ mod tests {
             crate::world::block::Direction::South
         );
         Ok(())
+    }
+
+    /// Operands on the Y-min face, sum driving the cell beyond the Y-max face.
+    fn assert_operands_opposite_sum(source: &str) -> eyre::Result<()> {
+        let document: PhysicalCellDocument = source.parse()?;
+        let build = document.build()?;
+        assert_eq!(build.inputs["a"].1, 0);
+        assert_eq!(build.inputs["b"].1, 0);
+        let sum = build.outputs["sum"];
+        assert_eq!(sum.1, document.size.1 - 1);
+        let block = build.world[sum];
+        assert!(
+            (block.kind.is_torch() && block.direction != Direction::North)
+                || (block.kind.is_repeater() && block.direction == Direction::South),
+            "sum must drive the cell beyond Y-max: {block:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn generated_exact_full_adder_keeps_interface_and_passes_all_cases() -> eyre::Result<()> {
+        verify_full_adder(FULL_ADDER_EXACT, DimSize(2, 13, 7))?;
+        assert_operands_opposite_sum(FULL_ADDER_EXACT)
+    }
+
+    #[test]
+    fn generated_exact_full_adder_passes_all_settled_input_transitions() -> eyre::Result<()> {
+        verify_full_adder_transitions(FULL_ADDER_EXACT)
+    }
+
+    #[test]
+    fn compacted_right_inputs_full_adder_keeps_interface_and_passes_all_cases(
+    ) -> eyre::Result<()> {
+        verify_full_adder(FULL_ADDER_RIGHT_INPUTS_COMPACTED, DimSize(2, 10, 10))?;
+        assert_operands_opposite_sum(FULL_ADDER_RIGHT_INPUTS_COMPACTED)
+    }
+
+    #[test]
+    fn compacted_right_inputs_full_adder_passes_all_settled_input_transitions(
+    ) -> eyre::Result<()> {
+        verify_full_adder_transitions(FULL_ADDER_RIGHT_INPUTS_COMPACTED)
     }
 
     fn verify_full_adder(source: &str, size: DimSize) -> eyre::Result<()> {

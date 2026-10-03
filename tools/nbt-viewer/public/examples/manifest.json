@@ -110,11 +110,27 @@
   },
   {
     "kind": "nbt",
+    "name": "full-adder-exact-2x13x7.nbt",
+    "file": "full-adder-exact-2x13x7.nbt",
+    "path": "examples/full-adder-exact-2x13x7.nbt",
+    "size": 790,
+    "outputsPath": "examples/full-adder-exact-2x13x7.outputs.json"
+  },
+  {
+    "kind": "nbt",
     "name": "full-adder-right-inputs-2x14x10.nbt",
     "file": "full-adder-right-inputs-2x14x10.nbt",
     "path": "examples/full-adder-right-inputs-2x14x10.nbt",
     "size": 774,
     "outputsPath": "examples/full-adder-right-inputs-2x14x10.outputs.json"
+  },
+  {
+    "kind": "nbt",
+    "name": "full-adder-right-inputs-compacted-2x10x10.nbt",
+    "file": "full-adder-right-inputs-compacted-2x10x10.nbt",
+    "path": "examples/full-adder-right-inputs-compacted-2x10x10.nbt",
+    "size": 679,
+    "outputsPath": "examples/full-adder-right-inputs-compacted-2x10x10.outputs.json"
   },
   {
     "kind": "nbt",
