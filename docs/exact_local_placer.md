@@ -166,6 +166,19 @@ the last. On AND 2x4x3 it reaches 8 after 7.9 s while the direct proof of 9
 finishes at 9.4 s; on XOR 2x6x4 it reaches only 8 in two minutes against a
 best layout of 30.
 
+Implied structural bound (on when optimizing): every torch is a NOR gate over
+vocabulary functions, and torches with different signals need supports with
+different signals, so a layout needs at least as many torches, and as many
+solids, as the smallest NOR network that produces the observed functions.
+`dsl::min_torches` finds that number by breadth-first search over sets of
+available classes (a solid can carry any OR of available classes that is
+itself a class; a torch adds the complement), and the model rule
+"구조적 하한" requires both counts. AND 2x4x3 needs 3 (`~a`, `~b`, their NOR),
+XOR 4 within its vocabulary, the full adder 9 (computed in 0.2 ms). The AND
+proof drops from about 10.8 s to 8.5 s; for plain placement the extra
+constraint slowed XOR (one of six seeds timed out), so it is only set with
+`optimize` (`compare_torch_lower_bound`).
+
 Tried and left off by default: the model's `symmetry_breaking` rules (one
 contributing source per dust/repeater; zero rank/stage without an incoming
 contribution). They are sound but did not speed up proofs (AND 2x4x3: 10.5 s

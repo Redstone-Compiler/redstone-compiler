@@ -160,11 +160,13 @@ impl Encoding {
 
         // Switch sites per present input, as the hand-written encoder chooses them.
         let mut sites = Vec::<(usize, Direction, NetId)>::new();
+        let mut present_classes = Vec::new();
         for name in netlist.input_names() {
             if config.absent_inputs.contains(&name) {
                 continue;
             }
             let net = netlist.input_net(&name).unwrap();
+            present_classes.push(class_of_net(net));
             instance.row(
                 "present",
                 vec![IValue::sym(&class_names[class_of_net(net)])],
@@ -224,12 +226,14 @@ impl Encoding {
         instance.domain("Output", output_names.iter().map(IValue::sym));
         let mut observed = Vec::new();
         let mut observation_cells = Vec::new();
+        let mut target_classes = Vec::new();
         for ((name, net, positions), symbol) in observations.iter().zip(&output_names) {
             let function = net_function(&values, *net);
             let Some(class) = classes.iter().position(|class| class.function == function) else {
                 bail!("output `{name}` is constant; the exact placer needs a driven signal");
             };
             observed.push((name.clone(), function));
+            target_classes.push(class);
             let cells = match positions {
                 Some(positions) => positions
                     .iter()
@@ -293,6 +297,15 @@ impl Encoding {
             instance.row("fixed", vec![cell_value(&geometry, cell), member]);
         }
 
+        // The implied torch bound speeds up optimality proofs (AND 2x4x3: about
+        // 20% faster) but slowed finding a first layout in measurements, so it
+        // is only set when optimizing.
+        let torches = if config.optimize {
+            min_torches(&classes, &present_classes, &target_classes, 200_000)
+        } else {
+            0
+        };
+        instance.param("min_torches", torches);
         for (name, value) in &config.model_params {
             instance.param(name, value.clone());
         }
@@ -572,4 +585,78 @@ impl Encoding {
         encoding.program = Some(Box::new(program));
         Ok(encoding)
     }
+}
+
+/// A lower bound on the torches any layout needs to produce `targets` from
+/// the `inputs` classes. Every cell carries a vocabulary class, so a solid
+/// carries an OR of available classes only when that OR is itself a class,
+/// and a torch carries the complement of its support's class: a torch is a
+/// NOR gate over vocabulary functions. Breadth-first search over sets of
+/// available classes finds the fewest torches; if it would visit more than
+/// `max_states` sets, the depth reached so far is returned (still a bound).
+pub(super) fn min_torches(
+    classes: &[super::encode::SignalClass],
+    inputs: &[usize],
+    targets: &[usize],
+    max_states: usize,
+) -> usize {
+    if classes.len() > 64 {
+        return 0;
+    }
+    let goal = targets.iter().fold(0u64, |set, &class| set | 1 << class);
+    // Add every class that is the OR of available classes below it.
+    let close = |mut set: u64| loop {
+        let mut grown = set;
+        for (index, class) in classes.iter().enumerate().skip(1) {
+            if grown & 1 << index != 0 {
+                continue;
+            }
+            let union = classes
+                .iter()
+                .enumerate()
+                .filter(|(other, c)| set & 1 << other != 0 && c.function & !class.function == 0)
+                .fold(0u64, |union, (_, c)| union | c.function);
+            if union == class.function {
+                grown |= 1 << index;
+            }
+        }
+        if grown == set {
+            return set;
+        }
+        set = grown;
+    };
+    let start = close(inputs.iter().fold(1u64, |set, &class| set | 1 << class));
+    if start & goal == goal {
+        return 0;
+    }
+    let mut seen = std::collections::HashSet::from([start]);
+    let mut layer = vec![start];
+    for depth in 1.. {
+        let mut next = Vec::new();
+        for &set in &layer {
+            for (index, class) in classes.iter().enumerate().skip(1) {
+                let Some(complement) = class.complement else {
+                    continue;
+                };
+                if set & 1 << index == 0 || set & 1 << complement != 0 {
+                    continue;
+                }
+                let grown = close(set | 1 << complement);
+                if grown & goal == goal {
+                    return depth;
+                }
+                if seen.insert(grown) {
+                    next.push(grown);
+                }
+            }
+            if seen.len() > max_states {
+                return depth;
+            }
+        }
+        if next.is_empty() {
+            return depth;
+        }
+        layer = next;
+    }
+    unreachable!()
 }

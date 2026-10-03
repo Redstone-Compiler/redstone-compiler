@@ -1566,7 +1566,13 @@ fn measure_optimize() {
     config.workers = env_usize("WORKERS", 8);
     config.time_limit = Some(Duration::from_secs(env_usize("SECONDS", 120) as u64));
     config.optimize = true;
-    config.core_guided = std::env::var("OPT_CORES").as_deref() != Ok("0");
+    config.core_guided = std::env::var("OPT_CORES").as_deref() == Ok("1");
+    if let Ok(torches) = std::env::var("OPT_MIN_TORCHES") {
+        config.model_params.insert(
+            "min_torches".to_owned(),
+            rsdsl::IValue::Int(torches.parse().unwrap()),
+        );
+    }
     if std::env::var("OPT_SYMMETRY").as_deref() == Ok("0") {
         config
             .model_params
@@ -1672,6 +1678,121 @@ fn core_guided_search_proves_the_optimum() {
         assert_eq!(stats.lower_bound, stats.cost, "{dim:?}");
         if let Some(expected) = expected {
             assert_eq!(stats.cost, Some(expected));
+        }
+    }
+}
+
+/// The torch lower bound counts NOR gates over the signal vocabulary.
+#[test]
+fn min_torches_counts_nor_gates() {
+    let bound = |assignments: &[(&str, &str)]| {
+        let netlist = NorNetlist::from_logic_graph(&graph(assignments)).unwrap();
+        let classes = super::encode::vocabulary(&netlist);
+        let values = netlist.net_values();
+        let function = |net: NetId| {
+            values[net]
+                .iter()
+                .enumerate()
+                .fold(0u64, |mask, (case, &on)| mask | (u64::from(on) << case))
+        };
+        let class_of = |f: u64| classes.iter().position(|c| c.function == f).unwrap();
+        let inputs = netlist
+            .input_names()
+            .iter()
+            .map(|name| class_of(function(netlist.input_net(name).unwrap())))
+            .collect::<Vec<_>>();
+        let targets = netlist
+            .outputs
+            .iter()
+            .map(|(_, net)| class_of(function(*net)))
+            .collect::<Vec<_>>();
+        super::dsl::min_torches(&classes, &inputs, &targets, 200_000)
+    };
+    assert_eq!(bound(&[("out", "~a")]), 1);
+    assert_eq!(bound(&[("out", "~(a|b)")]), 1);
+    assert_eq!(bound(&[("out", "a|b")]), 0);
+    assert_eq!(bound(&[("out", "a&b")]), 3);
+    let xor = bound(&[("out", "a^b")]);
+    println!("MIN_TORCHES xor={xor} full_adder={}", {
+        let netlist = NorNetlist::from_logic_graph(&full_adder_graph("nor9")).unwrap();
+        let classes = super::encode::vocabulary(&netlist);
+        let values = netlist.net_values();
+        let function = |net: NetId| {
+            values[net]
+                .iter()
+                .enumerate()
+                .fold(0u64, |mask, (case, &on)| mask | (u64::from(on) << case))
+        };
+        let class_of = |f: u64| classes.iter().position(|c| c.function == f).unwrap();
+        let inputs = netlist
+            .input_names()
+            .iter()
+            .map(|name| class_of(function(netlist.input_net(name).unwrap())))
+            .collect::<Vec<_>>();
+        let targets = netlist
+            .outputs
+            .iter()
+            .map(|(_, net)| class_of(function(*net)))
+            .collect::<Vec<_>>();
+        let started = std::time::Instant::now();
+        let n = super::dsl::min_torches(&classes, &inputs, &targets, 200_000);
+        format!("{n} ({:?})", started.elapsed())
+    });
+    assert!(xor >= 3);
+}
+
+/// A/B of the implied torch lower bound (`min_torches`, computed by default)
+/// against `min_torches = 0`: first-layout time for XOR 2x6x4 over seeds, and
+/// the optimality proof for AND 2x4x3. `SEEDS=6 SECONDS=60`.
+#[test]
+#[ignore = "measurement; run explicitly with --nocapture"]
+fn compare_torch_lower_bound() {
+    let seeds = env_usize("SEEDS", 6) as u32;
+    let seconds = env_usize("SECONDS", 60) as u64;
+    let off = |config: &mut ExactPlacerConfig, bound: bool| {
+        if !bound {
+            config
+                .model_params
+                .insert("min_torches".to_owned(), rsdsl::IValue::Int(0));
+        }
+    };
+    let xor = ExactLocalPlacer::new(&graph(&[("out", "a^b")])).unwrap();
+    for bound in [false, true] {
+        let mut times = Vec::new();
+        for seed in 0..seeds {
+            let mut config = ExactPlacerConfig::new(DimSize(2, 6, 4));
+            config.workers = 4;
+            config.seed = 1 + seed * 104_729;
+            config.time_limit = Some(Duration::from_secs(seconds));
+            off(&mut config, bound);
+            let started = std::time::Instant::now();
+            let (outcome, _) = xor.place(&config).unwrap();
+            let label = if matches!(outcome, ExactOutcome::Placed(_)) {
+                "ok"
+            } else {
+                "--"
+            };
+            times.push(format!("{label}{:.1}", started.elapsed().as_secs_f64()));
+        }
+        println!("BOUND feasible xor bound={bound} {times:?}");
+    }
+    let and = ExactLocalPlacer::new(&graph(&[("out", "a&b")])).unwrap();
+    for bound in [false, true] {
+        for rep in 0..2u32 {
+            let mut config = ExactPlacerConfig::new(DimSize(2, 4, 3));
+            config.workers = 4;
+            config.seed = 1 + rep;
+            config.optimize = true;
+            config.time_limit = Some(Duration::from_secs(120));
+            off(&mut config, bound);
+            let started = std::time::Instant::now();
+            let (_, stats) = and.place(&config).unwrap();
+            println!(
+                "BOUND proof and bound={bound} rep={rep} cost={:?} optimal={} elapsed={:.1}s",
+                stats.cost,
+                stats.optimal,
+                started.elapsed().as_secs_f64()
+            );
         }
     }
 }

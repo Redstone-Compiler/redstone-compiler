@@ -50,6 +50,10 @@ param legacy_semantics: bool = false;
 // Rules that remove equivalent duplicates of a layout (sound: every layout
 // keeps at least one representative); they speed up proofs.
 param symmetry_breaking: bool = false;
+// Lower bound on torches needed for the observed functions (each torch is a
+// NOR gate; the host computes it when optimizing). Implied, so it never
+// removes a layout; it only helps prove that cheaper layouts do not exist.
+param min_torches: int = 0;
 
 fn dir(a: Attach) -> Dir6 = match a {
     Floor => Down, East => East, West => West, North => North, South => South,
@@ -381,6 +385,17 @@ rule "대칭 제거: 받는 기여가 없으면 순위·단계는 0 (토치 단�
                 require Stage[c] >= 1 -> fed or Kind[c] is Torch(_);
             }
         }
+    }
+}
+
+// ===== implied lower bounds ==================================================
+
+rule "구조적 하한: 토치 수와 그 받침 블록 수" {
+    // Torches with different signals need supports with different signals,
+    // so a NOR network of n gates needs n torches on n distinct solids.
+    if min_torches > 0 {
+        require count(Kind[c] is Torch(_) for c: Cell) >= min_torches;
+        require count(Kind[c] is Solid for c: Cell) >= min_torches;
     }
 }
 
