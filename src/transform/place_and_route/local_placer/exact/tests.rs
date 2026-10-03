@@ -136,16 +136,19 @@ fn diagnose_exact_full_adder() -> eyre::Result<()> {
     let dim = DimSize(parts[0], parts[1], parts[2]);
     let variant = std::env::var("EXACT_FA_GRAPH").unwrap_or_else(|_| "nor9".to_owned());
     let pins = std::env::var("EXACT_FA_PINS").unwrap_or_else(|_| "manual".to_owned());
-    let placer = ExactLocalPlacer::new(&full_adder_graph(&variant))?.with_name(format!(
-        "exact-full-adder-{}x{}x{}",
-        dim.0, dim.1, dim.2
-    ));
+    let placer = ExactLocalPlacer::new(&full_adder_graph(&variant))?
+        .with_name(format!("exact-full-adder-{}x{}x{}", dim.0, dim.1, dim.2));
     let mut config = ExactPlacerConfig::new(dim);
     config.workers = env_usize("EXACT_FA_WORKERS", 8);
     config.rank_levels = env_usize("EXACT_FA_RANKS", 32);
-    config.time_limit = Some(Duration::from_secs(env_usize("EXACT_FA_SECONDS", 600) as u64));
+    config.time_limit = Some(Duration::from_secs(
+        env_usize("EXACT_FA_SECONDS", 600) as u64
+    ));
     if pins == "manual" {
-        eyre::ensure!(dim.0 >= 2 && dim.1 >= 14 && dim.2 >= 6, "manual pins need 2x14x6 or larger");
+        eyre::ensure!(
+            dim.0 >= 2 && dim.1 >= 14 && dim.2 >= 6,
+            "manual pins need 2x14x6 or larger"
+        );
         config = config
             .with_input_site("a", Position(0, 0, 3), Direction::East)
             .with_input_site("b", Position(0, 0, 1), Direction::East)
@@ -214,12 +217,18 @@ fn analyze_manual_full_adder_torches() -> eyre::Result<()> {
         let simulation = document.simulate_case(&build, inputs, 0)?;
         for (position, block) in simulation.simulator.world().iter_block() {
             if block.kind.is_torch() {
-                vectors.entry(position).or_default().push(block.kind.is_powered());
+                vectors
+                    .entry(position)
+                    .or_default()
+                    .push(block.kind.is_powered());
             }
         }
     }
     for (position, vector) in vectors {
-        let bits = vector.iter().map(|&b| if b { '1' } else { '0' }).collect::<String>();
+        let bits = vector
+            .iter()
+            .map(|&b| if b { '1' } else { '0' })
+            .collect::<String>();
         let matches = (0..netlist.nets.len())
             .filter(|&net| values[net] == vector)
             .map(|net| netlist.nets[net].name.clone())
@@ -249,7 +258,24 @@ fn manual_kind(block: &crate::world::block::Block) -> CellKind {
 /// Fixes every block of a verified hand-made cell and asks the solver to
 /// complete the class, rank, and stage labels. If this is unsatisfiable, the
 /// model rejects a known-good layout; the failed assumptions name the cells.
-fn assert_model_accepts_rcell(source: &str, variant: &str, rank_levels: usize, stage_levels: usize) {
+fn assert_model_accepts_rcell(
+    source: &str,
+    variant: &str,
+    rank_levels: usize,
+    stage_levels: usize,
+) {
+    for legacy in [false, true] {
+        assert_encoder_accepts_rcell(source, variant, rank_levels, stage_levels, legacy);
+    }
+}
+
+fn assert_encoder_accepts_rcell(
+    source: &str,
+    variant: &str,
+    rank_levels: usize,
+    stage_levels: usize,
+    legacy: bool,
+) {
     use super::encode::{Encoding, TORCH_ATTACH};
     use super::solver::{SatSolver, SolveResult, StopSignal};
     let document: crate::physical_cell::PhysicalCellDocument = source.parse().unwrap();
@@ -259,6 +285,7 @@ fn assert_model_accepts_rcell(source: &str, variant: &str, rank_levels: usize, s
     config.rank_levels = rank_levels;
     config.stage_levels = stage_levels;
     config.allow_unpowered_wires = true;
+    config.legacy_encoder = legacy;
     for input in &document.inputs {
         config = config.with_input_site(
             input.name.clone(),
@@ -267,7 +294,11 @@ fn assert_model_accepts_rcell(source: &str, variant: &str, rank_levels: usize, s
         );
     }
     for output in &document.outputs {
-        let name = if output.name == "sum" { "s" } else { output.name.as_str() };
+        let name = if output.name == "sum" {
+            "s"
+        } else {
+            output.name.as_str()
+        };
         config = config.with_output_sites(name, [output.position]);
     }
     let encoding = Encoding::build(&netlist, &config).unwrap();
@@ -291,14 +322,19 @@ fn assert_model_accepts_rcell(source: &str, variant: &str, rank_levels: usize, s
                     .unwrap();
                 encoding.repeater[cell][index]
             }
-            CellKind::Switch(attach) => encoding
-                .switches
-                .iter()
-                .find(|site| site.cell == cell && site.attach == attach)
-                .unwrap()
-                .lit,
+            CellKind::Switch(attach) => {
+                encoding
+                    .switches
+                    .iter()
+                    .find(|site| site.cell == cell && site.attach == attach)
+                    .unwrap()
+                    .lit
+            }
         };
-        assert!(!encoding.cnf.is_false(lit), "{position:?} {kind:?} is not encodable");
+        assert!(
+            !encoding.cnf.is_false(lit),
+            "{position:?} {kind:?} is not encodable"
+        );
         assumptions.push(lit);
         described.push((lit, position, kind));
     }
@@ -343,7 +379,10 @@ fn assert_model_accepts_rcell(source: &str, variant: &str, rank_levels: usize, s
                 value_assumptions.push((if powered { lit } else { -lit }, position, case, powered));
             }
         }
-        let lits = value_assumptions.iter().map(|(lit, ..)| *lit).collect::<Vec<_>>();
+        let lits = value_assumptions
+            .iter()
+            .map(|(lit, ..)| *lit)
+            .collect::<Vec<_>>();
         let second = solver.solve(&lits, &signal);
         // Third pass: relax soundness per relation to find the disagreeing rule.
         let mut relaxed_config = config.clone();
@@ -404,7 +443,10 @@ fn assert_model_accepts_rcell(source: &str, variant: &str, rank_levels: usize, s
             .iter()
             .filter(|(_, function)| {
                 **function != 0
-                    && !encoding.classes.iter().any(|class| class.function == **function)
+                    && !encoding
+                        .classes
+                        .iter()
+                        .any(|class| class.function == **function)
             })
             .map(|(position, function)| format!("{position:?}={function:08b}"))
             .collect::<Vec<_>>();
@@ -441,6 +483,15 @@ fn model_accepts_other_manual_full_adders() {
     ] {
         assert_model_accepts_rcell(source, "nor9", 24, 24);
     }
+    // A layout the exact placer compacted with the legacy encoder. (The
+    // generated 2x13x7 cell is not checked here: it has a repeater pointing out
+    // of the box, legal only with the whole max-Y face as sum sites.)
+    assert_model_accepts_rcell(
+        include_str!("../../../../../test/full-adder-right-inputs-compacted-2x10x10.rcell"),
+        "nor10",
+        24,
+        24,
+    );
     // `full-adder-2x20x20.rcell` is intentionally absent: its carry-out support
     // ORs n1 and n5 through one dust cell that carries power in opposite
     // directions depending on the input case. A single rank per cell cannot
@@ -522,7 +573,11 @@ fn measure_routing_with_manual_torches() {
     // No other torches anywhere.
     for cell in 0..encoding.geometry.len() {
         if !functions.contains_key(&encoding.geometry.position(cell)) {
-            assumptions.push(-encoding.is_torch[cell]);
+            for &torch in &encoding.torch[cell] {
+                if !encoding.cnf.is_false(torch) {
+                    assumptions.push(-torch);
+                }
+            }
         }
     }
     let workers = 8;
@@ -654,12 +709,14 @@ fn measure_completion_after_manual_prefix() {
             CellKind::Repeater(direction) => {
                 encoding.repeater[cell][CARDINALS.iter().position(|&d| d == direction).unwrap()]
             }
-            CellKind::Switch(attach) => encoding
-                .switches
-                .iter()
-                .find(|site| site.cell == cell && site.attach == attach)
-                .unwrap()
-                .lit,
+            CellKind::Switch(attach) => {
+                encoding
+                    .switches
+                    .iter()
+                    .find(|site| site.cell == cell && site.attach == attach)
+                    .unwrap()
+                    .lit
+            }
         };
         assumptions.push(lit);
     }
@@ -754,13 +811,19 @@ fn compaction_shrinks_a_loose_nor_and_keeps_it_verified() {
         ..Default::default()
     };
     let (compacted, placement, report) = placer.compact(layout, &compaction).unwrap();
-    println!("compaction {:?} -> {:?} {report:?}", config.dim, compacted.dim);
+    println!(
+        "compaction {:?} -> {:?} {report:?}",
+        config.dim, compacted.dim
+    );
     let placement = placement.expect("at least one slice can be removed from a loose box");
     assert!(compacted.dim.1 * compacted.dim.2 < config.dim.1 * config.dim.2);
     let document = placement.rcell.to_string();
     let reparsed: crate::physical_cell::PhysicalCellDocument = document.parse().unwrap();
     let build = reparsed.build().unwrap();
-    assert!(reparsed.verify(&build).unwrap().failures.is_empty(), "{document}");
+    assert!(
+        reparsed.verify(&build).unwrap().failures.is_empty(),
+        "{document}"
+    );
 }
 
 /// Construct-then-compact pipeline for the full adder with the requested
@@ -795,6 +858,7 @@ fn diagnose_full_adder_construct_and_compact() -> eyre::Result<()> {
         rank_levels: env_usize("PIPE_RANKS", 24),
         input_policies,
         output_policies: output_policies.clone(),
+        legacy_encoder: std::env::var("PIPE_LEGACY").as_deref() == Ok("1"),
         ..Default::default()
     };
     let (layout, placement, report) = placer.construct(&construction)?;
@@ -811,8 +875,11 @@ fn diagnose_full_adder_construct_and_compact() -> eyre::Result<()> {
         seed: env_usize("PIPE_SEED", 1) as u32,
         rank_levels: env_usize("PIPE_RANKS", 24),
         window_radius: env_usize("PIPE_RADIUS", 1),
-        time_limit: Some(Duration::from_secs(env_usize("PIPE_COMPACT_SECONDS", 1800) as u64)),
+        time_limit: Some(Duration::from_secs(
+            env_usize("PIPE_COMPACT_SECONDS", 1800) as u64
+        )),
         output_policies,
+        legacy_encoder: std::env::var("PIPE_LEGACY").as_deref() == Ok("1"),
         ..Default::default()
     };
     let (compacted, best, report) = placer.compact(layout, &compaction)?;
@@ -821,7 +888,10 @@ fn diagnose_full_adder_construct_and_compact() -> eyre::Result<()> {
         compacted.dim, report.removed, report.attempts, report.elapsed
     );
     let final_placement = best.unwrap_or(placement);
-    println!("PIPE result blocks={} inputs={:?} outputs={:?}", final_placement.block_count, final_placement.placed.inputs, final_placement.placed.outputs);
+    println!(
+        "PIPE result blocks={} inputs={:?} outputs={:?}",
+        final_placement.block_count, final_placement.placed.inputs, final_placement.placed.outputs
+    );
     println!("{}", final_placement.rcell);
     if let Ok(prefix) = std::env::var("PIPE_WRITE") {
         std::fs::write(format!("{prefix}.rcell"), final_placement.rcell.to_string())?;
@@ -855,11 +925,19 @@ fn recompact_full_adder_rcell() -> eyre::Result<()> {
         window_radius: 1,
         max_window_radius: env_usize("RECOMPACT_RADIUS", 2),
         attempt_time_limit: Duration::from_secs(env_usize("RECOMPACT_ATTEMPT_SECONDS", 20) as u64),
-        time_limit: Some(Duration::from_secs(env_usize("RECOMPACT_SECONDS", 1200) as u64)),
-        output_policies: [("s".to_owned(), OutputPolicy::MaxYFace)].into_iter().collect(),
+        time_limit: Some(Duration::from_secs(
+            env_usize("RECOMPACT_SECONDS", 1200) as u64
+        )),
+        output_policies: [("s".to_owned(), OutputPolicy::MaxYFace)]
+            .into_iter()
+            .collect(),
         ..Default::default()
     };
-    println!("RECOMPACT start dim={:?} cells={}", layout.dim, layout.cells.len());
+    println!(
+        "RECOMPACT start dim={:?} cells={}",
+        layout.dim,
+        layout.cells.len()
+    );
     let (compacted, best, report) = placer.compact(layout, &compaction)?;
     println!(
         "RECOMPACT done dim={:?} cells={} removed={:?} reductions={} attempts={} elapsed={:?}",
@@ -873,7 +951,415 @@ fn recompact_full_adder_rcell() -> eyre::Result<()> {
     if let (Some(placement), Ok(prefix)) = (best, std::env::var("RECOMPACT_WRITE")) {
         std::fs::write(format!("{prefix}.rcell"), placement.rcell.to_string())?;
         crate::nbt::NBTRoot::from(&placement.placed.world).save(format!("{prefix}.nbt"));
-        println!("RECOMPACT wrote {prefix}.rcell blocks={}", placement.block_count);
+        println!(
+            "RECOMPACT wrote {prefix}.rcell blocks={}",
+            placement.block_count
+        );
     }
     Ok(())
+}
+
+/// Writes the CaDiCaL input for a tiny inverter as DIMACS.
+/// `DUMP=<path>`, `COMMENTS=none|legend|explained` (default `explained`).
+#[test]
+#[ignore = "export; run explicitly with DUMP=<path>"]
+fn export_inverter_dimacs() {
+    let placer = ExactLocalPlacer::new(&graph(&[("out", "~a")]))
+        .unwrap()
+        .with_name("inverter");
+    let config = ExactPlacerConfig::new(DimSize(1, 3, 2));
+    let comments = match std::env::var("COMMENTS").as_deref() {
+        Ok("none") => DimacsComments::None,
+        Ok("legend") => DimacsComments::Legend,
+        _ => DimacsComments::Explained,
+    };
+    placer
+        .write_dimacs(&config, std::env::var("DUMP").unwrap(), comments)
+        .unwrap();
+}
+
+#[test]
+fn dimacs_comment_levels_only_add_comment_lines() {
+    let placer = ExactLocalPlacer::new(&graph(&[("out", "~a")])).unwrap();
+    let config = ExactPlacerConfig::new(DimSize(1, 3, 2));
+    let directory = std::env::temp_dir().join(format!("exact-dimacs-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let mut formulas = Vec::new();
+    for (level, comments) in [
+        ("none", DimacsComments::None),
+        ("legend", DimacsComments::Legend),
+        ("explained", DimacsComments::Explained),
+    ] {
+        let path = directory.join(format!("{level}.cnf"));
+        placer.write_dimacs(&config, &path, comments).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let comment_lines = text.lines().filter(|line| line.starts_with('c')).count();
+        let formula = text
+            .lines()
+            .filter(|line| !line.starts_with('c'))
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        formulas.push((comments, comment_lines, formula));
+    }
+    std::fs::remove_dir_all(&directory).unwrap();
+    assert_eq!(formulas[0].1, 0);
+    assert!(formulas[1].1 > 0 && formulas[2].1 > formulas[1].1);
+    assert!(formulas[0].2[0].starts_with("p cnf "));
+    assert!(formulas
+        .iter()
+        .all(|(_, _, formula)| *formula == formulas[0].2));
+}
+
+/// Solves the same problem from both encoders with several seeds and prints
+/// formula sizes and solve times: `ENCODER_CASE=xor|nor|inverter SEEDS=4`.
+#[test]
+#[ignore = "measurement; run explicitly with --nocapture"]
+fn compare_encoders() {
+    let (graph, dim) = match std::env::var("ENCODER_CASE").as_deref() {
+        Ok("nor") => (graph(&[("out", "~(a|b)")]), DimSize(1, 4, 2)),
+        Ok("inverter") => (graph(&[("out", "~a")]), DimSize(1, 3, 2)),
+        _ => (graph(&[("out", "a^b")]), DimSize(2, 6, 4)),
+    };
+    let netlist = NorNetlist::from_logic_graph(&graph).unwrap();
+    let seeds = env_usize("SEEDS", 4) as u32;
+    let seconds = env_usize("SECONDS", 120) as u64;
+    for legacy in [true, false] {
+        let mut config = ExactPlacerConfig::new(dim);
+        config.legacy_encoder = legacy;
+        let started = std::time::Instant::now();
+        let encoding = Encoding::build(&netlist, &config).unwrap();
+        let encode_time = started.elapsed();
+        let mut times = Vec::new();
+        for seed in 0..seeds {
+            let mut solver = SatSolver::new(1 + seed * 7919);
+            solver.add_cnf(&encoding.cnf);
+            let stop = std::sync::atomic::AtomicBool::new(false);
+            let signal = StopSignal {
+                stop: &stop,
+                deadline: Some(std::time::Instant::now() + Duration::from_secs(seconds)),
+            };
+            let started = std::time::Instant::now();
+            let result = solver.solve(&[], &signal);
+            times.push(format!(
+                "{result:?}@{:.2}s",
+                started.elapsed().as_secs_f64()
+            ));
+        }
+        println!(
+            "ENCODER legacy={legacy} vars={} clauses={} relations={} encode={encode_time:?} solves={times:?}",
+            encoding.cnf.num_vars(),
+            encoding.cnf.clause_count(),
+            encoding.relations.len(),
+        );
+    }
+}
+
+/// Runs the 4-worker `place` portfolio from both encoders over several base
+/// seeds: `ENCODER_CASE=xor SEEDS=4 SECONDS=120`.
+#[test]
+#[ignore = "measurement; run explicitly with --nocapture"]
+fn compare_encoder_portfolios() {
+    let (graph, dim) = match std::env::var("ENCODER_CASE").as_deref() {
+        Ok("nor") => (graph(&[("out", "~(a|b)")]), DimSize(1, 4, 2)),
+        _ => (graph(&[("out", "a^b")]), DimSize(2, 6, 4)),
+    };
+    let placer = ExactLocalPlacer::new(&graph).unwrap();
+    let seeds = env_usize("SEEDS", 4) as u32;
+    let seconds = env_usize("SECONDS", 120) as u64;
+    for legacy in [true, false] {
+        let mut times = Vec::new();
+        for seed in 0..seeds {
+            let mut config = ExactPlacerConfig::new(dim);
+            config.legacy_encoder = legacy;
+            config.workers = 4;
+            config.seed = 1 + seed * 104_729;
+            config.time_limit = Some(Duration::from_secs(seconds));
+            let started = std::time::Instant::now();
+            let (outcome, stats) = placer.place(&config).unwrap();
+            let worker = stats
+                .winning_seed
+                .map(|seed| (seed.wrapping_sub(config.seed) / 7919).to_string())
+                .unwrap_or_default();
+            let label = match outcome {
+                ExactOutcome::Placed(_) => "placed",
+                ExactOutcome::Infeasible => "infeasible",
+                ExactOutcome::Unknown { .. } => "unknown",
+            };
+            times.push(format!(
+                "{label}@{:.1}s/w{worker}",
+                started.elapsed().as_secs_f64()
+            ));
+            println!(
+                "PORTFOLIO legacy={legacy} seed={seed} {}",
+                times.last().unwrap()
+            );
+        }
+        println!("PORTFOLIO legacy={legacy} all={times:?}");
+    }
+}
+
+/// Each encoder accepts the layouts the other one finds (with the same pins
+/// and observation cells), and both agree on an infeasible box.
+#[test]
+fn encoders_accept_each_others_layouts() {
+    let cases = [
+        (graph(&[("out", "~a")]), DimSize(1, 3, 2)),
+        (graph(&[("out", "~(a|b)")]), DimSize(1, 4, 2)),
+        (graph(&[("out", "~(~a)")]), DimSize(1, 5, 3)),
+    ];
+    for (graph, dim) in cases {
+        let placer = ExactLocalPlacer::new(&graph).unwrap();
+        for legacy in [true, false] {
+            let mut config = ExactPlacerConfig::new(dim);
+            config.legacy_encoder = legacy;
+            config.time_limit = Some(Duration::from_secs(60));
+            let placement = expect_placed(&placer, &config);
+            let mut other = config.clone();
+            other.legacy_encoder = !legacy;
+            let position_of = |[x, y, z]: [usize; 3]| crate::world::position::Position(x, y, z);
+            for endpoint in &placement.placed.inputs {
+                let position = position_of(endpoint.position);
+                let kind = placement
+                    .cells
+                    .iter()
+                    .find(|(p, _)| *p == position)
+                    .map(|(_, kind)| *kind)
+                    .unwrap();
+                let CellKind::Switch(attach) = kind else {
+                    panic!("input {} is not a switch: {kind:?}", endpoint.name);
+                };
+                other
+                    .input_sites
+                    .insert(endpoint.name.clone(), vec![(position, attach)]);
+            }
+            for endpoint in &placement.placed.outputs {
+                other
+                    .output_sites
+                    .insert(endpoint.name.clone(), vec![position_of(endpoint.position)]);
+            }
+            let encoding = Encoding::build(placer.netlist(), &other).unwrap();
+            let assumptions = placement
+                .cells
+                .iter()
+                .map(|&(position, kind)| {
+                    encoding
+                        .kind_lit(encoding.geometry.index(position), kind)
+                        .unwrap_or_else(|| panic!("{position:?} cannot hold {kind:?}"))
+                })
+                .collect::<Vec<_>>();
+            let mut solver = SatSolver::new(1);
+            solver.add_cnf(&encoding.cnf);
+            let stop = std::sync::atomic::AtomicBool::new(false);
+            let signal = StopSignal {
+                stop: &stop,
+                deadline: Some(std::time::Instant::now() + Duration::from_secs(60)),
+            };
+            assert_eq!(
+                solver.solve(&assumptions, &signal),
+                SolveResult::Sat,
+                "legacy={} rejects the layout found with legacy={legacy} in {dim:?}",
+                !legacy
+            );
+        }
+    }
+    let placer = ExactLocalPlacer::new(&graph(&[("out", "~(a|b)")])).unwrap();
+    for legacy in [true, false] {
+        let mut config = ExactPlacerConfig::new(DimSize(1, 2, 1));
+        config.legacy_encoder = legacy;
+        let (outcome, _) = placer.place(&config).unwrap();
+        assert!(
+            matches!(outcome, ExactOutcome::Infeasible),
+            "legacy={legacy}: {outcome:?}"
+        );
+    }
+}
+
+/// Formula sizes and encode times of both encoders:
+/// `cargo test --release --lib measure_encoders -- --ignored --nocapture`.
+#[test]
+#[ignore = "measurement; run explicitly with --nocapture"]
+fn measure_encoders() {
+    let cases = [
+        ("inverter 1x3x2", graph(&[("out", "~a")]), DimSize(1, 3, 2)),
+        ("xor 2x6x4", graph(&[("out", "a^b")]), DimSize(2, 6, 4)),
+        (
+            "full adder 2x14x10",
+            full_adder_graph("nor9"),
+            DimSize(2, 14, 10),
+        ),
+    ];
+    let only = std::env::var("ENCODE_CASE").ok();
+    let encoders = match std::env::var("ENCODE_ONLY").as_deref() {
+        Ok("dsl") => vec![false],
+        Ok("legacy") => vec![true],
+        _ => vec![true, false],
+    };
+    for (name, graph, dim) in cases {
+        if only.as_deref().is_some_and(|only| !name.starts_with(only)) {
+            continue;
+        }
+        let netlist = NorNetlist::from_logic_graph(&graph).unwrap();
+        for &legacy in &encoders {
+            let mut config = ExactPlacerConfig::new(dim);
+            config.legacy_encoder = legacy;
+            let rounds = env_usize("ENCODE_ROUNDS", 5) as u32;
+            let started = std::time::Instant::now();
+            let mut encoding = None;
+            for _ in 0..rounds {
+                encoding = Some(Encoding::build(&netlist, &config).unwrap());
+            }
+            let elapsed = started.elapsed() / rounds;
+            let encoding = encoding.unwrap();
+            let started = std::time::Instant::now();
+            let mut solver = SatSolver::new(1);
+            solver.add_cnf(&encoding.cnf);
+            let load = started.elapsed();
+            drop(solver);
+            if let Some(program) = &encoding.program {
+                if std::env::var("ENCODE_RULES").is_ok() {
+                    for (rule, clauses, time) in program.rule_stats() {
+                        println!("  RULE {:>8.2?} {clauses:>8} {rule}", time / rounds);
+                    }
+                }
+            }
+            println!(
+                "ENCODE {name} legacy={legacy} vars={} clauses={} literals={} relations={} time={elapsed:?} load={load:?}",
+                encoding.cnf.num_vars(),
+                encoding.cnf.clause_count(),
+                encoding.cnf.literals().len() - encoding.cnf.clause_count(),
+                encoding.relations.len(),
+            );
+        }
+    }
+}
+
+/// Model params and replacement model files change the constraints without
+/// touching Rust or the CNF.
+#[test]
+fn model_params_and_files_change_the_constraints() {
+    let placer = ExactLocalPlacer::new(&graph(&[("out", "~(a|b)")])).unwrap();
+    let mut config = ExactPlacerConfig::new(DimSize(1, 4, 2));
+    config
+        .model_params
+        .insert("max_repeaters".to_owned(), rsdsl::IValue::Int(0));
+    let placement = expect_placed(&placer, &config);
+    assert!(placement
+        .cells
+        .iter()
+        .all(|(_, kind)| !matches!(kind, CellKind::Repeater(_))));
+
+    config
+        .model_params
+        .insert("max_repaeters".to_owned(), rsdsl::IValue::Int(0));
+    let error = placer.place(&config).unwrap_err().to_string();
+    assert!(error.contains("max_repaeters"), "{error}");
+    config.model_params.clear();
+
+    let directory = std::env::temp_dir().join(format!("exact-model-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("variant.rsdsl");
+    let variant = format!(
+        "{}\nrule \"이 실험에서는 아무 배치도 허용하지 않음\" {{ require false; }}\n",
+        include_str!("exact_placer.rsdsl")
+    );
+    std::fs::write(&path, variant).unwrap();
+    config.model_file = Some(path);
+    let (outcome, _) = placer.place(&config).unwrap();
+    std::fs::remove_dir_all(&directory).unwrap();
+    assert!(matches!(outcome, ExactOutcome::Infeasible), "{outcome:?}");
+}
+
+/// Every block layout one encoder admits (switches named with their input),
+/// by incremental enumeration with blocking clauses over the kind literals.
+fn admitted_layouts(
+    encoding: &Encoding,
+    netlist: &NorNetlist,
+    limit: usize,
+) -> Option<std::collections::BTreeSet<Vec<String>>> {
+    use super::encode::{CARDINALS, TORCH_ATTACH};
+    let geometry = encoding.geometry;
+    let mut options = Vec::new();
+    for cell in 0..geometry.len() {
+        let mut kinds = vec![CellKind::Air, CellKind::Solid, CellKind::Dust];
+        kinds.extend(TORCH_ATTACH.map(CellKind::Torch));
+        kinds.extend(CARDINALS.map(CellKind::Repeater));
+        let mut cell_options = kinds
+            .into_iter()
+            .filter_map(|kind| {
+                encoding
+                    .kind_lit(cell, kind)
+                    .map(|lit| (format!("{kind:?}"), lit))
+            })
+            .collect::<Vec<_>>();
+        for site in encoding.switches.iter().filter(|site| site.cell == cell) {
+            let label = format!("Switch({:?})/{}", site.attach, netlist.nets[site.net].name);
+            cell_options.push((label, site.lit));
+        }
+        options.push(cell_options);
+    }
+    let mut solver = SatSolver::new(1);
+    solver.add_cnf(&encoding.cnf);
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let signal = StopSignal {
+        stop: &stop,
+        deadline: None,
+    };
+    let mut layouts = std::collections::BTreeSet::new();
+    while solver.solve(&[], &signal) == SolveResult::Sat {
+        let chosen = options
+            .iter()
+            .map(|cell| {
+                let true_options = cell
+                    .iter()
+                    .filter(|(_, lit)| solver.value(*lit))
+                    .collect::<Vec<_>>();
+                assert_eq!(true_options.len(), 1, "{cell:?}");
+                true_options[0].clone()
+            })
+            .collect::<Vec<_>>();
+        solver.add_clause(&chosen.iter().map(|(_, lit)| -lit).collect::<Vec<_>>());
+        layouts.insert(chosen.into_iter().map(|(label, _)| label).collect());
+        if layouts.len() > limit {
+            return None;
+        }
+    }
+    Some(layouts)
+}
+
+/// Both encoders admit exactly the same block layouts on small boxes.
+#[test]
+fn encoders_admit_the_same_layouts() {
+    let cases = [
+        (graph(&[("out", "~a")]), DimSize(1, 3, 2), None),
+        (graph(&[("out", "~a")]), DimSize(1, 4, 2), None),
+        (graph(&[("out", "~(a|b)")]), DimSize(1, 4, 2), None),
+        (graph(&[("out", "~(a|b)")]), DimSize(1, 5, 2), Some(9)),
+        (graph(&[("out", "~a")]), DimSize(2, 2, 2), None),
+        (graph(&[("out", "~(a|b)")]), DimSize(2, 3, 2), Some(5)),
+    ];
+    for (graph, dim, max_blocks) in cases {
+        let netlist = NorNetlist::from_logic_graph(&graph).unwrap();
+        let mut sets = Vec::new();
+        for legacy in [true, false] {
+            let mut config = ExactPlacerConfig::new(dim);
+            config.legacy_encoder = legacy;
+            // Bound the count on larger boxes.
+            config.max_blocks = max_blocks;
+            let encoding = Encoding::build(&netlist, &config).unwrap();
+            let layouts = admitted_layouts(&encoding, &netlist, 20_000)
+                .unwrap_or_else(|| panic!("too many layouts in {dim:?}"));
+            sets.push(layouts);
+        }
+        assert!(!sets[0].is_empty(), "{dim:?}");
+        assert_eq!(
+            sets[0].len(),
+            sets[1].len(),
+            "layout counts differ in {dim:?}"
+        );
+        assert_eq!(sets[0], sets[1], "layouts differ in {dim:?}");
+        println!(
+            "LAYOUTS {dim:?} max_blocks={max_blocks:?}: {}",
+            sets[0].len()
+        );
+    }
 }

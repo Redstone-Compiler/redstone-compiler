@@ -31,6 +31,9 @@ pub struct CompactionConfig {
     /// Axes to shrink: 1 = Y (length), 2 = Z (height).
     pub axes: Vec<usize>,
     pub output_policies: BTreeMap<String, OutputPolicy>,
+    /// Diagnostic only: see `ExactPlacerConfig::legacy_encoder`.
+    #[doc(hidden)]
+    pub legacy_encoder: bool,
 }
 
 impl Default for CompactionConfig {
@@ -47,6 +50,7 @@ impl Default for CompactionConfig {
             stage_levels: 24,
             axes: vec![1, 2],
             output_policies: BTreeMap::new(),
+            legacy_encoder: false,
         }
     }
 }
@@ -73,11 +77,19 @@ impl ExactLocalPlacer {
         let started = Instant::now();
         let mut report = CompactionReport::default();
         let mut best = None;
-        let expired = || config.time_limit.is_some_and(|limit| started.elapsed() >= limit);
+        let expired = || {
+            config
+                .time_limit
+                .is_some_and(|limit| started.elapsed() >= limit)
+        };
         let mut radius = config.window_radius;
         'outer: loop {
             for &axis in &config.axes {
-                let length = if axis == 1 { layout.dim.1 } else { layout.dim.2 };
+                let length = if axis == 1 {
+                    layout.dim.1
+                } else {
+                    layout.dim.2
+                };
                 let mut order = (0..length).collect::<Vec<_>>();
                 order.sort_by_key(|&index| {
                     layout
@@ -98,7 +110,13 @@ impl ExactLocalPlacer {
                     report.attempts += 1;
                     let window = (index.saturating_sub(radius), index + radius);
                     if let Some(placement) = self.resolve_window(&cut, axis, window, None, config) {
-                        tracing::info!(axis, index, radius, blocks = placement.block_count, "compaction step");
+                        tracing::info!(
+                            axis,
+                            index,
+                            radius,
+                            blocks = placement.block_count,
+                            "compaction step"
+                        );
                         layout = ExactLayout::from_placement(cut.dim, &placement);
                         best = Some(placement);
                         report.removed.push((axis, index));
@@ -123,8 +141,14 @@ impl ExactLocalPlacer {
                     let limit = layout.cells.len().saturating_sub(1);
                     report.attempts += 1;
                     let window = (low, low + 3);
-                    if let Some(placement) = self.resolve_window(&layout, 1, window, Some(limit), config) {
-                        tracing::info!(low, blocks = placement.block_count, "compaction block reduction");
+                    if let Some(placement) =
+                        self.resolve_window(&layout, 1, window, Some(limit), config)
+                    {
+                        tracing::info!(
+                            low,
+                            blocks = placement.block_count,
+                            "compaction block reduction"
+                        );
                         layout = ExactLayout::from_placement(layout.dim, &placement);
                         best = Some(placement);
                         report.block_reductions += 1;
@@ -177,6 +201,7 @@ impl ExactLocalPlacer {
         exact.seed = config.seed;
         exact.rank_levels = config.rank_levels;
         exact.stage_levels = config.stage_levels;
+        exact.legacy_encoder = config.legacy_encoder;
         exact.time_limit = Some(config.attempt_time_limit);
         exact.max_refinements = 8;
         exact.max_blocks = max_blocks;
@@ -218,7 +243,12 @@ impl ExactLocalPlacer {
         &self,
         construction: &super::ConstructionConfig,
         compaction: &CompactionConfig,
-    ) -> eyre::Result<(ExactLayout, ExactPlacement, super::ConstructionReport, CompactionReport)> {
+    ) -> eyre::Result<(
+        ExactLayout,
+        ExactPlacement,
+        super::ConstructionReport,
+        CompactionReport,
+    )> {
         let (layout, placement, built) = self.construct(construction)?;
         let (layout, compacted, report) = self.compact(layout, compaction)?;
         Ok((layout, compacted.unwrap_or(placement), built, report))

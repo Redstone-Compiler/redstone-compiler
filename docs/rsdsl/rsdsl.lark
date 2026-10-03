@@ -1,0 +1,170 @@
+// Reference grammar for rsdsl v2 (Lark syntax, LALR(1), contextual lexer).
+// docs/solver_dsl_grammar.md is the normative spec; this file is the
+// machine-checked version of its syntax sections. Precedence is encoded in
+// the expression rules, lowest to highest.
+
+start: header item*
+
+header: "rsdsl" INT ";" (model_head | instance_head)
+model_head: "model" NAME ";"
+instance_head: "instance" NAME "of" NAME ";"
+
+?item: include
+     | grid_decl
+     | enum_decl
+     | subset_decl
+     | domain_decl
+     | fact_decl
+     | param_decl
+     | fn_decl
+     | annotated_decl
+     | objective_decl
+
+include: "include" STRING ";"
+
+// ----- compile-time declarations ---------------------------------------------
+
+grid_decl: "grid" NAME "(" NAME "," NAME "," NAME ")" "dirs" NAME "{" axis_dir ("," axis_dir)* [","] "}"
+         | "grid" NAME "=" "(" INT "," INT "," INT ")" ";"          -> grid_value
+axis_dir: NAME "=" axis_sign NAME
+!axis_sign: "+" | "-"
+
+enum_decl: "enum" NAME "{" NAME ("," NAME)* [","] "}"
+subset_decl: "subset" NAME "of" NAME "=" list ";"
+domain_decl: "domain" NAME [":" type] ["=" expr] ";"
+
+fact_decl: "fact" NAME "(" [fparams] ")" [":=" expr] ";"
+         | "fact" NAME "=" expr ";"                                  -> fact_value
+param_decl: "param" NAME ":" type ["=" expr] ";"
+          | "param" NAME "=" expr ";"                                -> param_value
+fn_decl: "fn" NAME "(" [fparams] ")" "->" type "=" expr ";"
+
+fparams: fparam ("," fparam)*
+fparam: [NAME ":"] type
+
+type: NAME
+    | "int"                                                          -> int_type
+    | "bool"                                                         -> bool_type
+    | "set" "<" type ">"                                             -> set_type
+    | type "?"                                                       -> option_type
+    | "(" type ("," type)+ ")"                                       -> tuple_type
+
+// ----- solver-level declarations ---------------------------------------------
+
+annotated_decl: annotation* decl
+?decl: choice_decl | var_decl | def_decl | relation_decl | int_decl | rule_decl
+
+annotation: "@" NAME [ "(" [ann_arg ("," ann_arg)*] ")" ]
+ann_arg: NAME "=" expr                                               -> named_arg
+       | expr
+
+choice_decl: "choice" NAME index "{" member ("," member)* [","] "}"
+member: NAME ["(" fparams ")"] ["if" expr]
+index: "[" binders "]"
+
+var_decl: "var" NAME index ";"
+        | "var" NAME "over" NAME ";"                                 -> var_over
+def_decl: "def" NAME [index] ":=" expr ";"
+relation_decl: "relation" NAME "(" fparams ")" ";"
+int_decl: "int" NAME index "in" range ";"
+rule_decl: "rule" STRING block
+
+objective_decl: objective expr ";"
+!objective: "minimize" | "maximize"
+
+// ----- statements ------------------------------------------------------------
+
+block: "{" stmt* "}"
+stmt: annotation* stmt_body
+?stmt_body: require_stmt | forall_stmt | if_stmt | let_stmt | contrib_stmt
+
+require_stmt: "require" expr ";"
+forall_stmt: "forall" binders ["where" expr] block
+if_stmt: "if" expr block ["else" (if_stmt | block)]
+let_stmt: "let" NAME "=" expr ";"
+contrib_stmt: NAME "(" args ")" "|=" expr ";"
+
+binders: binder ("," binder)*
+binder: NAME ":" type                                                -> typed_binder
+      | NAME "in" in_source                                          -> in_binder
+      | "(" pname ("," pname)* ")" "in" NAME                         -> tuple_binder
+pname: NAME | HOLE
+?in_source: range | expr
+range: sum ".." sum                                                  -> range_excl
+     | sum "..=" sum                                                 -> range_incl
+
+// ----- expressions (lowest precedence first) ---------------------------------
+
+?expr: iff
+?iff: imp
+    | imp "<->" imp                                                  -> iff_op
+?imp: or_e
+    | or_e "->" imp                                                  -> imp_op
+?or_e: xor_e
+     | or_e "or" xor_e                                               -> or_op
+?xor_e: and_e
+      | xor_e "xor" and_e                                            -> xor_op
+?and_e: not_e
+      | and_e "and" not_e                                            -> and_op
+?not_e: cmp
+      | "not" not_e                                                  -> not_op
+?cmp: sum
+    | sum cmp_op sum                                                 -> compare
+    | sum "is" pattern                                               -> is_test
+    | sum "in" sum                                                   -> in_test
+!cmp_op: "==" | "!=" | "<=" | ">=" | "<" | ">"
+?sum: term
+    | sum add_op term                                                -> arith
+?term: unary
+     | term mul_op unary                                             -> arith
+!add_op: "+" | "-"
+!mul_op: "*" | "/" | "%"
+?unary: postfix
+      | "-" unary                                                    -> neg
+?postfix: primary
+        | postfix "[" args "]"                                       -> family
+        | postfix "(" [args] ")"                                     -> call
+        | postfix "." NAME                                           -> member_access
+?primary: INT                                                        -> int_lit
+        | STRING                                                     -> str_lit
+        | "true"                                                     -> true_lit
+        | "false"                                                    -> false_lit
+        | "none"                                                     -> none_lit
+        | NAME                                                       -> name
+        | "(" expr ")"
+        | "(" expr "," args ")"                                      -> tuple
+        | list
+        | aggregate
+        | if_expr
+        | match_expr
+
+list: "[" [args] "]"
+    | "[" expr "for" binders ["where" expr] "]"                      -> list_comp
+aggregate: aggregator "(" expr "for" binders ["where" expr] ")"
+!aggregator: "any" | "all" | "count" | "exactly_one" | "at_most_one"
+if_expr: "if" expr "{" expr "}" "else" (if_expr | "{" expr "}")
+match_expr: "match" expr "{" arm ("," arm)* [","] "}"
+arm: pattern "=>" expr
+
+pattern: alt ("|" alt)*
+?alt: NAME                                                           -> ctor
+    | NAME "(" pat_arg ("," pat_arg)* ")"                            -> ctor_args
+    | HOLE                                                           -> wildcard
+?pat_arg: HOLE                                                       -> wildcard
+        | expr
+
+args: expr ("," expr)*
+
+// ----- lexical ---------------------------------------------------------------
+
+HOLE: "_"
+NAME: /[A-Za-z][A-Za-z0-9_]*|_[A-Za-z0-9_]+/
+INT: /[0-9]+/
+STRING: /"([^"\\\n]|\\.)*"/
+
+COMMENT: /\/\/[^\n]*/
+BLOCK_COMMENT: /\/\*(.|\n)*?\*\//
+%import common.WS
+%ignore WS
+%ignore COMMENT
+%ignore BLOCK_COMMENT

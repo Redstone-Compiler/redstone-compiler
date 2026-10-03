@@ -117,9 +117,12 @@ pub(super) fn refine(
                 })
         })
         .collect::<Vec<_>>();
-    let is_switch = (0..cells)
-        .map(|cell| solver.value(encoding.is_switch[cell]))
-        .collect::<Vec<_>>();
+    let mut is_switch = vec![false; cells];
+    for site in &encoding.switches {
+        if solver.value(site.lit) {
+            is_switch[site.cell] = true;
+        }
+    }
     // Read the whole model before adding clauses: adding invalidates it.
     let powered_by_case = (0..encoding.cases)
         .map(|case| {
@@ -175,7 +178,11 @@ pub(super) fn refine(
                 let neighbors = index.outgoing[cell]
                     .iter()
                     .map(|&r| encoding.relations[r].sink)
-                    .chain(index.incoming[cell].iter().map(|&r| encoding.relations[r].source))
+                    .chain(
+                        index.incoming[cell]
+                            .iter()
+                            .map(|&r| encoding.relations[r].source),
+                    )
                     .collect::<Vec<_>>();
                 for neighbor in neighbors {
                     if powered[neighbor] && !reached[neighbor] && group_of[neighbor] == usize::MAX {

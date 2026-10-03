@@ -40,6 +40,9 @@ pub struct ConstructionConfig {
     pub output_policies: BTreeMap<String, OutputPolicy>,
     /// Times an earlier step may be re-solved after a later step fails.
     pub max_backtracks: usize,
+    /// Diagnostic only: see `ExactPlacerConfig::legacy_encoder`.
+    #[doc(hidden)]
+    pub legacy_encoder: bool,
 }
 
 impl Default for ConstructionConfig {
@@ -58,6 +61,7 @@ impl Default for ConstructionConfig {
             input_policies: BTreeMap::new(),
             output_policies: BTreeMap::new(),
             max_backtracks: 6,
+            legacy_encoder: false,
         }
     }
 }
@@ -166,7 +170,11 @@ impl ExactLocalPlacer {
             .and_then(|state| state.result)
             .expect("the last step produced a layout");
         report.elapsed = started.elapsed();
-        Ok((ExactLayout::from_placement(dim, &placement), placement, report))
+        Ok((
+            ExactLayout::from_placement(dim, &placement),
+            placement,
+            report,
+        ))
     }
 
     #[allow(clippy::type_complexity)]
@@ -218,6 +226,7 @@ impl ExactLocalPlacer {
             exact.seed = config.seed;
             exact.rank_levels = config.rank_levels;
             exact.stage_levels = config.stage_levels;
+            exact.legacy_encoder = config.legacy_encoder;
             exact.time_limit = Some(config.step_time_limit);
             exact.max_refinements = 8;
             exact.blocked = blocked.to_vec();
@@ -240,7 +249,9 @@ impl ExactLocalPlacer {
                 let net = netlist.input_net(&name).unwrap();
                 if let Some((position, attach)) = state.placed_inputs.get(&name) {
                     // Keep placed switches even inside the overlap.
-                    exact.fixed_cells.insert(*position, CellKind::Switch(*attach));
+                    exact
+                        .fixed_cells
+                        .insert(*position, CellKind::Switch(*attach));
                     exact = exact.with_input_site(name.clone(), *position, *attach);
                 } else if needed_inputs.contains(&net) {
                     let policy = config
@@ -280,8 +291,16 @@ impl ExactLocalPlacer {
                 exact.observations = Some(live);
             }
             let step_started = Instant::now();
-            let (outcome, _) = self.place(&exact)?;
+            let (outcome, stats) = self.place(&exact)?;
             let ExactOutcome::Placed(placement) = outcome else {
+                tracing::info!(
+                    gate = netlist.nets[gate].name,
+                    window,
+                    seconds = step_started.elapsed().as_secs_f64(),
+                    refinements = stats.refinements,
+                    outcome = ?outcome,
+                    "construction step failed"
+                );
                 continue;
             };
             let seconds = step_started.elapsed().as_secs_f64();
@@ -301,8 +320,15 @@ impl ExactLocalPlacer {
                 placed_inputs.insert(input.name.clone(), (position, attach));
             }
             let window_cells = (0..dim.0)
-                .flat_map(|x| (frozen..dim.1).flat_map(move |y| (0..dim.2).map(move |z| Position(x, y, z))))
-                .map(|position| (position, cells.get(&position).copied().unwrap_or(CellKind::Air)))
+                .flat_map(|x| {
+                    (frozen..dim.1).flat_map(move |y| (0..dim.2).map(move |z| Position(x, y, z)))
+                })
+                .map(|position| {
+                    (
+                        position,
+                        cells.get(&position).copied().unwrap_or(CellKind::Air),
+                    )
+                })
                 .collect();
             let mut available = state.available.clone();
             available.extend(needed_inputs.iter().copied());
@@ -314,7 +340,11 @@ impl ExactLocalPlacer {
                 available,
                 result: Some((dim, *placement)),
             };
-            return Ok(Some((next, window_cells, (netlist.nets[gate].name.clone(), window, seconds))));
+            return Ok(Some((
+                next,
+                window_cells,
+                (netlist.nets[gate].name.clone(), window, seconds),
+            )));
         }
         Ok(None)
     }

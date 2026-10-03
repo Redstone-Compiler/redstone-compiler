@@ -1,0 +1,353 @@
+rsdsl 2;
+model exact_placer;
+
+// The exact local placer's constraint model (grounded by exact/dsl.rs;
+// encode.rs is the hand-written original). Language: docs/solver_dsl_grammar.md.
+
+// ===== compile-time world ====================================================
+
+grid Cell(x, y, z) dirs Dir6 {
+    East = +x, West = -x, North = +y, South = -y, Up = +z, Down = -z,
+}
+subset Dir4 of Dir6 = [East, West, North, South];
+enum Attach { Floor, East, West, North, South }
+enum Source { FromDust, FromTorch, FromRepeater, FromSolid, FromSwitch }
+enum Sink { DustSink, RepeaterSink, SolidSink }
+
+domain Case: int;      // input cases; bit i of a case is input i
+domain Class;          // signal vocabulary, one class per Boolean function
+domain Output;
+
+fact on(Class, Case);                  // class is powered in that case
+fact unpowered(Class);                 // the constant-off class
+fact input_class(Class);               // classes a switch may carry
+fact present(Class);                   // inputs that need a switch in this layout
+fact switch_site(Cell, Attach, Class);
+fact switch_attach(c: Cell, a: Attach) := any(switch_site(c, a, k) for k: Class);
+fact output_site(Output, Cell);
+fact output_class(Output, Class);
+fact driving(Output);                  // must drive the cell beyond the box
+fact fixed(Cell, Kind);                // fixed block kinds, as members of `Kind`
+
+// A repeater may point out of the box only where something is observed or
+// where one is already fixed.
+fact outward_ok(c: Cell) :=
+    any(output_site(o, c) for o: Output)
+    or any(fixed(c, m) and m is Repeater(_) for m: Kind);
+
+param rank_levels: int = 24;
+param stage_levels: int = 24;
+param max_blocks: int? = none;
+param max_repeaters: int? = none;      // e.g. 0 forbids repeaters
+param allow_unpowered_wires: bool = false;
+
+fn dir(a: Attach) -> Dir6 = match a {
+    Floor => Down, East => East, West => West, North => North, South => South,
+};
+
+fn perp(d: Dir4) -> set<Dir4> = match d {
+    East | West => [North, South],
+    North | South => [East, West],
+};
+
+// ===== solver variables ======================================================
+
+@prefer(Air) @outside(Air) @display("{c} {member}")
+choice Kind[c: Cell] {
+    Air,
+    Solid,
+    Dust if has(step(c, Down)),
+    Torch(a: Attach) if has(step(c, dir(a))),
+    Repeater(d: Dir4) if has(step(c, Down)) and has(step(c, d))
+                         and (has(step(c, opposite(d))) or outward_ok(c)),
+    Switch(a: Attach, k: Class) if switch_site(c, a, k),
+}
+
+@prefer(Empty) @display("{c} 신호={member}")
+choice Sig[c: Cell] {
+    Empty,
+    Carry(k: Class),
+}
+
+@display("{c} 경우{k}에 켜짐")
+def Powered[k: Case, c: Cell] := any(Sig[c] is Carry(j) for j: Class where on(j, k));
+
+@display("{c} 꺼짐 신호")
+def Unpowered[c: Cell] := any(Sig[c] is Carry(u) for u: Class where unpowered(u));
+
+@internal
+def Stick[c: Cell] := Kind[c] is Dust | Torch(_) | Switch(_, _);
+
+@display("{c} 가루가 {d}쪽과 연결")
+def Conn[c: Cell, d: Dir4] := Kind[c] is Dust and (
+       Stick[step(c, d)]
+    or Kind[step(c, d)] is Repeater(opposite(d))
+    or (not Kind[step(c, Up)] is Solid and Kind[step(step(c, d), Up)] is Dust)
+    or (not Kind[step(c, d)] is Solid and Kind[step(step(c, d), Down)] is Dust));
+
+@display("{c} 가루가 {d}쪽을 가리킴")
+def Points[c: Cell, d: Dir4] :=
+    Kind[c] is Dust and (Conn[c, d] or all(not Conn[c, p] for p in perp(d)));
+
+@display("{c} 강전원 받는 블록")
+def Hard[c: Cell] := Kind[c] is Solid and (
+       Kind[step(c, Down)] is Torch(_)
+    or any(Kind[step(c, d)] is Repeater(d) for d: Dir4)
+    or any(Kind[step(c, opposite(dir(a)))] is Switch(a, _) for a: Attach));
+
+@display("전원관계[{src} {from} → {dst} {to}]")
+relation Feeds(src: Cell, dst: Cell, from: Source, to: Sink);
+
+@display("기여[{src} → {dst}]")
+var Contrib over Feeds;
+
+@encoding(order) @display("{c} 순위")
+int Rank[c: Cell] in 0..=rank_levels;
+
+@encoding(order) @display("{c} 단계")
+int Stage[c: Cell] in 0..=stage_levels;
+
+// ===== blocks ================================================================
+
+rule "가루·리피터·바닥 토치는 아래 칸이 블록이어야 함" {
+    forall c: Cell {
+        require Kind[c] is Dust | Repeater(_) | Torch(Floor) -> Kind[step(c, Down)] is Solid;
+    }
+}
+
+rule "벽 토치·스위치는 붙은 쪽 칸이 블록이어야 함" {
+    forall c: Cell, a: Attach {
+        if a != Floor {
+            require Kind[c] is Torch(a) -> Kind[step(c, dir(a))] is Solid;
+        }
+        require Kind[c] is Switch(a, _) -> Kind[step(c, dir(a))] is Solid;
+    }
+}
+
+rule "입력마다 스위치는 정확히 하나" {
+    forall k: Class where input_class(k) and present(k) {
+        require exactly_one(Kind[c] is Switch(a, k) for (c, a, j) in switch_site where j == k);
+    }
+}
+
+rule "고정된 칸" {
+    forall c: Cell, m: Kind where fixed(c, m) {
+        require Kind[c] is m;
+    }
+}
+
+rule "블록 개수 상한" {
+    if has(max_blocks) {
+        @encoding(seqcounter)
+        require count(not Kind[c] is Air for c: Cell) <= max_blocks;
+    }
+}
+
+rule "리피터 개수 상한" {
+    if has(max_repeaters) {
+        require count(Kind[c] is Repeater(_) for c: Cell) <= max_repeaters;
+    }
+}
+
+// ===== signals ===============================================================
+
+rule "차 있는 칸만 신호를 실음" {
+    forall c: Cell {
+        require Kind[c] is Air <-> Sig[c] is Empty;
+    }
+}
+
+rule "'꺼짐' 신호는 블록만 (허용 시 죽은 가루/리피터도)" {
+    forall c: Cell {
+        require Unpowered[c] -> Kind[c] is Solid
+            or (allow_unpowered_wires and Kind[c] is Dust | Repeater(_));
+    }
+}
+
+rule "스위치는 자기 입력 신호만 실음" {
+    forall (c, a, k) in switch_site {
+        require Kind[c] is Switch(a, k) -> Sig[c] is Carry(k);
+    }
+}
+
+rule "토치는 반드시 꺼짐이 아닌 신호를 실음" {
+    forall c: Cell {
+        require Kind[c] is Torch(_) -> Sig[c] is Carry(_) and not Unpowered[c];
+    }
+}
+
+// ===== power relations =======================================================
+
+rule "전원 관계: 가루 ↔ 옆 가루 / 계단 가루" {
+    forall c: Cell, d: Dir4 {
+        Feeds(c, step(c, d), FromDust, DustSink) |= Kind[c] is Dust and Kind[step(c, d)] is Dust;
+        let up = step(step(c, d), Up);
+        let stair = Kind[c] is Dust and Kind[up] is Dust and not Kind[step(c, Up)] is Solid;
+        Feeds(c, up, FromDust, DustSink) |= stair;
+        Feeds(up, c, FromDust, DustSink) |= stair;
+    }
+}
+
+rule "전원 관계: 가루 → 받침·가리키는 블록(약전원), 뒤에서 읽는 리피터" {
+    forall c: Cell {
+        Feeds(c, step(c, Down), FromDust, SolidSink) |= Kind[c] is Dust;
+        forall d: Dir4 {
+            Feeds(c, step(c, d), FromDust, SolidSink) |= Points[c, d] and Kind[step(c, d)] is Solid;
+            Feeds(c, step(c, d), FromDust, RepeaterSink)
+                |= Kind[c] is Dust and Kind[step(c, d)] is Repeater(opposite(d));
+        }
+    }
+}
+
+rule "전원 관계: 토치 → 주변 가루·리피터, 위 블록(강전원)" {
+    forall c: Cell, d: Dir6 {
+        if d == Up {
+            Feeds(c, step(c, d), FromTorch, SolidSink)
+                |= Kind[c] is Torch(_) and Kind[step(c, d)] is Solid;
+        } else {
+            Feeds(c, step(c, d), FromTorch, DustSink)
+                |= Kind[c] is Torch(_) and Kind[step(c, d)] is Dust;
+        }
+        if d in Dir4 {
+            Feeds(c, step(c, d), FromTorch, RepeaterSink)
+                |= Kind[c] is Torch(_) and Kind[step(c, d)] is Repeater(opposite(d));
+        }
+    }
+}
+
+rule "전원 관계: 리피터 → 앞쪽 블록/가루/같은 방향 리피터" {
+    forall c: Cell, d: Dir4 {
+        let out = step(c, opposite(d));
+        Feeds(c, out, FromRepeater, SolidSink) |= Kind[c] is Repeater(d) and Kind[out] is Solid;
+        Feeds(c, out, FromRepeater, DustSink) |= Kind[c] is Repeater(d) and Kind[out] is Dust;
+        Feeds(c, out, FromRepeater, RepeaterSink) |= Kind[c] is Repeater(d) and Kind[out] is Repeater(d);
+    }
+}
+
+rule "리피터가 다른 리피터 옆구리를 치면 잠김 → 금지" {
+    forall c: Cell, d: Dir4, p in perp(d) {
+        require not (Kind[c] is Repeater(d) and Kind[step(c, opposite(d))] is Repeater(p));
+    }
+}
+
+rule "전원 관계: 블록 → 읽는 리피터; 강전원 블록 → 주변 가루" {
+    forall c: Cell {
+        forall d: Dir4 {
+            Feeds(c, step(c, d), FromSolid, RepeaterSink)
+                |= Kind[c] is Solid and Kind[step(c, d)] is Repeater(opposite(d));
+        }
+        forall d: Dir6 {
+            Feeds(c, step(c, d), FromSolid, DustSink) |= Hard[c] and Kind[step(c, d)] is Dust;
+        }
+    }
+}
+
+rule "전원 관계: 스위치 → 붙은 블록(강전원), 주변 가루·리피터" {
+    forall (c, a, k) in switch_site {
+        let sw = Kind[c] is Switch(a, k);
+        Feeds(c, step(c, dir(a)), FromSwitch, SolidSink) |= sw;
+        forall d: Dir6 where d != dir(a) {
+            let t = step(c, d);
+            Feeds(c, t, FromSwitch, DustSink) |= sw and Kind[t] is Dust;
+            if d in Dir4 {
+                Feeds(c, t, FromSwitch, RepeaterSink) |= sw and Kind[t] is Repeater(opposite(d));
+            }
+        }
+    }
+}
+
+rule "스위치 옆 블록의 약전원은 토치는 무시하고 리피터는 받음 → 그런 배치 금지" {
+    forall (c, a) in switch_attach, d: Dir6 where d != dir(a) {
+        let t = step(c, d);
+        forall b: Attach {
+            require not (Kind[c] is Switch(a, _) and Kind[step(t, opposite(dir(b)))] is Torch(b));
+        }
+        forall e: Dir4 {
+            require not (Kind[c] is Switch(a, _) and Kind[t] is Solid
+                         and Kind[step(t, e)] is Repeater(opposite(e)));
+        }
+    }
+}
+
+// ===== behavior ==============================================================
+
+@guarded(per = (s, t, f, to))
+rule "건전성: 원천이 켜지면 받는 쪽도 켜짐 (가루·리피터는 원천과 똑같은 신호)" {
+    forall (s, t, f, to) in Feeds {
+        let feeds = Feeds(s, t, f, to);
+        forall k: Case {
+            require feeds and Powered[k, s] -> Powered[k, t];
+            if to != SolidSink {
+                require feeds and Powered[k, t] -> Powered[k, s];
+            }
+        }
+    }
+}
+
+rule "정당화: 기여 관계, 순위·단계 순서" {
+    forall (s, t, f, to) in Feeds {
+        let used = Contrib(s, t, f, to);
+        require used -> Feeds(s, t, f, to);
+        // Zero levels select lazy acyclicity: the host adds loop nogoods.
+        if to == RepeaterSink {
+            // Repeaters restart the rank and advance the stage instead.
+            if stage_levels > 0 {
+                require used -> Stage[s] < Stage[t];
+            }
+        } else {
+            if rank_levels > 0 {
+                require used -> Rank[s] < Rank[t];
+            }
+            if stage_levels > 0 {
+                require used -> Stage[s] <= Stage[t];
+            }
+        }
+        if to != SolidSink {
+            require used -> not Unpowered[s];
+        }
+    }
+}
+
+@guarded(per = c)
+rule "켜진 것은 켜진 원천이 있어야 함" {
+    forall c: Cell {
+        require Kind[c] is Dust | Repeater(_) and not Unpowered[c]
+            -> any(Contrib(s, t, f, to) for (s, t, f, to) in Feeds where t == c and to != SolidSink);
+        forall k: Case {
+            require Powered[k, c] and Kind[c] is Solid
+                -> any(Contrib(s, t, f, to) and Powered[k, s]
+                       for (s, t, f, to) in Feeds where t == c and to == SolidSink);
+        }
+    }
+}
+
+rule "토치는 받침 블록의 반대, 받침보다 높은 단계" {
+    forall c: Cell, a: Attach {
+        let support = step(c, dir(a));
+        forall k: Case {
+            require Kind[c] is Torch(a) -> (Powered[k, c] <-> not Powered[k, support]);
+        }
+        if stage_levels > 0 {
+            require Kind[c] is Torch(a) -> Stage[support] < Stage[c];
+        }
+    }
+}
+
+// ===== interface =============================================================
+
+@display("출력 {o}을 {c}에서 관측")
+def Observe[o: Output, c: Cell] :=
+    output_site(o, c)
+    and (if driving(o) {
+            Kind[c] is Torch(_)
+            or any(Kind[c] is Repeater(d) for d: Dir4 where not has(step(c, opposite(d))))
+         } else {
+            Kind[c] is Dust | Repeater(_) | Torch(_)
+         })
+    and any(Sig[c] is Carry(j) for j: Class where output_class(o, j));
+
+rule "출력: 허용된 위치에서 관측" {
+    forall o: Output {
+        require any(Observe[o, c] for c: Cell where output_site(o, c));
+    }
+}

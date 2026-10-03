@@ -19,6 +19,8 @@ mod acyclic;
 mod cnf;
 mod compact;
 mod construct;
+mod dimacs;
+mod dsl;
 mod encode;
 mod layout;
 mod netlist;
@@ -34,6 +36,7 @@ use std::time::{Duration, Instant};
 
 pub use compact::{CompactionConfig, CompactionReport};
 pub use construct::{ConstructionConfig, ConstructionReport};
+pub use dimacs::DimacsComments;
 pub use encode::CellKind;
 pub use layout::{ExactLayout, InputPolicy, OutputPolicy};
 pub use netlist::{Net, NetDriver, NetId, NorNetlist};
@@ -89,6 +92,18 @@ pub struct ExactPlacerConfig {
     /// literal that tests can assume false to locate model/simulator mismatches.
     #[doc(hidden)]
     pub relax_soundness: bool,
+    /// Diagnostic only: encode with the hand-written `encode.rs` instead of
+    /// grounding `exact_placer.rsdsl`.
+    #[doc(hidden)]
+    pub legacy_encoder: bool,
+    /// A model file to ground instead of the built-in `exact_placer.rsdsl`.
+    /// It must declare the families the placer reads back (`Kind`, `Sig`,
+    /// `Powered`, `Conn`, `Points`, `Hard`, `Feeds`, `Contrib`, `Rank`,
+    /// `Stage`, `Observe`) and the instance facts and params it fills.
+    pub model_file: Option<std::path::PathBuf>,
+    /// Extra model params, for example `max_repeaters`; they override the
+    /// model's defaults.
+    pub model_params: BTreeMap<String, rsdsl::IValue>,
 }
 
 impl ExactPlacerConfig {
@@ -111,6 +126,9 @@ impl ExactPlacerConfig {
             max_refinements: 64,
             allow_unpowered_wires: false,
             relax_soundness: false,
+            legacy_encoder: false,
+            model_file: None,
+            model_params: BTreeMap::new(),
         }
     }
 
@@ -154,7 +172,7 @@ pub struct ExactPlacerStats {
     pub winning_seed: Option<u32>,
     pub relations: usize,
     /// Cumulative `(section, variables, clauses)` after each encoding step.
-    pub sections: Vec<(&'static str, i32, usize)>,
+    pub sections: Vec<(String, i32, usize)>,
 }
 
 #[derive(Debug, Clone)]
@@ -171,7 +189,9 @@ pub enum ExactOutcome {
     /// The solver proved that no layout satisfies the encoded constraints.
     Infeasible,
     /// Time limit reached, or every worker exhausted its refinement budget.
-    Unknown { last_rejection: Option<String> },
+    Unknown {
+        last_rejection: Option<String>,
+    },
 }
 
 pub struct ExactLocalPlacer {
@@ -202,7 +222,10 @@ impl ExactLocalPlacer {
         &self.netlist
     }
 
-    pub fn place(&self, config: &ExactPlacerConfig) -> eyre::Result<(ExactOutcome, ExactPlacerStats)> {
+    pub fn place(
+        &self,
+        config: &ExactPlacerConfig,
+    ) -> eyre::Result<(ExactOutcome, ExactPlacerStats)> {
         let encode_started = Instant::now();
         let encoding = Encoding::build(&self.netlist, config)?;
         let mut stats = ExactPlacerStats {
@@ -331,7 +354,11 @@ impl ExactLocalPlacer {
                     last_rejection = Some(format!("{} at {:?}", failure.message, failure.position));
                     *refinements.lock().unwrap() += 1;
                     rejections += 1;
-                    let blocking = decoded.kind_lits.iter().map(|&lit| -lit).collect::<Vec<_>>();
+                    let blocking = decoded
+                        .kind_lits
+                        .iter()
+                        .map(|&lit| -lit)
+                        .collect::<Vec<_>>();
                     solver.add_clause(&blocking);
                 }
             }
@@ -352,11 +379,7 @@ impl ExactLocalPlacer {
             .filter(|(_, kind)| **kind != CellKind::Air)
             .map(|(cell, kind)| {
                 (
-                    Position(
-                        cell % dim.0,
-                        (cell / dim.0) % dim.1,
-                        cell / (dim.0 * dim.1),
-                    ),
+                    Position(cell % dim.0, (cell / dim.0) % dim.1, cell / (dim.0 * dim.1)),
                     *kind,
                 )
             })

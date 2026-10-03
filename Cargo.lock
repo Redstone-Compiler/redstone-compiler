@@ -744,6 +744,7 @@ dependencies = [
  "quine-mc_cluskey",
  "rand",
  "rayon",
+ "rsdsl",
  "serde",
  "serde_json",
  "structopt",
@@ -753,6 +754,10 @@ dependencies = [
  "tracing-subscriber",
  "zip",
 ]
+
+[[package]]
+name = "rsdsl"
+version = "0.2.0"
 
 [[package]]
 name = "rustversion"

@@ -1,0 +1,24 @@
+rsdsl 2;
+instance inverter_1x3x2 of exact_placer;
+
+// `out = ~a` in a 1x3x2 box. In practice Rust builds instances from a
+// LogicGraph; a text instance like this is for tests and DIMACS exports.
+
+grid Cell = (1, 3, 2);
+
+domain Case = [0, 1];                 // case 0: a = 0, case 1: a = 1
+domain Class = [off, a, out];         // vocabulary: off, a, ~a
+domain Output = [out];
+
+fact on = [(a, 1), (out, 0)];
+fact unpowered = [off];
+fact input_class = [a];
+fact present = [a];
+fact switch_site = [(c, att, a) for c: Cell, att: Attach where has(step(c, dir(att)))];
+fact output_site = [(out, c) for c: Cell];
+fact output_class = [(out, out)];
+fact driving = [];
+fact fixed = [];
+
+param rank_levels = 8;
+param stage_levels = 8;

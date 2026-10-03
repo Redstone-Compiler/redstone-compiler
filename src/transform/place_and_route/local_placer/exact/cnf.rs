@@ -9,6 +9,9 @@ pub(super) struct Cnf {
     literals: Vec<Lit>,
     clause_count: usize,
     true_lit: Lit,
+    /// `(first clause index, rule)`: which modeling rule emitted each run of
+    /// clauses, so exported formulas can be explained.
+    rules: Vec<(usize, &'static str)>,
 }
 
 impl Cnf {
@@ -18,12 +21,25 @@ impl Cnf {
             literals: Vec::new(),
             clause_count: 0,
             true_lit: 0,
+            rules: vec![(0, "상수: 변수 1은 항상 참")],
         };
         let true_lit = cnf.new_var();
         cnf.literals.extend([true_lit, 0]);
         cnf.clause_count = 1;
         cnf.true_lit = true_lit;
         cnf
+    }
+
+    /// Wraps an already built formula whose variable 1 is constant true.
+    pub(super) fn from_literals(num_vars: i32, literals: Vec<Lit>, clause_count: usize) -> Self {
+        debug_assert_eq!(literals.get(..2), Some(&[1, 0][..]));
+        Self {
+            num_vars,
+            literals,
+            clause_count,
+            true_lit: 1,
+            rules: vec![(0, "rsdsl 모델 (규칙별 설명은 rsdsl DIMACS 출력 참고)")],
+        }
     }
 
     pub(super) fn new_var(&mut self) -> Lit {
@@ -41,6 +57,18 @@ impl Cnf {
 
     pub(super) fn literals(&self) -> &[Lit] {
         &self.literals
+    }
+
+    /// Labels the clauses added from now on with `rule`.
+    pub(super) fn rule(&mut self, rule: &'static str) {
+        if self.rules.last().is_some_and(|(_, last)| *last == rule) {
+            return;
+        }
+        self.rules.push((self.clause_count, rule));
+    }
+
+    pub(super) fn rules(&self) -> &[(usize, &'static str)] {
+        &self.rules
     }
 
     pub(super) fn tru(&self) -> Lit {

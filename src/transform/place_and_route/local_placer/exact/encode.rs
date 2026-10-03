@@ -106,7 +106,11 @@ impl SignalClass {
 pub(super) fn vocabulary(netlist: &NorNetlist) -> Vec<SignalClass> {
     let values = netlist.net_values();
     let cases = 1usize << netlist.input_names().len();
-    let full = if cases >= 64 { u64::MAX } else { (1u64 << cases) - 1 };
+    let full = if cases >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << cases) - 1
+    };
     let mask = |vector: &[bool]| {
         vector
             .iter()
@@ -145,7 +149,9 @@ pub(super) fn vocabulary(netlist: &NorNetlist) -> Vec<SignalClass> {
     }
     for index in 1..classes.len() {
         let complement = !classes[index].function & full;
-        classes[index].complement = classes.iter().position(|class| class.function == complement);
+        classes[index].complement = classes
+            .iter()
+            .position(|class| class.function == complement);
     }
     for (net, vector) in values.iter().enumerate() {
         if matches!(netlist.nets[net].driver, NetDriver::Input(_)) {
@@ -178,7 +184,6 @@ pub(super) enum SourceKind {
 pub(super) struct Relation {
     pub(super) source: usize,
     pub(super) sink: usize,
-    #[allow(dead_code)]
     pub(super) source_kind: SourceKind,
     pub(super) sink_kind: SinkKind,
     pub(super) lit: Lit,
@@ -236,6 +241,7 @@ pub(super) struct Encoding {
     pub(super) dust: Vec<Lit>,
     pub(super) torch: Vec<[Lit; 5]>,
     pub(super) repeater: Vec<[Lit; 4]>,
+    /// Per-cell "any torch/repeater/switch" literals (legacy encoder only).
     pub(super) is_torch: Vec<Lit>,
     pub(super) is_repeater: Vec<Lit>,
     pub(super) is_switch: Vec<Lit>,
@@ -251,17 +257,29 @@ pub(super) struct Encoding {
     pub(super) stages: Vec<Vec<Lit>>,
     pub(super) output_sites: Vec<OutputSite>,
     pub(super) block_lits: Vec<Lit>,
-    pub(super) sections: Vec<(&'static str, i32, usize)>,
+    pub(super) sections: Vec<(String, i32, usize)>,
     /// Per-relation soundness guards (only with `relax_soundness`).
     pub(super) relaxations: Vec<Lit>,
     /// Per-cell coverage guards (only with `relax_soundness`).
     pub(super) coverage_relaxations: Vec<(usize, Lit)>,
     /// Required observations as `(name, function)`.
     pub(super) observed: Vec<(String, u64)>,
+    /// The grounded rsdsl program behind `cnf` (absent for the legacy encoder).
+    pub(super) program: Option<Box<rsdsl::Program>>,
 }
 
 impl Encoding {
     pub(super) fn build(netlist: &NorNetlist, config: &ExactPlacerConfig) -> eyre::Result<Self> {
+        if config.legacy_encoder {
+            Self::build_legacy(netlist, config)
+        } else {
+            Self::build_dsl(netlist, config)
+        }
+    }
+
+    /// The hand-written encoding that `exact_placer.rsdsl` replaces; kept to
+    /// check that both produce equivalent formulas.
+    fn build_legacy(netlist: &NorNetlist, config: &ExactPlacerConfig) -> eyre::Result<Self> {
         let geometry = Geometry { dim: config.dim };
         ensure!(geometry.len() > 0, "empty placement box");
         let input_count = netlist.input_names().len();
@@ -294,10 +312,11 @@ impl Encoding {
             relaxations: Vec::new(),
             coverage_relaxations: Vec::new(),
             observed: Vec::new(),
+            program: None,
         };
         let mut sections = Vec::new();
         let mark = |name: &'static str, cnf: &Cnf, sections: &mut Vec<_>| {
-            sections.push((name, cnf.num_vars(), cnf.clause_count()));
+            sections.push((name.to_owned(), cnf.num_vars(), cnf.clause_count()));
         };
         encoding.encode_kinds(netlist, config)?;
         encoding.encode_fixed_cells(config)?;
@@ -310,7 +329,11 @@ impl Encoding {
         mark("relations", &encoding.cnf, &mut sections);
         encoding.encode_soundness(config.relax_soundness);
         mark("soundness", &encoding.cnf, &mut sections);
-        encoding.encode_coverage(config.rank_levels, config.stage_levels, config.relax_soundness);
+        encoding.encode_coverage(
+            config.rank_levels,
+            config.stage_levels,
+            config.relax_soundness,
+        );
         mark("coverage", &encoding.cnf, &mut sections);
         encoding.encode_torches(config.stage_levels);
         mark("torches", &encoding.cnf, &mut sections);
@@ -337,7 +360,11 @@ impl Encoding {
             .expect("every input has a class")
     }
 
-    fn encode_kinds(&mut self, netlist: &NorNetlist, config: &ExactPlacerConfig) -> eyre::Result<()> {
+    fn encode_kinds(
+        &mut self,
+        netlist: &NorNetlist,
+        config: &ExactPlacerConfig,
+    ) -> eyre::Result<()> {
         let geometry = self.geometry;
         let fals = self.cnf.fals();
         let mut sites_by_cell = BTreeMap::<usize, Vec<(Direction, NetId)>>::new();
@@ -414,6 +441,8 @@ impl Encoding {
                 .into_iter()
                 .filter(|&lit| !self.cnf.is_false(lit))
                 .collect::<Vec<_>>();
+            self.cnf
+                .rule("칸마다 블록 종류는 정확히 하나 (공기/블록/가루/토치/리피터/스위치)");
             self.cnf.exactly_one(&kind_lits);
 
             self.air.push(air);
@@ -421,6 +450,8 @@ impl Encoding {
             self.dust.push(dust);
             self.torch.push(torch);
             self.repeater.push(repeater);
+            self.cnf
+                .rule("보조: 이 칸이 (어느 방향이든) 토치/리피터/스위치인가");
             let is_torch = self.cnf.or(&torch);
             let is_repeater = self.cnf.or(&repeater);
             let is_switch = self.cnf.or(&switch_lits);
@@ -433,6 +464,8 @@ impl Encoding {
         // Physical support.
         for cell in 0..geometry.len() {
             if let Some(below) = geometry.step(cell, Direction::Bottom) {
+                self.cnf
+                    .rule("가루·리피터·바닥 토치는 아래 칸이 블록이어야 함");
                 let below_solid = self.solid[below];
                 let dust = self.dust[cell];
                 self.cnf.implies(&[dust], &[below_solid]);
@@ -444,6 +477,7 @@ impl Encoding {
             }
             for (index, attach) in TORCH_ATTACH.into_iter().enumerate().skip(1) {
                 if let Some(support) = geometry.step(cell, attach) {
+                    self.cnf.rule("벽 토치는 붙은 쪽 칸이 블록이어야 함");
                     let torch = self.torch[cell][index];
                     let support_solid = self.solid[support];
                     self.cnf.implies(&[torch], &[support_solid]);
@@ -452,10 +486,12 @@ impl Encoding {
         }
         for site in self.switches.clone() {
             let support = geometry.step(site.cell, site.attach).unwrap();
+            self.cnf.rule("스위치는 붙은 쪽 칸이 블록이어야 함");
             let support_solid = self.solid[support];
             self.cnf.implies(&[site.lit], &[support_solid]);
         }
 
+        self.cnf.rule("입력마다 스위치는 정확히 하나");
         // Each present input has exactly one switch.
         for name in netlist.input_names() {
             if config.absent_inputs.contains(&name) {
@@ -484,25 +520,34 @@ impl Encoding {
                 .collect::<Vec<_>>();
             let mut one_hot = vec![self.air[cell]];
             one_hot.extend(lits.iter().copied());
+            self.cnf
+                .rule("차 있는 칸은 신호를 정확히 하나 실음 (공기는 신호 없음)");
             self.cnf.exactly_one(&one_hot);
 
             let solid = self.solid[cell];
             let is_switch = self.is_switch[cell];
+            self.cnf
+                .rule("'꺼짐' 신호는 블록만 (허용 시 죽은 가루/리피터도)");
             // A torch is never unpowered because its support is never constant.
             if allow_unpowered_wires {
-                self.cnf
-                    .implies(&[lits[0]], &[solid, self.dust[cell], self.is_repeater[cell]]);
+                self.cnf.implies(
+                    &[lits[0]],
+                    &[solid, self.dust[cell], self.is_repeater[cell]],
+                );
             } else {
                 self.cnf.implies(&[lits[0]], &[solid]);
             }
             for (class, &lit) in lits.iter().enumerate().skip(1) {
+                self.cnf.rule("스위치는 입력 신호만 실을 수 있음");
                 if self.classes[class].input.is_none() {
                     self.cnf.implies(&[lit, is_switch], &[]);
                 }
             }
+            self.cnf.rule("토치는 반드시 꺼짐이 아닌 신호를 실음");
             let mut clause = vec![-self.is_torch[cell]];
             clause.extend(lits[1..].iter().copied());
             self.cnf.clause(&clause);
+            self.cnf.rule("경우 k에 켜짐 ⇔ 실은 신호가 경우 k에 1");
             let values = (0..self.cases)
                 .map(|case| {
                     let on = (1..class_count)
@@ -515,6 +560,7 @@ impl Encoding {
             self.class_lits.push(lits);
             self.values.push(values);
         }
+        self.cnf.rule("스위치는 자기 입력 신호를 실음");
         for site in self.switches.clone() {
             let class = self.input_class(site.net);
             let lit = self.class_lits[site.cell][class];
@@ -525,6 +571,8 @@ impl Encoding {
     /// Dust connection and pointing directions, matching
     /// `World3D::update_redstone_states` and `cardinal_redstone`.
     fn encode_dust_shape(&mut self) {
+        self.cnf
+            .rule("가루 연결: 이웃이 가루/토치/스위치/뒤에서 읽는 리피터이거나 계단으로 이어짐");
         let geometry = self.geometry;
         let fals = self.cnf.fals();
         for cell in 0..geometry.len() {
@@ -562,6 +610,8 @@ impl Encoding {
             }
             self.conn.push(conn);
         }
+        self.cnf
+            .rule("가루가 가리키는 방향: 연결된 쪽, 또는 옆 연결이 없으면 직선/십자");
         for cell in 0..geometry.len() {
             let mut points = [fals; 4];
             let dust = self.dust[cell];
@@ -634,6 +684,7 @@ impl Encoding {
             let dust = self.dust[cell];
             if !self.cnf.is_false(dust) {
                 // Dust to dust: flat neighbors and step connections are symmetric.
+                self.cnf.rule("전원 관계: 가루 ↔ 옆 가루");
                 for direction in [Direction::East, Direction::North] {
                     if let Some(other) = geometry.step(cell, direction) {
                         let edge = self.cnf.and(&[dust, self.dust[other]]);
@@ -641,6 +692,8 @@ impl Encoding {
                         self.relate(other, cell, SourceKind::Dust, SinkKind::Dust, edge);
                     }
                 }
+                self.cnf
+                    .rule("전원 관계: 가루 ↔ 계단 가루 (아래 가루 위 칸이 블록이 아닐 때)");
                 if let Some(above) = geometry.step(cell, Direction::Top) {
                     for direction in CARDINALS {
                         let Some(other) = geometry
@@ -649,13 +702,13 @@ impl Encoding {
                         else {
                             continue;
                         };
-                        let edge = self
-                            .cnf
-                            .and(&[dust, self.dust[other], -self.solid[above]]);
+                        let edge = self.cnf.and(&[dust, self.dust[other], -self.solid[above]]);
                         self.relate(cell, other, SourceKind::Dust, SinkKind::Dust, edge);
                         self.relate(other, cell, SourceKind::Dust, SinkKind::Dust, edge);
                     }
                 }
+                self.cnf
+                    .rule("전원 관계: 가루 → 가리키는 블록(약전원), 가루 → 뒤에서 읽는 리피터");
                 // Dust weakly powers its support and the blocks it points into.
                 let below = geometry.step(cell, Direction::Bottom).unwrap();
                 self.relate(cell, below, SourceKind::Dust, SinkKind::Solid, dust);
@@ -671,6 +724,8 @@ impl Encoding {
                 }
             }
 
+            self.cnf
+                .rule("전원 관계: 토치 → 주변 가루·리피터, 위 블록(강전원)");
             let is_torch = self.is_torch[cell];
             if !self.cnf.is_false(is_torch) {
                 for direction in ALL_DIRECTIONS {
@@ -698,6 +753,8 @@ impl Encoding {
                 if self.cnf.is_false(repeater) {
                     continue;
                 }
+                self.cnf
+                    .rule("전원 관계: 리피터 → 앞쪽 블록/가루/같은 방향 리피터");
                 let Some(output) = geometry.step(cell, direction.inverse()) else {
                     continue;
                 };
@@ -707,6 +764,8 @@ impl Encoding {
                 self.relate(cell, output, SourceKind::Repeater, SinkKind::Dust, lit);
                 let lit = self.cnf.and(&[repeater, self.repeater[output][index]]);
                 self.relate(cell, output, SourceKind::Repeater, SinkKind::Repeater, lit);
+                self.cnf
+                    .rule("리피터가 다른 리피터 옆구리를 치면 잠김 → 금지");
                 // A repeater feeding another repeater's side locks it.
                 for side in perpendicular(direction) {
                     let locked = self.repeater[output][cardinal_index(side)];
@@ -716,6 +775,9 @@ impl Encoding {
 
             // Solid blocks: any power reaches repeaters reading them; strong
             // power also reaches all adjacent dust.
+            self.cnf.rule(
+                "전원 관계: 블록 → 읽는 리피터; 강전원 블록(아래 토치/리피터/스위치) → 주변 가루",
+            );
             let solid = self.solid[cell];
             for (reader, lit) in self.reading_repeaters(cell) {
                 let lit = self.cnf.and(&[solid, lit]);
@@ -748,7 +810,15 @@ impl Encoding {
 
         for site in self.switches.clone() {
             let support = geometry.step(site.cell, site.attach).unwrap();
-            self.relate(site.cell, support, SourceKind::Switch, SinkKind::Solid, site.lit);
+            self.cnf
+                .rule("전원 관계: 스위치 → 붙은 블록(강전원), 주변 가루·리피터");
+            self.relate(
+                site.cell,
+                support,
+                SourceKind::Switch,
+                SinkKind::Solid,
+                site.lit,
+            );
             for direction in ALL_DIRECTIONS {
                 let Some(target) = geometry.step(site.cell, direction) else {
                     continue;
@@ -761,8 +831,17 @@ impl Encoding {
                 if CARDINALS.contains(&direction) {
                     let reader = self.repeater[target][cardinal_index(direction.inverse())];
                     let lit = self.cnf.and(&[site.lit, reader]);
-                    self.relate(site.cell, target, SourceKind::Switch, SinkKind::Repeater, lit);
+                    self.relate(
+                        site.cell,
+                        target,
+                        SourceKind::Switch,
+                        SinkKind::Repeater,
+                        lit,
+                    );
                 }
+                self.cnf.rule(
+                    "스위치 옆 블록의 약전원은 토치는 무시하고 리피터는 받음 → 그런 배치 금지",
+                );
                 // The simulator records this soft power but torches ignore it
                 // while repeaters do not. Keep both away from such blocks.
                 for (_, torch) in self.attached_torches(target) {
@@ -779,6 +858,8 @@ impl Encoding {
     /// If a source is powered, its sink is. Dust and repeaters must also not be
     /// powered without their source, i.e. they carry exactly its function.
     fn encode_soundness(&mut self, relax: bool) {
+        self.cnf
+            .rule("건전성: 원천이 켜지면 받는 쪽도 켜짐 (가루·리피터는 원천과 똑같은 신호)");
         for relation in self.relations.clone() {
             let guard = if relax {
                 let guard = self.cnf.new_var();
@@ -803,6 +884,7 @@ impl Encoding {
     }
 
     fn order_levels(&mut self, levels: usize) -> Vec<Vec<Lit>> {
+        self.cnf.rule("순위/단계 순서 인코딩: '≥ k+1'이면 '≥ k'");
         (0..self.geometry.len())
             .map(|_| {
                 let lits = (0..levels).map(|_| self.cnf.new_var()).collect::<Vec<_>>();
@@ -841,6 +923,7 @@ impl Encoding {
         let mut parents = vec![Vec::new(); geometry.len()];
         let mut witnesses = vec![vec![Vec::new(); self.cases]; geometry.len()];
         for relation in self.relations.clone() {
+            self.cnf.rule("정당화: 기여 관계는 실제로 있고, 순위는 오르고 단계는 내려가지 않음 (리피터에서 순위 초기화·단계 상승)");
             let contributes = self.cnf.new_var();
             self.cnf.implies(&[contributes], &[relation.lit]);
             // Repeaters restart the local rank and advance the stage instead,
@@ -865,6 +948,7 @@ impl Encoding {
                 }
             }
             if relation.sink_kind == SinkKind::Solid {
+                self.cnf.rule("정당화: 경우 k의 증인은 그 경우에 켜진 원천");
                 for case in 0..self.cases {
                     let witness = self.cnf.new_var();
                     let source = self.values[relation.source][case];
@@ -888,17 +972,17 @@ impl Encoding {
             } else {
                 None
             };
+            self.cnf
+                .rule("켜진 가루·리피터는 기여하는 원천이 있어야 함");
             for element in [self.dust[cell], self.is_repeater[cell]] {
                 let mut clause = vec![-element, self.class_lits[cell][0]];
                 clause.extend(parents[cell].iter().copied());
                 clause.extend(guard);
                 self.cnf.clause(&clause);
             }
+            self.cnf.rule("켜진 블록은 그 경우에 켜진 원천이 있어야 함");
             for case in 0..self.cases {
-                let mut clause = vec![
-                    -self.values[cell][case],
-                    -self.solid[cell],
-                ];
+                let mut clause = vec![-self.values[cell][case], -self.solid[cell]];
                 clause.extend(witnesses[cell][case].iter().copied());
                 clause.extend(guard);
                 self.cnf.clause(&clause);
@@ -916,12 +1000,14 @@ impl Encoding {
                     continue;
                 }
                 let support = geometry.step(cell, attach).unwrap();
+                self.cnf.rule("토치는 받침 블록의 반대 (경우마다)");
                 for case in 0..self.cases {
                     let output = self.values[cell][case];
                     let input = self.values[support][case];
                     self.cnf.implies(&[torch, output], &[-input]);
                     self.cnf.implies(&[torch, -output], &[input]);
                 }
+                self.cnf.rule("토치는 받침보다 높은 단계 (되먹임 금지)");
                 if stage_levels > 0 {
                     let lower = self.stages[support].clone();
                     let upper = self.stages[cell].clone();
@@ -953,6 +1039,7 @@ impl Encoding {
     }
 
     fn encode_fixed_cells(&mut self, config: &ExactPlacerConfig) -> eyre::Result<()> {
+        self.cnf.rule("고정된 칸");
         for (&position, &kind) in &config.fixed_cells {
             ensure!(
                 self.geometry.dim.bound_on(position),
@@ -964,6 +1051,7 @@ impl Encoding {
             };
             self.cnf.clause(&[lit]);
         }
+        self.cnf.rule("이전에 거부된 배치는 다시 쓰지 않음");
         for layout in &config.blocked {
             let mut clause = Vec::new();
             for &(position, kind) in layout {
@@ -993,7 +1081,11 @@ impl Encoding {
             .fold(0u64, |mask, (case, &on)| mask | (u64::from(on) << case))
     }
 
-    fn encode_outputs(&mut self, netlist: &NorNetlist, config: &ExactPlacerConfig) -> eyre::Result<()> {
+    fn encode_outputs(
+        &mut self,
+        netlist: &NorNetlist,
+        config: &ExactPlacerConfig,
+    ) -> eyre::Result<()> {
         let geometry = self.geometry;
         let values = netlist.net_values();
         let observations = match &config.observations {
@@ -1026,6 +1118,8 @@ impl Encoding {
                     .collect::<eyre::Result<Vec<_>>>()?,
                 None => (0..geometry.len()).collect(),
             };
+            self.cnf
+                .rule("출력: 허용된 위치의 가루/리피터/토치가 그 신호를 실어야 함");
             let driving = config.driving_outputs.contains(name);
             let mut lits = Vec::new();
             for cell in cells {
@@ -1038,11 +1132,8 @@ impl Encoding {
                     }
                     self.cnf.or(&drivers)
                 } else {
-                    self.cnf.or(&[
-                        self.dust[cell],
-                        self.is_repeater[cell],
-                        self.is_torch[cell],
-                    ])
+                    self.cnf
+                        .or(&[self.dust[cell], self.is_repeater[cell], self.is_torch[cell]])
                 };
                 let lit = self.cnf.and(&[element, self.class_lits[cell][class]]);
                 if self.cnf.is_false(lit) {
@@ -1073,6 +1164,7 @@ impl Encoding {
             }
             return;
         }
+        self.cnf.rule("블록 개수 상한 (순차 카운터)");
         // counters[i][j]: at least j + 1 of the first i + 1 literals are true.
         let mut previous: Vec<Lit> = Vec::new();
         for (index, &lit) in lits.iter().enumerate() {
@@ -1096,7 +1188,10 @@ impl Encoding {
 }
 
 fn may_observe_output(config: &ExactPlacerConfig, position: Position) -> bool {
-    if matches!(config.fixed_cells.get(&position), Some(CellKind::Repeater(_))) {
+    if matches!(
+        config.fixed_cells.get(&position),
+        Some(CellKind::Repeater(_))
+    ) {
         return true;
     }
     match &config.observations {
@@ -1114,7 +1209,7 @@ fn may_observe_output(config: &ExactPlacerConfig, position: Position) -> bool {
     }
 }
 
-fn default_input_sites(dim: DimSize) -> Vec<(Position, Direction)> {
+pub(super) fn default_input_sites(dim: DimSize) -> Vec<(Position, Direction)> {
     let mut sites = Vec::new();
     for z in 0..dim.2 {
         for y in 0..dim.1 {

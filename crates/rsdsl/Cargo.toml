@@ -1,0 +1,7 @@
+[package]
+name = "rsdsl"
+version = "0.2.0"
+edition = "2021"
+description = "Redstone solver DSL: a constraint modeling language that grounds to CNF"
+
+[dependencies]
