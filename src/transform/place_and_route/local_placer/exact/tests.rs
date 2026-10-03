@@ -862,12 +862,25 @@ fn diagnose_full_adder_construct_and_compact() -> eyre::Result<()> {
         input_policies,
         output_policies: output_policies.clone(),
         legacy_encoder: std::env::var("PIPE_LEGACY").as_deref() == Ok("1"),
+        max_overlap: env_usize("PIPE_MAX_OVERLAP", 1),
+        block_seam: std::env::var("PIPE_BLOCK_SEAM").as_deref() == Ok("1"),
+        max_restarts: env_usize("PIPE_RESTARTS", 7),
+        max_backtracks: env_usize("PIPE_BACKTRACKS", 0),
         ..Default::default()
     };
     let (layout, placement, report) = placer.construct(&construction)?;
     println!(
-        "PIPE constructed dim={:?} blocks={} steps={:?} elapsed={:?}",
-        layout.dim, placement.block_count, report.steps, report.elapsed
+        "PIPE constructed dim={:?} blocks={} seed={} restarts={:?} steps={:?} elapsed={:?}",
+        layout.dim,
+        placement.block_count,
+        report.seed,
+        report
+            .restarts
+            .iter()
+            .map(|(seed, _)| *seed)
+            .collect::<Vec<_>>(),
+        report.steps,
+        report.elapsed
     );
     if let Ok(prefix) = std::env::var("PIPE_WRITE") {
         std::fs::write(format!("{prefix}-loose.rcell"), placement.rcell.to_string())?;

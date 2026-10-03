@@ -233,8 +233,39 @@ These keep every exact solve small:
    stay fixed. Accepted repairs are simulator-verified, and the emptiest
    slices are tried first. When no seam can be repaired, the window radius
    grows up to `max_window_radius`.
-3. **Block minimization.** Optionally, a three-slice window slides along Y and
-   is re-solved with a global bound of one block fewer.
+3. **Block minimization.** Optionally, a `reduction_window`-slice window
+   (3) slides along Y and is re-solved for fewer blocks (in one optimizing
+   solve with `optimize_windows`).
+
+Construction depends on the seed: a step can leave live signals at the seam
+in a shape the next gate cannot use within its time limit. When a gate fails
+in every window, construction starts over with a new seed
+(`ConstructionConfig::max_restarts`, 7; seeds are `seed + k * 104729`).
+`restart_after` (10 minutes) also caps each attempt, and step solves are
+capped by the remaining budget. Measured on the full adder (height 10,
+windows 2..4, 60-second steps, 8 workers):
+
+| Seed | Backtracking, restart after 10 min | Restart on first failure |
+|------|------------------------------------|--------------------------|
+| 1    | 27 s                               | 27 s                     |
+| 2    | 632 s, 1 restart                   | 261 s, 1 restart         |
+| 3    | 33 s                               | 33 s                     |
+| 4    | 649 s, 1 restart                   | 352 s, 1 restart         |
+
+Without restarts, seed 2 used up its backtracks and failed.
+
+A failed gate costs about three minutes (three windows at the step limit),
+while a restart rebuilds the same prefix in about 30 seconds. Three finer
+repairs are available but off by default because none rescued seeds 2 or 4:
+
+- `max_backtracks` (0): re-solve the previous step with its layout blocked.
+  Six backtracks across seeds 2 and 4 each re-placed `g22`, and gate `s`
+  failed again every time.
+- `max_overlap` (= `overlap`): re-solve up to that many slices of the
+  previous layout before backtracking. All nine window/overlap combinations
+  for gate `s` timed out.
+- `block_seam`: on backtracking, block only the seam slice instead of the
+  whole previous window. The re-solved seam still left `s` unplaceable.
 
 `ExactLocalPlacer::synthesize` runs construction followed by compaction.
 `ExactLayout::from_rcell` loads any RCELL so that existing cells can be

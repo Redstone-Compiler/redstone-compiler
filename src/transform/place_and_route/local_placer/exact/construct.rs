@@ -31,6 +31,23 @@ pub struct ConstructionConfig {
     /// Slices of the previous step that are re-solved with each new window,
     /// so the interface between steps can be reshaped.
     pub overlap: usize,
+    /// When no window fits, re-solve more of the previous layout (overlap up
+    /// to this) before backtracking. Off by default (= `overlap`): on the
+    /// seed-2 full adder none of the wider attempts helped and each failed
+    /// attempt costs a full `step_time_limit`.
+    pub max_overlap: usize,
+    /// On backtracking, block only the previous step's seam slice (the one
+    /// the failed step had to build on) instead of its whole window. Off by
+    /// default; it did not rescue the seed-2 full adder either.
+    pub block_seam: bool,
+    /// Construction attempts after the first, each from scratch with a new
+    /// seed. A seed that paints itself into a corner can burn many minutes
+    /// of failed steps, while another seed often finishes in seconds.
+    pub max_restarts: usize,
+    /// Time budget of one construction attempt before restarting.
+    pub restart_after: Option<Duration>,
+    /// Seed spacing between construction attempts.
+    pub restart_seed_stride: u32,
     pub step_time_limit: Duration,
     pub workers: usize,
     pub seed: u32,
@@ -38,7 +55,10 @@ pub struct ConstructionConfig {
     pub stage_levels: usize,
     pub input_policies: BTreeMap<String, InputPolicy>,
     pub output_policies: BTreeMap<String, OutputPolicy>,
-    /// Times an earlier step may be re-solved after a later step fails.
+    /// Times an earlier step may be re-solved after a later step fails,
+    /// per attempt. Off by default: on the full adder (seeds 2 and 4) six
+    /// backtracks each cost three failed steps and none let the stuck gate
+    /// fit, while a restart reaches the same gate again in about 30 s.
     pub max_backtracks: usize,
     /// Simulator rejections each step's workers may hit before giving up.
     pub max_refinements: usize,
@@ -57,6 +77,11 @@ impl Default for ConstructionConfig {
             window: 3,
             max_window: 6,
             overlap: 1,
+            max_overlap: 1,
+            block_seam: false,
+            max_restarts: 7,
+            restart_after: Some(Duration::from_secs(600)),
+            restart_seed_stride: 104_729,
             step_time_limit: Duration::from_secs(60),
             workers: 8,
             seed: 1,
@@ -64,7 +89,7 @@ impl Default for ConstructionConfig {
             stage_levels: 24,
             input_policies: BTreeMap::new(),
             output_policies: BTreeMap::new(),
-            max_backtracks: 6,
+            max_backtracks: 0,
             max_refinements: 8,
             tuning: ExactTuning::default(),
             legacy_encoder: false,
@@ -74,9 +99,14 @@ impl Default for ConstructionConfig {
 
 #[derive(Debug, Clone, Default)]
 pub struct ConstructionReport {
-    /// `(gate net name, window length, seconds)` per accepted step.
+    /// `(gate net name, window length, seconds)` per accepted step of the
+    /// successful attempt.
     pub steps: Vec<(String, usize, f64)>,
     pub backtracks: usize,
+    /// Attempts abandoned before the successful one, with their seeds.
+    pub restarts: Vec<(u32, String)>,
+    /// The seed of the successful attempt.
+    pub seed: u32,
     pub elapsed: Duration,
 }
 
@@ -116,9 +146,46 @@ struct StepState {
 }
 
 impl ExactLocalPlacer {
+    /// Builds the layout gate by gate. When an attempt fails or exceeds
+    /// `restart_after`, it starts over with the next seed, up to
+    /// `max_restarts` times.
     pub fn construct(
         &self,
         config: &ConstructionConfig,
+    ) -> eyre::Result<(ExactLayout, ExactPlacement, ConstructionReport)> {
+        let started = Instant::now();
+        let mut restarts = Vec::new();
+        let mut attempt = 0u32;
+        loop {
+            let seed = config
+                .seed
+                .wrapping_add(attempt.wrapping_mul(config.restart_seed_stride));
+            let attempt_config = ConstructionConfig {
+                seed,
+                ..config.clone()
+            };
+            let deadline = config.restart_after.map(|budget| Instant::now() + budget);
+            match self.construct_once(&attempt_config, deadline) {
+                Ok((layout, placement, mut report)) => {
+                    report.restarts = restarts;
+                    report.seed = seed;
+                    report.elapsed = started.elapsed();
+                    return Ok((layout, placement, report));
+                }
+                Err(error) if (attempt as usize) < config.max_restarts => {
+                    tracing::info!(seed, %error, "construction restarts with a new seed");
+                    restarts.push((seed, error.to_string()));
+                    attempt += 1;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    fn construct_once(
+        &self,
+        config: &ConstructionConfig,
+        deadline: Option<Instant>,
     ) -> eyre::Result<(ExactLayout, ExactPlacement, ConstructionReport)> {
         let started = Instant::now();
         let netlist = &self.netlist;
@@ -143,7 +210,21 @@ impl ExactLocalPlacer {
         let mut windows = vec![Vec::new(); order.len()];
         let mut step = 0;
         while step < order.len() {
-            match self.construct_step(&order, step, &states[step], &blocked[step], config)? {
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                bail!(
+                    "construction attempt with seed {} ran out of time at gate {}",
+                    config.seed,
+                    netlist.nets[order[step]].name
+                );
+            }
+            match self.construct_step(
+                &order,
+                step,
+                &states[step],
+                &blocked[step],
+                config,
+                deadline,
+            )? {
                 Some((state, window_cells, entry)) => {
                     report.steps.push(entry);
                     states.truncate(step + 1);
@@ -167,7 +248,21 @@ impl ExactLocalPlacer {
                     blocked[step].clear();
                     step -= 1;
                     let previous = windows[step].clone();
-                    blocked[step].push(previous);
+                    // The failed step could unfreeze up to `max_overlap`
+                    // slices, so it built on the slice just before those.
+                    let seam = states[step + 1]
+                        .length
+                        .checked_sub(config.max_overlap.max(config.overlap) + 1);
+                    let seam_cells = previous
+                        .iter()
+                        .filter(|(position, _)| Some(position.1) == seam)
+                        .copied()
+                        .collect::<Vec<_>>();
+                    if config.block_seam && !seam_cells.is_empty() {
+                        blocked[step].push(seam_cells);
+                    } else {
+                        blocked[step].push(previous);
+                    }
                 }
             }
         }
@@ -191,6 +286,7 @@ impl ExactLocalPlacer {
         state: &StepState,
         blocked: &[Vec<(Position, CellKind)>],
         config: &ConstructionConfig,
+        deadline: Option<Instant>,
     ) -> eyre::Result<Option<(StepState, Vec<(Position, CellKind)>, (String, usize, f64))>> {
         let netlist = &self.netlist;
         let gate = order[step];
@@ -224,8 +320,20 @@ impl ExactLocalPlacer {
             }
         }
         let length = state.length;
-        let frozen = length.saturating_sub(config.overlap);
-        for window in config.window..=config.max_window {
+        // Cheapest re-solve first: fewest slices (overlap + window), then the
+        // smaller overlap.
+        let mut attempts = (config.overlap..=config.max_overlap.max(config.overlap))
+            .flat_map(|overlap| {
+                (config.window..=config.max_window).map(move |window| (overlap, window))
+            })
+            .collect::<Vec<_>>();
+        attempts.sort_by_key(|&(overlap, window)| (overlap + window, overlap));
+        for (overlap, window) in attempts {
+            let frozen = length.saturating_sub(overlap);
+            if overlap > config.overlap && frozen == length.saturating_sub(overlap - 1) {
+                // Nothing more to unfreeze (the layout is shorter).
+                continue;
+            }
             let dim = DimSize(config.width, length + window, config.height);
             let mut exact = ExactPlacerConfig::new(dim);
             exact.workers = config.workers;
@@ -233,7 +341,15 @@ impl ExactLocalPlacer {
             exact.rank_levels = config.rank_levels;
             exact.stage_levels = config.stage_levels;
             exact.legacy_encoder = config.legacy_encoder;
-            exact.time_limit = Some(config.step_time_limit);
+            // Stop at the attempt's deadline too, so a restart starts on time.
+            let remaining =
+                deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
+            if remaining.is_some_and(|remaining| remaining.is_zero()) {
+                return Ok(None);
+            }
+            exact.time_limit = Some(remaining.map_or(config.step_time_limit, |remaining| {
+                remaining.min(config.step_time_limit)
+            }));
             exact.max_refinements = config.max_refinements;
             exact.tuning = config.tuning.clone();
             exact.blocked = blocked.to_vec();
@@ -303,6 +419,7 @@ impl ExactLocalPlacer {
                 tracing::info!(
                     gate = netlist.nets[gate].name,
                     window,
+                    overlap,
                     seconds = step_started.elapsed().as_secs_f64(),
                     refinements = stats.refinements,
                     outcome = ?outcome,
@@ -314,6 +431,7 @@ impl ExactLocalPlacer {
             tracing::info!(
                 gate = netlist.nets[gate].name,
                 window,
+                overlap,
                 seconds,
                 "construction step"
             );
