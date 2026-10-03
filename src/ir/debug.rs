@@ -572,6 +572,38 @@ mod tests {
     }
 
     #[test]
+    fn mapped_full_adder_nodes_all_have_source_provenance() -> eyre::Result<()> {
+        let source = include_str!("../../test/full-adder.v");
+        let logical =
+            super::super::LogicalDesign::from_verilog_source_named(source, "full-adder.v")?;
+        let routable = logical.lower_to_routable()?;
+        let map = build_source_map(
+            &logical,
+            &logical.to_string(),
+            &routable,
+            &routable.to_string(),
+        );
+        let module = routable
+            .module("full_adder")
+            .expect("missing full-adder Routable module");
+        let super::super::RoutableModuleBody::Leaf { nodes } = &module.body else {
+            panic!("full adder must lower to a leaf");
+        };
+
+        for node in nodes {
+            let entity = routable_entity("full_adder", "node", &node.id.to_string());
+            assert!(
+                map.entities.contains_key(&entity),
+                "missing source map for {entity}"
+            );
+            assert!(map.documents["ir/routable.rcir"]
+                .iter()
+                .any(|range| range.entity == entity));
+        }
+        Ok(())
+    }
+
+    #[test]
     fn hierarchical_leaf_nodes_keep_definition_level_provenance() -> eyre::Result<()> {
         let source = include_str!("../../test/d-flip-flop.snapshot/d-flip-flop.v");
         let logical =

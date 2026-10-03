@@ -8,8 +8,8 @@ use crate::transform::place_and_route::estimate::world_compact_cost;
 use crate::transform::place_and_route::local_placer::{
     generate_d_latch_gate_routes, generate_rs_latch_not_pairs, route_rs_latch_branches,
     rs_latch_input_node_ids, select_rs_latch_not_pairs, InputPlacementStrategy, LocalPlacer,
-    LocalPlacerConfig, LocalPlacerDebug, NotRouteStrategy, PlacementSamplingPolicy, SamplingPolicy,
-    TorchPlacementStrategy,
+    LocalPlacerConfig, LocalPlacerDebug, NotRouteStrategy, PlacementSamplingPolicy,
+    PlacementSchedulePolicy, SamplingPolicy, TorchPlacementStrategy,
 };
 use crate::transform::place_and_route::utils::{
     contains_truth_table_with_world3ds, equivalent_logic_with_world3d,
@@ -25,6 +25,7 @@ fn test_generate_component_and_shortest() -> eyre::Result<()> {
     let logic_graph = predefined_logics::and_graph()?;
     let config = LocalPlacerConfig {
         random_seed: 42,
+        schedule: PlacementSchedulePolicy::Topological,
         greedy_input_generation: true,
         input_placement_strategy: InputPlacementStrategy::Boundary,
         input_candidate_limit: None,
@@ -273,6 +274,7 @@ fn pad_world_top(world: &World3D, extra_z: usize) -> World3D {
 fn test_generate_component_rs_latch() -> eyre::Result<()> {
     let config = LocalPlacerConfig {
         random_seed: 42,
+        schedule: PlacementSchedulePolicy::Topological,
         greedy_input_generation: true,
         input_placement_strategy: InputPlacementStrategy::Boundary,
         input_candidate_limit: None,
@@ -342,6 +344,7 @@ fn test_generate_component_rs_latch() -> eyre::Result<()> {
 fn test_generate_component_d_latch() -> eyre::Result<()> {
     let config = LocalPlacerConfig {
         random_seed: 42,
+        schedule: PlacementSchedulePolicy::Topological,
         greedy_input_generation: true,
         input_placement_strategy: InputPlacementStrategy::Boundary,
         input_candidate_limit: None,
@@ -436,6 +439,7 @@ fn test_generate_component_xor_simple() -> eyre::Result<()> {
 
     let config = LocalPlacerConfig {
         random_seed: 42,
+        schedule: PlacementSchedulePolicy::Topological,
         greedy_input_generation: false,
         input_placement_strategy: InputPlacementStrategy::Boundary,
         input_candidate_limit: None,
@@ -469,6 +473,7 @@ fn test_generate_component_xor_complex() -> eyre::Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
     let config = LocalPlacerConfig {
         random_seed: 42,
+        schedule: PlacementSchedulePolicy::Topological,
         greedy_input_generation: false,
         input_placement_strategy: InputPlacementStrategy::Boundary,
         input_candidate_limit: None,
@@ -508,6 +513,7 @@ fn test_generate_component_xor_shortest() -> eyre::Result<()> {
 
     let config = LocalPlacerConfig {
         random_seed: 42,
+        schedule: PlacementSchedulePolicy::Topological,
         greedy_input_generation: true,
         input_placement_strategy: InputPlacementStrategy::Boundary,
         input_candidate_limit: None,
@@ -552,6 +558,7 @@ fn test_generate_component_half_adder() -> eyre::Result<()> {
 
     let config = LocalPlacerConfig {
         random_seed: 42,
+        schedule: PlacementSchedulePolicy::Topological,
         greedy_input_generation: true,
         input_placement_strategy: InputPlacementStrategy::Boundary,
         input_candidate_limit: None,
@@ -588,6 +595,7 @@ fn test_generate_component_full_adder() -> eyre::Result<()> {
 
     let config = LocalPlacerConfig {
         random_seed: 42,
+        schedule: PlacementSchedulePolicy::Topological,
         greedy_input_generation: true,
         input_placement_strategy: InputPlacementStrategy::Boundary,
         input_candidate_limit: Some(25),
@@ -645,6 +653,7 @@ fn debug_full_adder_with_cost_sampling() -> eyre::Result<()> {
 
     let config = LocalPlacerConfig {
         random_seed: 42,
+        schedule: PlacementSchedulePolicy::Topological,
         greedy_input_generation: true,
         input_placement_strategy: InputPlacementStrategy::Boundary,
         input_candidate_limit: None,

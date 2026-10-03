@@ -70,17 +70,33 @@ mod tests {
         maybe_dump_graphviz("prepared Verilog LogicGraph", &prepared);
 
         assert_eq!(output_names(&prepared), vec!["c", "s"]);
-        let observable_sources = prepared.externally_observable_output_source_ids();
-        assert_eq!(observable_sources.len(), 2);
-        for source_id in output_source_ids(&prepared) {
-            assert!(observable_sources.contains(&source_id));
-        }
 
         let table = prepared.truth_table()?;
         assert_eq!(table.input_names, vec!["a", "b"]);
         assert_eq!(table.output_tables["s"], vec![false, true, true, false]);
         assert_eq!(table.output_tables["c"], vec![false, false, false, true]);
 
+        Ok(())
+    }
+
+    #[test]
+    fn half_adder_shared_carry_source_is_not_sealed() -> eyre::Result<()> {
+        let prepared = load_logic_graph("test/half-adder.v")?.prepare_place()?;
+        let sealed = prepared.sealed_output_source_ids();
+        let carry = prepared
+            .named_outputs()
+            .into_iter()
+            .find_map(|(name, source)| (name == "c").then_some(source))
+            .unwrap();
+        let sum = prepared
+            .named_outputs()
+            .into_iter()
+            .find_map(|(name, source)| (name == "s").then_some(source))
+            .unwrap();
+
+        assert!(!sealed.contains(&carry));
+        assert!(sealed.contains(&sum));
+        assert_eq!(sealed.len(), 1);
         Ok(())
     }
 
@@ -109,10 +125,8 @@ mod tests {
 
         assert_eq!(output_names(&generated), vec!["c", "s"]);
         assert!(generated
-            .externally_observable_truth_table()?
-            .contains_output_tables_under_input_permutation(
-                &expected.externally_observable_truth_table()?
-            ));
+            .truth_table()?
+            .contains_output_tables_under_input_permutation(&expected.truth_table()?));
 
         Ok(())
     }
@@ -134,19 +148,6 @@ mod tests {
             .collect::<Vec<_>>();
         names.sort();
         names
-    }
-
-    fn output_source_ids(graph: &LogicGraph) -> Vec<usize> {
-        let mut ids = graph
-            .nodes
-            .iter()
-            .filter_map(|node| match &node.kind {
-                GraphNodeKind::Output(_) => Some(node.inputs[0]),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        ids.sort();
-        ids
     }
 
     fn output_source_logic_types(graph: &LogicGraph) -> Vec<(String, LogicType)> {

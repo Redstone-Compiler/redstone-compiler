@@ -1,0 +1,22 @@
+rcell 1;
+
+// A composable NOR edge.  The first torch only weak-powers neighboring solid
+// blocks, so a repeater is required to hard-power the next torch's support.
+cell "nor-cascade-primitive" size [2, 6, 2] {
+  glyph "S" = torch on y-;
+  glyph "Q" = repeater toward y- delay 1;
+
+  auto-support repeater;
+
+  input "a" at [0, 1, 1] on x+;
+  input "b" at [1, 0, 1] on y+;
+  output "nor" at [1, 2, 1];
+  output "or" at [1, 5, 1];
+
+  plane yz at x=1 {
+    z=1 ".#SQ#S";
+  }
+
+  expect "nor" = ~a&~b;
+  expect "or" = a|b;
+}

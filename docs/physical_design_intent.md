@@ -55,8 +55,9 @@ examples below remain exploratory and are not all accepted by the parser.
   candidate may be slightly larger locally but have much better port access or
   routing behavior.
 - Constraints must refer to stable Routable definitions, instances, nets, and
-  public ports. They must not refer to graph indices or nodes created by
-  `prepare_place()`.
+  public ports. Mapping-created leaf nodes are now canonical Routable content,
+  but raw generated node indices are not stable authoring identities; internal
+  constraints require an explicit stable name or role.
 - Diagnostics must distinguish invalid or contradictory intent from search
   exhaustion. A heuristic placer failing to find a solution does not prove that
   the constraints are unsatisfiable.
@@ -277,6 +278,30 @@ every coordinate in an unconstrained continuous 3D space.
 For Redstone, `z` should initially behave as a discrete and comparatively
 expensive layer dimension, while `x` and `y` carry most floorplanning freedom.
 
+### Routable-leaf clustering and physical macro reuse
+
+Large combinational Routable leaves are searched through a bounded portfolio:
+the original monolithic leaf and a bottom-up composition of smaller physical
+clusters. Lowering provenance tags are preferred as cluster boundaries because
+they preserve semantic cones such as `partial_sum`, `sum`, and `cout` after
+technology mapping. Untagged graphs fall back to deterministic topological
+chunks.
+
+Every cluster candidate is independently simulated, then the composed world is
+routed and checked against the original leaf truth table. Recognized XOR and
+half-adder truth tables share a verified per-compilation macro candidate; only
+the boundary port roles are relabeled. The composed result is not forced: it
+competes with monolithic candidates on volume, block count, height, and
+footprint, so hierarchy cannot regress a compact leaf merely by existing.
+These choices are expressed by the leaf's `pnr.candidate` profile: provenance
+cuts, macro reuse, cluster sizes, retained geometry alternatives, shelf
+spacing, floor margin, and composition-router budgets are source-level RCIR
+knobs rather than compiler constants. They remain a hierarchical fallback or
+portfolio choice, not a substitute for the monolithic local placement
+objective. The same candidate profile separately records local objective and
+adaptive retry policy so experiments can tune a leaf without changing its
+Routable graph.
+
 ## Physical intent semantics
 
 ### Requirements, preferences, and locks
@@ -420,9 +445,9 @@ Each variant may have a different stable internal Routable subgraph and layout
 recipe. Variant selection is target mapping or local implementation selection;
 it must preserve the public operation's behavior and ports.
 
-This avoids making nodes inserted by `prepare_place()` part of the public
-contract. A user who needs internal control refers to named objects in a stable
-implementation variant, not transient graph indices.
+The selected variant must be fully materialized in Routable IR before local
+placement. A user who needs internal control refers to named objects in that
+stable implementation variant, not transient or inferred graph indices.
 
 ### Physical contract
 
@@ -565,6 +590,13 @@ able to choose among them based on the surrounding instances and nets.
 
 The candidate library should retain a bounded Pareto frontier, optionally with
 diversity sampling among candidates with similar metrics.
+
+The initial implementation ranks the non-dominated frontier ahead of dominated
+candidates using bbox volume, footprint, height, occupied block count, and the
+number of exposed port access points. Geometry diversity remains the bounded
+tie-breaker. This intentionally keeps the metrics separate instead of hiding
+them behind one scalar compactness score; delay, isolation halo, and historical
+routing failures can be added when those measurements become available.
 
 ### Compact-search strategy and optimality claims
 

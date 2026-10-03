@@ -40,7 +40,7 @@
     "name": "counter.rsnap",
     "file": "counter.rsnap",
     "path": "examples/counter.rsnap",
-    "size": 36505
+    "size": 41114
   },
   {
     "kind": "nbt",
@@ -62,21 +62,73 @@
     "name": "d-flip-flop.rsnap",
     "file": "d-flip-flop.rsnap",
     "path": "examples/d-flip-flop.rsnap",
-    "size": 18725
+    "size": 20165
   },
   {
     "kind": "nbt",
     "name": "d-latch.nbt",
     "file": "d-latch.nbt",
     "path": "examples/d-latch.nbt",
-    "size": 617
+    "size": 597
+  },
+  {
+    "kind": "nbt",
+    "name": "dust-step-up-primitive.nbt",
+    "file": "dust-step-up-primitive.nbt",
+    "path": "examples/dust-step-up-primitive.nbt",
+    "size": 228
+  },
+  {
+    "kind": "nbt",
+    "name": "full-adder-2x13x9.nbt",
+    "file": "full-adder-2x13x9.nbt",
+    "path": "examples/full-adder-2x13x9.nbt",
+    "size": 647,
+    "outputsPath": "examples/full-adder-2x13x9.outputs.json"
+  },
+  {
+    "kind": "nbt",
+    "name": "full-adder-2x17x10.nbt",
+    "file": "full-adder-2x17x10.nbt",
+    "path": "examples/full-adder-2x17x10.nbt",
+    "size": 745,
+    "outputsPath": "examples/full-adder-2x17x10.outputs.json"
+  },
+  {
+    "kind": "nbt",
+    "name": "full-adder-2x20x20.nbt",
+    "file": "full-adder-2x20x20.nbt",
+    "path": "examples/full-adder-2x20x20.nbt",
+    "size": 1262
+  },
+  {
+    "kind": "nbt",
+    "name": "full-adder-baseline.nbt",
+    "file": "full-adder-baseline.nbt",
+    "path": "examples/full-adder-baseline.nbt",
+    "size": 1706
+  },
+  {
+    "kind": "nbt",
+    "name": "full-adder-right-inputs-2x14x10.nbt",
+    "file": "full-adder-right-inputs-2x14x10.nbt",
+    "path": "examples/full-adder-right-inputs-2x14x10.nbt",
+    "size": 774,
+    "outputsPath": "examples/full-adder-right-inputs-2x14x10.outputs.json"
   },
   {
     "kind": "nbt",
     "name": "full-adder.nbt",
     "file": "full-adder.nbt",
     "path": "examples/full-adder.nbt",
-    "size": 508
+    "size": 635
+  },
+  {
+    "kind": "snapshot",
+    "name": "full-adder.rsnap",
+    "file": "full-adder.rsnap",
+    "path": "examples/full-adder.rsnap",
+    "size": 22045
   },
   {
     "kind": "nbt",
@@ -102,10 +154,52 @@
   },
   {
     "kind": "nbt",
+    "name": "hard-fanout-primitive.nbt",
+    "file": "hard-fanout-primitive.nbt",
+    "path": "examples/hard-fanout-primitive.nbt",
+    "size": 276
+  },
+  {
+    "kind": "nbt",
     "name": "level.nbt",
     "file": "level.nbt",
     "path": "examples/level.nbt",
     "size": 1900
+  },
+  {
+    "kind": "nbt",
+    "name": "nor-cascade-primitive.nbt",
+    "file": "nor-cascade-primitive.nbt",
+    "path": "examples/nor-cascade-primitive.nbt",
+    "size": 270
+  },
+  {
+    "kind": "nbt",
+    "name": "nor-lane-step-primitive.nbt",
+    "file": "nor-lane-step-primitive.nbt",
+    "path": "examples/nor-lane-step-primitive.nbt",
+    "size": 322
+  },
+  {
+    "kind": "nbt",
+    "name": "nor-lane-swap-primitive.nbt",
+    "file": "nor-lane-swap-primitive.nbt",
+    "path": "examples/nor-lane-swap-primitive.nbt",
+    "size": 278
+  },
+  {
+    "kind": "nbt",
+    "name": "nor-primitive.nbt",
+    "file": "nor-primitive.nbt",
+    "path": "examples/nor-primitive.nbt",
+    "size": 223
+  },
+  {
+    "kind": "nbt",
+    "name": "nor-top-output-primitive.nbt",
+    "file": "nor-top-output-primitive.nbt",
+    "path": "examples/nor-top-output-primitive.nbt",
+    "size": 268
   },
   {
     "kind": "nbt",
@@ -137,6 +231,13 @@
   },
   {
     "kind": "nbt",
+    "name": "wall-nor-lane-step-primitive.nbt",
+    "file": "wall-nor-lane-step-primitive.nbt",
+    "path": "examples/wall-nor-lane-step-primitive.nbt",
+    "size": 318
+  },
+  {
+    "kind": "nbt",
     "name": "xor-gate-complex.nbt",
     "file": "xor-gate-complex.nbt",
     "path": "examples/xor-gate-complex.nbt",
@@ -154,7 +255,7 @@
     "name": "xor-gate-simple.nbt",
     "file": "xor-gate-simple.nbt",
     "path": "examples/xor-gate-simple.nbt",
-    "size": 11748
+    "size": 13868
   },
   {
     "kind": "nbt",

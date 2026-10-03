@@ -44,13 +44,7 @@ pub fn rank_child_candidates(
     mut candidates: Vec<LayoutCandidate>,
     limit: usize,
 ) -> ChildCandidatePool {
-    candidates.sort_by_key(|candidate| {
-        (
-            candidate.cost.bbox_volume,
-            candidate.cost.block_count,
-            candidate_geometry_signature(candidate),
-        )
-    });
+    sort_candidates_by_pareto_frontier(&mut candidates);
 
     select_ranked_candidates(instance_name, candidates, limit)
 }
@@ -68,15 +62,53 @@ pub fn rank_child_candidates_with_preferred(
         };
     }
     let preferred = candidates.remove(preferred_index.min(candidates.len() - 1));
-    candidates.sort_by_key(|candidate| {
+    sort_candidates_by_pareto_frontier(&mut candidates);
+    candidates.insert(0, preferred);
+    select_ranked_candidates(instance_name, candidates, limit)
+}
+
+fn sort_candidates_by_pareto_frontier(candidates: &mut Vec<LayoutCandidate>) {
+    let dominated = candidates
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| {
+            candidates.iter().enumerate().any(|(other_index, other)| {
+                other_index != index && candidate_cost_dominates(other, candidate)
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut indexed = candidates
+        .drain(..)
+        .enumerate()
+        .collect::<Vec<(usize, LayoutCandidate)>>();
+    indexed.sort_by_key(|(index, candidate)| {
         (
+            dominated[*index],
             candidate.cost.bbox_volume,
             candidate.cost.block_count,
+            candidate.cost.bbox_footprint,
+            candidate.cost.bbox_height,
+            Reverse(candidate.cost.port_access_points),
             candidate_geometry_signature(candidate),
         )
     });
-    candidates.insert(0, preferred);
-    select_ranked_candidates(instance_name, candidates, limit)
+    candidates.extend(indexed.into_iter().map(|(_, candidate)| candidate));
+}
+
+fn candidate_cost_dominates(left: &LayoutCandidate, right: &LayoutCandidate) -> bool {
+    let left = &left.cost;
+    let right = &right.cost;
+    let no_worse = left.bbox_volume <= right.bbox_volume
+        && left.block_count <= right.block_count
+        && left.bbox_footprint <= right.bbox_footprint
+        && left.bbox_height <= right.bbox_height
+        && left.port_access_points >= right.port_access_points;
+    let strictly_better = left.bbox_volume < right.bbox_volume
+        || left.block_count < right.block_count
+        || left.bbox_footprint < right.bbox_footprint
+        || left.bbox_height < right.bbox_height
+        || left.port_access_points > right.port_access_points;
+    no_worse && strictly_better
 }
 
 fn select_ranked_candidates(
@@ -206,6 +238,9 @@ mod tests {
             cost: LayoutCandidateCost {
                 block_count,
                 bbox_volume: volume,
+                bbox_footprint: volume,
+                bbox_height: 1,
+                port_access_points: 1,
             },
         }
     }
@@ -245,6 +280,21 @@ mod tests {
 
         assert_eq!(pool.candidates[0].cost.bbox_volume, 5);
         assert_eq!(pool.candidates.len(), 3);
+    }
+
+    #[test]
+    fn rank_child_candidates_keeps_a_larger_candidate_with_more_port_access() {
+        let compact = candidate("child", 1, 1, Position(0, 0, 0));
+        let mut routeable = candidate("child", 2, 2, Position(1, 0, 0));
+        routeable.cost.port_access_points = 3;
+        routeable.ports[0].access_points =
+            vec![Position(1, 0, 0), Position(1, 1, 0), Position(1, 0, 1)];
+
+        let pool = rank_child_candidates("instance", vec![compact, routeable], 2);
+
+        assert_eq!(pool.candidates.len(), 2);
+        assert_eq!(pool.candidates[0].cost.bbox_volume, 1);
+        assert_eq!(pool.candidates[1].cost.port_access_points, 3);
     }
 
     #[test]

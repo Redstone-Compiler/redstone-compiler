@@ -41,3 +41,21 @@ cargo test --release counter_module_generates_world_from_child_layout_candidates
 Library consumers are responsible for installing and configuring their own
 subscriber. The compiler CLI installs a formatted subscriber whose default
 level is `info`.
+
+## Local candidate exhaustion and adaptive retry
+
+When a local candidate frontier becomes empty, the debug event
+`local candidate frontier exhausted` identifies the failing node, classifies
+the stage as input placement, NOT routing, OR routing, sequential placement,
+output placement, or another placement operation, and distinguishes initial
+frontier, placement beam, route depth, route beam, no-legal-route, and
+no-legal-placement exhaustion. It also records the incoming and generated
+frontier sizes and, where available, route calls and successful route candidates.
+
+Candidate generation performs at most one stage-specific adaptive retry. NOT
+and OR failures grow their corresponding exhausted route budget and the
+upstream placement beam; sequential and other placement failures grow only the
+placement beam. Input and
+output failures are not retried because a larger routing budget cannot repair
+an impossible pin constraint. Route depth is capped at 16, so this recovery
+path cannot turn into an unbounded search.

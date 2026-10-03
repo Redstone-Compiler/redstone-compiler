@@ -1,0 +1,68 @@
+rcell 1;
+
+// X=a (upper switch), Y=b (lower switch): both at compiler Y-min.
+// This is the right-hand edge in the user's reference view; z is height.
+// Sum exits through a +Y-facing repeater at Y-max, opposite both operands.
+// Each logical input still has exactly one physical switch.
+// The bottom B bus feeds both NOR inputs through isolating repeaters.
+// Keep (0,5,8) air for the descending XNOR wire; (1,9,9) blocks an
+// unwanted diagonal dust connection between the n6 and carry routes.
+cell "full-adder-right-inputs-2x14x10" size [2, 14, 10] {
+  glyph "U" = torch on z-;
+  glyph "W" = torch on x-;
+  glyph "V" = torch on x+;
+  glyph "P" = repeater toward y- delay 1;
+  glyph "Q" = repeater toward y+ delay 1;
+  glyph "T" = torch on y-;
+  glyph "R" = torch on y+;
+  auto-support dust repeater;
+  input "a" at [0, 0, 3] on x+;
+  input "b" at [0, 0, 1] on x+;
+  input "cin" at [0, 13, 5] on x+;
+  probe "n1" at [1, 2, 3];
+  probe "n2" at [1, 0, 4];
+  probe "n3" at [1, 4, 4];
+  probe "xnor" at [1, 2, 7];
+  probe "second_input" at [1, 7, 5];
+  probe "n5" at [1, 11, 5];
+  probe "n6" at [1, 9, 6];
+  probe "n7" at [1, 13, 6];
+  probe "carry_n5" at [0, 10, 7];
+  probe "carry_n1" at [0, 3, 9];
+  probe "sum_core" at [0, 11, 8];
+  output "sum" at [0, 13, 8];
+  output "cout" at [1, 7, 9];
+  plane yz at x=0 {
+  z=9 "..#TP#P#QQr...";
+  z=8 "..U.......#VrP";
+  z=7 "..#..r....R#..";
+  z=6 "..U...r....V..";
+  z=5 "..#....rrPP#Q.";
+  z=4 "..V...........";
+  z=3 ".P#QQQr.......";
+  z=2 ".......r......";
+  }
+  plane yz at x=1 {
+  z=9 ".......W.#....";
+  z=8 "..#rrr...rP#Qr";
+  z=7 "..U......#...#";
+  z=6 "rP#Qr....U.#.U";
+  z=5 "#...#..rP#QWP#";
+  z=4 "U.#.U.........";
+  z=3 "#QWP#Qr.......";
+  z=1 "#rrrrrrr......";
+  }
+  expect "n1" = ~(a|b);
+  expect "n2" = ~(a|~(a|b));
+  expect "n3" = ~(b|~(a|b));
+  expect "xnor" = ~(a^b);
+  expect "second_input" = ~(a^b);
+  expect "n5" = ~((~(a^b))|cin);
+  expect "n6" = ~((~(a^b))|~((~(a^b))|cin));
+  expect "n7" = ~(cin|~((~(a^b))|cin));
+  expect "carry_n5" = ~((~(a^b))|cin);
+  expect "carry_n1" = ~(a|b);
+  expect "sum_core" = a^b^cin;
+  expect "sum" = a^b^cin;
+  expect "cout" = a&b|a&cin|b&cin;
+}

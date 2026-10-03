@@ -1,6 +1,7 @@
 pub mod assembly;
 pub mod candidate;
 mod candidate_cache;
+mod combinational_macro;
 pub mod diagnostics;
 mod free_3d;
 pub mod heuristics;
@@ -37,8 +38,11 @@ use crate::snapshot::{
 };
 use crate::transform::place_and_route::global_pnr::assembly::assemble_world;
 use crate::transform::place_and_route::global_pnr::candidate::{
-    generate_routable_module_candidates_with_progress_label, CandidatePolicySet,
+    generate_routable_top_leaf_candidates_with_progress_label, CandidatePolicySet,
     UnitCandidateConfig,
+};
+use crate::transform::place_and_route::global_pnr::combinational_macro::{
+    CombinationalMacroLibrary, MacroCandidateSource,
 };
 pub use crate::transform::place_and_route::global_pnr::heuristics::GlobalHeuristicHooks;
 use crate::transform::place_and_route::global_pnr::ir::{LayoutCandidate, PhysicalPortDirection};
@@ -66,7 +70,6 @@ use crate::transform::place_and_route::global_pnr::topology::{
     NetId, ResolvedEndpoint, ResolvedPnrTopology,
 };
 use crate::transform::place_and_route::global_pnr::visualize::placement_bbox_wireframe_world;
-use crate::transform::place_and_route::local_placer::{LocalPlacerConfig, NotRouteStrategy};
 use crate::transform::place_and_route::sampling::SamplingPolicy;
 use crate::world::position::{DimSize, Position};
 use crate::world::World3D;
@@ -667,7 +670,7 @@ fn prepare_routable_module_with_topology(
         progress.stage(1, 4, "generate leaf layout candidates");
         let candidate_config = config.candidate.effective_for_definition(&module.name);
         let candidate_config = candidate_config_for_routable_child(module, &candidate_config);
-        let candidates = generate_routable_module_candidates_with_progress_label(
+        let candidates = generate_routable_top_leaf_candidates_with_progress_label(
             module,
             &candidate_config,
             config.show_progress.then_some(module.name.as_str()),
@@ -1409,8 +1412,14 @@ fn run_prepared_leaf(
 ) -> eyre::Result<GlobalPnrResult> {
     let candidate = prepared_candidates
         .iter()
+        .min_by_key(|candidate| {
+            (
+                crate::transform::place_and_route::estimate::world_compact_cost(&candidate.world),
+                candidate.cost.bbox_volume,
+                candidate.cost.block_count,
+            )
+        })
         .cloned()
-        .next()
         .context("graph-backed module produced no layout candidates")?;
     progress.detail(format!(
         "selected candidate for `{}`",
@@ -1419,11 +1428,27 @@ fn run_prepared_leaf(
 
     progress.stage(2, 4, "place leaf candidate");
     let placed = place_candidates_on_shelves(&[candidate.clone()], &config.placement);
+    let placed_leaf = placed
+        .first()
+        .context("leaf candidate placement produced no module")?;
+    let translate_port = |position: Position| {
+        Position(
+            placed_leaf.origin.0 + position.0 - candidate.bbox.min.0,
+            placed_leaf.origin.1 + position.1 - candidate.bbox.min.1,
+            placed_leaf.origin.2 + position.2 - candidate.bbox.min.2,
+        )
+    };
     let inputs = candidate
         .ports
         .iter()
         .filter(|port| port.direction == PhysicalPortDirection::Input)
-        .map(|port| OutputEndpoint::new(port.name.clone(), port.position))
+        .map(|port| OutputEndpoint::new(port.name.clone(), translate_port(port.position)))
+        .collect();
+    let outputs: Vec<OutputEndpoint> = candidate
+        .ports
+        .iter()
+        .filter(|port| port.direction == PhysicalPortDirection::Output)
+        .map(|port| OutputEndpoint::new(port.name.clone(), translate_port(port.position)))
         .collect();
 
     progress.stage(3, 4, "assemble leaf world");
@@ -1446,7 +1471,8 @@ fn run_prepared_leaf(
 
     progress.stage(4, 4, "complete");
     progress.summary(format!(
-        "global PnR completed: outputs=0 routes=0 global_elapsed={:.2?}",
+        "global PnR completed: outputs={} routes=0 global_elapsed={:.2?}",
+        outputs.len(),
         started.elapsed()
     ));
     Ok(GlobalPnrResult {
@@ -1454,7 +1480,7 @@ fn run_prepared_leaf(
         placed_world: PlacedWorld {
             world,
             inputs,
-            outputs: Vec::new(),
+            outputs,
         },
         placement_bbox_world,
         selected_candidates: candidates,
@@ -1485,6 +1511,7 @@ fn prepare_routable_child_candidate_sets(
     let started = Instant::now();
     let mut bindings = Vec::new();
     let mut cache = ChildCandidateCache::default();
+    let mut macro_library = CombinationalMacroLibrary::default();
     let mut reused = 0usize;
     let mut candidate_references = 0usize;
     for (index, instance) in instances.iter().enumerate() {
@@ -1521,11 +1548,17 @@ fn prepare_routable_child_candidate_sets(
                         )),
                     }
                 }
-                let candidates = generate_routable_module_candidates_with_progress_label(
+                let (candidates, macro_source) = macro_library.candidates_for(
                     child,
                     &child_config,
                     config.show_progress.then_some(instance.name.as_str()),
                 )?;
+                if macro_source == MacroCandidateSource::ReusedVerifiedMacro {
+                    progress.detail(format!(
+                        "`{}` reused a verified combinational macro",
+                        instance.name
+                    ));
+                }
                 if let Some(root) = config.candidate_cache_dir.as_deref()
                     && let Err(error) = candidate_cache::store(root, &persistent_key, &candidates)
                 {
@@ -1761,9 +1794,6 @@ fn candidate_config_for_routable_child(
 ) -> UnitCandidateConfig {
     let mut config = base_config.clone();
     if routable_module_is_combinational(child) {
-        if routable_input_port_count(child) > 1 {
-            config.local_config = multi_input_combinational_local_config(config.local_config);
-        }
         if let Some(limit) = config.combinational_sampling_limit {
             config.local_config.step_sampling_policy = SamplingPolicy::Random(limit);
             config.local_config.not_route_step_sampling_policy = SamplingPolicy::Random(limit);
@@ -1790,29 +1820,21 @@ fn routable_input_port_count(module: &RoutableModule) -> usize {
         .count()
 }
 
-fn multi_input_combinational_local_config(mut config: LocalPlacerConfig) -> LocalPlacerConfig {
-    config.leak_sampling = false;
-    config.not_route_strategy = NotRouteStrategy::DirectAndRedstone;
-    config.max_not_route_step = config.max_not_route_step.max(4);
-    config.not_route_step_sampling_policy = SamplingPolicy::Random(512);
-    config.max_route_step = config.max_route_step.max(4);
-    config.route_step_sampling_policy = SamplingPolicy::Random(512);
-    config
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::logic::LogicGraph;
     use crate::graph::GraphNodeKind;
     use crate::nbt::{NBTRoot, ToNBT};
     use crate::snapshot::{compile_with_snapshot, SnapshotOptions};
+    use crate::transform::place_and_route::estimate::{bounding_box, world_compact_cost};
     use crate::transform::place_and_route::global_pnr::candidate::d_latch_child_candidate_config;
     use crate::transform::place_and_route::global_pnr::policy::{
         Free3DPlacementConfig, PlacementHeuristic,
     };
     use crate::transform::place_and_route::local_placer::{
         InputPlacementStrategy, LocalPlacerConfig, NotRouteStrategy, PlacementSamplingPolicy,
-        TorchPlacementStrategy,
+        PlacementSchedulePolicy, TorchPlacementStrategy,
     };
     use crate::transform::place_and_route::sampling::SamplingPolicy;
     use crate::transform::place_and_route::utils::world_to_logic_with_outputs;
@@ -1824,6 +1846,7 @@ mod tests {
     fn sequential_local_config() -> LocalPlacerConfig {
         LocalPlacerConfig {
             random_seed: 42,
+            schedule: PlacementSchedulePolicy::Topological,
             greedy_input_generation: true,
             input_placement_strategy: InputPlacementStrategy::Boundary,
             input_candidate_limit: None,
@@ -1839,6 +1862,13 @@ mod tests {
             max_route_step: 4,
             route_step_sampling_policy: SamplingPolicy::Random(256),
         }
+    }
+
+    fn expected_full_adder_graph() -> eyre::Result<LogicGraph> {
+        LogicGraph::from_assignments([
+            ("sum".to_owned(), "(a^b)^cin".to_owned()),
+            ("cout".to_owned(), "(a&b)|((a^b)&cin)".to_owned()),
+        ])
     }
 
     fn test_d_latch_module(name: &str) -> eyre::Result<RoutableModule> {
@@ -1909,6 +1939,152 @@ mod tests {
     }
 
     #[test]
+    fn full_adder_verilog_lowers_to_routable_leaf() -> eyre::Result<()> {
+        let source = include_str!("../../../../test/full-adder.v");
+        let logical = LogicalDesign::from_verilog_source_named(source, "full-adder.v")?;
+        let routable = logical.lower_to_routable()?;
+        let top = routable
+            .module(&routable.top)
+            .context("full-adder Routable IR is missing its top module")?;
+        assert!(matches!(top.body, RoutableModuleBody::Leaf { .. }));
+        assert_eq!(routable.modules.len(), 1);
+        let graph = LogicGraph {
+            graph: crate::ir::graph_from_routable_leaf(top)?,
+        };
+        assert!(graph
+            .truth_table()?
+            .contains_output_tables_under_input_permutation(
+                &expected_full_adder_graph()?.truth_table()?
+            ));
+        Ok(())
+    }
+
+    #[test]
+    fn routable_child_keeps_explicit_local_placer_policy() -> eyre::Result<()> {
+        let source = include_str!("../../../../test/full-adder.v");
+        let routable = LogicalDesign::from_verilog_source_named(source, "full-adder.v")?
+            .lower_to_routable()?;
+        let child = routable
+            .module(&routable.top)
+            .context("missing full adder")?;
+        let mut base = UnitCandidateConfig::default();
+        base.local_config.leak_sampling = true;
+        base.local_config.not_route_strategy = NotRouteStrategy::RedstoneOnly;
+        base.local_config.max_not_route_step = 7;
+        base.local_config.not_route_step_sampling_policy = SamplingPolicy::Take(23);
+        base.local_config.max_route_step = 9;
+        base.local_config.route_step_sampling_policy = SamplingPolicy::Take(29);
+
+        let effective = candidate_config_for_routable_child(child, &base);
+
+        assert_eq!(effective, base);
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "search-heavy combinational compiler smoke test"]
+    fn full_adder_verilog_compiles_to_routable_world() -> eyre::Result<()> {
+        init_tracing_from_env();
+        let source = include_str!("../../../../test/full-adder.v");
+        let logical = LogicalDesign::from_verilog_source_named(source, "full-adder.v")?;
+        let routable = logical.lower_to_routable()?;
+        let top = routable
+            .module(&routable.top)
+            .context("full-adder Routable IR is missing its top module")?;
+        assert!(matches!(top.body, RoutableModuleBody::Leaf { .. }));
+
+        let local_config = LocalPlacerConfig {
+            random_seed: 29,
+            schedule: PlacementSchedulePolicy::Auto,
+            greedy_input_generation: true,
+            input_placement_strategy: InputPlacementStrategy::Boundary,
+            input_candidate_limit: Some(25),
+            step_sampling_policy: SamplingPolicy::None,
+            placement_sampling_policy: LocalPlacerConfig::ranked_sampling(2_000, 500, 0),
+            leak_sampling: false,
+            route_torch_directly: true,
+            materialize_outputs: false,
+            torch_placement_strategy: TorchPlacementStrategy::DirectOnly,
+            not_route_strategy: NotRouteStrategy::DirectOnly,
+            max_not_route_step: 0,
+            not_route_step_sampling_policy: SamplingPolicy::Random(10),
+            max_route_step: 4,
+            route_step_sampling_policy: SamplingPolicy::Random(10),
+        };
+        let config = GlobalPnrConfig {
+            candidate: UnitCandidateConfig {
+                dim: DimSize(10, 10, 5),
+                local_config,
+                max_candidates: 8,
+                ..Default::default()
+            }
+            .into(),
+            show_progress: true,
+            ..Default::default()
+        };
+
+        let result = compile_with_snapshot(
+            SnapshotOptions::new("test/full-adder.snapshot", "full-adder")
+                .with_source_text("full-adder.v", source),
+            || place_and_route_logical_design_with_visualization(&logical, &config),
+        )?;
+
+        let mut input_names = result
+            .placed_world
+            .inputs
+            .iter()
+            .map(|input| input.name.as_str())
+            .collect::<Vec<_>>();
+        input_names.sort_unstable();
+        let mut output_names = result
+            .placed_world
+            .outputs
+            .iter()
+            .map(|output| output.name.as_str())
+            .collect::<Vec<_>>();
+        output_names.sort_unstable();
+        assert_eq!(input_names, ["a", "b", "cin"]);
+        assert_eq!(output_names, ["cout", "sum"]);
+        assert_eq!(
+            result
+                .placed_world
+                .world
+                .iter_block()
+                .into_iter()
+                .filter(|(_, block)| block.kind.is_switch())
+                .count(),
+            3
+        );
+        assert!(result
+            .placed_world
+            .inputs
+            .iter()
+            .all(|input| { result.placed_world.world[input.position()].kind.is_switch() }));
+
+        let world = &result.placed_world.world;
+        let bounds = bounding_box(world).context("compiled full-adder world is empty")?;
+        let compact_cost = world_compact_cost(world);
+        println!(
+            "full-adder compact result: blocks={} bbox={}x{}x{} volume={} cost={compact_cost}",
+            world.iter_block().len(),
+            bounds.width(),
+            bounds.depth(),
+            bounds.height(),
+            bounds.volume(),
+        );
+        // This is the natural-RTL functional baseline. More aggressive
+        // compactness is a placement-scheduling objective, not a requirement
+        // on how the Verilog expression is manually decomposed.
+        assert!(world.iter_block().len() <= 65);
+        assert!(bounds.volume() <= 245);
+        assert!(compact_cost <= 1_090);
+        assert!(std::path::Path::new("test/full-adder.snapshot/ir/logical.rcir").is_file());
+        assert!(std::path::Path::new("test/full-adder.snapshot/ir/routable.rcir").is_file());
+        assert!(std::path::Path::new("test/full-adder.snapshot/full-adder.nbt").is_file());
+        Ok(())
+    }
+
+    #[test]
     #[ignore = "search-heavy sequential global pnr smoke test"]
     fn d_flip_flop_module_generates_world_from_child_layout_candidates() -> eyre::Result<()> {
         init_tracing_from_env();
@@ -1964,6 +2140,8 @@ mod tests {
                     max_steps: 128,
                 },
                 validation: crate::transform::place_and_route::global_pnr::router::RouteValidationMode::Deferred,
+                top_inputs_last: false,
+                defer_feedback_cycles: false,
             }),
             routing: GlobalRoutingConfig {
                 strategy: crate::transform::place_and_route::global_pnr::router::GlobalRoutingStrategy::GreedyBeam {
@@ -1972,6 +2150,8 @@ mod tests {
                     variant_seed: 0,
                 },
                 validation: crate::transform::place_and_route::global_pnr::router::RouteValidationMode::Deferred,
+                top_inputs_last: false,
+                defer_feedback_cycles: false,
             },
             routing_refinement: Some(GlobalRoutingConfig {
                 strategy: crate::transform::place_and_route::global_pnr::router::GlobalRoutingStrategy::GreedyBeam {
@@ -1980,6 +2160,8 @@ mod tests {
                     variant_seed: 0,
                 },
                 validation: crate::transform::place_and_route::global_pnr::router::RouteValidationMode::Deferred,
+                top_inputs_last: false,
+                defer_feedback_cycles: false,
             }),
             search: GlobalSearchConfig {
                 budget: GlobalSearchBudget {
@@ -2106,6 +2288,8 @@ mod tests {
                     max_steps: 128,
                 },
                 validation: crate::transform::place_and_route::global_pnr::router::RouteValidationMode::Deferred,
+                top_inputs_last: false,
+                defer_feedback_cycles: false,
             }),
             routing: GlobalRoutingConfig {
                 strategy: crate::transform::place_and_route::global_pnr::router::GlobalRoutingStrategy::GreedyBeam {
@@ -2114,6 +2298,8 @@ mod tests {
                     variant_seed: 0,
                 },
                 validation: crate::transform::place_and_route::global_pnr::router::RouteValidationMode::Deferred,
+                top_inputs_last: false,
+                defer_feedback_cycles: false,
             },
             routing_refinement: Some(GlobalRoutingConfig {
                 strategy: crate::transform::place_and_route::global_pnr::router::GlobalRoutingStrategy::GreedyBeam {
@@ -2122,6 +2308,8 @@ mod tests {
                     variant_seed: 0,
                 },
                 validation: crate::transform::place_and_route::global_pnr::router::RouteValidationMode::Deferred,
+                top_inputs_last: false,
+                defer_feedback_cycles: false,
             }),
             search: GlobalSearchConfig {
                 budget: GlobalSearchBudget {

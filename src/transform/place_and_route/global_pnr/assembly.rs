@@ -59,6 +59,9 @@ pub fn assemble_world(
     let mut world = World3D::new(size);
     for (position, block) in candidate_blocks {
         if !world[position].kind.is_air() {
+            if world[position].kind.is_cobble() && block.kind.is_cobble() {
+                continue;
+            }
             return Err(AssemblyError::Collision { position });
         }
         world[position] = block;

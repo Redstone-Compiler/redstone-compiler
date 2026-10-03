@@ -1,0 +1,25 @@
+rcell 1;
+
+// A composable two-wide NOR. Two signals enter on x=0 from opposite Y
+// directions; the wall-torch result exits on x=1, leaving the input lane free.
+cell "nor-lane-swap-primitive" size [2, 5, 2] {
+  glyph "X" = torch on x-;
+  glyph "P" = repeater toward y- delay 1;
+  glyph "Q" = repeater toward y+ delay 1;
+
+  auto-support repeater;
+
+  input "a" at [0, 0, 1] on x+;
+  input "b" at [0, 4, 1] on x+;
+  output "y" at [1, 2, 1];
+
+  plane xy at z=1 {
+    y=0 ".#";
+    y=1 "P.";
+    y=2 "#X";
+    y=3 "Q.";
+    y=4 ".#";
+  }
+
+  expect "y" = ~(a|b);
+}

@@ -1,0 +1,112 @@
+rcell 1;
+
+// Compact full adder: validated two-wide sum core, two reserved vertical relays,
+// and local carry recomputation. Compiler coordinates: z is height.
+// n1 bypass: x=1,y=19. cin bypass: x=1,y=18. Final carry is at z=19.
+// P flows +Y, Q flows -Y. D flows +Y with delay 2 to filter startup pulses.
+// U attaches below; W/V attach toward -X/+X. Each row spans y=0..19.
+cell "full-adder-2x20x20" size [2, 20, 20] {
+  glyph "U" = torch on z-;
+  glyph "W" = torch on x-;
+  glyph "V" = torch on x+;
+  glyph "P" = repeater toward y- delay 1;
+  glyph "Q" = repeater toward y+ delay 1;
+
+  glyph "D" = repeater toward y- delay 2;
+  auto-support dust repeater;
+
+  input "a" at [0, 5, 1] on x+;
+  input "b" at [0, 13, 1] on x+;
+  input "cin" at [1, 19, 1] on x-;
+
+  probe "a_lift" at [1, 4, 3];
+  probe "b_lift" at [1, 13, 3];
+  probe "cin_lift" at [0, 16, 3];
+  probe "n1" at [0, 9, 2];
+  probe "n1_keep" at [1, 19, 9];
+  probe "n2" at [1, 6, 4];
+  probe "n3" at [0, 11, 5];
+  probe "n4" at [0, 8, 8];
+  probe "n4_keep" at [0, 9, 11];
+  probe "n4_final" at [0, 6, 14];
+  probe "cin_keep" at [0, 14, 11];
+  probe "cin_final" at [0, 12, 14];
+  probe "n1_final" at [1, 19, 17];
+  probe "n5" at [1, 11, 12];
+  probe "n6" at [1, 8, 15];
+  probe "n7" at [1, 14, 15];
+  probe "carry_cin" at [1, 18, 17];
+  probe "carry_or" at [1, 18, 19];
+  output "sum" at [1, 11, 18];
+  output "cout" at [0, 18, 19];
+  probe "carry_n5" at [0, 15, 18];
+
+  // x=0: top to bottom, columns are Y.
+  plane yz at x=0 {
+    //    01234567890123456789
+    z=19 "..................V.";
+    z=18 "...............U....";
+    z=17 ".............rP#Qr..";
+    z=16 ".............#......";
+    z=14 "......r.....UrP#rr..";
+    z=13 "......#r....#..#....";
+    z=12 ".......#r...U...#...";
+    z=11 "........#r..#Qr.rP#.";
+    z=10 ".........#r...#r#...";
+    z=9 "........#P#....#r...";
+    z=8 "........U.....r.#r..";
+    z=7 ".....rrP#Qrr...r.#..";
+    z=6 "...........#....r...";
+    z=5 "...........U.....r..";
+    z=4 ".........rP#Qrr...rr";
+    z=3 "........#.....#.r..#";
+    z=2 ".........U......#r..";
+    z=1 "...rr.rrP#Qrr.r..#r#";
+  }
+
+  // x=1: top to bottom, columns are Y.
+  plane yz at x=1 {
+    //    01234567890123456789
+    z=19 "................rD#r";
+    z=18 "...........U..#r...#";
+    z=17 "........rrP#Qrr..rUU";
+    z=16 "........#.....#...##";
+    z=15 "........U.....U...UU";
+    z=14 "......rP#QrrPP#Qrr##";
+    z=13 "...........#......UU";
+    z=12 "...........U......##";
+    z=11 ".........rP#Qrr...WU";
+    z=10 "...................#";
+    z=9 "..............rr...U";
+    z=8 "...................#";
+    z=7 ".....r.............U";
+    z=6 ".....#r......rPPPPP#";
+    z=5 "......#.....r#......";
+    z=4 "......U..rrP#...rPr.";
+    z=3 "....rP#Qr#...r......";
+    z=2 "...r#...#r....r.....";
+    z=1 ".....#.......#.#....";
+  }
+
+  expect "a_lift" = a;
+  expect "b_lift" = b;
+  expect "cin_lift" = cin;
+  expect "n1" = ~(a|b);
+  expect "n1_keep" = ~(a|b);
+  expect "n2" = ~(a|~(a|b));
+  expect "n3" = ~(b|~(a|b));
+  expect "n4" = ~(a^b);
+  expect "n4_keep" = ~(a^b);
+  expect "n4_final" = ~(a^b);
+  expect "cin_keep" = cin;
+  expect "cin_final" = cin;
+  expect "n1_final" = ~(a|b);
+  expect "n5" = ~((~(a^b))|cin);
+  expect "n6" = ~((~(a^b))|~((~(a^b))|cin));
+  expect "n7" = ~(cin|~((~(a^b))|cin));
+  expect "sum" = a^b^cin;
+  expect "carry_n5" = ~((~(a^b))|cin);
+  expect "carry_cin" = cin;
+  expect "carry_or" = (~(a|b))|(~((~(a^b))|cin));
+  expect "cout" = a&b|a&cin|b&cin;
+}

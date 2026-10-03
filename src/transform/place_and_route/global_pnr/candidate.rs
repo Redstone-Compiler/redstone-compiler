@@ -3,23 +3,36 @@ use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::ops::{Deref, DerefMut};
 
 use eyre::ContextCompat;
+use serde::Serialize;
 
 use crate::graph::logic::LogicGraph;
 use crate::graph::{Graph, GraphNodeKind};
-use crate::ir::{graph_from_routable_leaf, RoutableModule, RoutablePortDirection};
+use crate::ir::{
+    graph_from_routable_leaf, CellFaceSpec, ClusteringSpec, LocalCellContractSpec,
+    PortAccessDirectionSpec, RoutableModule, RoutablePortDirection,
+};
 use crate::output::{OutputEndpoint, PlacedWorld};
+use crate::snapshot::{emit_json, record as record_snapshot, SnapshotEvent};
 use crate::transform::place_and_route::detailed_router;
 use crate::transform::place_and_route::global_pnr::ir::{
     LayoutCandidate, PhysicalPort, PhysicalPortDirection, PortConnection,
 };
 use crate::transform::place_and_route::local_placer::{
-    LocalPlacer, LocalPlacerConfig, LocalPlacerInputConstraints,
+    LocalPlacementCostWeights, LocalPlacementFailure, LocalPlacementFailureKind,
+    LocalPlacementStage, LocalPlacer, LocalPlacerConfig, LocalPlacerDebug,
+    LocalPlacerInputConstraints, PlacementSamplingPolicy, PlacementSchedulePolicy,
+    PlacementScheduler,
 };
 use crate::transform::place_and_route::placed_node::PlacedNode;
-use crate::world::block::Block;
+use crate::transform::place_and_route::sampling::SamplingPolicy;
+use crate::world::block::{Block, BlockKind};
 use crate::world::position::{DimSize, Position};
 use crate::world::simulator::Simulator;
 use crate::world::{World, World3D};
+
+mod clustering;
+#[cfg(test)]
+mod local_diagnostic;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UnitCandidateConfig {
@@ -28,6 +41,31 @@ pub struct UnitCandidateConfig {
     pub input_constraints: LocalPlacerInputConstraints,
     pub max_candidates: usize,
     pub combinational_sampling_limit: Option<usize>,
+    pub local_objective: LocalPlacementCostWeights,
+    pub adaptive_search: LocalAdaptiveSearchConfig,
+    pub clustering: ClusteringSpec,
+    pub local_cell_contract: LocalCellContractSpec,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct LocalAdaptiveSearchConfig {
+    pub max_retries: usize,
+    pub route_depth_multiplier: usize,
+    pub route_depth_cap: usize,
+    pub sampling_multiplier: usize,
+    pub sampling_cap: Option<usize>,
+}
+
+impl Default for LocalAdaptiveSearchConfig {
+    fn default() -> Self {
+        Self {
+            max_retries: 1,
+            route_depth_multiplier: 2,
+            route_depth_cap: 16,
+            sampling_multiplier: 2,
+            sampling_cap: None,
+        }
+    }
 }
 
 /// Local-candidate preparation policy before it is resolved against a typed
@@ -122,6 +160,10 @@ impl Default for UnitCandidateConfig {
             input_constraints: LocalPlacerInputConstraints::default(),
             max_candidates: 16,
             combinational_sampling_limit: None,
+            local_objective: LocalPlacementCostWeights::default(),
+            adaptive_search: LocalAdaptiveSearchConfig::default(),
+            clustering: ClusteringSpec::default(),
+            local_cell_contract: LocalCellContractSpec::default(),
         }
     }
 }
@@ -131,8 +173,41 @@ pub fn generate_routable_module_candidates_with_progress_label(
     config: &UnitCandidateConfig,
     progress_label: Option<&str>,
 ) -> eyre::Result<Vec<LayoutCandidate>> {
+    generate_routable_module_candidates(
+        module,
+        config,
+        progress_label,
+        CandidateInputMode::ExternalPorts,
+    )
+}
+
+pub fn generate_routable_top_leaf_candidates_with_progress_label(
+    module: &RoutableModule,
+    config: &UnitCandidateConfig,
+    progress_label: Option<&str>,
+) -> eyre::Result<Vec<LayoutCandidate>> {
+    generate_routable_module_candidates(
+        module,
+        config,
+        progress_label,
+        CandidateInputMode::MaterializedSwitches,
+    )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CandidateInputMode {
+    ExternalPorts,
+    MaterializedSwitches,
+}
+
+fn generate_routable_module_candidates(
+    module: &RoutableModule,
+    config: &UnitCandidateConfig,
+    progress_label: Option<&str>,
+    input_mode: CandidateInputMode,
+) -> eyre::Result<Vec<LayoutCandidate>> {
     let graph = graph_from_routable_leaf(module)?;
-    let ports = module
+    let ports: Vec<_> = module
         .ports
         .iter()
         .map(|port| {
@@ -146,7 +221,56 @@ pub fn generate_routable_module_candidates_with_progress_label(
             )
         })
         .collect();
-    generate_unit_candidates(&module.name, graph, ports, config, progress_label)
+    let clustered = clustering::try_generate_clustered_candidates(
+        &module.name,
+        &graph,
+        &ports,
+        config,
+        progress_label,
+        input_mode,
+    )?;
+    let clustering_was_requested = config.clustering.enabled
+        && graph
+            .nodes
+            .iter()
+            .filter(|node| matches!(node.kind, GraphNodeKind::Logic(_)))
+            .count()
+            >= config.clustering.trigger_logic_nodes
+        && !graph
+            .nodes
+            .iter()
+            .any(|node| matches!(node.kind, GraphNodeKind::Sequential(_)));
+    if clustering_was_requested && !config.clustering.keep_monolithic {
+        // `keep-monolithic false` makes clustering a forced representation,
+        // including its failure semantics. Retrying the same large graph here
+        // both ignores the profile and can dominate a failed compact search.
+        return Ok(clustered.unwrap_or_default());
+    }
+    let mut candidates = generate_unit_candidates(
+        &module.name,
+        graph,
+        ports,
+        config,
+        progress_label,
+        input_mode,
+    )?;
+    if let Some(clustered) = clustered {
+        candidates.extend(clustered);
+        // Clustering is an additional search representation, not a forced
+        // replacement. Keep the compact monolithic result when composition
+        // overhead outweighs the benefit, while retaining clustered layouts
+        // when they win on physical cost.
+        candidates.sort_by_key(|candidate| {
+            (
+                candidate.cost.bbox_volume,
+                candidate.cost.block_count,
+                candidate.cost.bbox_height,
+                candidate.cost.bbox_footprint,
+            )
+        });
+        candidates.truncate(config.max_candidates.max(1));
+    }
+    Ok(candidates)
 }
 
 #[derive(Clone, Debug)]
@@ -172,17 +296,11 @@ fn generate_unit_candidates(
     ports: Vec<CandidatePort>,
     config: &UnitCandidateConfig,
     progress_label: Option<&str>,
+    input_mode: CandidateInputMode,
 ) -> eyre::Result<Vec<LayoutCandidate>> {
-    let graph = LogicGraph { graph }.prepare_place()?;
-    let placer = LocalPlacer::new(graph.clone(), config.local_config)?;
-
-    let placed = placer.generate_with_outputs_and_input_constraints_progress(
-        config.dim,
-        None,
-        &config.input_constraints,
-        progress_label,
-    );
-
+    // Routable leaf bodies are already technology-mapped. Candidate
+    // generation must preserve that graph exactly.
+    let graph = LogicGraph { graph };
     let contains_sequential = graph
         .graph
         .nodes
@@ -190,37 +308,514 @@ fn generate_unit_candidates(
         .any(|node| matches!(node.kind, GraphNodeKind::Sequential(_)));
     let validate_truth_table = !contains_sequential;
     let mut candidates = Vec::new();
-    for placed in placed {
+    let mut generated_count = 0usize;
+    let mut truth_table_rejections = 0usize;
+    let mut port_rejections = 0usize;
+    let mut missing_port_rejections = BTreeMap::<String, usize>::new();
+    let mut contract_rejections = 0usize;
+    let mut schedules = if config.local_config.schedule == PlacementSchedulePolicy::Auto {
+        PlacementScheduler::new(&graph).candidates()
+    } else {
+        vec![PlacementScheduler::new(&graph).select(config.local_config.schedule)]
+    };
+    // Keep auto mode performance-neutral for graphs already handled by the
+    // canonical order. Heuristic schedules are recovery paths, ranked by
+    // their static metrics, rather than speculative work paid on every run.
+    let topological_order = graph.topological_order();
+    schedules.sort_by_key(|schedule| (schedule.order != topological_order, schedule.metrics));
+    let schedule_count = schedules.len();
+    let mut attempted_schedules = 0usize;
+    let mut adaptive_retries = 0usize;
+    let mut schedule_reports = Vec::new();
+
+    for (schedule_attempt, schedule) in schedules.into_iter().enumerate() {
         if candidates.len() >= config.max_candidates {
             break;
         }
-        if validate_truth_table && !candidate_matches_truth_table(&graph, &placed)? {
-            continue;
+        attempted_schedules += 1;
+        if schedule_count > 1 {
+            tracing::info!(
+                module = module_name,
+                schedule_attempt = schedule_attempt + 1,
+                schedule_count,
+                input_lifetime = schedule.metrics.input_lifetime,
+                peak_frontier = schedule.metrics.peak_frontier,
+                total_frontier = schedule.metrics.total_frontier,
+                edge_lifetime = schedule.metrics.edge_lifetime,
+                "trying local placement schedule"
+            );
         }
-        let (world, physical_ports) = switchless_candidate_layout(
-            &ports,
-            contains_sequential,
-            &config.input_constraints,
-            placed.world,
-            &placed.inputs,
-            &placed.outputs,
-        );
-        if !candidate_ports_cover_module_ports(&ports, &physical_ports) {
-            continue;
+        let accepted_before = candidates.len();
+        let mut failures = Vec::new();
+        let mut local_config = config.local_config;
+        let mut adaptive_attempt = 0usize;
+        let placed = loop {
+            let placer = LocalPlacer::new_with_visit_order_and_cost(
+                graph.clone(),
+                local_config,
+                schedule.order.clone(),
+                config.local_objective,
+            )?;
+            let mut debug = LocalPlacerDebug::default();
+            let mut placed = match input_mode {
+                CandidateInputMode::ExternalPorts => placer
+                    .generate_with_outputs_and_planned_inputs_debug_progress(
+                        config.dim,
+                        None,
+                        &config.input_constraints,
+                        Some(&mut debug),
+                        progress_label,
+                    ),
+                CandidateInputMode::MaterializedSwitches => placer
+                    .generate_with_outputs_and_input_constraints_debug_progress(
+                        config.dim,
+                        None,
+                        &config.input_constraints,
+                        Some(&mut debug),
+                        progress_label,
+                    ),
+            };
+            if input_mode == CandidateInputMode::ExternalPorts && placed.is_empty() {
+                tracing::info!(
+                    module = module_name,
+                    "planned child inputs produced no candidates; retrying incremental input placement"
+                );
+                debug = LocalPlacerDebug::default();
+                placed = placer.generate_with_outputs_and_input_constraints_debug_progress(
+                    config.dim,
+                    None,
+                    &config.input_constraints,
+                    Some(&mut debug),
+                    progress_label,
+                );
+            }
+            if !placed.is_empty() {
+                break placed;
+            }
+
+            let Some(failure) = debug.failure() else {
+                break placed;
+            };
+            failures.push(failure.clone());
+            tracing::debug!(
+                module = module_name,
+                stage = ?failure.stage,
+                failure = ?failure.kind,
+                step = failure.step + 1,
+                total_steps = failure.total_steps,
+                node_id = failure.node_id,
+                node_kind = failure.node_kind,
+                input_candidates = failure.input_candidates,
+                generated_candidates = failure.generated_candidates,
+                route_calls = failure.route_calls,
+                route_candidates = failure.route_candidates,
+                "local candidate frontier exhausted"
+            );
+
+            if adaptive_attempt >= config.adaptive_search.max_retries {
+                break placed;
+            }
+            let Some(escalated) =
+                adaptive_retry_config(local_config, config.adaptive_search, &failure)
+            else {
+                break placed;
+            };
+            adaptive_attempt += 1;
+            adaptive_retries += 1;
+            tracing::info!(
+                module = module_name,
+                stage = ?failure.stage,
+                retry = adaptive_attempt,
+                max_retries = config.adaptive_search.max_retries,
+                max_not_route_step = escalated.max_not_route_step,
+                max_route_step = escalated.max_route_step,
+                "retrying local candidate generation with a bounded stage-specific budget"
+            );
+            local_config = escalated;
+        };
+        let placed_count = placed.len();
+        generated_count += placed.len();
+
+        for placed in placed {
+            if candidates.len() >= config.max_candidates {
+                break;
+            }
+            if validate_truth_table {
+                match candidate_matches_truth_table(&graph, &placed) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        truth_table_rejections += 1;
+                        continue;
+                    }
+                    Err(error) => {
+                        tracing::debug!(
+                            module = module_name,
+                            error = %error,
+                            "rejecting local candidate with incomplete or invalid endpoints"
+                        );
+                        port_rejections += 1;
+                        continue;
+                    }
+                }
+            }
+            let (world, physical_ports) = candidate_layout(
+                &ports,
+                contains_sequential,
+                &config.input_constraints,
+                placed.world,
+                &placed.inputs,
+                &placed.outputs,
+                input_mode,
+            );
+            if !candidate_ports_cover_module_ports(&ports, &physical_ports) {
+                port_rejections += 1;
+                for missing in missing_candidate_ports(&ports, &physical_ports) {
+                    *missing_port_rejections.entry(missing).or_default() += 1;
+                }
+                continue;
+            }
+            let mut candidate =
+                LayoutCandidate::from_world(module_name.to_owned(), world, physical_ports)?;
+            if !candidate_satisfies_local_cell_contract(&mut candidate, &config.local_cell_contract)
+            {
+                contract_rejections += 1;
+                continue;
+            }
+            candidates.push(candidate);
         }
-        candidates.push(LayoutCandidate::from_world(
-            module_name.to_owned(),
-            world,
-            physical_ports,
-        )?);
+        schedule_reports.push(LocalScheduleAttemptReport {
+            attempt: schedule_attempt + 1,
+            input_lifetime: schedule.metrics.input_lifetime,
+            peak_frontier: schedule.metrics.peak_frontier,
+            total_frontier: schedule.metrics.total_frontier,
+            edge_lifetime: schedule.metrics.edge_lifetime,
+            adaptive_retries: adaptive_attempt,
+            generated: placed_count,
+            accepted: candidates.len() - accepted_before,
+            failures,
+        });
     }
+    tracing::info!(
+        module = module_name,
+        generated = generated_count,
+        accepted = candidates.len(),
+        attempted_schedules,
+        truth_table_rejections,
+        port_rejections,
+        missing_ports = ?missing_port_rejections,
+        contract_rejections,
+        "local candidate validation completed"
+    );
+    let report = LocalCandidateSearchReport {
+        format: "redstone-compiler.local-candidate-search.v1",
+        module: module_name,
+        requested_candidates: config.max_candidates,
+        schedules_available: schedule_count,
+        attempted_schedules,
+        adaptive_retries,
+        generated: generated_count,
+        accepted: candidates.len(),
+        truth_table_rejections,
+        port_rejections,
+        missing_port_rejections,
+        attempts: schedule_reports,
+        candidates: candidates
+            .iter()
+            .enumerate()
+            .map(|(index, candidate)| LocalCandidateQuality {
+                index,
+                volume: candidate.cost.bbox_volume,
+                width: candidate.bbox.width(),
+                depth: candidate.bbox.depth(),
+                footprint: candidate.cost.bbox_footprint,
+                height: candidate.cost.bbox_height,
+                blocks: candidate.cost.block_count,
+                port_access_count: candidate.cost.port_access_points,
+            })
+            .collect(),
+    };
+    emit_json(
+        format!(
+            "candidates/search/{}.json",
+            snapshot_file_component(module_name)
+        ),
+        &report,
+    )?;
+    record_snapshot(SnapshotEvent::LocalCandidateSearch {
+        module: module_name.to_owned(),
+        attempted_schedules,
+        adaptive_retries,
+        failures: report
+            .attempts
+            .iter()
+            .map(|attempt| attempt.failures.len())
+            .sum(),
+        generated: generated_count,
+        accepted: candidates.len(),
+    });
     Ok(candidates)
 }
 
+fn candidate_satisfies_local_cell_contract(
+    candidate: &mut LayoutCandidate,
+    contract: &LocalCellContractSpec,
+) -> bool {
+    if contract.max_bbox.is_none() && contract.ports.is_empty() {
+        return true;
+    }
+
+    // A cell package includes both occupied blocks and its declared routing
+    // access points. This prevents an otherwise small world from satisfying a
+    // bbox contract while exposing a pin outside that package.
+    let mut min = candidate.bbox.min;
+    let mut max = candidate.bbox.max;
+    for position in candidate
+        .ports
+        .iter()
+        .flat_map(|port| std::iter::once(port.position).chain(port.routing_access_positions()))
+    {
+        min.0 = min.0.min(position.0);
+        min.1 = min.1.min(position.1);
+        min.2 = min.2.min(position.2);
+        max.0 = max.0.max(position.0);
+        max.1 = max.1.max(position.1);
+        max.2 = max.2.max(position.2);
+    }
+
+    if let Some(limit) = contract.max_bbox {
+        let extent = [max.0 - min.0 + 1, max.1 - min.1 + 1, max.2 - min.2 + 1];
+        if extent
+            .into_iter()
+            .zip(limit)
+            .any(|(actual, maximum)| actual > maximum)
+        {
+            return false;
+        }
+    }
+
+    for (name, requirement) in &contract.ports {
+        let Some(port) = candidate.ports.iter_mut().find(|port| port.name == *name) else {
+            return false;
+        };
+        let direction_matches = match requirement.access {
+            PortAccessDirectionSpec::Inward => port.direction == PhysicalPortDirection::Input,
+            PortAccessDirectionSpec::Outward => port.direction == PhysicalPortDirection::Output,
+            PortAccessDirectionSpec::Bidirectional => true,
+        };
+        if !direction_matches {
+            return false;
+        }
+        let matching_access = port
+            .routing_access_positions()
+            .into_iter()
+            .filter(|position| position_is_on_face(*position, min, max, requirement.face))
+            .collect::<Vec<_>>();
+        if matching_access.is_empty() {
+            return false;
+        }
+        port.route_position = matching_access.first().copied();
+        port.access_points = matching_access;
+    }
+    candidate.cost.port_access_points = candidate
+        .ports
+        .iter()
+        .map(|port| port.routing_access_positions().len())
+        .sum();
+    true
+}
+
+fn position_is_on_face(
+    position: Position,
+    min: Position,
+    max: Position,
+    face: CellFaceSpec,
+) -> bool {
+    match face {
+        CellFaceSpec::West => position.0 == min.0,
+        CellFaceSpec::East => position.0 == max.0,
+        CellFaceSpec::North => position.1 == min.1,
+        CellFaceSpec::South => position.1 == max.1,
+        CellFaceSpec::Down => position.2 == min.2,
+        CellFaceSpec::Up => position.2 == max.2,
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct LocalCandidateSearchReport<'a> {
+    format: &'static str,
+    module: &'a str,
+    requested_candidates: usize,
+    schedules_available: usize,
+    attempted_schedules: usize,
+    adaptive_retries: usize,
+    generated: usize,
+    accepted: usize,
+    truth_table_rejections: usize,
+    port_rejections: usize,
+    missing_port_rejections: BTreeMap<String, usize>,
+    attempts: Vec<LocalScheduleAttemptReport>,
+    candidates: Vec<LocalCandidateQuality>,
+}
+
+#[derive(Debug, Serialize)]
+struct LocalScheduleAttemptReport {
+    attempt: usize,
+    input_lifetime: usize,
+    peak_frontier: usize,
+    total_frontier: usize,
+    edge_lifetime: usize,
+    adaptive_retries: usize,
+    generated: usize,
+    accepted: usize,
+    failures: Vec<LocalPlacementFailure>,
+}
+
+#[derive(Debug, Serialize)]
+struct LocalCandidateQuality {
+    index: usize,
+    volume: usize,
+    width: usize,
+    depth: usize,
+    footprint: usize,
+    height: usize,
+    blocks: usize,
+    port_access_count: usize,
+}
+
+fn snapshot_file_component(name: &str) -> String {
+    if name.is_empty() {
+        return "unnamed".to_owned();
+    }
+    let mut encoded = String::new();
+    for byte in name.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_') {
+            encoded.push(char::from(byte));
+        } else {
+            use std::fmt::Write as _;
+            let _ = write!(encoded, "%{byte:02X}");
+        }
+    }
+    encoded
+}
+
+fn adaptive_retry_config(
+    config: LocalPlacerConfig,
+    adaptive: LocalAdaptiveSearchConfig,
+    failure: &LocalPlacementFailure,
+) -> Option<LocalPlacerConfig> {
+    let mut retry = config;
+    match failure.stage {
+        LocalPlacementStage::NotRouting => {
+            if failure.kind == LocalPlacementFailureKind::RouteDepthExhausted {
+                retry.max_not_route_step = grow_route_depth(config.max_not_route_step, adaptive);
+            }
+            if failure.kind == LocalPlacementFailureKind::RouteBeamExhausted {
+                retry.not_route_step_sampling_policy =
+                    grow_sampling(config.not_route_step_sampling_policy, adaptive);
+            }
+            retry.step_sampling_policy = grow_sampling(config.step_sampling_policy, adaptive);
+            retry.placement_sampling_policy =
+                grow_placement_sampling(config.placement_sampling_policy, adaptive);
+        }
+        LocalPlacementStage::OrRouting => {
+            if failure.kind == LocalPlacementFailureKind::RouteDepthExhausted {
+                retry.max_route_step = grow_route_depth(config.max_route_step, adaptive);
+            }
+            if failure.kind == LocalPlacementFailureKind::RouteBeamExhausted {
+                retry.route_step_sampling_policy =
+                    grow_sampling(config.route_step_sampling_policy, adaptive);
+            }
+            retry.step_sampling_policy = grow_sampling(config.step_sampling_policy, adaptive);
+            retry.placement_sampling_policy =
+                grow_placement_sampling(config.placement_sampling_policy, adaptive);
+        }
+        LocalPlacementStage::SequentialPlacement | LocalPlacementStage::OtherPlacement => {
+            retry.step_sampling_policy = grow_sampling(config.step_sampling_policy, adaptive);
+            retry.placement_sampling_policy =
+                grow_placement_sampling(config.placement_sampling_policy, adaptive);
+        }
+        LocalPlacementStage::InputPlacement | LocalPlacementStage::OutputPlacement => return None,
+    }
+    (retry != config).then_some(retry)
+}
+
+fn grow_route_depth(depth: usize, adaptive: LocalAdaptiveSearchConfig) -> usize {
+    if depth == 0 {
+        0
+    } else {
+        depth
+            .saturating_mul(adaptive.route_depth_multiplier)
+            .min(adaptive.route_depth_cap)
+            .max(depth)
+    }
+}
+
+fn grow_sample_count(count: usize, adaptive: LocalAdaptiveSearchConfig) -> usize {
+    let grown = count.saturating_mul(adaptive.sampling_multiplier);
+    adaptive
+        .sampling_cap
+        .map_or(grown, |cap| grown.min(cap))
+        .max(count)
+}
+
+fn grow_sampling(policy: SamplingPolicy, adaptive: LocalAdaptiveSearchConfig) -> SamplingPolicy {
+    match policy {
+        SamplingPolicy::None => SamplingPolicy::None,
+        SamplingPolicy::Take(count) => SamplingPolicy::Take(grow_sample_count(count, adaptive)),
+        SamplingPolicy::Random(count) => SamplingPolicy::Random(grow_sample_count(count, adaptive)),
+    }
+}
+
+fn grow_placement_sampling(
+    policy: PlacementSamplingPolicy,
+    adaptive: LocalAdaptiveSearchConfig,
+) -> PlacementSamplingPolicy {
+    match policy {
+        PlacementSamplingPolicy::StepPolicy => PlacementSamplingPolicy::StepPolicy,
+        PlacementSamplingPolicy::Cost {
+            count,
+            random_count,
+            start_step,
+        } => PlacementSamplingPolicy::Cost {
+            count: grow_sample_count(count, adaptive),
+            random_count: grow_sample_count(random_count, adaptive),
+            start_step,
+        },
+        PlacementSamplingPolicy::Ranked {
+            count,
+            random_count,
+            start_step,
+        } => PlacementSamplingPolicy::Ranked {
+            count: grow_sample_count(count, adaptive),
+            random_count: grow_sample_count(random_count, adaptive),
+            start_step,
+        },
+    }
+}
+
 fn candidate_ports_cover_module_ports(expected: &[CandidatePort], actual: &[PhysicalPort]) -> bool {
+    if !missing_candidate_ports(expected, actual).is_empty() {
+        return false;
+    }
+    let input_positions = actual
+        .iter()
+        .filter(|port| port.direction == PhysicalPortDirection::Input)
+        .map(|port| port.primary_route_position())
+        .collect::<Vec<_>>();
+    input_positions
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>()
+        .len()
+        == input_positions.len()
+}
+
+fn missing_candidate_ports(expected: &[CandidatePort], actual: &[PhysicalPort]) -> Vec<String> {
     expected
         .iter()
-        .all(|expected| actual.iter().any(|port| port.name == expected.name))
+        .filter(|expected| !actual.iter().any(|port| port.name == expected.name))
+        .map(|port| format!("{:?}:{}", port.direction, port.name))
+        .collect()
 }
 
 fn candidate_matches_truth_table(
@@ -232,11 +827,14 @@ fn candidate_matches_truth_table(
         .input_names
         .iter()
         .map(|name| {
-            placed
+            let positions = placed
                 .inputs
                 .iter()
-                .find(|input| input.name == *name)
+                .filter(|input| input.name == *name)
                 .map(|input| input.position())
+                .collect::<Vec<_>>();
+            (!positions.is_empty())
+                .then_some(positions)
                 .with_context(|| format!("missing input endpoint `{name}`"))
         })
         .collect::<eyre::Result<Vec<_>>>()?;
@@ -257,11 +855,15 @@ fn candidate_matches_truth_table(
     for mask in 0..(1usize << inputs.len()) {
         let mut sim = Simulator::from_with_limits_and_trace(&world, 256, 50_000, 0)
             .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
-        sim.change_state_with_limits(
+        sim.drive_inputs_with_limits(
             inputs
                 .iter()
                 .enumerate()
-                .map(|(index, position)| (*position, (mask & (1 << index)) != 0))
+                .flat_map(|(index, positions)| {
+                    positions
+                        .iter()
+                        .map(move |position| (*position, (mask & (1 << index)) != 0))
+                })
                 .collect(),
             256,
             50_000,
@@ -271,7 +873,54 @@ fn candidate_matches_truth_table(
             let Some(expected_output) = expected.output_tables.get(*output_name) else {
                 return Ok(false);
             };
-            if sim.world()[*output_position].kind.is_powered() != expected_output[mask] {
+            let actual = sim.world()[*output_position].kind.is_powered();
+            if actual != expected_output[mask] {
+                tracing::debug!(
+                    mask,
+                    output = *output_name,
+                    expected = expected_output[mask],
+                    actual,
+                    position = ?output_position,
+                    input_names = ?expected.input_names,
+                    input_positions = ?inputs,
+                    input_blocks = ?inputs
+                        .iter()
+                        .flatten()
+                        .map(|position| {
+                            (
+                                *position,
+                                sim.world()[*position],
+                                position
+                                    .cardinal()
+                                    .into_iter()
+                                    .filter(|neighbor| sim.world().size.bound_on(*neighbor))
+                                    .map(|neighbor| (neighbor, sim.world()[neighbor]))
+                                    .collect::<Vec<_>>(),
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                    input_repeater_targets = ?inputs
+                        .iter()
+                        .flatten()
+                        .flat_map(|position| position.cardinal())
+                        .filter(|position| sim.world().size.bound_on(*position))
+                        .filter_map(|position| {
+                            sim.world()[position]
+                                .kind
+                                .is_repeater()
+                                .then(|| {
+                                    let target = position
+                                        .walk(sim.world()[position].direction.inverse())?;
+                                    sim.world()
+                                        .size
+                                        .bound_on(target)
+                                        .then(|| (position, target, sim.world()[target]))
+                                })
+                                .flatten()
+                        })
+                        .collect::<Vec<_>>(),
+                    "candidate truth-table mismatch"
+                );
                 return Ok(false);
             }
         }
@@ -286,11 +935,15 @@ fn candidate_matches_truth_table(
         .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
     let mask_count = 1usize << inputs.len();
     for mask in (0..mask_count).chain((0..mask_count).rev()) {
-        sim.change_state_with_limits(
+        sim.drive_inputs_with_limits(
             inputs
                 .iter()
                 .enumerate()
-                .map(|(index, position)| (*position, (mask & (1 << index)) != 0))
+                .flat_map(|(index, positions)| {
+                    positions
+                        .iter()
+                        .map(move |position| (*position, (mask & (1 << index)) != 0))
+                })
                 .collect(),
             256,
             50_000,
@@ -299,7 +952,16 @@ fn candidate_matches_truth_table(
             let Some(expected_output) = expected.output_tables.get(*output_name) else {
                 return Ok(false);
             };
-            if sim.world()[*output_position].kind.is_powered() != expected_output[mask] {
+            let actual = sim.world()[*output_position].kind.is_powered();
+            if actual != expected_output[mask] {
+                tracing::debug!(
+                    mask,
+                    output = *output_name,
+                    expected = expected_output[mask],
+                    actual,
+                    position = ?output_position,
+                    "candidate transition truth-table mismatch"
+                );
                 return Ok(false);
             }
         }
@@ -314,13 +976,14 @@ fn candidate_matches_truth_table(
 // module port metadata로 다시 노출한다.
 // TODO(high-level): make LocalPlacer produce either standalone layouts with switches
 // or child-module layouts with PhysicalPort metadata, instead of rewriting switches here.
-fn switchless_candidate_layout(
+fn candidate_layout(
     module_ports: &[CandidatePort],
     contains_sequential: bool,
     input_constraints: &LocalPlacerInputConstraints,
     mut world: World3D,
     inputs: &[OutputEndpoint],
     outputs: &[OutputEndpoint],
+    input_mode: CandidateInputMode,
 ) -> (World3D, Vec<PhysicalPort>) {
     let mut ports = Vec::new();
     // Sequential child layout은 내부 feedback/state signal이 외부 route와 직접
@@ -348,21 +1011,42 @@ fn switchless_candidate_layout(
                             .and_then(|positions| positions.into_iter().next())
                     });
                 if let Some(input_position) = position {
-                    let Some(position) = expose_switchless_input_port(
+                    if input_mode == CandidateInputMode::MaterializedSwitches {
+                        ports.push(PhysicalPort {
+                            name: port.name.clone(),
+                            direction: PhysicalPortDirection::Input,
+                            position: input_position,
+                            route_position: None,
+                            access_points: vec![input_position],
+                            connection: PortConnection::Direct,
+                        });
+                        continue;
+                    }
+                    let positions = expose_switchless_input_ports(
                         &mut world,
                         input_position,
                         preserve_switch_position_inputs,
                         use_direct_input_ports,
-                    ) else {
+                    );
+                    let Some(&position) = positions.first() else {
                         continue;
                     };
                     ports.push(PhysicalPort {
                         name: port.name.clone(),
                         direction: PhysicalPortDirection::Input,
                         position,
-                        route_position: None,
-                        access_points: vec![position],
-                        connection: if needs_input_isolation || world[position].kind.is_redstone() {
+                        // Keep the LocalPlacer switch site as the preferred
+                        // drive point even though ExternalPorts removes the
+                        // standalone switch. `access_points` are the required
+                        // physical ingress taps; the switch site is a source
+                        // location and must not be mistaken for another sink.
+                        route_position: (input_mode == CandidateInputMode::ExternalPorts)
+                            .then_some(input_position),
+                        access_points: positions,
+                        connection: if needs_input_isolation
+                            || input_mode == CandidateInputMode::ExternalPorts
+                            || world[position].kind.is_redstone()
+                        {
                             PortConnection::InputDiode
                         } else {
                             PortConnection::Direct
@@ -392,15 +1076,17 @@ fn switchless_candidate_layout(
             }
         }
     }
-    for input in inputs {
-        let _ = expose_switchless_input_port(
-            &mut world,
-            input.position(),
-            preserve_switch_position_inputs,
-            use_direct_input_ports,
-        );
+    if input_mode == CandidateInputMode::ExternalPorts {
+        for input in inputs {
+            let _ = expose_switchless_input_port(
+                &mut world,
+                input.position(),
+                preserve_switch_position_inputs,
+                use_direct_input_ports,
+            );
+        }
+        remove_local_input_switches(&mut world);
     }
-    remove_local_input_switches(&mut world);
     ports.sort_by(|a, b| a.name.cmp(&b.name));
     world.initialize_redstone_states();
     (world, ports)
@@ -417,23 +1103,52 @@ fn remove_local_input_switches(world: &mut World3D) {
 // Torch/switch/repeater 같은 출력 블록은 바로 route하기 어려울 수 있으므로,
 // 해당 출력이 실제로 power하는 redstone tap들을 route access point로 노출한다.
 fn expose_routeable_output_ports(world: &World3D, output_position: Position) -> Vec<Position> {
-    if !world.size.bound_on(output_position)
-        || (!world[output_position].kind.is_torch()
-            && !world[output_position].kind.is_switch()
-            && !world[output_position].kind.is_repeater())
-    {
+    if !world.size.bound_on(output_position) {
         return vec![output_position];
     }
 
-    let mut access_points = world
-        .iter_block()
-        .into_iter()
-        .filter(|(position, block)| {
-            block.kind.is_redstone()
-                && detailed_router::target_powers_position(world, output_position, *position)
-        })
-        .map(|(position, _)| position)
-        .collect::<Vec<_>>();
+    let output_block = world[output_position];
+    let output_is_route_terminal = output_block.kind.is_redstone()
+        || output_block.kind.is_torch()
+        || output_block.kind.is_switch()
+        || output_block.kind.is_repeater()
+        || matches!(output_block.kind, BlockKind::RedstoneBlock);
+    let mut access_points = if output_block.kind.is_redstone() {
+        redstone_network_positions(world, &[output_position])
+    } else if output_block.kind.is_torch()
+        || output_block.kind.is_switch()
+        || output_block.kind.is_repeater()
+        || matches!(output_block.kind, BlockKind::RedstoneBlock)
+    {
+        let direct = world
+            .iter_block()
+            .into_iter()
+            .filter(|(position, block)| {
+                block.kind.is_redstone()
+                    && detailed_router::target_powers_position(world, output_position, *position)
+            })
+            .map(|(position, _)| position)
+            .collect::<Vec<_>>();
+        redstone_network_positions(world, &direct)
+    } else {
+        // Observable outputs can be solid blocks powered by dust. The block
+        // remains the logical observation point, but routing must branch from
+        // the upstream dust network rather than treating cobble as a signal
+        // terminal.
+        let direct = world
+            .iter_block()
+            .into_iter()
+            .filter_map(|(position, block)| {
+                (block.kind.is_redstone()
+                    && detailed_router::target_powers_position(world, position, output_position))
+                .then_some(position)
+            })
+            .collect::<Vec<_>>();
+        redstone_network_positions(world, &direct)
+    };
+    if output_is_route_terminal {
+        access_points.push(output_position);
+    }
     access_points.sort_by_key(|position| {
         (
             output_position.manhattan_distance(position),
@@ -470,6 +1185,28 @@ fn expose_switchless_input_port(
         return Some(input_position);
     }
 
+    // A combinational cluster with multiple logical inputs must preserve one
+    // independent physical terminal per input. Two switches can both power
+    // the same downstream redstone in the standalone local layout; exposing
+    // that shared wire as both ports aliases the inputs after composition even
+    // though the pre-rewrite truth-table check passed.
+    if preserve_switch_position_input && use_direct_input_port {
+        if let Some(target) = input_position
+            .walk(world[input_position].direction)
+            .filter(|position| world.size.bound_on(*position) && world[*position].kind.is_cobble())
+        {
+            world[input_position] = Block::default();
+            return Some(target);
+        }
+        if let Some(port_position) = switch_powered_redstone_port(world, input_position, true) {
+            world[input_position] = Block::default();
+            return Some(port_position);
+        }
+        // With no distinct downstream contact, keep the switch site as the
+        // cluster boundary. The fallback below either turns it into supported
+        // redstone or leaves an empty terminal for global route materialization.
+    }
+
     let switch_target = input_position.walk(world[input_position].direction);
     if let Some(target) = switch_target
         .filter(|position| world.size.bound_on(*position) && world[*position].kind.is_cobble())
@@ -484,9 +1221,20 @@ fn expose_switchless_input_port(
         return Some(target);
     }
 
-    if preserve_switch_position_input && switch_powers_redstone(world, input_position) {
-        ensure_redstone_support(world, input_position)?;
-        world[input_position] = PlacedNode::new_redstone(input_position).block;
+    // A clustered candidate can feed a NOT gate directly from its local input
+    // switch, without an intermediate redstone wire.  That switch still marks
+    // a valid external boundary: replace it with supported redstone so the
+    // global router can drive the same position.  Requiring an already-powered
+    // redstone neighbor here used to silently drop those boundary ports.
+    if preserve_switch_position_input {
+        if ensure_redstone_support(world, input_position).is_some() {
+            world[input_position] = PlacedNode::new_redstone(input_position).block;
+        } else {
+            // The candidate may sit on its local floor or already occupy the
+            // support cell. Keep an empty terminal in that case; placement adds
+            // floor margin and the global router materializes the final route.
+            world[input_position] = Block::default();
+        }
         return Some(input_position);
     }
 
@@ -504,11 +1252,50 @@ fn expose_switchless_input_port(
     })
 }
 
-fn switch_powers_redstone(world: &World3D, input_position: Position) -> bool {
-    world.iter_block().into_iter().any(|(position, block)| {
-        block.kind.is_redstone()
-            && detailed_router::target_powers_position(world, input_position, position)
-    })
+fn expose_switchless_input_ports(
+    world: &mut World3D,
+    input_position: Position,
+    preserve_switch_position_input: bool,
+    use_direct_input_port: bool,
+) -> Vec<Position> {
+    if world.size.bound_on(input_position)
+        && world[input_position].kind.is_switch()
+        && preserve_switch_position_input
+        && use_direct_input_port
+    {
+        let mut positions = Vec::new();
+        if let Some(target) = input_position
+            .walk(world[input_position].direction)
+            .filter(|position| world.size.bound_on(*position) && world[*position].kind.is_cobble())
+        {
+            positions.push(target);
+        }
+        positions.extend(
+            world
+                .iter_block()
+                .into_iter()
+                .filter_map(|(position, block)| {
+                    (block.kind.is_redstone()
+                        && detailed_router::target_powers_position(world, input_position, position))
+                    .then_some(position)
+                }),
+        );
+        positions.sort_unstable();
+        positions.dedup();
+        if !positions.is_empty() {
+            world[input_position] = Block::default();
+            return positions;
+        }
+    }
+
+    expose_switchless_input_port(
+        world,
+        input_position,
+        preserve_switch_position_input,
+        use_direct_input_port,
+    )
+    .into_iter()
+    .collect()
 }
 
 fn ensure_redstone_support(world: &mut World3D, position: Position) -> Option<()> {
@@ -613,6 +1400,10 @@ pub fn d_latch_child_candidate_config(local_config: LocalPlacerConfig) -> UnitCa
             .with_input_positions("en", [Position(0, 6, 1)]),
         max_candidates: 1,
         combinational_sampling_limit: None,
+        local_objective: LocalPlacementCostWeights::default(),
+        adaptive_search: LocalAdaptiveSearchConfig::default(),
+        clustering: ClusteringSpec::default(),
+        local_cell_contract: LocalCellContractSpec::default(),
     }
 }
 
@@ -620,6 +1411,233 @@ pub fn d_latch_child_candidate_config(local_config: LocalPlacerConfig) -> UnitCa
 mod tests {
     use super::*;
     use crate::world::block::{BlockKind, Direction};
+
+    fn contract_test_candidate(port_position: Position) -> LayoutCandidate {
+        let mut world = World3D::new(DimSize(6, 6, 4));
+        world[Position(1, 1, 1)] = PlacedNode::new_cobble(Position(1, 1, 1)).block;
+        world[Position(3, 3, 2)] = PlacedNode::new_cobble(Position(3, 3, 2)).block;
+        LayoutCandidate::from_world(
+            "contract-test".to_owned(),
+            world,
+            vec![PhysicalPort {
+                name: "a".to_owned(),
+                direction: PhysicalPortDirection::Input,
+                position: port_position,
+                route_position: None,
+                access_points: vec![port_position],
+                connection: PortConnection::Direct,
+            }],
+        )
+        .expect("candidate")
+    }
+
+    fn west_input_contract(max_bbox: [usize; 3]) -> LocalCellContractSpec {
+        LocalCellContractSpec {
+            max_bbox: Some(max_bbox),
+            ports: BTreeMap::from([(
+                "a".to_owned(),
+                crate::ir::PortAccessSpec {
+                    face: CellFaceSpec::West,
+                    access: PortAccessDirectionSpec::Inward,
+                },
+            )]),
+        }
+    }
+
+    #[test]
+    fn local_cell_contract_accepts_candidate_inside_bbox_with_on_face_pin() {
+        let mut candidate = contract_test_candidate(Position(1, 2, 1));
+
+        assert!(candidate_satisfies_local_cell_contract(
+            &mut candidate,
+            &west_input_contract([3, 3, 2])
+        ));
+    }
+
+    #[test]
+    fn local_cell_contract_rejects_oversized_candidate() {
+        let mut candidate = contract_test_candidate(Position(1, 2, 1));
+
+        assert!(!candidate_satisfies_local_cell_contract(
+            &mut candidate,
+            &west_input_contract([2, 3, 2])
+        ));
+    }
+
+    #[test]
+    fn local_cell_contract_rejects_off_face_pin() {
+        let mut candidate = contract_test_candidate(Position(2, 2, 1));
+
+        assert!(!candidate_satisfies_local_cell_contract(
+            &mut candidate,
+            &west_input_contract([3, 3, 2])
+        ));
+    }
+
+    fn failure(stage: LocalPlacementStage) -> LocalPlacementFailure {
+        LocalPlacementFailure {
+            stage,
+            kind: LocalPlacementFailureKind::RouteDepthExhausted,
+            step: 2,
+            total_steps: 5,
+            node_id: 3,
+            node_kind: "test".to_owned(),
+            input_candidates: 8,
+            generated_candidates: 0,
+            route_calls: 8,
+            route_candidates: 0,
+        }
+    }
+
+    #[test]
+    fn adaptive_retry_only_grows_the_failed_or_routing_budget() {
+        let config = LocalPlacerConfig {
+            max_not_route_step: 3,
+            not_route_step_sampling_policy: SamplingPolicy::Random(11),
+            max_route_step: 4,
+            route_step_sampling_policy: SamplingPolicy::Random(16),
+            placement_sampling_policy: PlacementSamplingPolicy::Ranked {
+                count: 32,
+                random_count: 4,
+                start_step: 1,
+            },
+            ..Default::default()
+        };
+
+        let retry = adaptive_retry_config(
+            config,
+            LocalAdaptiveSearchConfig::default(),
+            &failure(LocalPlacementStage::OrRouting),
+        )
+        .expect("retry config");
+
+        assert_eq!(retry.max_route_step, 8);
+        assert_eq!(retry.route_step_sampling_policy, SamplingPolicy::Random(16));
+        assert_eq!(retry.max_not_route_step, 3);
+        assert_eq!(
+            retry.not_route_step_sampling_policy,
+            SamplingPolicy::Random(11)
+        );
+        assert_eq!(
+            retry.placement_sampling_policy,
+            PlacementSamplingPolicy::Ranked {
+                count: 64,
+                random_count: 8,
+                start_step: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn adaptive_retry_grows_sampling_when_the_route_beam_was_pruned() {
+        let config = LocalPlacerConfig {
+            max_route_step: 4,
+            route_step_sampling_policy: SamplingPolicy::Random(16),
+            ..Default::default()
+        };
+        let mut failure = failure(LocalPlacementStage::OrRouting);
+        failure.kind = LocalPlacementFailureKind::RouteBeamExhausted;
+
+        let retry = adaptive_retry_config(config, LocalAdaptiveSearchConfig::default(), &failure)
+            .expect("retry config");
+
+        assert_eq!(retry.max_route_step, 4);
+        assert_eq!(retry.route_step_sampling_policy, SamplingPolicy::Random(32));
+    }
+
+    #[test]
+    fn adaptive_retry_uses_configured_growth_and_caps() {
+        let config = LocalPlacerConfig {
+            max_route_step: 5,
+            route_step_sampling_policy: SamplingPolicy::Random(20),
+            placement_sampling_policy: PlacementSamplingPolicy::Cost {
+                count: 30,
+                random_count: 4,
+                start_step: 0,
+            },
+            ..Default::default()
+        };
+        let adaptive = LocalAdaptiveSearchConfig {
+            max_retries: 3,
+            route_depth_multiplier: 3,
+            route_depth_cap: 12,
+            sampling_multiplier: 4,
+            sampling_cap: Some(50),
+        };
+
+        let retry =
+            adaptive_retry_config(config, adaptive, &failure(LocalPlacementStage::OrRouting))
+                .expect("retry config");
+
+        assert_eq!(retry.max_route_step, 12);
+        assert_eq!(
+            retry.placement_sampling_policy,
+            PlacementSamplingPolicy::Cost {
+                count: 50,
+                random_count: 16,
+                start_step: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn adaptive_retry_does_not_expand_impossible_input_constraints() {
+        assert!(adaptive_retry_config(
+            LocalPlacerConfig::default(),
+            LocalAdaptiveSearchConfig::default(),
+            &failure(LocalPlacementStage::InputPlacement)
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn local_candidate_search_report_serializes_failures_and_quality() {
+        let report = LocalCandidateSearchReport {
+            format: "redstone-compiler.local-candidate-search.v1",
+            module: "adder/core",
+            requested_candidates: 2,
+            schedules_available: 3,
+            attempted_schedules: 2,
+            adaptive_retries: 1,
+            generated: 4,
+            accepted: 1,
+            truth_table_rejections: 2,
+            port_rejections: 1,
+            missing_port_rejections: BTreeMap::from([("sum".to_owned(), 1)]),
+            attempts: vec![LocalScheduleAttemptReport {
+                attempt: 1,
+                input_lifetime: 3,
+                peak_frontier: 4,
+                total_frontier: 12,
+                edge_lifetime: 20,
+                adaptive_retries: 1,
+                generated: 0,
+                accepted: 0,
+                failures: vec![failure(LocalPlacementStage::OrRouting)],
+            }],
+            candidates: vec![LocalCandidateQuality {
+                index: 0,
+                volume: 245,
+                width: 7,
+                depth: 7,
+                footprint: 49,
+                height: 5,
+                blocks: 65,
+                port_access_count: 3,
+            }],
+        };
+
+        let value = serde_json::to_value(report).expect("serialize report");
+        assert_eq!(value["attempts"][0]["failures"][0]["stage"], "or_routing");
+        assert_eq!(
+            value["attempts"][0]["failures"][0]["kind"],
+            "route_depth_exhausted"
+        );
+        assert_eq!(value["candidates"][0]["volume"], 245);
+        assert_eq!(value["candidates"][0]["port_access_count"], 3);
+        assert_eq!(snapshot_file_component("adder/core"), "adder%2Fcore");
+        assert_eq!(snapshot_file_component("full_adder"), "full_adder");
+    }
 
     #[test]
     fn candidate_pin_search_is_scoped_by_definition_and_port() {
@@ -670,6 +1688,41 @@ mod tests {
             expose_switchless_input_port(&mut world, switch, false, true).expect("input port");
 
         assert_eq!(port, input_redstone);
+        assert!(world[switch].kind.is_air());
+    }
+
+    #[test]
+    fn preserved_switch_position_becomes_a_cluster_boundary_port_without_wire_fanout() {
+        let switch = Position(1, 1, 1);
+        let support = Position(1, 1, 0);
+        let mut world = World3D::new(DimSize(3, 3, 3));
+        world[support] = PlacedNode::new_cobble(support).block;
+        world[switch] = Block {
+            kind: BlockKind::Switch { is_on: false },
+            direction: Direction::East,
+        };
+
+        let port =
+            expose_switchless_input_port(&mut world, switch, true, true).expect("input port");
+
+        assert_eq!(port, switch);
+        assert!(world[switch].kind.is_redstone());
+        assert!(world[support].kind.is_cobble());
+    }
+
+    #[test]
+    fn preserved_floor_switch_remains_an_empty_routing_terminal() {
+        let switch = Position(0, 1, 0);
+        let mut world = World3D::new(DimSize(2, 3, 2));
+        world[switch] = Block {
+            kind: BlockKind::Switch { is_on: false },
+            direction: Direction::East,
+        };
+
+        let port =
+            expose_switchless_input_port(&mut world, switch, true, true).expect("input port");
+
+        assert_eq!(port, switch);
         assert!(world[switch].kind.is_air());
     }
 }

@@ -8,6 +8,14 @@
 - Physical design intent and local cell recipes: `docs/physical_design_intent.md`
 - PnR logging and observability: `docs/pnr_logging.md`
 - Compilation snapshot artifacts: `docs/compilation_snapshots.md`
+- Text-editable physical cell laboratory: `docs/physical_cell_lab.md`
+- Bounded local-only full-adder diagnostic: `docs/local_full_adder_diagnostic.md`
+- Manual RCELL full-adder carry diagnosis: `docs/rcell_full_adder_diagnostic.md`
+- Readable, verified RCELL full-adder baseline: `docs/rcell_full_adder_baseline.md`
+- Verified compact full adder and transferable placement rules: `docs/compact_full_adder_rules.md`
+- Height-10 full adder and low XNOR composition rules: `docs/height10_full_adder.md`
+- Further 2x13x9 compaction and carry bridge clearance: `docs/compact_full_adder_shrink.md`
+- Full adder with operand switches on the same boundary: `docs/full_adder_input_boundary.md`
 
 When asked to create or preserve project documentation, add an appropriate file under `docs/` and link it from this file when it is useful for future agents.
 
@@ -15,6 +23,6 @@ When asked to create or preserve project documentation, add an appropriate file 
 
 When committing changes, include the intent behind the change in the commit message body.
 
-## Testing
+## Building, Testing, and Running
 
-Run local placer and place-and-route tests with `cargo test --release`; debug builds are too slow for these search-heavy tests.
+Always use release mode for all builds, unit tests, and executions: `cargo build --release`, `cargo test --release`, and `cargo run --release`. Do not use debug builds for this project. This applies to all targets, not only local placer and place-and-route tests; the search-heavy tests are especially slow in debug mode.

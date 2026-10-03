@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use serde::Serialize;
+
 use crate::graph::GraphNodeId;
 pub use crate::transform::place_and_route::detailed_router::RouteRejectReason;
 use crate::world::position::Position;
@@ -7,13 +9,14 @@ use crate::world::position::Position;
 #[derive(Debug, Default)]
 pub struct LocalPlacerDebug {
     pub steps: Vec<StepDebug>,
+    pub time_limit_reached: bool,
 }
 
 impl LocalPlacerDebug {
     pub fn print_summary(&self) {
         for step in &self.steps {
             println!(
-                "[{}/{}] node={} kind={} inputs={:?} queue={} generated={} sampled={}",
+                "[{}/{}] node={} kind={} inputs={:?} queue={} generated={} compacted={} sampled={} generation_us={} total_us={}",
                 step.step + 1,
                 step.total_steps,
                 step.node_id,
@@ -21,8 +24,17 @@ impl LocalPlacerDebug {
                 step.input_node_ids,
                 step.input_queue_len,
                 step.generated_len,
+                step.compacted_len,
                 step.sampled_len,
+                step.generation_us,
+                step.total_us,
             );
+            if step.joint_route_attempted {
+                println!(
+                    "  jointly routed ready OR consumers: candidates={}",
+                    step.joint_route_candidates
+                );
+            }
             if let Some(route) = &step.route_debug {
                 println!(
                     "  routes={} candidates={} initial_states={} samples={:?}",
@@ -52,6 +64,114 @@ impl LocalPlacerDebug {
             .iter()
             .find(|step| step.input_queue_len > 0 && step.generated_len == 0)
     }
+
+    /// Returns the first stage that exhausted the placement frontier.
+    ///
+    /// `sampled_len` is used instead of only `generated_len`: a bounded
+    /// sampling policy can also intentionally reduce a non-empty expansion to
+    /// an empty frontier.
+    pub fn failure(&self) -> Option<LocalPlacementFailure> {
+        self.steps
+            .iter()
+            .find(|step| step.sampled_len == 0)
+            .map(|step| {
+                let kind = if step.joint_route_attempted && step.joint_route_candidates == 0 {
+                    LocalPlacementFailureKind::NoLegalRoute
+                } else if step.input_queue_len == 0 {
+                    LocalPlacementFailureKind::InitialFrontierEmpty
+                } else if step.generated_len > 0 {
+                    LocalPlacementFailureKind::PlacementBeamExhausted
+                } else if let Some(route) = &step.route_debug {
+                    if route
+                        .depths
+                        .last()
+                        .is_some_and(|depth| depth.next_frontier_after_sampling > 0)
+                    {
+                        LocalPlacementFailureKind::RouteDepthExhausted
+                    } else if route.depths.iter().any(|depth| {
+                        depth.next_frontier_before_sampling > depth.next_frontier_after_sampling
+                    }) {
+                        LocalPlacementFailureKind::RouteBeamExhausted
+                    } else {
+                        LocalPlacementFailureKind::NoLegalRoute
+                    }
+                } else {
+                    LocalPlacementFailureKind::NoLegalPlacement
+                };
+                LocalPlacementFailure {
+                    stage: if step.joint_route_attempted && step.joint_route_candidates == 0 {
+                        LocalPlacementStage::OrRouting
+                    } else {
+                        step.stage
+                    },
+                    kind,
+                    step: step.step,
+                    total_steps: step.total_steps,
+                    node_id: step.node_id,
+                    node_kind: if step.joint_route_attempted && step.joint_route_candidates == 0 {
+                        format!("JointReadyOr after {}", step.node_kind)
+                    } else {
+                        step.node_kind.clone()
+                    },
+                    input_candidates: step.input_queue_len,
+                    generated_candidates: if step.joint_route_attempted {
+                        step.joint_route_candidates
+                    } else {
+                        step.generated_len
+                    },
+                    route_calls: step
+                        .route_debug
+                        .as_ref()
+                        .map_or(0, |debug| debug.route_calls),
+                    route_candidates: step
+                        .route_debug
+                        .as_ref()
+                        .map_or(0, |debug| debug.candidates_found),
+                }
+            })
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalPlacementStage {
+    InputPlacement,
+    NotRouting,
+    OrRouting,
+    SequentialPlacement,
+    OutputPlacement,
+    OtherPlacement,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalPlacementFailureKind {
+    InitialFrontierEmpty,
+    PlacementBeamExhausted,
+    RouteDepthExhausted,
+    RouteBeamExhausted,
+    NoLegalRoute,
+    NoLegalPlacement,
+}
+
+impl Default for LocalPlacementStage {
+    fn default() -> Self {
+        Self::OtherPlacement
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LocalPlacementFailure {
+    pub stage: LocalPlacementStage,
+    pub kind: LocalPlacementFailureKind,
+    pub step: usize,
+    pub total_steps: usize,
+    pub node_id: GraphNodeId,
+    pub node_kind: String,
+    pub input_candidates: usize,
+    pub generated_candidates: usize,
+    pub route_calls: usize,
+    pub route_candidates: usize,
 }
 
 #[derive(Debug, Default)]
@@ -60,12 +180,18 @@ pub struct StepDebug {
     pub total_steps: usize,
     pub node_id: GraphNodeId,
     pub node_kind: String,
+    pub stage: LocalPlacementStage,
     pub input_node_ids: Vec<GraphNodeId>,
     pub input_positions: Vec<(GraphNodeId, Position)>,
     pub input_queue_len: usize,
     pub generated_len: usize,
     pub sampled_len: usize,
+    pub compacted_len: usize,
+    pub generation_us: u128,
+    pub total_us: u128,
     pub route_debug: Option<RouteDebug>,
+    pub joint_route_attempted: bool,
+    pub joint_route_candidates: usize,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -120,4 +246,67 @@ pub struct RouteDepthDebug {
     pub accepted_routes: usize,
     pub next_frontier_before_sampling: usize,
     pub next_frontier_after_sampling: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failure_reports_the_stage_that_first_exhausted_the_frontier() {
+        let debug = LocalPlacerDebug {
+            time_limit_reached: false,
+            steps: vec![
+                StepDebug {
+                    sampled_len: 4,
+                    ..Default::default()
+                },
+                StepDebug {
+                    step: 1,
+                    total_steps: 3,
+                    node_id: 7,
+                    node_kind: "Logic(Or)".to_owned(),
+                    stage: LocalPlacementStage::OrRouting,
+                    input_queue_len: 4,
+                    generated_len: 0,
+                    sampled_len: 0,
+                    route_debug: Some(RouteDebug {
+                        route_calls: 4,
+                        candidates_found: 0,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            ],
+        };
+
+        let failure = debug.failure().expect("failure");
+        assert_eq!(failure.stage, LocalPlacementStage::OrRouting);
+        assert_eq!(failure.kind, LocalPlacementFailureKind::NoLegalRoute);
+        assert_eq!(failure.step, 1);
+        assert_eq!(failure.input_candidates, 4);
+        assert_eq!(failure.route_calls, 4);
+    }
+
+    #[test]
+    fn failure_identifies_a_failed_joint_or_plan() {
+        let debug = LocalPlacerDebug {
+            steps: vec![StepDebug {
+                node_id: 3,
+                node_kind: "Logic(Not)".to_owned(),
+                stage: LocalPlacementStage::NotRouting,
+                input_queue_len: 8,
+                generated_len: 12,
+                joint_route_attempted: true,
+                joint_route_candidates: 0,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let failure = debug.failure().unwrap();
+        assert_eq!(failure.stage, LocalPlacementStage::OrRouting);
+        assert_eq!(failure.kind, LocalPlacementFailureKind::NoLegalRoute);
+        assert_eq!(failure.generated_candidates, 0);
+        assert!(failure.node_kind.starts_with("JointReadyOr"));
+    }
 }

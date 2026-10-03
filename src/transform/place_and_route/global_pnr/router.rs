@@ -145,6 +145,8 @@ pub enum RouteValidationMode {
 pub struct GlobalRoutingConfig {
     pub strategy: GlobalRoutingStrategy,
     pub validation: RouteValidationMode,
+    pub top_inputs_last: bool,
+    pub defer_feedback_cycles: bool,
 }
 
 impl Default for GlobalRoutingConfig {
@@ -152,6 +154,8 @@ impl Default for GlobalRoutingConfig {
         Self {
             strategy: GlobalRoutingStrategy::AStar,
             validation: RouteValidationMode::Incremental,
+            top_inputs_last: false,
+            defer_feedback_cycles: false,
         }
     }
 }
@@ -161,6 +165,7 @@ struct ResolvedPortTarget {
     position: Position,
     requires_input_diode: bool,
     input_repeater_delay: usize,
+    preferred_input_repeater: Option<Position>,
 }
 
 #[derive(Clone)]
@@ -169,6 +174,155 @@ struct InputDiodeAdapter {
     driver: Position,
     repeater: Position,
     target: Position,
+}
+
+pub(super) fn materialize_input_diode(
+    world: &World3D,
+    sink: Position,
+    preferred_repeater: Option<Position>,
+    input_repeater_delay: usize,
+    allowed_input_contacts: &[Position],
+    isolated_from: &[Position],
+) -> Option<(World3D, Position)> {
+    let mut allowed_contacts = allowed_input_contacts.to_vec();
+    allowed_contacts.extend(redstone_network_positions(world, &[sink]));
+    allowed_contacts.sort_unstable();
+    allowed_contacts.dedup();
+    let adapters = redstone_input_repeater_adapters(
+        world,
+        sink,
+        input_repeater_delay,
+        preferred_repeater,
+        &allowed_contacts,
+    );
+    if adapters.is_empty() {
+        tracing::debug!(
+            ?sink,
+            ?preferred_repeater,
+            candidates = ?sink
+                .cardinal()
+                .into_iter()
+                .map(|repeater| {
+                    let direction = repeater.diff(sink).inverse();
+                    let driver = repeater.walk(direction);
+                    (
+                        repeater,
+                        world
+                            .size
+                            .bound_on(repeater)
+                            .then(|| world[repeater].kind.clone()),
+                        repeater
+                            .down()
+                            .filter(|position| world.size.bound_on(*position))
+                            .map(|position| world[position].kind.clone()),
+                        driver,
+                        driver
+                            .filter(|position| world.size.bound_on(*position))
+                            .map(|position| world[position].kind.clone()),
+                        driver
+                            .and_then(|position| position.down())
+                            .filter(|position| world.size.bound_on(*position))
+                            .map(|position| world[position].kind.clone()),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            "cluster input has no materializable diode orientation"
+        );
+    }
+    if let Some(adapter) = adapters.into_iter().find(|adapter| {
+        input_driver_is_backfeed_isolated(world, &adapter.world, adapter.driver)
+            && isolated_from.iter().all(|other| {
+                !detailed_router::target_powers_position(&adapter.world, adapter.driver, *other)
+                    && !detailed_router::target_powers_position(
+                        &adapter.world,
+                        *other,
+                        adapter.driver,
+                    )
+            })
+    }) {
+        return Some((adapter.world, adapter.driver));
+    }
+
+    let mut repeaters = sink.cardinal();
+    repeaters.sort_by_key(|repeater| {
+        (
+            usize::from(Some(*repeater) != preferred_repeater),
+            repeater.0,
+            repeater.1,
+            repeater.2,
+        )
+    });
+    for repeater_position in repeaters {
+        if !world.size.bound_on(repeater_position) || !world[repeater_position].kind.is_air() {
+            continue;
+        }
+        let direction = repeater_position.diff(sink).inverse();
+        let Some(driver_position) = repeater_position.walk(direction) else {
+            continue;
+        };
+        let Some(repeater_support) = repeater_position.down() else {
+            continue;
+        };
+        let Some(driver_support) = driver_position.down() else {
+            continue;
+        };
+        if !world.size.bound_on(driver_position)
+            || !world.size.bound_on(repeater_support)
+            || !world.size.bound_on(driver_support)
+            || !world[driver_position].kind.is_air()
+            || !(world[repeater_support].kind.is_air() || world[repeater_support].kind.is_cobble())
+            || !(world[driver_support].kind.is_air() || world[driver_support].kind.is_cobble())
+        {
+            continue;
+        }
+        let mut adapter_world = world.clone();
+        if adapter_world[repeater_support].kind.is_air() {
+            adapter_world[repeater_support] = PlacedNode::new_cobble(repeater_support).block;
+        }
+        if adapter_world[driver_support].kind.is_air() {
+            adapter_world[driver_support] = PlacedNode::new_cobble(driver_support).block;
+        }
+        let mut repeater = PlacedNode::new_repeater(repeater_position, direction);
+        if let BlockKind::Repeater { delay, .. } = &mut repeater.block.kind {
+            *delay = input_repeater_delay.clamp(1, 4);
+        }
+        detailed_router::place_node(&mut adapter_world, repeater);
+        detailed_router::place_node(
+            &mut adapter_world,
+            PlacedNode::new_redstone(driver_position),
+        );
+        if isolated_from.iter().any(|other| {
+            detailed_router::target_powers_position(&adapter_world, driver_position, *other)
+                || detailed_router::target_powers_position(&adapter_world, *other, driver_position)
+        }) {
+            continue;
+        }
+        if detailed_router::target_powers_position(
+            &adapter_world,
+            driver_position,
+            repeater_position,
+        ) && detailed_router::target_powers_position(&adapter_world, repeater_position, sink)
+            && input_driver_is_backfeed_isolated(world, &adapter_world, driver_position)
+        {
+            return Some((adapter_world, driver_position));
+        }
+    }
+    None
+}
+
+fn input_driver_is_backfeed_isolated(
+    original_world: &World3D,
+    adapter_world: &World3D,
+    driver: Position,
+) -> bool {
+    original_world
+        .iter_block()
+        .into_iter()
+        .all(|(position, block)| {
+            block.kind.is_air()
+                || block.kind.is_cobble()
+                || !detailed_router::target_powers_position(adapter_world, position, driver)
+        })
 }
 
 #[derive(Clone)]
@@ -506,35 +660,66 @@ fn route_module_variables_with_order_from_prefix_impl(
         .filter(|label| !label.contains('.'))
         .map(str::to_owned)
         .collect::<HashSet<_>>();
-    if let Err(error) = route_top_input_ports(
-        &plan.top_inputs,
-        candidates,
-        placed_modules,
-        config,
-        progress,
-        &completed_top_inputs,
-        &mut route_world,
-        &mut routes,
-    ) {
-        return Err(PartialRoutingFailure {
-            error,
-            routed_nets: routes,
-        });
-    }
-
-    if let Err(error) = route_internal_module_nets(
-        &vars,
-        candidates,
-        placed_modules,
-        config,
-        progress,
-        &mut route_world,
-        &mut routes,
-    ) {
-        return Err(PartialRoutingFailure {
-            error,
-            routed_nets: routes,
-        });
+    if config.top_inputs_last {
+        if let Err(error) = route_internal_module_nets(
+            &vars,
+            candidates,
+            placed_modules,
+            config,
+            progress,
+            &mut route_world,
+            &mut routes,
+        ) {
+            return Err(PartialRoutingFailure {
+                error,
+                routed_nets: routes,
+            });
+        }
+        if let Err(error) = route_top_input_ports(
+            &plan.top_inputs,
+            candidates,
+            placed_modules,
+            config,
+            progress,
+            &completed_top_inputs,
+            &mut route_world,
+            &mut routes,
+        ) {
+            return Err(PartialRoutingFailure {
+                error,
+                routed_nets: routes,
+            });
+        }
+    } else {
+        if let Err(error) = route_top_input_ports(
+            &plan.top_inputs,
+            candidates,
+            placed_modules,
+            config,
+            progress,
+            &completed_top_inputs,
+            &mut route_world,
+            &mut routes,
+        ) {
+            return Err(PartialRoutingFailure {
+                error,
+                routed_nets: routes,
+            });
+        }
+        if let Err(error) = route_internal_module_nets(
+            &vars,
+            candidates,
+            placed_modules,
+            config,
+            progress,
+            &mut route_world,
+            &mut routes,
+        ) {
+            return Err(PartialRoutingFailure {
+                error,
+                routed_nets: routes,
+            });
+        }
     }
 
     if config.validation == RouteValidationMode::Incremental
@@ -654,8 +839,14 @@ fn route_internal_module_nets(
             sort_internal_sink_targets_by_current_tree(&mut sink_targets, &route_sources);
             let mut selected_route = None;
             let mut last_error = None;
+            let diode_pending = sink_targets
+                .iter()
+                .any(|(_, sink)| sink.requires_input_diode);
 
             for (sink_index, (var, sink)) in sink_targets.iter().copied().enumerate() {
+                if diode_pending && !sink.requires_input_diode {
+                    continue;
+                }
                 progress.item(
                     group_index + 1,
                     grouped_vars.len(),
@@ -702,9 +893,13 @@ fn route_internal_module_nets(
                         continue;
                     }
                 };
-                if let Some(reason) =
-                    eager_route_failure_reason(config.validation, route_world, &next_world, &route)
-                {
+                if let Some(reason) = eager_route_failure_reason(
+                    config.validation,
+                    config.defer_feedback_cycles,
+                    route_world,
+                    &next_world,
+                    &route,
+                ) {
                     last_error = Some(eyre::eyre!(
                         "routed {}.{} -> {}.{} at {:?}, but route contract failed: {}",
                         source_key.0,
@@ -751,11 +946,21 @@ fn route_internal_module_nets(
                     route_sources.push(source);
                 }
             }
-            sink_targets.remove(sink_index);
+            let covered = route
+                .required_powered_positions
+                .iter()
+                .copied()
+                .collect::<HashSet<_>>();
+            let remaining_before = sink_targets.len();
+            sink_targets.retain(|(_, target)| !covered.contains(&target.position));
+            let covered_sinks = remaining_before - sink_targets.len();
+            if covered_sinks == 0 {
+                sink_targets.remove(sink_index);
+            }
             prune_powered_route_sources(&mut route_sources, &mut route_source_set, &all_sinks, 0);
             *route_world = next_world;
             routes.push(route);
-            routed_sinks += 1;
+            routed_sinks += covered_sinks.max(1);
         }
     }
 
@@ -798,7 +1003,7 @@ fn route_top_input_ports(
             .targets
             .iter()
             .flat_map(|(module, port)| {
-                resolve_port_targets(candidates, placed_modules, module, port)
+                resolve_top_input_targets(candidates, placed_modules, module, port)
             })
             .collect::<Vec<_>>();
         if sinks.is_empty() {
@@ -816,7 +1021,19 @@ fn route_top_input_ports(
             continue;
         }
 
-        let input_sources = external_input_sources(route_world, input_index, &sinks);
+        let preferred_switch_sites = port
+            .targets
+            .iter()
+            .filter_map(|(module, port)| {
+                let (physical_port, candidate, placed) =
+                    resolve_port(candidates, placed_modules, module, port)?;
+                physical_port
+                    .route_position
+                    .map(|position| translate_candidate_position(position, candidate, placed))
+            })
+            .collect::<Vec<_>>();
+        let input_sources =
+            external_input_sources(route_world, input_index, &sinks, &preferred_switch_sites);
         if input_sources.is_empty() {
             return Err(eyre::eyre!(
                 "failed to place top-level input switch `{}`",
@@ -877,6 +1094,7 @@ fn route_top_input_fanout(
     route_world: &mut World3D,
     routes: &mut Vec<RoutedNet>,
 ) -> eyre::Result<()> {
+    sinks.retain(|sink| sink.requires_input_diode || sink.position != input_source.route_source);
     let total_sinks = sinks.len();
     *route_world = input_source.world.clone();
     routes.push(
@@ -901,8 +1119,12 @@ fn route_top_input_fanout(
         sort_top_input_sinks_by_current_tree(&mut sinks, &route_sources);
         let mut selected_route = None;
         let mut last_error = None;
+        let diode_pending = sinks.iter().any(|sink| sink.requires_input_diode);
 
         for (sink_index, sink) in sinks.iter().copied().enumerate() {
+            if diode_pending && !sink.requires_input_diode {
+                continue;
+            }
             progress.item(
                 port_index + 1,
                 total_ports,
@@ -933,9 +1155,13 @@ fn route_top_input_fanout(
                 }
             };
             route.source = input_source.switch;
-            if let Some(reason) =
-                eager_route_failure_reason(config.validation, route_world, &next_world, &route)
-            {
+            if let Some(reason) = eager_route_failure_reason(
+                config.validation,
+                config.defer_feedback_cycles,
+                route_world,
+                &next_world,
+                &route,
+            ) {
                 last_error = Some(eyre::eyre!(
                     "routed top-level input {} -> {:?}, but route contract failed: {}",
                     port_name,
@@ -964,11 +1190,21 @@ fn route_top_input_fanout(
                 route_sources.push(source);
             }
         }
-        sinks.remove(sink_index);
+        let covered = route
+            .required_powered_positions
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>();
+        let remaining_before = sinks.len();
+        sinks.retain(|target| !covered.contains(&target.position));
+        let covered_sinks = remaining_before - sinks.len();
+        if covered_sinks == 0 {
+            sinks.remove(sink_index);
+        }
         prune_powered_route_sources(&mut route_sources, &mut route_source_set, &sinks, 0);
         *route_world = next_world;
         routes.push(route.with_labels(port_name, format!("{port_name}.sink")));
-        routed_sinks += 1;
+        routed_sinks += covered_sinks.max(1);
     }
 
     Ok(())
@@ -988,6 +1224,7 @@ fn sort_top_input_sinks_by_current_tree(
             .min()
             .unwrap_or(usize::MAX);
         (
+            usize::from(!sink.requires_input_diode),
             nearest_source,
             sink.position.0,
             sink.position.1,
@@ -1008,6 +1245,7 @@ fn sort_internal_sink_targets_by_current_tree(
             .unwrap_or(usize::MAX);
         (
             register_next_target_bit_order(&var.target.0),
+            usize::from(!sink.requires_input_diode),
             std::cmp::Reverse(nearest_source),
             sink.position.0,
             sink.position.1,
@@ -1026,6 +1264,28 @@ fn route_top_input_to_target_from_network(
 ) -> Result<(RoutedNet, World3D), RouteFailure> {
     let mut sources = sources.to_vec();
     sources.sort_by_key(|source| source.position.manhattan_distance(&sink.position));
+    if !sink.requires_input_diode
+        && let Some(source) = sources.iter().find(|source| {
+            source.position == sink.position
+                || detailed_router::target_powers_position(world, logical_source, sink.position)
+                || detailed_router::target_powers_position(world, source.position, sink.position)
+        })
+    {
+        let path = if logical_source == sink.position {
+            vec![logical_source]
+        } else {
+            vec![logical_source, sink.position]
+        };
+        return Ok((
+            RoutedNet::new(logical_source, sink.position, Vec::new(), path).with_powered_taps(
+                vec![PoweredRouteSource {
+                    position: sink.position,
+                    strength: source.strength.saturating_sub(1).max(1),
+                }],
+            ),
+            world.clone(),
+        ));
+    }
     for source in sources {
         if let Ok(route) = route_logical_source_to_target_position_with_strength(
             world,
@@ -1132,11 +1392,14 @@ fn route_power_contract_holds(before: &World3D, after: &World3D, route: &RoutedN
 
 fn eager_route_failure_reason(
     validation: RouteValidationMode,
+    defer_feedback_cycles: bool,
     before: &World3D,
     after: &World3D,
     route: &RoutedNet,
 ) -> Option<&'static str> {
-    if route_has_signal_feedback_cycle(after, route) {
+    if !(validation == RouteValidationMode::Deferred && defer_feedback_cycles)
+        && route_has_signal_feedback_cycle(after, route)
+    {
         return Some("route contains a self-sustaining signal feedback cycle");
     }
     if validation == RouteValidationMode::Deferred {
@@ -1198,9 +1461,19 @@ pub(crate) fn first_invalid_active_route<'a>(
     world: &World3D,
     routes: &'a [RoutedNet],
 ) -> Option<&'a RoutedNet> {
-    routes
-        .iter()
-        .find(|route| !route_power_contract_holds(world, world, route))
+    routes.iter().find(|route| {
+        !route_required_positions_keep_route_contact(world, route)
+            || !route_power_contract_holds(world, world, route)
+    })
+}
+
+fn route_required_positions_keep_route_contact(world: &World3D, route: &RoutedNet) -> bool {
+    route.required_powered_positions.iter().all(|required| {
+        route.path.iter().copied().any(|route_position| {
+            route_position == *required
+                || detailed_router::target_powers_position(world, route_position, *required)
+        })
+    })
 }
 
 fn can_validate_active_route_source(world: &World3D, position: Position) -> bool {
@@ -1348,6 +1621,31 @@ fn route_source_to_target_from_access_points(
         route_sources.push(logical_source);
     }
 
+    // Compact placement may fuse a producer and consumer boundary by placing
+    // their route terminals on the same cell or in direct propagation range.
+    // That is already a complete physical connection: asking the detailed
+    // router to insert another wire/repeater between occupied terminals makes
+    // the valid zero-block route look unreachable.
+    if let Some(route_source) = route_sources.iter().copied().find(|source| {
+        world.size.bound_on(*source)
+            && world.size.bound_on(sink.position)
+            && (*source == sink.position
+                || detailed_router::target_powers_position(world, *source, sink.position))
+    }) {
+        let path = if route_source == sink.position {
+            vec![route_source]
+        } else {
+            vec![route_source, sink.position]
+        };
+        let strength = initial_signal_strength(world, route_source);
+        let route = RoutedNet::new(logical_source, sink.position, Vec::new(), path)
+            .with_powered_taps(vec![PoweredRouteSource {
+                position: sink.position,
+                strength: strength.saturating_sub(1).max(1),
+            }]);
+        return Ok((route, world.clone()));
+    }
+
     for route_source in route_sources {
         if !world.size.bound_on(route_source) || !is_route_terminal(world, route_source) {
             continue;
@@ -1386,18 +1684,50 @@ fn route_to_target_position(
             source,
             sink.position,
             sink.input_repeater_delay,
+            sink.preferred_input_repeater,
             same_net_sinks,
             strategy,
         );
     }
 
-    route_point_to_point_with_strategy_and_allowed_contacts(
-        world,
+    let logical_sink = sink.position;
+    let mut route_targets = sink_route_access_positions(world, logical_sink);
+    route_targets.sort_by_key(|target| source.manhattan_distance(target));
+    let mut allowed_contacts = same_net_contact_positions(same_net_sinks);
+    allowed_contacts.extend(route_targets.iter().copied());
+    allowed_contacts.sort_unstable();
+    allowed_contacts.dedup();
+    for route_target in route_targets {
+        let Ok((mut route, routed_world)) = route_point_to_point_with_strategy_and_allowed_contacts(
+            world,
+            source,
+            route_target,
+            strategy,
+            allowed_contacts.clone(),
+        ) else {
+            continue;
+        };
+        route.sink = logical_sink;
+        route.required_powered_positions = vec![logical_sink];
+        route.required_released_positions = vec![logical_sink];
+        return Ok((route, routed_world));
+    }
+
+    Err(RouteFailure::Unreachable {
         source,
-        sink.position,
-        strategy,
-        same_net_contact_positions(same_net_sinks),
-    )
+        sink: logical_sink,
+    })
+}
+
+fn sink_route_access_positions(world: &World3D, sink: Position) -> Vec<Position> {
+    if !world.size.bound_on(sink) || !world[sink].kind.is_redstone() {
+        return vec![sink];
+    }
+    let mut positions = redstone_network_positions(world, &[sink]);
+    if !positions.contains(&sink) {
+        positions.push(sink);
+    }
+    positions
 }
 
 fn route_logical_source_to_target_position_with_strength(
@@ -1417,6 +1747,7 @@ fn route_logical_source_to_target_position_with_strength(
             route_source_strength,
             sink.position,
             sink.input_repeater_delay,
+            sink.preferred_input_repeater,
             same_net_sinks,
             strategy,
         );
@@ -1491,6 +1822,22 @@ fn route_to_target_from_powered_network(
     for source in sources.into_iter().take(FANOUT_ROUTE_SOURCE_LIMIT) {
         if !world.size.bound_on(source.position) || !is_route_terminal(world, source.position) {
             continue;
+        }
+        if !sink.requires_input_diode
+            && (source.position == sink.position
+                || detailed_router::target_powers_position(world, source.position, sink.position))
+        {
+            let route = RoutedNet::new(
+                source.position,
+                sink.position,
+                Vec::new(),
+                vec![source.position],
+            )
+            .with_powered_taps(vec![PoweredRouteSource {
+                position: sink.position,
+                strength: source.strength.saturating_sub(1).max(1),
+            }]);
+            return Ok((route, world.clone()));
         }
         if let Ok((route, next_world)) = route_logical_source_to_target_position_with_strength(
             world,
@@ -1597,6 +1944,7 @@ fn route_isolated_output_to_target_position(
             world,
             sink.position,
             sink.input_repeater_delay,
+            sink.preferred_input_repeater,
             &same_net_contacts,
         ) {
             let Ok((route, routed_world)) = route_direct_output_to_point(
@@ -1654,6 +2002,7 @@ fn route_to_redstone_input_through_repeater(
     source: Position,
     sink: Position,
     input_repeater_delay: usize,
+    preferred_input_repeater: Option<Position>,
     same_net_sinks: &[ResolvedPortTarget],
     strategy: GlobalRoutingStrategy,
 ) -> Result<(RoutedNet, World3D), RouteFailure> {
@@ -1664,6 +2013,7 @@ fn route_to_redstone_input_through_repeater(
         initial_signal_strength(world, source),
         sink,
         input_repeater_delay,
+        preferred_input_repeater,
         same_net_sinks,
         strategy,
     )
@@ -1676,13 +2026,18 @@ fn route_to_redstone_input_through_repeater_from_route_source(
     route_source_strength: usize,
     sink: Position,
     input_repeater_delay: usize,
+    preferred_input_repeater: Option<Position>,
     same_net_sinks: &[ResolvedPortTarget],
     strategy: GlobalRoutingStrategy,
 ) -> Result<(RoutedNet, World3D), RouteFailure> {
     let same_net_contacts = same_net_contact_positions(same_net_sinks);
-    for adapter in
-        redstone_input_repeater_adapters(world, sink, input_repeater_delay, &same_net_contacts)
-    {
+    for adapter in redstone_input_repeater_adapters(
+        world,
+        sink,
+        input_repeater_delay,
+        preferred_input_repeater,
+        &same_net_contacts,
+    ) {
         let Ok((route, routed_world)) =
             route_point_to_point_with_strategy_and_allowed_contacts_and_initial_strength(
                 &adapter.world,
@@ -1709,14 +2064,28 @@ fn route_to_redstone_input_through_repeater_from_route_source(
             adapter.repeater,
             adapter.target
         ));
-        let powered_taps = route.powered_route_sources();
+        let mut powered_taps = route.powered_route_sources();
+        powered_taps.push(PoweredRouteSource {
+            position: adapter.repeater,
+            strength: MAX_REDSTONE_STRENGTH,
+        });
+        powered_taps.push(PoweredRouteSource {
+            position: adapter.target,
+            strength: MAX_REDSTONE_STRENGTH,
+        });
+        powered_taps.sort_by_key(|tap| tap.position);
+        powered_taps.dedup_by_key(|tap| tap.position);
+        let mut required_powered_positions = vec![adapter.driver, adapter.repeater, adapter.target];
+        required_powered_positions.extend(same_net_sinks.iter().map(|sink| sink.position));
+        required_powered_positions.sort_unstable();
+        required_powered_positions.dedup();
         let route = RoutedNet::new(
             logical_source,
             adapter.target,
             added_route_blocks(world, &routed_world),
             route.path,
         )
-        .with_required_powered_positions(vec![adapter.driver, adapter.repeater, adapter.target])
+        .with_required_powered_positions(required_powered_positions)
         .with_required_released_positions(vec![adapter.driver, adapter.repeater])
         .with_powered_taps(powered_taps);
         if route_candidate_powers_sink(world, &routed_world, &route, strategy) {
@@ -1812,9 +2181,11 @@ fn redstone_input_repeater_adapters(
     world: &World3D,
     sink: Position,
     input_repeater_delay: usize,
+    preferred_input_repeater: Option<Position>,
     additional_allowed_contacts: &[Position],
 ) -> Vec<InputDiodeAdapter> {
-    sink.cardinal()
+    let mut adapters = sink
+        .cardinal()
         .into_iter()
         .filter_map(|repeater_position| {
             let direction = repeater_position.diff(sink).inverse();
@@ -1827,7 +2198,21 @@ fn redstone_input_repeater_adapters(
                 additional_allowed_contacts,
             )
         })
-        .collect()
+        .collect::<Vec<_>>();
+    // The LocalPlacer's former switch site is a useful first choice, but it
+    // is not a hard orientation contract. Once cells are packed, a producer
+    // can approach the boundary from another safe cardinal side. Keeping the
+    // remaining validated adapters lets compact compositions connect without
+    // changing the logical input terminal.
+    adapters.sort_by_key(|adapter| {
+        (
+            usize::from(Some(adapter.repeater) != preferred_input_repeater),
+            adapter.repeater.0,
+            adapter.repeater.1,
+            adapter.repeater.2,
+        )
+    });
+    adapters
 }
 
 fn input_repeater_adapter_world(
@@ -2014,8 +2399,42 @@ fn external_input_sources(
     world: &World3D,
     index: usize,
     sinks: &[ResolvedPortTarget],
+    preferred_switch_sites: &[Position],
 ) -> Vec<ExternalInputSource> {
-    let mut candidates = external_switch_candidates_outside_layout(world, sinks);
+    let mut preferred = preferred_switch_sites
+        .iter()
+        .copied()
+        .flat_map(|position| {
+            [
+                Direction::West,
+                Direction::East,
+                Direction::North,
+                Direction::South,
+            ]
+            .into_iter()
+            .filter_map(move |direction| {
+                build_external_input_source_facing(world, position, direction)
+            })
+        })
+        .collect::<Vec<_>>();
+    preferred.sort_by_key(|source| {
+        std::cmp::Reverse(
+            sinks
+                .iter()
+                .filter(|sink| {
+                    detailed_router::target_powers_position(
+                        &source.world,
+                        source.switch,
+                        sink.position,
+                    )
+                })
+                .count(),
+        )
+    });
+    let embedded = embedded_external_input_sources(world, sinks);
+    let compact = compact_external_input_sources(world, sinks);
+    let mut candidates = external_switch_candidates_inside_layout(world, sinks);
+    candidates.extend(external_switch_candidates_outside_layout(world, sinks));
     candidates.extend(external_switch_candidates_for_sinks(sinks));
     candidates.sort_by_key(|position| external_input_candidate_cost(*position, sinks));
     candidates.dedup();
@@ -2044,11 +2463,103 @@ fn external_input_sources(
     selected.sort_by_key(|position| external_input_candidate_cost(*position, sinks));
     selected.dedup();
 
-    selected
+    preferred
         .into_iter()
-        .filter_map(|position| build_external_input_source(world, position))
+        .chain(embedded)
+        .chain(compact)
+        .chain(
+            selected
+                .into_iter()
+                .filter_map(|position| build_external_input_source(world, position)),
+        )
         .take(24)
         .collect()
+}
+
+fn embedded_external_input_sources(
+    world: &World3D,
+    sinks: &[ResolvedPortTarget],
+) -> Vec<ExternalInputSource> {
+    sinks
+        .iter()
+        .filter_map(|sink| {
+            // A diode-qualified physical input is a materialized routing
+            // terminal. Replacing that terminal with a switch loses both its
+            // electrical access geometry and the isolation contract (and the
+            // hard-coded switch facing need not match the original local
+            // layout). Route a real source into the terminal instead.
+            if sink.requires_input_diode {
+                return None;
+            }
+            if !world.size.bound_on(sink.position) {
+                return None;
+            }
+            if world[sink.position].kind.is_switch() {
+                let switch_block = world[sink.position];
+                return Some(ExternalInputSource {
+                    world: world.clone(),
+                    switch: sink.position,
+                    route_source: sink.position,
+                    blocks: vec![(sink.position, switch_block)],
+                });
+            }
+            // A redstone terminal can be the driver of an input diode that was
+            // materialized in the local candidate. Replacing it with a
+            // hard-coded east-facing switch destroys that adapter's chosen
+            // direction. Preserve the terminal and let the compact/external
+            // source builders drive it from an adjacent switch or short route.
+            None
+        })
+        .collect()
+}
+
+fn compact_external_input_sources(
+    world: &World3D,
+    sinks: &[ResolvedPortTarget],
+) -> Vec<ExternalInputSource> {
+    sinks
+        .iter()
+        .flat_map(|sink| {
+            [
+                Direction::West,
+                Direction::East,
+                Direction::North,
+                Direction::South,
+            ]
+            .into_iter()
+            .filter_map(move |direction| {
+                let switch = sink.position.walk(direction.inverse())?;
+                build_external_input_source_facing(world, switch, direction)
+            })
+        })
+        .collect()
+}
+
+fn external_switch_candidates_inside_layout(
+    world: &World3D,
+    sinks: &[ResolvedPortTarget],
+) -> Vec<Position> {
+    let Some((min, max)) = occupied_bounds(world) else {
+        return Vec::new();
+    };
+    if max.0 == 0 {
+        return Vec::new();
+    }
+
+    let mut candidates = (min.2.max(1)..=max.2)
+        .flat_map(|z| (min.1..=max.1).map(move |y| Position(max.0, y, z)))
+        .filter(|switch| {
+            let Some(route_source) = switch.walk(Direction::West) else {
+                return false;
+            };
+            world.size.bound_on(*switch)
+                && world.size.bound_on(route_source)
+                && world[*switch].kind.is_air()
+                && world[route_source].kind.is_air()
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|position| external_input_candidate_cost(*position, sinks));
+    candidates
 }
 
 fn external_input_candidate_cost(
@@ -2068,27 +2579,42 @@ fn external_input_candidate_cost(
 }
 
 fn build_external_input_source(world: &World3D, switch: Position) -> Option<ExternalInputSource> {
-    let switch_block = input_switch_block();
+    build_external_input_source_facing(world, switch, Direction::West)
+}
+
+fn build_external_input_source_facing(
+    world: &World3D,
+    switch: Position,
+    direction: Direction,
+) -> Option<ExternalInputSource> {
+    let switch_block = input_switch_block(direction);
     let route_source = switch.walk(switch_block.direction)?;
     let route_source_support = route_source.down()?;
+    let reuse_redstone_source =
+        world.size.bound_on(route_source) && world[route_source].kind.is_redstone();
+    let reuse_solid_input_terminal =
+        world.size.bound_on(route_source) && world[route_source].kind.is_cobble();
     if !world.size.bound_on(switch)
         || !world.size.bound_on(route_source)
         || !world.size.bound_on(route_source_support)
         || !world[switch].kind.is_air()
-        || !world[route_source].kind.is_air()
+        || (!world[route_source].kind.is_air()
+            && !reuse_redstone_source
+            && !reuse_solid_input_terminal)
     {
         return None;
     }
 
     let mut source_world = world.clone();
     source_world[switch] = switch_block;
-    place_support_cobble_if_needed(&mut source_world, route_source_support)?;
-
-    let redstone_node = PlacedNode::new_redstone(route_source);
-    if redstone_node.has_conflict(&source_world, &[switch].into_iter().collect()) {
-        return None;
+    if !reuse_redstone_source && !reuse_solid_input_terminal {
+        place_support_cobble_if_needed(&mut source_world, route_source_support)?;
+        let redstone_node = PlacedNode::new_redstone(route_source);
+        if redstone_node.has_conflict(&source_world, &[switch].into_iter().collect()) {
+            return None;
+        }
+        detailed_router::place_node(&mut source_world, redstone_node);
     }
-    detailed_router::place_node(&mut source_world, redstone_node);
     if !detailed_router::target_powers_position(&source_world, switch, route_source) {
         return None;
     }
@@ -2097,7 +2623,9 @@ fn build_external_input_source(world: &World3D, switch: Position) -> Option<Exte
     if world[route_source_support].kind.is_air() {
         blocks.push((route_source_support, source_world[route_source_support]));
     }
-    blocks.push((route_source, source_world[route_source]));
+    if !reuse_redstone_source && !reuse_solid_input_terminal {
+        blocks.push((route_source, source_world[route_source]));
+    }
 
     Some(ExternalInputSource {
         world: source_world,
@@ -2236,10 +2764,10 @@ fn external_switch_candidates_near_sink(sink: Position) -> Vec<Position> {
     candidates
 }
 
-fn input_switch_block() -> Block {
+fn input_switch_block(direction: Direction) -> Block {
     Block {
         kind: BlockKind::Switch { is_on: false },
-        direction: Direction::West,
+        direction,
     }
 }
 
@@ -2255,12 +2783,57 @@ fn resolve_port_targets(
         return Vec::new();
     };
 
-    let position = port.primary_route_position();
-    vec![ResolvedPortTarget {
-        position: translate_candidate_position(position, candidate, placed),
-        requires_input_diode: port.requires_input_diode(),
-        input_repeater_delay: 1,
-    }]
+    let positions = if port.direction == PhysicalPortDirection::Input && port.requires_input_diode()
+    {
+        vec![port.position]
+    } else if port.direction == PhysicalPortDirection::Input {
+        port.routing_access_positions()
+    } else {
+        vec![port.primary_route_position()]
+    };
+    positions
+        .into_iter()
+        .map(|position| ResolvedPortTarget {
+            position: translate_candidate_position(position, candidate, placed),
+            requires_input_diode: port.requires_input_diode(),
+            input_repeater_delay: 1,
+            preferred_input_repeater: port
+                .route_position
+                .map(|position| translate_candidate_position(position, candidate, placed)),
+        })
+        .collect()
+}
+
+fn resolve_top_input_targets(
+    candidates: &[LayoutCandidate],
+    placed_modules: &[PlacedModule],
+    module_name: &str,
+    port_name: &str,
+) -> Vec<ResolvedPortTarget> {
+    let Some((port, candidate, placed)) =
+        resolve_port(candidates, placed_modules, module_name, port_name)
+    else {
+        return Vec::new();
+    };
+    if port.requires_input_diode() {
+        return vec![ResolvedPortTarget {
+            position: translate_candidate_position(port.position, candidate, placed),
+            requires_input_diode: true,
+            input_repeater_delay: 1,
+            preferred_input_repeater: port
+                .route_position
+                .map(|position| translate_candidate_position(position, candidate, placed)),
+        }];
+    }
+    port.routing_access_positions()
+        .into_iter()
+        .map(|position| ResolvedPortTarget {
+            position: translate_candidate_position(position, candidate, placed),
+            requires_input_diode: false,
+            input_repeater_delay: 1,
+            preferred_input_repeater: None,
+        })
+        .collect()
 }
 
 fn route_has_signal_feedback_cycle(world: &World3D, route: &RoutedNet) -> bool {
@@ -2381,6 +2954,9 @@ fn placed_candidate_world(
     let mut world = World3D::new(route_world_size(&blocks));
     for (position, block) in blocks {
         if !world[position].kind.is_air() {
+            if world[position].kind.is_cobble() && block.kind.is_cobble() {
+                continue;
+            }
             eyre::bail!("global route base collision at {position:?}");
         }
         world[position] = block;
@@ -2463,7 +3039,7 @@ pub fn route_point_to_point_with_strategy(
     )
 }
 
-fn route_point_to_point_with_strategy_and_allowed_contacts(
+pub(super) fn route_point_to_point_with_strategy_and_allowed_contacts(
     world: &World3D,
     source: Position,
     sink: Position,
@@ -2627,7 +3203,7 @@ fn powered_redstone_network_taps(world: &World3D, seeds: &[Position]) -> Vec<(Po
     strengths.into_iter().collect()
 }
 
-fn redstone_network_positions(world: &World3D, seeds: &[Position]) -> Vec<Position> {
+pub(super) fn redstone_network_positions(world: &World3D, seeds: &[Position]) -> Vec<Position> {
     let redstones = world
         .iter_block()
         .into_iter()
@@ -3892,6 +4468,7 @@ mod tests {
                 position: sink,
                 requires_input_diode: true,
                 input_repeater_delay: 1,
+                preferred_input_repeater: None,
             },
             &[],
             GlobalRoutingStrategy::AStar,
@@ -3927,6 +4504,7 @@ mod tests {
                 position: sink,
                 requires_input_diode: true,
                 input_repeater_delay: 1,
+                preferred_input_repeater: None,
             },
             &[],
             GlobalRoutingStrategy::AStar,
@@ -3962,6 +4540,7 @@ mod tests {
                 position: sink,
                 requires_input_diode: false,
                 input_repeater_delay: 1,
+                preferred_input_repeater: None,
             },
             &[],
             GlobalRoutingStrategy::AStar,
@@ -3992,6 +4571,7 @@ mod tests {
                 position: sink,
                 requires_input_diode: true,
                 input_repeater_delay: 1,
+                preferred_input_repeater: None,
             },
             &[],
             GlobalRoutingStrategy::AStar,
@@ -4022,6 +4602,7 @@ mod tests {
                 position: sink,
                 requires_input_diode: false,
                 input_repeater_delay: 1,
+                preferred_input_repeater: None,
             },
             &[],
             GlobalRoutingStrategy::AStar,
@@ -4036,16 +4617,19 @@ mod tests {
                 position: Position(2, 0, 1),
                 requires_input_diode: false,
                 input_repeater_delay: 1,
+                preferred_input_repeater: None,
             },
             ResolvedPortTarget {
                 position: Position(8, 0, 1),
                 requires_input_diode: false,
                 input_repeater_delay: 1,
+                preferred_input_repeater: None,
             },
             ResolvedPortTarget {
                 position: Position(5, 0, 1),
                 requires_input_diode: false,
                 input_repeater_delay: 1,
+                preferred_input_repeater: None,
             },
         ];
         let route_sources = vec![PoweredRouteSource {
@@ -4166,6 +4750,7 @@ mod tests {
                 position: sink,
                 requires_input_diode: true,
                 input_repeater_delay: 1,
+                preferred_input_repeater: None,
             },
             &[],
             GlobalRoutingStrategy::AStar,
@@ -4205,6 +4790,7 @@ mod tests {
                 position: sink,
                 requires_input_diode: true,
                 input_repeater_delay: 1,
+                preferred_input_repeater: None,
             },
             &[],
             GlobalRoutingStrategy::BreadthFirst,
@@ -4252,6 +4838,7 @@ mod tests {
                 position: sink,
                 requires_input_diode: true,
                 input_repeater_delay: 3,
+                preferred_input_repeater: None,
             },
             &[],
             GlobalRoutingStrategy::BreadthFirst,
@@ -4286,6 +4873,7 @@ mod tests {
                 position: sink,
                 requires_input_diode: true,
                 input_repeater_delay: 1,
+                preferred_input_repeater: None,
             },
             &[],
             GlobalRoutingStrategy::BreadthFirst,
@@ -4731,11 +5319,13 @@ mod tests {
             position: Position(10, 1, 0),
             requires_input_diode: true,
             input_repeater_delay: 1,
+            preferred_input_repeater: None,
         };
         let near_sink = ResolvedPortTarget {
             position: Position(3, 1, 0),
             requires_input_diode: true,
             input_repeater_delay: 1,
+            preferred_input_repeater: None,
         };
         let mut sinks = vec![(&near_var, near_sink), (&far_var, far_sink)];
 

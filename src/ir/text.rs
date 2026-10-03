@@ -8,10 +8,12 @@ use super::routable::{
 };
 use super::syntax::{tokenize, Token};
 use super::{
-    CandidateSpec, CongestionSpec, Free3dSweepSpec, InputPlacementSpec, LayerAssignmentSpec,
-    LocalPlacerSpec, NetOrderSpec, NotRouteSpec, ObjectiveSpec, PhysicalConstraintSpec,
-    PhysicalRegionSpec, PhysicalSpec, PlacementHeuristicSpec, PlacementSamplingSpec, PlacementSpec,
-    PnrSpec, PortRef, PreferenceSpec, RoutableDocument, RouteStageSpec, RouteStrategySpec,
+    CandidateSpec, CellFaceSpec, ClusteringSpec, CongestionSpec, Free3dSweepSpec,
+    InputPlacementSpec, LayerAssignmentSpec, LocalAdaptiveSpec, LocalCellContractSpec,
+    LocalObjectiveSpec, LocalPlacerSpec, NetOrderSpec, NotRouteSpec, ObjectiveSpec,
+    PhysicalConstraintSpec, PhysicalRegionSpec, PhysicalSpec, PlacementHeuristicSpec,
+    PlacementSamplingSpec, PlacementScheduleSpec, PlacementSpec, PnrSpec, PortAccessDirectionSpec,
+    PortAccessSpec, PortRef, PreferenceSpec, RoutableDocument, RouteStageSpec, RouteStrategySpec,
     RouteValidationSpec, RoutingSpec, SamplingSpec, SearchSpec, TorchPlacementSpec,
 };
 
@@ -62,7 +64,22 @@ fn write_routable_document(
                 if let Some(profile) = document.candidate_bindings.get(&module.name) {
                     write_profile_binding(output, "candidate", profile)?;
                 }
-                write_leaf(output, module, nodes, &document.pin_search)?
+                if let Some(contract) = document.local_cell_contracts.get(&module.name) {
+                    if let Some(size) = contract.max_bbox {
+                        writeln!(
+                            output,
+                            "@pnr.max_bbox(size = [{}, {}, {}])",
+                            size[0], size[1], size[2]
+                        )?;
+                    }
+                }
+                write_leaf(
+                    output,
+                    module,
+                    nodes,
+                    &document.pin_search,
+                    document.local_cell_contracts.get(&module.name),
+                )?
             }
             RoutableModuleBody::Composite { instances, nets } => {
                 if let Some(profile) = document.design_bindings.get(&module.name) {
@@ -265,9 +282,86 @@ fn write_candidate_body(
         Some(value) => writeln!(output, "{indent}combinational-samples {value};")?,
         None => writeln!(output, "{indent}combinational-samples none;")?,
     }
+    writeln!(output, "{indent}clustering {{")?;
+    write_clustering_body(output, &candidate.clustering, &format!("{indent}  "))?;
+    writeln!(output, "{indent}}}")?;
     writeln!(output, "{indent}local-placer {{")?;
     write_local_placer_body(output, &candidate.local_placer, &format!("{indent}  "))?;
     writeln!(output, "{indent}}}")
+}
+
+fn write_clustering_body(
+    output: &mut fmt::Formatter<'_>,
+    clustering: &ClusteringSpec,
+    indent: &str,
+) -> fmt::Result {
+    writeln!(output, "{indent}enabled {};", clustering.enabled)?;
+    writeln!(
+        output,
+        "{indent}prefer-provenance {};",
+        clustering.prefer_provenance
+    )?;
+    writeln!(output, "{indent}reuse-macros {};", clustering.reuse_macros)?;
+    writeln!(
+        output,
+        "{indent}keep-monolithic {};",
+        clustering.keep_monolithic
+    )?;
+    writeln!(
+        output,
+        "{indent}trigger-logic-nodes {};",
+        clustering.trigger_logic_nodes
+    )?;
+    writeln!(
+        output,
+        "{indent}max-logic-nodes {};",
+        clustering.max_logic_nodes
+    )?;
+    writeln!(
+        output,
+        "{indent}max-tagged-logic-nodes {};",
+        clustering.max_tagged_logic_nodes
+    )?;
+    writeln!(
+        output,
+        "{indent}candidates-per-cluster {};",
+        clustering.candidates_per_cluster
+    )?;
+    writeln!(
+        output,
+        "{indent}candidate-seed-variants {};",
+        clustering.candidate_seed_variants
+    )?;
+    writeln!(
+        output,
+        "{indent}max-alternative-combinations {};",
+        clustering.max_alternative_combinations
+    )?;
+    write!(output, "{indent}placement-spacings [")?;
+    write_usize_list(output, &clustering.placement_spacings)?;
+    writeln!(output, "];")?;
+    writeln!(output, "{indent}shelf-width {};", clustering.shelf_width)?;
+    writeln!(
+        output,
+        "{indent}routing-floor-margin {};",
+        clustering.routing_floor_margin
+    )?;
+    writeln!(
+        output,
+        "{indent}input-boundary-bias {};",
+        clustering.input_boundary_bias
+    )?;
+    writeln!(
+        output,
+        "{indent}direct-max-steps {};",
+        clustering.direct_max_steps
+    )?;
+    writeln!(output, "{indent}beam-width {};", clustering.beam_width)?;
+    writeln!(
+        output,
+        "{indent}beam-max-expansions {};",
+        clustering.beam_max_expansions
+    )
 }
 
 fn write_local_placer_body(
@@ -276,6 +370,16 @@ fn write_local_placer_body(
     indent: &str,
 ) -> fmt::Result {
     writeln!(output, "{indent}random-seed {};", local.random_seed)?;
+    writeln!(
+        output,
+        "{indent}schedule {};",
+        match local.schedule {
+            PlacementScheduleSpec::Topological => "topological",
+            PlacementScheduleSpec::MinFrontier => "min-frontier",
+            PlacementScheduleSpec::Reconvergence => "reconvergence",
+            PlacementScheduleSpec::Auto => "auto",
+        }
+    )?;
     writeln!(
         output,
         "{indent}greedy-input-generation {};",
@@ -346,7 +450,65 @@ fn write_local_placer_body(
         output,
         "{indent}route-step-sampling {};",
         sampling_text(local.route_step_sampling)
-    )
+    )?;
+    writeln!(output, "{indent}objective {{")?;
+    writeln!(
+        output,
+        "{indent}  block-count {};",
+        local.objective.block_count
+    )?;
+    writeln!(
+        output,
+        "{indent}  bbox-volume {};",
+        local.objective.bbox_volume
+    )?;
+    writeln!(
+        output,
+        "{indent}  bbox-extent {};",
+        local.objective.bbox_extent
+    )?;
+    writeln!(
+        output,
+        "{indent}  bbox-height {};",
+        local.objective.bbox_height
+    )?;
+    writeln!(
+        output,
+        "{indent}  local-density {};",
+        local.objective.local_density
+    )?;
+    writeln!(
+        output,
+        "{indent}  future-join-distance {};",
+        local.objective.future_join_distance
+    )?;
+    writeln!(output, "{indent}}}")?;
+    writeln!(output, "{indent}adaptive {{")?;
+    writeln!(
+        output,
+        "{indent}  max-retries {};",
+        local.adaptive.max_retries
+    )?;
+    writeln!(
+        output,
+        "{indent}  route-depth-multiplier {};",
+        local.adaptive.route_depth_multiplier
+    )?;
+    writeln!(
+        output,
+        "{indent}  route-depth-cap {};",
+        local.adaptive.route_depth_cap
+    )?;
+    writeln!(
+        output,
+        "{indent}  sampling-multiplier {};",
+        local.adaptive.sampling_multiplier
+    )?;
+    match local.adaptive.sampling_cap {
+        Some(value) => writeln!(output, "{indent}  sampling-cap {value};")?,
+        None => writeln!(output, "{indent}  sampling-cap none;")?,
+    }
+    writeln!(output, "{indent}}}")
 }
 
 fn write_route_stage(
@@ -584,16 +746,31 @@ impl FromStr for RoutableDocument {
         }
         let mut modules = Vec::new();
         let mut pin_search = std::collections::BTreeMap::new();
+        let mut local_cell_contracts = std::collections::BTreeMap::new();
         let mut candidate_bindings = std::collections::BTreeMap::new();
         let mut design_bindings = std::collections::BTreeMap::new();
         while !parser.is_done() && !parser.peek_keyword("physical") {
             let mut bindings = Vec::new();
             while parser.consume_symbol('@') {
-                bindings.push(parser.parse_definition_profile_binding()?);
+                bindings.push(parser.parse_definition_annotation()?);
             }
             if parser.consume_keyword("leaf") {
-                let module = parser.parse_leaf(&mut pin_search)?;
-                for (kind, profile) in bindings {
+                let mut contract = LocalCellContractSpec::default();
+                let mut profile_bindings = Vec::new();
+                for annotation in bindings {
+                    match annotation {
+                        DefinitionAnnotation::Profile { kind, profile } => {
+                            profile_bindings.push((kind, profile));
+                        }
+                        DefinitionAnnotation::MaxBbox(size) => {
+                            if contract.max_bbox.replace(size).is_some() {
+                                eyre::bail!("duplicate @pnr.max_bbox on leaf");
+                            }
+                        }
+                    }
+                }
+                let module = parser.parse_leaf(&mut pin_search, &mut contract)?;
+                for (kind, profile) in profile_bindings {
                     match kind.as_str() {
                         "candidate" => {
                             if candidate_bindings
@@ -614,10 +791,16 @@ impl FromStr for RoutableDocument {
                         _ => unreachable!(),
                     }
                 }
+                if contract.max_bbox.is_some() || !contract.ports.is_empty() {
+                    local_cell_contracts.insert(module.name.clone(), contract);
+                }
                 modules.push(module);
             } else if parser.consume_keyword("module") {
                 let module = parser.parse_composite()?;
-                for (kind, profile) in bindings {
+                for annotation in bindings {
+                    let DefinitionAnnotation::Profile { kind, profile } = annotation else {
+                        eyre::bail!("@pnr.max_bbox may annotate only leaf definitions");
+                    };
                     if kind != "design" {
                         eyre::bail!(
                             "module `{}` requires @pnr.design, not @pnr.{kind}",
@@ -670,15 +853,18 @@ impl FromStr for RoutableDocument {
                 );
             }
         }
-        Ok(RoutableDocument {
+        let document = RoutableDocument {
             design,
             candidate_profiles,
             design_profiles,
             candidate_bindings,
             design_bindings,
             pin_search,
+            local_cell_contracts,
             physical,
-        })
+        };
+        document.validate_local_cell_contracts()?;
+        Ok(document)
     }
 }
 
@@ -687,9 +873,10 @@ fn write_leaf(
     module: &RoutableModule,
     nodes: &[RoutableNode],
     pin_search: &std::collections::BTreeMap<PortRef, Vec<[usize; 3]>>,
+    contract: Option<&LocalCellContractSpec>,
 ) -> fmt::Result {
     writeln!(output, "leaf {} {{", quoted(&module.name))?;
-    write_ports(output, &module.name, &module.ports, pin_search)?;
+    write_ports(output, &module.name, &module.ports, pin_search, contract)?;
     let mut nodes = nodes.iter().collect::<Vec<_>>();
     nodes.sort_by_key(|node| node.id);
     for node in nodes {
@@ -698,9 +885,7 @@ fn write_leaf(
             RoutableNodeKind::Input { name } => write!(output, "input {}", quoted(name))?,
             RoutableNodeKind::Output { name } => write!(output, "output {}", quoted(name))?,
             RoutableNodeKind::Not => write!(output, "logic not")?,
-            RoutableNodeKind::And => write!(output, "logic and")?,
             RoutableNodeKind::Or => write!(output, "logic or")?,
-            RoutableNodeKind::Xor => write!(output, "logic xor")?,
             RoutableNodeKind::Sequential {
                 primitive,
                 input_ports,
@@ -733,7 +918,13 @@ fn write_composite(
     nets: &[RoutableNet],
 ) -> fmt::Result {
     writeln!(output, "module {} {{", quoted(&module.name))?;
-    write_ports(output, &module.name, &module.ports, &Default::default())?;
+    write_ports(
+        output,
+        &module.name,
+        &module.ports,
+        &Default::default(),
+        None,
+    )?;
 
     let mut instances = instances.iter().collect::<Vec<_>>();
     instances.sort_by(|left, right| left.name.cmp(&right.name));
@@ -783,6 +974,7 @@ fn write_ports(
     definition: &str,
     ports: &[RoutablePort],
     pin_search: &std::collections::BTreeMap<PortRef, Vec<[usize; 3]>>,
+    contract: Option<&LocalCellContractSpec>,
 ) -> fmt::Result {
     let mut ports = ports.iter().collect::<Vec<_>>();
     ports.sort_by(|left, right| left.name.cmp(&right.name));
@@ -805,6 +997,14 @@ fn write_ports(
             }
             writeln!(output, "])")?;
         }
+        if let Some(access) = contract.and_then(|contract| contract.ports.get(&port.name)) {
+            writeln!(
+                output,
+                "  @pnr.pin(face = {}, access = {})",
+                cell_face_name(access.face),
+                port_access_name(access.access)
+            )?;
+        }
         writeln!(
             output,
             "  port {} {};",
@@ -813,6 +1013,25 @@ fn write_ports(
         )?;
     }
     Ok(())
+}
+
+fn cell_face_name(face: CellFaceSpec) -> &'static str {
+    match face {
+        CellFaceSpec::West => "west",
+        CellFaceSpec::East => "east",
+        CellFaceSpec::Down => "down",
+        CellFaceSpec::Up => "up",
+        CellFaceSpec::North => "north",
+        CellFaceSpec::South => "south",
+    }
+}
+
+fn port_access_name(access: PortAccessDirectionSpec) -> &'static str {
+    match access {
+        PortAccessDirectionSpec::Inward => "inward",
+        PortAccessDirectionSpec::Outward => "outward",
+        PortAccessDirectionSpec::Bidirectional => "bidirectional",
+    }
 }
 
 fn write_endpoint(output: &mut fmt::Formatter<'_>, endpoint: &Endpoint) -> fmt::Result {
@@ -886,6 +1105,16 @@ fn sequential_name(primitive: RoutableSequentialPrimitive) -> &'static str {
     }
 }
 
+enum DefinitionAnnotation {
+    Profile { kind: String, profile: String },
+    MaxBbox([usize; 3]),
+}
+
+enum PortAnnotation {
+    Search(Vec<[usize; 3]>),
+    Access(PortAccessSpec),
+}
+
 struct Parser {
     tokens: Vec<Token>,
     position: usize,
@@ -919,10 +1148,18 @@ impl Parser {
         })
     }
 
-    fn parse_definition_profile_binding(&mut self) -> eyre::Result<(String, String)> {
+    fn parse_definition_annotation(&mut self) -> eyre::Result<DefinitionAnnotation> {
         self.expect_keyword("pnr")?;
         self.expect_symbol('.')?;
         let kind = self.expect_word()?;
+        if kind == "max_bbox" {
+            self.expect_symbol('(')?;
+            self.expect_keyword("size")?;
+            self.expect_symbol('=')?;
+            let size = self.parse_position()?;
+            self.expect_symbol(')')?;
+            return Ok(DefinitionAnnotation::MaxBbox(size));
+        }
         if kind != "candidate" && kind != "design" {
             eyre::bail!("unknown definition annotation `@pnr.{kind}`");
         }
@@ -931,7 +1168,7 @@ impl Parser {
         self.expect_symbol('=')?;
         let profile = self.expect_string()?;
         self.expect_symbol(')')?;
-        Ok((kind, profile))
+        Ok(DefinitionAnnotation::Profile { kind, profile })
     }
 
     fn parse_candidate_spec(&mut self) -> eyre::Result<CandidateSpec> {
@@ -945,6 +1182,11 @@ impl Parser {
         self.expect_keyword("combinational-samples")?;
         let combinational_samples = self.parse_optional_usize()?;
         self.expect_symbol(';')?;
+        let clustering = if self.consume_keyword("clustering") {
+            self.parse_clustering_spec()?
+        } else {
+            ClusteringSpec::default()
+        };
         self.expect_keyword("local-placer")?;
         let local_placer = self.parse_local_placer_spec()?;
         self.expect_symbol('}')?;
@@ -952,7 +1194,83 @@ impl Parser {
             search_box,
             retain,
             combinational_samples,
+            clustering,
             local_placer,
+        })
+    }
+
+    fn parse_clustering_spec(&mut self) -> eyre::Result<ClusteringSpec> {
+        self.expect_symbol('{')?;
+        self.expect_keyword("enabled")?;
+        let enabled = self.expect_bool()?;
+        self.expect_symbol(';')?;
+        self.expect_keyword("prefer-provenance")?;
+        let prefer_provenance = self.expect_bool()?;
+        self.expect_symbol(';')?;
+        self.expect_keyword("reuse-macros")?;
+        let reuse_macros = self.expect_bool()?;
+        self.expect_symbol(';')?;
+        self.expect_keyword("keep-monolithic")?;
+        let keep_monolithic = self.expect_bool()?;
+        self.expect_symbol(';')?;
+        self.expect_keyword("trigger-logic-nodes")?;
+        let trigger_logic_nodes = self.expect_usize()?;
+        self.expect_symbol(';')?;
+        self.expect_keyword("max-logic-nodes")?;
+        let max_logic_nodes = self.expect_usize()?;
+        self.expect_symbol(';')?;
+        self.expect_keyword("max-tagged-logic-nodes")?;
+        let max_tagged_logic_nodes = self.expect_usize()?;
+        self.expect_symbol(';')?;
+        self.expect_keyword("candidates-per-cluster")?;
+        let candidates_per_cluster = self.expect_usize()?;
+        self.expect_symbol(';')?;
+        self.expect_keyword("candidate-seed-variants")?;
+        let candidate_seed_variants = self.expect_usize()?;
+        self.expect_symbol(';')?;
+        self.expect_keyword("max-alternative-combinations")?;
+        let max_alternative_combinations = self.expect_usize()?;
+        self.expect_symbol(';')?;
+        self.expect_keyword("placement-spacings")?;
+        let placement_spacings = self.parse_usize_list()?;
+        self.expect_symbol(';')?;
+        self.expect_keyword("shelf-width")?;
+        let shelf_width = self.expect_usize()?;
+        self.expect_symbol(';')?;
+        self.expect_keyword("routing-floor-margin")?;
+        let routing_floor_margin = self.expect_usize()?;
+        self.expect_symbol(';')?;
+        self.expect_keyword("input-boundary-bias")?;
+        let input_boundary_bias = self.expect_bool()?;
+        self.expect_symbol(';')?;
+        self.expect_keyword("direct-max-steps")?;
+        let direct_max_steps = self.expect_usize()?;
+        self.expect_symbol(';')?;
+        self.expect_keyword("beam-width")?;
+        let beam_width = self.expect_usize()?;
+        self.expect_symbol(';')?;
+        self.expect_keyword("beam-max-expansions")?;
+        let beam_max_expansions = self.expect_usize()?;
+        self.expect_symbol(';')?;
+        self.expect_symbol('}')?;
+        Ok(ClusteringSpec {
+            enabled,
+            prefer_provenance,
+            reuse_macros,
+            keep_monolithic,
+            trigger_logic_nodes,
+            max_logic_nodes,
+            max_tagged_logic_nodes,
+            candidates_per_cluster,
+            candidate_seed_variants,
+            max_alternative_combinations,
+            placement_spacings,
+            shelf_width,
+            routing_floor_margin,
+            input_boundary_bias,
+            direct_max_steps,
+            beam_width,
+            beam_max_expansions,
         })
     }
 
@@ -960,6 +1278,15 @@ impl Parser {
         self.expect_symbol('{')?;
         self.expect_keyword("random-seed")?;
         let random_seed = self.expect_u64()?;
+        self.expect_symbol(';')?;
+        self.expect_keyword("schedule")?;
+        let schedule = match self.expect_word()?.as_str() {
+            "topological" => PlacementScheduleSpec::Topological,
+            "min-frontier" => PlacementScheduleSpec::MinFrontier,
+            "reconvergence" => PlacementScheduleSpec::Reconvergence,
+            "auto" => PlacementScheduleSpec::Auto,
+            value => eyre::bail!("unknown placement schedule `{value}`"),
+        };
         self.expect_symbol(';')?;
         self.expect_keyword("greedy-input-generation")?;
         let greedy_input_generation = self.expect_bool()?;
@@ -1016,9 +1343,49 @@ impl Parser {
         self.expect_keyword("route-step-sampling")?;
         let route_step_sampling = self.parse_sampling()?;
         self.expect_symbol(';')?;
+        self.expect_keyword("objective")?;
+        self.expect_symbol('{')?;
+        self.expect_keyword("block-count")?;
+        let block_count = self.expect_usize()?;
+        self.expect_symbol(';')?;
+        self.expect_keyword("bbox-volume")?;
+        let bbox_volume = self.expect_usize()?;
+        self.expect_symbol(';')?;
+        self.expect_keyword("bbox-extent")?;
+        let bbox_extent = self.expect_usize()?;
+        self.expect_symbol(';')?;
+        self.expect_keyword("bbox-height")?;
+        let bbox_height = self.expect_usize()?;
+        self.expect_symbol(';')?;
+        self.expect_keyword("local-density")?;
+        let local_density = self.expect_usize()?;
+        self.expect_symbol(';')?;
+        self.expect_keyword("future-join-distance")?;
+        let future_join_distance = self.expect_usize()?;
+        self.expect_symbol(';')?;
+        self.expect_symbol('}')?;
+        self.expect_keyword("adaptive")?;
+        self.expect_symbol('{')?;
+        self.expect_keyword("max-retries")?;
+        let max_retries = self.expect_usize()?;
+        self.expect_symbol(';')?;
+        self.expect_keyword("route-depth-multiplier")?;
+        let route_depth_multiplier = self.expect_usize()?;
+        self.expect_symbol(';')?;
+        self.expect_keyword("route-depth-cap")?;
+        let route_depth_cap = self.expect_usize()?;
+        self.expect_symbol(';')?;
+        self.expect_keyword("sampling-multiplier")?;
+        let sampling_multiplier = self.expect_usize()?;
+        self.expect_symbol(';')?;
+        self.expect_keyword("sampling-cap")?;
+        let sampling_cap = self.parse_optional_usize()?;
+        self.expect_symbol(';')?;
+        self.expect_symbol('}')?;
         self.expect_symbol('}')?;
         Ok(LocalPlacerSpec {
             random_seed,
+            schedule,
             greedy_input_generation,
             input_placement,
             input_candidate_limit,
@@ -1033,6 +1400,21 @@ impl Parser {
             not_route_step_sampling,
             max_route_step,
             route_step_sampling,
+            objective: LocalObjectiveSpec {
+                block_count,
+                bbox_volume,
+                bbox_extent,
+                bbox_height,
+                local_density,
+                future_join_distance,
+            },
+            adaptive: LocalAdaptiveSpec {
+                max_retries,
+                route_depth_multiplier,
+                route_depth_cap,
+                sampling_multiplier,
+                sampling_cap,
+            },
         })
     }
 
@@ -1436,39 +1818,52 @@ impl Parser {
     fn parse_leaf(
         &mut self,
         pin_search: &mut std::collections::BTreeMap<PortRef, Vec<[usize; 3]>>,
+        contract: &mut LocalCellContractSpec,
     ) -> eyre::Result<RoutableModule> {
         let name = self.expect_string()?;
         self.expect_symbol('{')?;
         let mut ports = Vec::new();
         let mut nodes = Vec::new();
         while !self.consume_symbol('}') {
-            let annotation = if self.consume_symbol('@') {
-                Some(self.parse_port_annotation()?)
-            } else {
-                None
-            };
+            let mut annotations = Vec::new();
+            while self.consume_symbol('@') {
+                annotations.push(self.parse_port_annotation()?);
+            }
             if self.consume_keyword("port") {
                 let port = self.parse_port()?;
-                if let Some(positions) = annotation {
-                    if port.direction != RoutablePortDirection::Input {
-                        eyre::bail!(
-                            "@pnr.pin_search may annotate only input ports; `{}.{}` is an output",
-                            name,
-                            port.name
-                        );
-                    }
-                    let key = PortRef {
-                        definition: name.clone(),
-                        port: port.name.clone(),
-                    };
-                    if pin_search.insert(key, positions).is_some() {
-                        eyre::bail!("duplicate @pnr.pin_search on `{}.{}`", name, port.name);
+                for annotation in annotations {
+                    match annotation {
+                        PortAnnotation::Search(positions) => {
+                            if port.direction != RoutablePortDirection::Input {
+                                eyre::bail!(
+                                    "@pnr.pin_search may annotate only input ports; `{}.{}` is an output",
+                                    name,
+                                    port.name
+                                );
+                            }
+                            let key = PortRef {
+                                definition: name.clone(),
+                                port: port.name.clone(),
+                            };
+                            if pin_search.insert(key, positions).is_some() {
+                                eyre::bail!(
+                                    "duplicate @pnr.pin_search on `{}.{}`",
+                                    name,
+                                    port.name
+                                );
+                            }
+                        }
+                        PortAnnotation::Access(access) => {
+                            if contract.ports.insert(port.name.clone(), access).is_some() {
+                                eyre::bail!("duplicate @pnr.pin on `{}.{}`", name, port.name);
+                            }
+                        }
                     }
                 }
                 ports.push(port);
             } else if self.consume_keyword("node") {
-                if annotation.is_some() {
-                    eyre::bail!("@pnr.pin_search may annotate only input ports");
+                if !annotations.is_empty() {
+                    eyre::bail!("@pnr pin annotations may annotate only ports");
                 }
                 nodes.push(self.parse_node()?);
             } else {
@@ -1482,10 +1877,22 @@ impl Parser {
         })
     }
 
-    fn parse_port_annotation(&mut self) -> eyre::Result<Vec<[usize; 3]>> {
+    fn parse_port_annotation(&mut self) -> eyre::Result<PortAnnotation> {
         self.expect_keyword("pnr")?;
         self.expect_symbol('.')?;
         let annotation = self.expect_word()?;
+        if annotation == "pin" {
+            self.expect_symbol('(')?;
+            self.expect_keyword("face")?;
+            self.expect_symbol('=')?;
+            let face = self.parse_cell_face()?;
+            self.expect_symbol(',')?;
+            self.expect_keyword("access")?;
+            self.expect_symbol('=')?;
+            let access = self.parse_port_access_direction()?;
+            self.expect_symbol(')')?;
+            return Ok(PortAnnotation::Access(PortAccessSpec { face, access }));
+        }
         if annotation != "pin_search" {
             eyre::bail!("unknown PnR annotation `@pnr.{annotation}`");
         }
@@ -1497,7 +1904,7 @@ impl Parser {
             eyre::bail!("@pnr.pin_search requires at least one position");
         }
         self.expect_symbol(')')?;
-        Ok(positions)
+        Ok(PortAnnotation::Search(positions))
     }
 
     fn parse_composite(&mut self) -> eyre::Result<RoutableModule> {
@@ -1550,9 +1957,7 @@ impl Parser {
         } else if self.consume_keyword("logic") {
             match self.expect_word()?.as_str() {
                 "not" => RoutableNodeKind::Not,
-                "and" => RoutableNodeKind::And,
                 "or" => RoutableNodeKind::Or,
-                "xor" => RoutableNodeKind::Xor,
                 kind => eyre::bail!("unknown routable logic node `{kind}`"),
             }
         } else if self.consume_keyword("sequential") {
@@ -1865,6 +2270,27 @@ impl Parser {
         }
     }
 
+    fn parse_cell_face(&mut self) -> eyre::Result<CellFaceSpec> {
+        match self.expect_word()?.as_str() {
+            "west" => Ok(CellFaceSpec::West),
+            "east" => Ok(CellFaceSpec::East),
+            "down" => Ok(CellFaceSpec::Down),
+            "up" => Ok(CellFaceSpec::Up),
+            "north" => Ok(CellFaceSpec::North),
+            "south" => Ok(CellFaceSpec::South),
+            value => eyre::bail!("unknown local-cell face `{value}`"),
+        }
+    }
+
+    fn parse_port_access_direction(&mut self) -> eyre::Result<PortAccessDirectionSpec> {
+        match self.expect_word()?.as_str() {
+            "inward" => Ok(PortAccessDirectionSpec::Inward),
+            "outward" => Ok(PortAccessDirectionSpec::Outward),
+            "bidirectional" => Ok(PortAccessDirectionSpec::Bidirectional),
+            value => eyre::bail!("unknown port access direction `{value}`"),
+        }
+    }
+
     fn expect_keyword(&mut self, expected: &str) -> eyre::Result<()> {
         if self.consume_keyword(expected) {
             Ok(())
@@ -1962,6 +2388,57 @@ mod tests {
     }
 
     #[test]
+    fn local_cell_contracts_round_trip_and_validate_pin_faces() -> eyre::Result<()> {
+        let mut document = RoutableDocument::circuit_only(sample_design());
+        document.pin_search.insert(
+            PortRef {
+                definition: "inv".to_owned(),
+                port: "a".to_owned(),
+            },
+            vec![[0, 1, 1]],
+        );
+        document.local_cell_contracts.insert(
+            "inv".to_owned(),
+            LocalCellContractSpec {
+                max_bbox: Some([3, 3, 3]),
+                ports: std::collections::BTreeMap::from([(
+                    "a".to_owned(),
+                    PortAccessSpec {
+                        face: CellFaceSpec::West,
+                        access: PortAccessDirectionSpec::Outward,
+                    },
+                )]),
+            },
+        );
+
+        let source = document.to_string();
+        let reparsed: RoutableDocument = source.parse()?;
+        assert_eq!(reparsed, document);
+        assert!(source.contains("@pnr.max_bbox(size = [3, 3, 3])"));
+        assert!(source.contains("@pnr.pin(face = west, access = outward)"));
+
+        let invalid = source.replace(
+            "@pnr.pin_search(positions = [[0, 1, 1]])",
+            "@pnr.pin_search(positions = [[1, 1, 1]])",
+        );
+        let error = invalid.parse::<RoutableDocument>().unwrap_err();
+        assert!(format!("{error:#}").contains("is not on the required west face"));
+        Ok(())
+    }
+
+    #[test]
+    fn local_cell_contract_rejects_zero_sized_bbox() {
+        let source = RoutableDocument::circuit_only(sample_design())
+            .to_string()
+            .replace(
+                "leaf \"inv\"",
+                "@pnr.max_bbox(size = [0, 3, 3])\nleaf \"inv\"",
+            );
+        let error = source.parse::<RoutableDocument>().unwrap_err();
+        assert!(format!("{error:#}").contains("requires non-zero dimensions"));
+    }
+
+    #[test]
     fn routable_text_rejects_wrong_endpoint_direction() {
         let mut design = sample_design();
         let RoutableModuleBody::Composite { nets, .. } = &mut design.modules[1].body else {
@@ -1972,6 +2449,16 @@ mod tests {
         };
 
         assert!(format!("{:#}", design.validate().unwrap_err()).contains("invalid driver"));
+    }
+
+    #[test]
+    fn routable_text_rejects_unmapped_logic_nodes() {
+        let source = sample_design()
+            .to_string()
+            .replace("logic not", "logic xor");
+
+        let error = source.parse::<RoutableDesign>().unwrap_err();
+        assert!(format!("{error:#}").contains("unknown routable logic node `xor`"));
     }
 
     fn sample_design() -> RoutableDesign {

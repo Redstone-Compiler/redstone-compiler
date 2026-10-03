@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use eyre::ensure;
 use indicatif::{ParallelProgressIterator, ProgressStyle};
@@ -16,7 +16,7 @@ use crate::logic::LogicType;
 use crate::output::{OutputEndpoint, PlacedWorld};
 use crate::sequential::layout::SequentialMacro;
 use crate::sequential::{SequentialPrimitive, SequentialType};
-use crate::transform::place_and_route::estimate::{bounding_box_of_positions, world_compact_cost};
+use crate::transform::place_and_route::estimate::{bounding_box, bounding_box_of_positions};
 use crate::transform::place_and_route::place_bound::PropagateType;
 use crate::world::block::{Block, BlockKind, Direction};
 use crate::world::position::{DimSize, Position};
@@ -25,14 +25,20 @@ use crate::world::World3D;
 mod config;
 mod debug;
 mod isolation;
+mod scheduler;
 mod state;
 
 pub use config::{
-    InputPlacementStrategy, LocalPlacerConfig, LocalPlacerInputConstraints, NotRouteStrategy,
-    PlacementSamplingPolicy, TorchPlacementStrategy, K_MAX_LOCAL_PLACE_NODE_COUNT,
+    InputPlacementStrategy, LocalPlacementCostWeights, LocalPlacerConfig,
+    LocalPlacerInputConstraints, NotRouteStrategy, PlacementSamplingPolicy,
+    PlacementSchedulePolicy, TorchPlacementStrategy, K_MAX_LOCAL_PLACE_NODE_COUNT,
 };
-pub use debug::{LocalPlacerDebug, RouteDebug, RouteDepthDebug, RouteRejectReason, StepDebug};
+pub use debug::{
+    LocalPlacementFailure, LocalPlacementFailureKind, LocalPlacementStage, LocalPlacerDebug,
+    RouteDebug, RouteDepthDebug, RouteRejectReason, StepDebug,
+};
 use isolation::RouteIsolation;
+pub use scheduler::{PlacementSchedule, PlacementScheduleMetrics, PlacementScheduler};
 use state::PlacementState;
 
 mod routing;
@@ -51,8 +57,12 @@ use sequential::{
 pub struct LocalPlacer {
     graph: LogicGraph,
     config: LocalPlacerConfig,
+    cost_weights: LocalPlacementCostWeights,
     visit_orders: Vec<GraphNodeId>,
     cost_join_pairs_by_step: Vec<Vec<FutureJoinPair>>,
+    time_limit: Option<Duration>,
+    not_site_limit: Option<usize>,
+    joint_ready_or_routes: bool,
 }
 
 type PlacerQueue = Vec<(World3D, PlacementState)>;
@@ -62,21 +72,70 @@ const RANKED_RANDOM_TAIL_SAMPLE_SCOPE: u64 = 2;
 const LEAK_SAMPLING_QUEUE_THRESHOLD: usize = 10_000;
 const PLACEMENT_DIVERSITY_SPAN_BUCKET_SIZE: usize = 4;
 const RANKED_DIVERSITY_SLOT_DIVISOR: usize = 4;
-const LOCAL_DENSITY_COST_WEIGHT: usize = 3;
-const FUTURE_JOIN_DISTANCE_COST_WEIGHT: usize = 8;
 
 impl LocalPlacer {
     pub fn new(graph: LogicGraph, config: LocalPlacerConfig) -> eyre::Result<Self> {
-        let visit_orders = graph.topological_order();
+        let visit_orders = PlacementScheduler::new(&graph)
+            .select(config.schedule)
+            .order;
+        Self::new_with_visit_order(graph, config, visit_orders)
+    }
+
+    pub(crate) fn new_with_visit_order(
+        graph: LogicGraph,
+        config: LocalPlacerConfig,
+        visit_orders: Vec<GraphNodeId>,
+    ) -> eyre::Result<Self> {
+        Self::new_with_visit_order_and_cost(
+            graph,
+            config,
+            visit_orders,
+            LocalPlacementCostWeights::default(),
+        )
+    }
+
+    pub(crate) fn new_with_visit_order_and_cost(
+        graph: LogicGraph,
+        config: LocalPlacerConfig,
+        visit_orders: Vec<GraphNodeId>,
+        cost_weights: LocalPlacementCostWeights,
+    ) -> eyre::Result<Self> {
         let cost_join_pairs_by_step = build_cost_join_pairs_by_step(&graph, &visit_orders);
         let result = Self {
             graph,
             config,
+            cost_weights,
             visit_orders,
             cost_join_pairs_by_step,
+            time_limit: None,
+            not_site_limit: None,
+            joint_ready_or_routes: false,
         };
         result.verify()?;
         Ok(result)
+    }
+
+    /// Cooperative limit checked between placement steps. A single step may
+    /// overrun it; incomplete worlds are never returned as finished candidates.
+    pub fn with_time_limit(mut self, limit: Duration) -> Self {
+        self.time_limit = Some(limit);
+        self
+    }
+
+    /// Limits legal torch/support poses per parent before world cloning and
+    /// routing. This is an explicitly heuristic search budget, not a constraint.
+    pub fn with_not_site_limit(mut self, limit: usize) -> Self {
+        self.not_site_limit = Some(limit);
+        self
+    }
+
+    /// Route simultaneously ready OR consumers of the same signal before
+    /// sampling their parent worlds. Normal and reverse orders are considered.
+    /// This is an experimental search policy; callers retain the baseline
+    /// policy for comparison because early routing can exclude later recipes.
+    pub fn with_joint_ready_or_routes(mut self) -> Self {
+        self.joint_ready_or_routes = true;
+        self
     }
 
     fn verify(&self) -> eyre::Result<()> {
@@ -85,6 +144,35 @@ impl LocalPlacer {
             self.graph.nodes.len() <= K_MAX_LOCAL_PLACE_NODE_COUNT,
             "too large graph"
         );
+        ensure!(
+            self.visit_orders.len() == self.graph.nodes.len()
+                && self
+                    .visit_orders
+                    .iter()
+                    .copied()
+                    .collect::<HashSet<_>>()
+                    .len()
+                    == self.graph.nodes.len(),
+            "placement schedule must contain every graph node exactly once"
+        );
+        let schedule_position = self
+            .visit_orders
+            .iter()
+            .enumerate()
+            .map(|(index, node_id)| (*node_id, index))
+            .collect::<HashMap<_, _>>();
+        for node in &self.graph.nodes {
+            for input in &node.inputs {
+                if let Some(input_position) = schedule_position.get(input) {
+                    ensure!(
+                        input_position < &schedule_position[&node.id],
+                        "placement schedule visits node {} before its input {}",
+                        node.id,
+                        input
+                    );
+                }
+            }
+        }
 
         for node_id in &self.graph.nodes {
             let kind = &self.graph.find_node_by_id(node_id.id).unwrap().kind;
@@ -189,10 +277,27 @@ impl LocalPlacer {
         input_constraints: &LocalPlacerInputConstraints,
         progress_label: Option<&str>,
     ) -> Vec<PlacedWorld> {
+        self.generate_with_outputs_and_input_constraints_debug_progress(
+            dim,
+            finish_step,
+            input_constraints,
+            None,
+            progress_label,
+        )
+    }
+
+    pub fn generate_with_outputs_and_input_constraints_debug_progress(
+        &self,
+        dim: DimSize,
+        finish_step: Option<usize>,
+        input_constraints: &LocalPlacerInputConstraints,
+        debug: Option<&mut LocalPlacerDebug>,
+        progress_label: Option<&str>,
+    ) -> Vec<PlacedWorld> {
         self.generate_queue(
             dim,
             finish_step,
-            None,
+            debug,
             Some(input_constraints),
             progress_label,
         )
@@ -203,6 +308,79 @@ impl LocalPlacer {
             outputs: self.output_endpoints(&state),
         })
         .collect()
+    }
+
+    /// Generates candidates after choosing all external input pins as one bounded plan.
+    ///
+    /// The switches are temporary electrical drivers used by the local router and verifier.
+    /// Global PnR removes them when it converts the result into a switchless child layout.
+    pub fn generate_with_outputs_and_planned_inputs_progress(
+        &self,
+        dim: DimSize,
+        finish_step: Option<usize>,
+        input_constraints: &LocalPlacerInputConstraints,
+        progress_label: Option<&str>,
+    ) -> Vec<PlacedWorld> {
+        self.generate_with_outputs_and_planned_inputs_debug_progress(
+            dim,
+            finish_step,
+            input_constraints,
+            None,
+            progress_label,
+        )
+    }
+
+    pub fn generate_with_outputs_and_planned_inputs_debug_progress(
+        &self,
+        dim: DimSize,
+        finish_step: Option<usize>,
+        input_constraints: &LocalPlacerInputConstraints,
+        debug: Option<&mut LocalPlacerDebug>,
+        progress_label: Option<&str>,
+    ) -> Vec<PlacedWorld> {
+        if !self.inputs_form_initial_prefix()
+            || !matches!(
+                self.config.placement_sampling_policy,
+                PlacementSamplingPolicy::StepPolicy
+            )
+        {
+            return self.generate_with_outputs_and_input_constraints_debug_progress(
+                dim,
+                finish_step,
+                input_constraints,
+                debug,
+                progress_label,
+            );
+        }
+        self.generate_queue_with_planned_inputs(
+            dim,
+            finish_step,
+            Some(input_constraints),
+            debug,
+            progress_label,
+        )
+        .into_iter()
+        .map(|(world, state)| PlacedWorld {
+            world,
+            inputs: self.input_endpoints(&state),
+            outputs: self.output_endpoints(&state),
+        })
+        .collect()
+    }
+
+    fn inputs_form_initial_prefix(&self) -> bool {
+        let mut saw_non_input = false;
+        for node_id in &self.visit_orders {
+            let is_input = self
+                .graph
+                .find_node_by_id(*node_id)
+                .is_some_and(|node| node.kind.is_input());
+            if is_input && saw_non_input {
+                return false;
+            }
+            saw_non_input |= !is_input;
+        }
+        true
     }
 
     pub fn generate_with_debug(
@@ -278,6 +456,86 @@ impl LocalPlacer {
         )
     }
 
+    fn generate_queue_with_planned_inputs(
+        &self,
+        dim: DimSize,
+        finish_step: Option<usize>,
+        input_constraints: Option<&LocalPlacerInputConstraints>,
+        debug: Option<&mut LocalPlacerDebug>,
+        progress_label: Option<&str>,
+    ) -> PlacerQueue {
+        let queue = self.initial_pin_plan_queue(dim, input_constraints);
+        self.generate_queue_from_with_input_constraints(
+            queue,
+            finish_step,
+            debug,
+            input_constraints,
+            progress_label,
+        )
+    }
+
+    fn initial_pin_plan_queue(
+        &self,
+        dim: DimSize,
+        input_constraints: Option<&LocalPlacerInputConstraints>,
+    ) -> PlacerQueue {
+        let mut queue = vec![(World3D::new(dim), PlacementState::default())];
+        for (step, node_id) in self.visit_orders.iter().copied().enumerate() {
+            let node = self.graph.find_node_by_id(node_id).unwrap();
+            let GraphNodeKind::Input(input_name) = &node.kind else {
+                continue;
+            };
+            let constrained_positions = input_constraints
+                .and_then(|constraints| constraints.positions_for(node.id, input_name));
+
+            // Expand lightweight descriptors and sample them before cloning World3D.
+            // A 2,500 x 25 pin step therefore materializes at most the beam size.
+            let mut extensions = Vec::new();
+            for (parent, (world, _)) in queue.iter().enumerate() {
+                for kind in input_node_kind() {
+                    extensions.extend(
+                        input_placements(
+                            &self.config,
+                            world,
+                            kind,
+                            constrained_positions.as_deref(),
+                        )
+                        .into_iter()
+                        .map(|placed_node| (parent, placed_node)),
+                    );
+                }
+            }
+            let extensions = self.sample_pin_extensions(step, extensions);
+
+            let mut next = Vec::with_capacity(extensions.len());
+            for (parent, placed_node) in extensions {
+                let (parent_world, parent_state) = &queue[parent];
+                let mut world = parent_world.clone();
+                let mut state = parent_state.clone();
+                place_node(&mut world, placed_node);
+                state.set_node_position(node.id, placed_node.position);
+                state.set_signal_footprint(node.id, [placed_node.position]);
+                next.push((world, state));
+            }
+            queue = next;
+            if queue.is_empty() {
+                break;
+            }
+        }
+        queue
+    }
+
+    fn sample_pin_extensions(
+        &self,
+        step: usize,
+        extensions: Vec<(usize, PlacedNode)>,
+    ) -> Vec<(usize, PlacedNode)> {
+        self.config.step_sampling_policy.sample_with_seed(
+            extensions,
+            self.config.sampling_seed(STEP_SAMPLE_SCOPE, step),
+        )
+    }
+
     fn generate_queue_from(
         &self,
         queue: PlacerQueue,
@@ -306,17 +564,40 @@ impl LocalPlacer {
 
         let mut step = 0;
         while step < self.visit_orders.len() && Some(step) != finish_step {
+            if self
+                .time_limit
+                .is_some_and(|limit| started.elapsed() >= limit)
+            {
+                if let Some(debug) = debug.as_deref_mut() {
+                    debug.time_limit_reached = true;
+                }
+                return Vec::new();
+            }
+            let step_started = Instant::now();
             let prev_len = queue.len();
             let result = self.do_step(step, queue, input_constraints, Some(progress));
+            let generation_elapsed = step_started.elapsed();
             let next_len = result.queue.len();
 
-            let compacted = self.compact_queue_after_step(step, result.queue);
+            let mut compacted = self.compact_queue_after_step(step, result.queue);
+            let mut joint_attempted = false;
+            let mut joint_candidates = 0;
+            if self.joint_ready_or_routes {
+                (compacted, joint_attempted) = self.preplan_ready_or_consumers(step, compacted);
+                joint_candidates = compacted.len();
+                compacted = self.compact_queue_after_step(step, compacted);
+            }
             let compacted_len = compacted.len();
             queue = self.sample(step, compacted);
             let sampled_len = queue.len();
             if let Some(debug) = debug.as_deref_mut() {
                 let mut step_debug = result.debug;
                 step_debug.sampled_len = sampled_len;
+                step_debug.compacted_len = compacted_len;
+                step_debug.joint_route_attempted = joint_attempted;
+                step_debug.joint_route_candidates = joint_candidates;
+                step_debug.generation_us = generation_elapsed.as_micros();
+                step_debug.total_us = step_started.elapsed().as_micros();
                 debug.steps.push(step_debug);
             }
 
@@ -331,6 +612,9 @@ impl LocalPlacer {
                 sampled_candidates = sampled_len,
                 "local placement step completed"
             );
+            if queue.is_empty() {
+                break;
+            }
         }
 
         tracing::info!(
@@ -399,18 +683,86 @@ impl LocalPlacer {
             total_steps: self.visit_orders.len(),
             node_id: node.id,
             node_kind: format!("{:?}", node.kind),
+            stage: match &node.kind {
+                GraphNodeKind::Input(_) => LocalPlacementStage::InputPlacement,
+                GraphNodeKind::Logic(logic) if logic.logic_type == LogicType::Not => {
+                    LocalPlacementStage::NotRouting
+                }
+                GraphNodeKind::Logic(logic) if logic.logic_type == LogicType::Or => {
+                    LocalPlacementStage::OrRouting
+                }
+                GraphNodeKind::Sequential(_) => LocalPlacementStage::SequentialPlacement,
+                GraphNodeKind::Output(_) => LocalPlacementStage::OutputPlacement,
+                _ => LocalPlacementStage::OtherPlacement,
+            },
             input_node_ids: node.inputs.clone(),
             input_positions,
             input_queue_len,
             generated_len: next_queue.len(),
             sampled_len: 0,
+            compacted_len: 0,
+            generation_us: 0,
+            total_us: 0,
             route_debug: has_route_debug.then_some(route_debug),
+            joint_route_attempted: false,
+            joint_route_candidates: 0,
         };
 
         StepResult {
             queue: next_queue,
             debug: step_debug,
         }
+    }
+
+    fn preplan_ready_or_consumers(&self, step: usize, queue: PlacerQueue) -> (PlacerQueue, bool) {
+        let producer = self.graph.find_node_by_id(self.visit_orders[step]).unwrap();
+        let mut attempted = false;
+        let planned = queue
+            .into_iter()
+            .flat_map(|(world, state)| {
+                let ready = producer
+                    .outputs
+                    .iter()
+                    .copied()
+                    .filter(|id| {
+                        let Some(node) = self.graph.find_node_by_id(*id) else {
+                            return false;
+                        };
+                        matches!(&node.kind, GraphNodeKind::Logic(logic) if logic.logic_type == LogicType::Or)
+                            && state.node_position(*id).is_none()
+                            && node.inputs.iter().all(|input| state.node_position(*input).is_some())
+                    })
+                    .collect_vec();
+                if ready.len() < 2 {
+                    return vec![(world, state)];
+                }
+                attempted = true;
+
+                let mut reverse = ready.clone();
+                reverse.reverse();
+                [ready.clone(), reverse]
+                    .into_iter()
+                    .unique()
+                    .flat_map(|order| {
+                        let mut frontier = vec![(world.clone(), state.clone())];
+                        for id in order {
+                            let node = self.graph.find_node_by_id(id).unwrap();
+                            frontier = frontier
+                                .into_iter()
+                                .flat_map(|(world, state)| {
+                                    self.generate_place_and_route(node, world, &state, None).items
+                                })
+                                .collect();
+                            if frontier.is_empty() {
+                                break;
+                            }
+                        }
+                        frontier
+                    })
+                    .collect_vec()
+            })
+            .collect();
+        (planned, attempted)
     }
 
     fn generate_place_and_route(
@@ -420,6 +772,12 @@ impl LocalPlacer {
         state: &PlacementState,
         input_constraints: Option<&LocalPlacerInputConstraints>,
     ) -> PlacementGeneration {
+        if matches!(node.kind, GraphNodeKind::Logic(_)) && state.node_position(node.id).is_some() {
+            return PlacementGeneration {
+                items: vec![(world, state.clone())],
+                route_debug: None,
+            };
+        }
         let mut route_debug = None;
         let items = match node.kind {
             GraphNodeKind::Input(ref input_name) => {
@@ -468,11 +826,12 @@ impl LocalPlacer {
                 LogicType::Not => not_node_kind()
                     .into_iter()
                     .flat_map(|kind| {
-                        generate_place_and_routes(
+                        generate_torch_place_and_routes_bounded(
                             &self.config,
                             &world,
                             state[&node.inputs[0]],
                             kind,
+                            self.not_site_limit,
                         )
                     })
                     .map(|(world, position)| {
@@ -491,8 +850,7 @@ impl LocalPlacer {
                     assert_eq!(node.inputs.len(), 2);
                     let input_a = state[&node.inputs[0]];
                     let input_b = state[&node.inputs[1]];
-                    let sealed_output_source_ids =
-                        self.graph.externally_observable_output_source_ids();
+                    let sealed_output_source_ids = self.graph.sealed_output_source_ids();
                     let mut protected_positions =
                         state.signal_positions_for_nodes(&sealed_output_source_ids);
                     protected_positions.extend(state.endpoint_positions().into_iter().filter_map(
@@ -507,7 +865,13 @@ impl LocalPlacer {
                     ));
                     let isolation =
                         RouteIsolation::new(&world, [input_a, input_b], protected_positions);
-                    let result = generate_or_routes(&self.config, &world, input_a, input_b);
+                    let result = generate_or_routes_with_isolation(
+                        &self.config,
+                        &world,
+                        input_a,
+                        input_b,
+                        &isolation,
+                    );
                     route_debug = Some(result.debug);
                     result
                         .routes
@@ -518,10 +882,7 @@ impl LocalPlacer {
                             let positions = route_path
                                 .last()
                                 .copied()
-                                .filter(|position| {
-                                    candidate_world[*position].kind.is_redstone()
-                                        && isolation.accepts_or_route(&candidate_world, &route_path)
-                                })
+                                .filter(|position| candidate_world[*position].kind.is_redstone())
                                 .into_iter()
                                 .collect_vec();
                             positions
@@ -621,7 +982,7 @@ impl LocalPlacer {
                 .chain(self.graph.nodes.iter().filter_map(|node| {
                     matches!(node.kind, GraphNodeKind::Input(_)).then_some(node.id)
                 }))
-                .chain(self.graph.externally_observable_output_source_ids())
+                .chain(self.graph.sealed_output_source_ids())
                 .chain(
                     self.config
                         .materialize_outputs
@@ -774,10 +1135,31 @@ impl LocalPlacer {
 
     fn placement_cost(&self, step: usize, world: &World3D, state: &PlacementState) -> usize {
         let current_node_id = self.visit_orders[step];
-        let mut cost = world_compact_cost(world);
+        let block_count = world.iter_block().len();
+        let mut cost = block_count.saturating_mul(self.cost_weights.block_count);
+        if let Some(bounds) = bounding_box(world) {
+            cost = cost
+                .saturating_add(
+                    bounds
+                        .volume()
+                        .saturating_mul(self.cost_weights.bbox_volume),
+                )
+                .saturating_add(
+                    bounds
+                        .extent_sum()
+                        .saturating_mul(self.cost_weights.bbox_extent),
+                )
+                .saturating_add(
+                    bounds
+                        .height()
+                        .saturating_mul(self.cost_weights.bbox_height),
+                );
+        }
 
         if let Some(position) = state.node_position(current_node_id) {
-            cost += local_density(world, position) * LOCAL_DENSITY_COST_WEIGHT;
+            cost = cost.saturating_add(
+                local_density(world, position).saturating_mul(self.cost_weights.local_density),
+            );
         }
 
         for pair in &self.cost_join_pairs_by_step[step] {
@@ -785,7 +1167,11 @@ impl LocalPlacer {
             else {
                 continue;
             };
-            cost += a.manhattan_distance(&b) * pair.weight * FUTURE_JOIN_DISTANCE_COST_WEIGHT;
+            cost = cost.saturating_add(
+                a.manhattan_distance(&b)
+                    .saturating_mul(pair.weight)
+                    .saturating_mul(self.cost_weights.future_join_distance),
+            );
         }
 
         cost

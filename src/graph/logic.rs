@@ -53,7 +53,12 @@ impl LogicGraph {
         LogicTruthTable::from_graph(self)
     }
 
-    pub fn externally_observable_output_source_ids(&self) -> HashSet<GraphNodeId> {
+    /// Output sources whose signal terminates at the module boundary.
+    ///
+    /// A named output that is also consumed by internal logic is deliberately
+    /// excluded: local placement must keep routing that shared signal rather
+    /// than sealing it as a completed terminal.
+    pub fn sealed_output_source_ids(&self) -> HashSet<GraphNodeId> {
         self.nodes
             .iter()
             .filter_map(|node| match &node.kind {
@@ -127,9 +132,9 @@ impl LogicGraph {
         self.attach_outputs(outputs)
     }
 
-    pub fn externally_observable_truth_table(&self) -> eyre::Result<LogicTruthTable> {
+    pub fn sealed_output_truth_table(&self) -> eyre::Result<LogicTruthTable> {
         let table = self.truth_table()?;
-        let output_source_ids = self.externally_observable_output_source_ids();
+        let output_source_ids = self.sealed_output_source_ids();
         let mut output_names = self
             .nodes
             .iter()
@@ -499,7 +504,12 @@ impl LogicGraphBuilder {
                         self.next();
                         self.new_input_node(ident)
                     }
-                    LogicStringTokenType::ParStart => self.parse_or(),
+                    LogicStringTokenType::ParStart => {
+                        self.next();
+                        let node = self.parse_or();
+                        assert_eq!(self.next(), LogicStringTokenType::ParEnd);
+                        node
+                    }
                     _ => panic!(),
                 };
                 self.new_logic_node(LogicType::Not, vec![node])
@@ -606,6 +616,14 @@ mod tests {
         assert_eq!(table.input_names, vec!["a", "b"]);
         assert_eq!(table.output_tables["s"], vec![false, true, true, false]);
 
+        Ok(())
+    }
+
+    #[test]
+    fn parenthesized_not_does_not_consume_following_operator() -> eyre::Result<()> {
+        let parsed = LogicGraph::from_stmt("~(a|b)|c", "y")?.truth_table()?;
+        let equivalent = LogicGraph::from_stmt("(~a&~b)|c", "y")?.truth_table()?;
+        assert_eq!(parsed, equivalent);
         Ok(())
     }
 

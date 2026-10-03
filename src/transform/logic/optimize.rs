@@ -198,6 +198,17 @@ impl LogicGraphTransformer {
         }
 
         for (from, to) in replacements {
+            let replacement_tag = self
+                .graph
+                .graph
+                .find_node_by_id(from)
+                .map(|node| node.tag.clone())
+                .unwrap_or_default();
+            if let Some(mut representative) = self.graph.graph.find_node_by_id_mut(to) {
+                if representative.tag.is_empty() {
+                    representative.tag = replacement_tag;
+                }
+            }
             self.graph.graph.replace_input_node_id_lazy(from, to);
             self.graph.graph.remove_by_node_id_lazy(from);
         }

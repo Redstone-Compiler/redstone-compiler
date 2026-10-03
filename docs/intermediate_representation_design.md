@@ -28,7 +28,7 @@ Verilog source
   -> Logical IR                      ir/logical.rcir
   -> direct target/macro lowering
   -> Routable IR                     ir/routable.rcir
-  -> local candidate preparation
+  -> local candidate generation
   -> global placement and routing
   -> NBT and snapshot artifacts
 ```
@@ -37,8 +37,10 @@ The boundaries have different purposes:
 
 - Logical IR is target-independent, bus-aware, and preserves intent such as
   incrementers, muxes, registers, clock edges, enables, and reset behavior.
-- Routable IR is target-selected and structural. Every value is scalar and
-  every cell is supported by the selected target library or macro mapper.
+- Routable IR is target-selected, technology-mapped, and structural. Every
+  value is scalar and every node is directly supported by local placement.
+  Adapting a leaf to the placer graph must not decompose logic, run CSE, insert
+  buffers, or otherwise rewrite the graph.
 - Physical results (selected coordinates, bounding boxes, route paths, and
   Minecraft block states) belong to snapshots. Physical intent and PnR policy
   may be embedded in a Routable RCIR document without becoming circuit graph
@@ -130,6 +132,7 @@ RoutableDocument
 |- named pnr.design profiles
 |- explicit module/leaf profile bindings
 |- port-local @pnr.pin_search annotations
+|- hard local-cell packaging and port-access contracts
 `- PhysicalSpec
 ```
 
@@ -151,11 +154,115 @@ module "counter" { ... }
 leaf "inv" { ... }
 ```
 
+Combinational hierarchy search is part of the candidate profile and is fully
+replayable from Routable RCIR:
+
+```text
+profile pnr.candidate "adder-search" {
+  search-box [10, 10, 5];
+  retain 8;
+  combinational-samples none;
+  clustering {
+    enabled true;
+    prefer-provenance true;
+    reuse-macros true;
+    keep-monolithic true;
+    trigger-logic-nodes 8;
+    max-logic-nodes 4;
+    max-tagged-logic-nodes 12;
+    candidates-per-cluster 2;
+    max-alternative-combinations 6;
+    placement-spacings [4, 8];
+    shelf-width 96;
+    routing-floor-margin 4;
+    input-boundary-bias true;
+    direct-max-steps 128;
+    beam-width 64;
+    beam-max-expansions 2048;
+  }
+  local-placer { ... }
+}
+```
+
+Setting `enabled false` selects monolithic local placement. With clustering
+enabled, `keep-monolithic` controls whether the composed result competes with
+the original leaf or replaces it. A zero direct budget disables the direct
+probe; zero beam width or expansion budget disables the beam stage. At least
+one composition router must remain enabled. This block configures an optional
+hierarchical candidate representation: it is not the leaf local placer's own
+routing policy.
+
+The leaf local placer owns its quality objective and failure-sensitive retry
+policy. Both are explicit in the same bound candidate profile:
+
+```text
+local-placer {
+  random-seed 29;
+  schedule auto;
+  # input, placement-sampling, and routing fields omitted here
+
+  objective {
+    block-count 10;
+    bbox-volume 1;
+    bbox-extent 5;
+    bbox-height 20;
+    local-density 3;
+    future-join-distance 8;
+  }
+
+  adaptive {
+    max-retries 1;
+    route-depth-multiplier 2;
+    route-depth-cap 16;
+    sampling-multiplier 2;
+    sampling-cap none;
+  }
+}
+```
+
+The objective weights rank partial local placements; they do not change
+candidate legality. `max-retries 0` disables adaptive retry. A route depth of
+zero remains disabled during retry, so adaptation never silently enables a
+route family that the profile turned off. Sampling and depth caps never shrink
+the explicitly configured initial budget.
+
+Candidate profiles are authoritative. The compiler does not replace an
+explicit multi-input combinational leaf policy with hidden NOT/OR routing
+defaults. `combinational-samples N` remains an explicit profile-level shorthand
+that sets the three combinational step/NOT-route/OR-route sampling limits to
+`random(N)` when the candidate is resolved.
+
 An input port may carry the object-local coordinate constraint
 `@pnr.pin_search(positions = [[x, y, z], ...])`. Placement heuristics are an
 ordered list, and a `free3d` entry represents a deterministic Cartesian sweep
 of clearances (outer loop) and seeds (inner loop). `physical {}` appears after
 the circuit modules and holds regions and multi-object constraints.
+
+Hard requirements on a generated leaf stay directly beside that leaf rather
+than inside its reusable search profile:
+
+```text
+@pnr.candidate(profile = "cell-search")
+@pnr.max_bbox(size = [8, 6, 4])
+leaf "compact_xor" {
+  @pnr.pin_search(positions = [[0, 2, 1]])
+  @pnr.pin(face = west, access = inward)
+  port input "a";
+
+  @pnr.pin(face = east, access = outward)
+  port output "y";
+  ...
+}
+```
+
+`search-box` controls where candidate generation searches;
+`@pnr.max_bbox` is a packaging contract that every accepted realization must
+eventually satisfy. The parser already rejects zero dimensions, pin-search
+coordinates outside the box, and coordinates that contradict the declared
+face. Faces use the local cell axes (`west/east` = x, `north/south` = depth,
+`down/up` = height). `access` describes the legal signal direction relative to
+the cell. Enforcement against generated worlds belongs at the candidate
+acceptance boundary, not in the RCIR parser.
 
 The compileable boundary is the entire document:
 
@@ -324,21 +431,23 @@ Additional rules:
 - Module definitions and named instances remain distinct so one verified macro
   candidate pool can be reused by many instances.
 
-An initial `redstone-v1` target may accept operations such as `std.not`,
-`std.and`, `std.or`, `std.xor`, `std.buffer`, and `std.d_latch`. A macro such as
-`redstone.dff` may remain as one Routable cell only if the target declares a
-local-placement implementation for it. Otherwise Logical lowering expands it
-into supported latch cells.
+The initial `redstone-v1` Routable leaf graph accepts `not`, binary `or`, and
+supported sequential primitives. Logical lowering decomposes `and` and `xor`,
+runs structural CSE, removes redundant inversions, and inserts required signal
+buffers before constructing Routable IR. A macro such as `redstone.dff` may
+remain as one Routable cell only if local placement directly supports it.
 
-The local preparation pass may decompose `std.xor`, insert buffers, or choose a
-different implementation. Those derived nodes are not canonical Routable RCIR.
+Consequently `ir/routable.rcir` is the canonical graph seen by local placement,
+not a pre-mapping graph. Implementation choices belong to lowering; candidate
+generation may change coordinates and physical blocks but not circuit graph
+structure.
 
 Conceptual counter lowering:
 
 ```text
 logical.inc<2>
   -> q_next_0 = std.not(q_0)
-  -> q_next_1 = std.xor(q_1, q_0)
+  -> q_next_1 = mapped not/or network for xor(q_1, q_0)
 
 logical.register<2>
   -> two target-supported state cells or state macros
@@ -526,6 +635,37 @@ At the local-placement boundary, each Routable leaf supplies only its node graph
 and typed ports; the node graph is adapted to the `Graph` consumed by the local
 placer. Composite hierarchy, candidate binding, global placement, and routing
 continue to use Routable definitions and `ResolvedPnrTopology`.
+
+Local placement scheduling is a separate, non-semantic layer between the
+Routable leaf graph and block search. Candidate profiles select it inside
+`local-placer`:
+
+```text
+local-placer {
+  schedule auto;
+  ...
+}
+```
+
+Supported policies are `topological`, `min-frontier`, `reconvergence`, and
+`auto`. The first preserves the legacy graph order. The two heuristic policies
+perform legal DAG list scheduling. `auto` first tries the canonical topological
+order so enabling it does not penalize graphs already handled by the established
+search. If that order cannot produce enough physically valid candidates, it
+ranks the remaining legal schedules by input-to-first-consumer lifetime, peak
+live frontier, accumulated frontier, and edge lifetime and tries them as a
+bounded recovery portfolio. Input lifetime is placement-specific: it favors
+introducing an external source near the logic cone that first consumes it
+instead of requiring every input to form an initial prefix. The
+schedule changes search order only; it does not mutate Routable IR or its cache
+identity as a circuit.
+
+Local candidate cost and adaptive retry are also replayable policy rather than
+compiler constants. `objective` preserves the established compact cost as its
+default while allowing experiments to trade block count, bounding volume,
+extent, height, local density, and future reconvergent-join distance. `adaptive`
+controls retry count, route-depth growth and cap, and sampling growth and cap.
+The resolved values participate in the candidate configuration fingerprint.
 
 Prepared/replayed global execution stores only the module name, resolved typed
 topology, candidate sets, and preparation metadata. Snapshot replay determines

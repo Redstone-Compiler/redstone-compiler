@@ -56,10 +56,13 @@ impl PhysicalPort {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LayoutCandidateCost {
     pub block_count: usize,
     pub bbox_volume: usize,
+    pub bbox_footprint: usize,
+    pub bbox_height: usize,
+    pub port_access_points: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -88,6 +91,12 @@ impl LayoutCandidate {
         let cost = LayoutCandidateCost {
             block_count: occupied_cells.len(),
             bbox_volume: bbox.volume(),
+            bbox_footprint: bbox.width() * bbox.depth(),
+            bbox_height: bbox.height(),
+            port_access_points: ports
+                .iter()
+                .map(|port| port.routing_access_positions().len())
+                .sum(),
         };
 
         Ok(Self {
