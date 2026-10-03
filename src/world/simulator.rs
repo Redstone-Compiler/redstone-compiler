@@ -796,7 +796,9 @@ impl Simulator {
                                     EventType::HardOff
                                 },
                                 target_position,
-                                direction: Direction::None,
+                                // Name the switch as the source, so several
+                                // sources on one block are tracked separately.
+                                direction: target_position.diff(pos),
                             })
                         }())
                         .for_each(|event| self.push_event_to_current_tick(event));
@@ -894,7 +896,7 @@ impl Simulator {
                     direction: pos_src.diff(pos),
                 })
                 .chain(|| -> Option<Event> {
-                    let pos = pos.walk(self.world[pos].direction)?;
+                    let support = pos.walk(self.world[pos].direction)?;
 
                     Some(Event {
                         id: None,
@@ -904,8 +906,8 @@ impl Simulator {
                         } else {
                             EventType::HardOff
                         },
-                        target_position: pos,
-                        direction: Direction::None,
+                        target_position: support,
+                        direction: support.diff(pos),
                     })
                 }())
                 .for_each(|event| self.push_event_to_current_tick(event));
@@ -1080,7 +1082,8 @@ impl Simulator {
             from_id: None,
             event_type: EventType::HardOn,
             target_position: pos.up(),
-            direction: Direction::None,
+            // The torch below is the source.
+            direction: Direction::Bottom,
         }));
 
         self.queue[0].extend(events);
@@ -1360,14 +1363,14 @@ impl Simulator {
                 direction: pos_src.diff(pos),
             })
             .chain(|| -> Option<Event> {
-                let pos = pos.walk(dir)?;
+                let support = pos.walk(dir)?;
 
                 Some(Event {
                     id: None,
                     from_id: None,
                     event_type: EventType::HardOn,
-                    target_position: pos,
-                    direction: Direction::None,
+                    target_position: support,
+                    direction: support.diff(pos),
                 })
             }());
 
@@ -1978,7 +1981,7 @@ impl Simulator {
                 EventType::HardOff
             },
             target_position: event.target_position.up(),
-            direction: Direction::None,
+            direction: Direction::Bottom,
         }))
         .collect::<Vec<_>>();
         events.into_iter().for_each(|event| {
@@ -2957,7 +2960,7 @@ mod test {
             from_id: None,
             event_type: EventType::HardOff,
             target_position: support,
-            direction: Direction::None,
+            direction: support.diff(torch),
         }]));
         sim.run_with_max_cycles(32)?;
 
