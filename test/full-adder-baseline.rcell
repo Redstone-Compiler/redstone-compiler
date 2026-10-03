@@ -1,0 +1,86 @@
+rcell 1;
+
+// Readable reference layout: two 4-NOR cones and one carry NOR.
+// z=1: a,b -> XNOR -> XNOR with cin -> sum (left to right).
+// z=3: n1 and n5 travel independently to cout. No input is duplicated.
+// E/S/N describe repeater OUTPUT flow; RCELL stores the input direction.
+cell "full-adder-baseline" size [48, 22, 4] {
+  glyph "T" = torch on x-;
+  glyph "E" = repeater toward x- delay 1;
+  glyph "S" = repeater toward y- delay 1;
+  glyph "N" = repeater toward y+ delay 1;
+  auto-support dust repeater;
+
+  input "a" at [2, 2, 1] on x-;
+  input "b" at [2, 14, 1] on x-;
+  input "cin" at [26, 14, 1] on x-;
+
+  // First cone: n1=NOR(a,b); n2=NOR(a,n1); n3=NOR(b,n1).
+  probe "n1" at [7, 8, 1];
+  probe "n2" at [15, 4, 1];
+  probe "n3" at [15, 12, 1];
+  probe "xnor_ab" at [23, 8, 1];
+  // Second cone: n5=NOR(xnor_ab,cin); n6=NOR(xnor_ab,n5); n7=NOR(cin,n5).
+  probe "n5" at [31, 8, 1];
+  probe "n6" at [39, 4, 1];
+  probe "n7" at [39, 12, 1];
+  // Observe both carry branches just before their isolating input repeaters.
+  probe "carry_n1" at [40, 20, 3];
+  probe "carry_n5" at [40, 16, 3];
+  probe "carry_or" at [40, 18, 3];
+  output "sum" at [47, 8, 1];
+  output "cout" at [41, 18, 3];
+
+  // Logic plane: first cone x=6..23, second cone x=30..47.
+  plane xy at z=1 {
+    y=2 ".#.rrrrrrrrrrrr.........rrErrrrrrrrrrrr.........";
+    y=3 "....r.........S.........r...r.........S.........";
+    y=4 "....r...rrrrrE#Tr.......r...r...rrrrrE#Tr.......";
+    y=5 "....r...r.......r.......r...r...r.......r.......";
+    y=6 "....r...r.......rrrrrrr.r...r...r.......rrrrrrr.";
+    y=7 "....r...r.............S.r...r...r.............S.";
+    y=8 "....rE#Tr.............#Tr...rE#Tr.............#T";
+    y=9 "......N.r.............N.......N.r.............N.";
+    y=10 "......r.r.......rrrrrrr.......r.r.......rrrrrrr.";
+    y=11 "......r.r.......r.............r.r.......r.......";
+    y=12 "......r.rrrrrE#Tr.............r.rrrrrE#Tr.......";
+    y=13 "......r.......N...............r.......N.........";
+    y=14 ".#.rrrrrrrrrrrr..........#.rrrrrrrrrrrr.........";
+  }
+
+  // Only the two vertical carry pickups need explicit solid blocks.
+  plane xy at z=2 {
+    y=8 ".......#.......................#................";
+  }
+
+  // Carry plane: n5 uses y=16; n1 uses y=20; final NOR is at y=18.
+  plane xy at z=3 {
+    y=8 ".......r.......................r................";
+    y=9 ".......r.......................r................";
+    y=10 ".......r.......................r................";
+    y=11 ".......r.......................r................";
+    y=12 ".......r.......................r................";
+    y=13 ".......S.......................S................";
+    y=14 ".......r.......................r................";
+    y=15 ".......r.......................r................";
+    y=16 ".......r.......................rrrrrrrrrr.......";
+    y=17 ".......r................................S.......";
+    y=18 ".......S................................#T......";
+    y=19 ".......r................................N.......";
+    y=20 ".......rrrrrrErrrrrrrErrrrrrrErrrrrrrErrr.......";
+  }
+
+  // Explicit source-input expressions keep verification independent of probes.
+  expect "n1" = ~(a|b);
+  expect "n2" = ~(a|~(a|b));
+  expect "n3" = ~(b|~(a|b));
+  expect "xnor_ab" = ~(a^b);
+  expect "n5" = ~((~(a^b))|cin);
+  expect "n6" = ~((~(a^b))|~((~(a^b))|cin));
+  expect "n7" = ~(cin|~((~(a^b))|cin));
+  expect "carry_n1" = ~(a|b);
+  expect "carry_n5" = ~((~(a^b))|cin);
+  expect "carry_or" = (~(a|b))|(~((~(a^b))|cin));
+  expect "sum" = a^b^cin;
+  expect "cout" = (a&b)|(a&cin)|(b&cin);
+}

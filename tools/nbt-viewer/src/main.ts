@@ -3025,7 +3025,10 @@ async function loadExamples(): Promise<void> {
     if (!response.ok) throw new Error(`Failed to load examples: ${response.status}`);
     const examples = (await response.json()) as ExampleFile[];
     renderExampleBrowser(examples);
-    const initialExample = examples.find(example => example.kind === 'nbt');
+    const requestedExample = new URLSearchParams(window.location.search).get('example');
+    const initialExample = examples.find(example =>
+      example.path === requestedExample || example.name === requestedExample,
+    ) ?? examples.find(example => example.kind === 'nbt');
     if (initialExample) {
       await openExample(initialExample, findExampleEntry(initialExample.path));
     }

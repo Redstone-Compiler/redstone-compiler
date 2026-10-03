@@ -17,38 +17,62 @@ fn local_or_repeater_crosses_side_signal_without_merging_it() -> eyre::Result<()
     // The only two-step corridor is A -> repeater -> dust <- B. The
     // independent C switch beside the middle site would contaminate dust.
     let mut world = World3D::new(DimSize(3, 5, 2));
-    for position in [Position(1, 1, 0), Position(2, 3, 0), Position(0, 2, 0),
-        Position(2, 1, 1), Position(2, 2, 1)] {
+    for position in [
+        Position(1, 1, 0),
+        Position(2, 3, 0),
+        Position(0, 2, 0),
+        Position(2, 1, 1),
+        Position(2, 2, 1),
+    ] {
         place_node(&mut world, PlacedNode::new_cobble(position));
     }
     let from = Position(1, 1, 1);
     let to = Position(2, 3, 1);
     for position in [from, to] {
-        place_node(&mut world, PlacedNode::new(position, torch(Direction::Bottom)));
+        place_node(
+            &mut world,
+            PlacedNode::new(position, torch(Direction::Bottom)),
+        );
     }
     let drivers = [Position(1, 0, 0), Position(2, 4, 0), Position(0, 2, 1)];
-    for (position, direction) in drivers.into_iter().zip([Direction::North, Direction::South, Direction::Bottom]) {
+    for (position, direction) in
+        drivers
+            .into_iter()
+            .zip([Direction::North, Direction::South, Direction::Bottom])
+    {
         place_node(&mut world, PlacedNode::new(position, switch(direction)));
     }
     let cfg = config(2);
     assert!(generate_or_routes(&cfg, &world, from, to).routes.is_empty());
     assert!(generate_or_routes(&cfg, &world, to, from).routes.is_empty());
-    let result = generate_or_routes_with_fallbacks(&cfg, &world, from, to);
-    assert!(!result.routes.is_empty(), "diode corridor must be expressible");
     let isolation = RouteIsolation::new(&world, [from, to], HashSet::new());
+    let result = generate_or_routes_with_isolation(&cfg, &world, from, to, &isolation);
+    assert!(
+        !result.routes.is_empty(),
+        "diode corridor must be expressible"
+    );
     let mut verified = 0;
     for (candidate, path) in result.routes {
-        if !isolation.accepts_or_route(&candidate, &path) { continue; }
-        assert!(candidate.iter_block().iter().any(|(_, block)| block.kind.is_repeater()));
+        assert!(isolation.accepts_or_route(&candidate, &path));
+        assert!(candidate
+            .iter_block()
+            .iter()
+            .any(|(_, block)| block.kind.is_repeater()));
         let world = crate::world::World::from(&candidate);
         let mut valid = true;
         for mask in 0..8 {
             let a = mask & 1 != 0;
             let b = mask & 2 != 0;
             let c = mask & 4 != 0;
-            let mut sim = crate::world::simulator::Simulator::from_with_limits_and_trace(&world, 256, 50_000, 0)
-                .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
-            sim.drive_inputs_with_limits(drivers.into_iter().zip([a,b,c]).collect(), 256, 50_000)?;
+            let mut sim = crate::world::simulator::Simulator::from_with_limits_and_trace(
+                &world, 256, 50_000, 0,
+            )
+            .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
+            sim.drive_inputs_with_limits(
+                drivers.into_iter().zip([a, b, c]).collect(),
+                256,
+                50_000,
+            )?;
             valid &= sim.world()[from].kind.is_powered() == !a;
             valid &= sim.world()[to].kind.is_powered() == !b;
             valid &= sim.world()[*path.last().unwrap()].kind.is_powered() == (!a || !b);
@@ -235,7 +259,8 @@ fn replay_full_adder_first_failed_join() -> eyre::Result<()> {
         .unwrap_or_else(|_| "10".to_owned())
         .parse::<usize>()?;
     let width = std::env::var("LOCAL_FA_WIDTH")
-        .unwrap_or_else(|_| "2".to_owned()).parse::<usize>()?;
+        .unwrap_or_else(|_| "2".to_owned())
+        .parse::<usize>()?;
     eyre::ensure!((1..=10).contains(&width), "replay width out of range");
     let depth = std::env::var("LOCAL_FA_DEPTH")
         .unwrap_or_else(|_| "4".to_owned())
@@ -501,6 +526,105 @@ fn local_placer_limits_input_search_to_named_constraints() -> eyre::Result<()> {
 
     assert_eq!(generated.len(), 1);
     assert!(generated[0][input_position].kind.is_switch());
+    Ok(())
+}
+
+#[test]
+fn joint_ready_or_routes_keep_both_fanout_branches_live() -> eyre::Result<()> {
+    let mut graph = LogicGraph::from_assignments([
+        ("n1".to_owned(), "~(a|b)".to_owned()),
+        ("n2".to_owned(), "~(a|n1)".to_owned()),
+        ("n3".to_owned(), "~(b|n1)".to_owned()),
+    ])?
+    .prepare_place()?;
+    graph.graph.remove_output("n1");
+    let input_id = |name: &str| {
+        graph.nodes.iter().find_map(|node| {
+            matches!(&node.kind, GraphNodeKind::Input(input) if input == name).then_some(node.id)
+        })
+    };
+    let a_id = input_id("a").unwrap();
+    let b_id = input_id("b").unwrap();
+    let (fork_id, branches) = graph
+        .nodes
+        .iter()
+        .filter(|node| matches!(&node.kind, GraphNodeKind::Logic(logic) if logic.logic_type == LogicType::Not))
+        .find_map(|node| {
+            let branches = node
+                .outputs
+                .iter()
+                .copied()
+                .filter(|id| {
+                    graph.find_node_by_id(*id).is_some_and(|consumer| {
+                        matches!(&consumer.kind, GraphNodeKind::Logic(logic) if logic.logic_type == LogicType::Or)
+                    })
+                })
+                .collect_vec();
+            (branches.len() == 2).then_some((node.id, branches))
+        })
+        .unwrap();
+    let stop = PlacementScheduler::new(&graph)
+        .select(PlacementSchedulePolicy::Topological)
+        .order
+        .iter()
+        .position(|id| *id == fork_id)
+        .unwrap()
+        + 1;
+    let cfg = LocalPlacerConfig {
+        greedy_input_generation: true,
+        step_sampling_policy: SamplingPolicy::Random(64),
+        placement_sampling_policy: LocalPlacerConfig::ranked_sampling(56, 8, 0),
+        max_route_step: 8,
+        route_step_sampling_policy: SamplingPolicy::Random(32),
+        ..Default::default()
+    };
+    let placer = LocalPlacer::new(graph.clone(), cfg)?.with_joint_ready_or_routes();
+    let queue = placer.generate_queue(DimSize(2, 14, 10), Some(stop), None, None, None);
+    assert!(
+        !queue.is_empty(),
+        "joint branches should have at least one route"
+    );
+    assert!(queue
+        .iter()
+        .all(|(_, state)| { branches.iter().all(|id| state.node_position(*id).is_some()) }));
+
+    let mut verified = false;
+    for (world, state) in queue {
+        let world = crate::world::World::from(&world);
+        let branch_positions = branches
+            .iter()
+            .map(|id| {
+                (
+                    graph.find_node_by_id(*id).unwrap().inputs.clone(),
+                    state[id],
+                )
+            })
+            .collect_vec();
+        let mut valid = true;
+        for mask in 0..4 {
+            let a = mask & 1 != 0;
+            let b = mask & 2 != 0;
+            let mut sim = crate::world::simulator::Simulator::from_with_limits_and_trace(
+                &world, 256, 50_000, 0,
+            )
+            .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
+            sim.drive_inputs_with_limits(vec![(state[&a_id], a), (state[&b_id], b)], 256, 50_000)?;
+            let n1 = !(a || b);
+            valid &= sim.world()[state[&fork_id]].kind.is_powered() == n1;
+            valid &= branch_positions.iter().all(|(inputs, position)| {
+                let operand = if inputs.contains(&a_id) { a } else { b };
+                sim.world()[*position].kind.is_powered() == (operand || n1)
+            });
+        }
+        if valid {
+            verified = true;
+            break;
+        }
+    }
+    assert!(
+        verified,
+        "at least one joint route must preserve both branches"
+    );
     Ok(())
 }
 

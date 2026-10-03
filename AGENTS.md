@@ -10,6 +10,12 @@
 - Compilation snapshot artifacts: `docs/compilation_snapshots.md`
 - Text-editable physical cell laboratory: `docs/physical_cell_lab.md`
 - Bounded local-only full-adder diagnostic: `docs/local_full_adder_diagnostic.md`
+- Manual RCELL full-adder carry diagnosis: `docs/rcell_full_adder_diagnostic.md`
+- Readable, verified RCELL full-adder baseline: `docs/rcell_full_adder_baseline.md`
+- Verified compact full adder and transferable placement rules: `docs/compact_full_adder_rules.md`
+- Height-10 full adder and low XNOR composition rules: `docs/height10_full_adder.md`
+- Further 2x13x9 compaction and carry bridge clearance: `docs/compact_full_adder_shrink.md`
+- Full adder with operand switches on the same boundary: `docs/full_adder_input_boundary.md`
 
 When asked to create or preserve project documentation, add an appropriate file under `docs/` and link it from this file when it is useful for future agents.
 

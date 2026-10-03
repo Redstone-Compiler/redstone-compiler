@@ -62,6 +62,7 @@ pub struct LocalPlacer {
     cost_join_pairs_by_step: Vec<Vec<FutureJoinPair>>,
     time_limit: Option<Duration>,
     not_site_limit: Option<usize>,
+    joint_ready_or_routes: bool,
 }
 
 type PlacerQueue = Vec<(World3D, PlacementState)>;
@@ -108,6 +109,7 @@ impl LocalPlacer {
             cost_join_pairs_by_step,
             time_limit: None,
             not_site_limit: None,
+            joint_ready_or_routes: false,
         };
         result.verify()?;
         Ok(result)
@@ -124,6 +126,15 @@ impl LocalPlacer {
     /// routing. This is an explicitly heuristic search budget, not a constraint.
     pub fn with_not_site_limit(mut self, limit: usize) -> Self {
         self.not_site_limit = Some(limit);
+        self
+    }
+
+    /// Route simultaneously ready OR consumers of the same signal before
+    /// sampling their parent worlds. Normal and reverse orders are considered.
+    /// This is an experimental search policy; callers retain the baseline
+    /// policy for comparison because early routing can exclude later recipes.
+    pub fn with_joint_ready_or_routes(mut self) -> Self {
+        self.joint_ready_or_routes = true;
         self
     }
 
@@ -568,7 +579,14 @@ impl LocalPlacer {
             let generation_elapsed = step_started.elapsed();
             let next_len = result.queue.len();
 
-            let compacted = self.compact_queue_after_step(step, result.queue);
+            let mut compacted = self.compact_queue_after_step(step, result.queue);
+            let mut joint_attempted = false;
+            let mut joint_candidates = 0;
+            if self.joint_ready_or_routes {
+                (compacted, joint_attempted) = self.preplan_ready_or_consumers(step, compacted);
+                joint_candidates = compacted.len();
+                compacted = self.compact_queue_after_step(step, compacted);
+            }
             let compacted_len = compacted.len();
             queue = self.sample(step, compacted);
             let sampled_len = queue.len();
@@ -576,6 +594,8 @@ impl LocalPlacer {
                 let mut step_debug = result.debug;
                 step_debug.sampled_len = sampled_len;
                 step_debug.compacted_len = compacted_len;
+                step_debug.joint_route_attempted = joint_attempted;
+                step_debug.joint_route_candidates = joint_candidates;
                 step_debug.generation_us = generation_elapsed.as_micros();
                 step_debug.total_us = step_started.elapsed().as_micros();
                 debug.steps.push(step_debug);
@@ -684,12 +704,65 @@ impl LocalPlacer {
             generation_us: 0,
             total_us: 0,
             route_debug: has_route_debug.then_some(route_debug),
+            joint_route_attempted: false,
+            joint_route_candidates: 0,
         };
 
         StepResult {
             queue: next_queue,
             debug: step_debug,
         }
+    }
+
+    fn preplan_ready_or_consumers(&self, step: usize, queue: PlacerQueue) -> (PlacerQueue, bool) {
+        let producer = self.graph.find_node_by_id(self.visit_orders[step]).unwrap();
+        let mut attempted = false;
+        let planned = queue
+            .into_iter()
+            .flat_map(|(world, state)| {
+                let ready = producer
+                    .outputs
+                    .iter()
+                    .copied()
+                    .filter(|id| {
+                        let Some(node) = self.graph.find_node_by_id(*id) else {
+                            return false;
+                        };
+                        matches!(&node.kind, GraphNodeKind::Logic(logic) if logic.logic_type == LogicType::Or)
+                            && state.node_position(*id).is_none()
+                            && node.inputs.iter().all(|input| state.node_position(*input).is_some())
+                    })
+                    .collect_vec();
+                if ready.len() < 2 {
+                    return vec![(world, state)];
+                }
+                attempted = true;
+
+                let mut reverse = ready.clone();
+                reverse.reverse();
+                [ready.clone(), reverse]
+                    .into_iter()
+                    .unique()
+                    .flat_map(|order| {
+                        let mut frontier = vec![(world.clone(), state.clone())];
+                        for id in order {
+                            let node = self.graph.find_node_by_id(id).unwrap();
+                            frontier = frontier
+                                .into_iter()
+                                .flat_map(|(world, state)| {
+                                    self.generate_place_and_route(node, world, &state, None).items
+                                })
+                                .collect();
+                            if frontier.is_empty() {
+                                break;
+                            }
+                        }
+                        frontier
+                    })
+                    .collect_vec()
+            })
+            .collect();
+        (planned, attempted)
     }
 
     fn generate_place_and_route(
@@ -699,6 +772,12 @@ impl LocalPlacer {
         state: &PlacementState,
         input_constraints: Option<&LocalPlacerInputConstraints>,
     ) -> PlacementGeneration {
+        if matches!(node.kind, GraphNodeKind::Logic(_)) && state.node_position(node.id).is_some() {
+            return PlacementGeneration {
+                items: vec![(world, state.clone())],
+                route_debug: None,
+            };
+        }
         let mut route_debug = None;
         let items = match node.kind {
             GraphNodeKind::Input(ref input_name) => {
@@ -786,11 +865,12 @@ impl LocalPlacer {
                     ));
                     let isolation =
                         RouteIsolation::new(&world, [input_a, input_b], protected_positions);
-                    let result = generate_or_routes_with_fallbacks(
+                    let result = generate_or_routes_with_isolation(
                         &self.config,
                         &world,
                         input_a,
                         input_b,
+                        &isolation,
                     );
                     route_debug = Some(result.debug);
                     result
@@ -802,10 +882,7 @@ impl LocalPlacer {
                             let positions = route_path
                                 .last()
                                 .copied()
-                                .filter(|position| {
-                                    candidate_world[*position].kind.is_redstone()
-                                        && isolation.accepts_or_route(&candidate_world, &route_path)
-                                })
+                                .filter(|position| candidate_world[*position].kind.is_redstone())
                                 .into_iter()
                                 .collect_vec();
                             positions

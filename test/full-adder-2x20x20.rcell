@@ -1,13 +1,18 @@
 rcell 1;
 
-// A fully isolated 9-NOR full adder. Every derived signal crosses a repeater
-// before hard-powering the next torch support.
+// Compact full adder: validated two-wide sum core, two reserved vertical relays,
+// and local carry recomputation. Compiler coordinates: z is height.
+// n1 bypass: x=1,y=19. cin bypass: x=1,y=18. Final carry is at z=19.
+// P flows +Y, Q flows -Y. D flows +Y with delay 2 to filter startup pulses.
+// U attaches below; W/V attach toward -X/+X. Each row spans y=0..19.
 cell "full-adder-2x20x20" size [2, 20, 20] {
   glyph "U" = torch on z-;
   glyph "W" = torch on x-;
+  glyph "V" = torch on x+;
   glyph "P" = repeater toward y- delay 1;
   glyph "Q" = repeater toward y+ delay 1;
 
+  glyph "D" = repeater toward y- delay 2;
   auto-support dust repeater;
 
   input "a" at [0, 5, 1] on x+;
@@ -18,7 +23,7 @@ cell "full-adder-2x20x20" size [2, 20, 20] {
   probe "b_lift" at [1, 13, 3];
   probe "cin_lift" at [0, 16, 3];
   probe "n1" at [0, 9, 2];
-  probe "n1_keep" at [1, 19, 7];
+  probe "n1_keep" at [1, 19, 9];
   probe "n2" at [1, 6, 4];
   probe "n3" at [0, 11, 5];
   probe "n4" at [0, 8, 8];
@@ -26,211 +31,61 @@ cell "full-adder-2x20x20" size [2, 20, 20] {
   probe "n4_final" at [0, 6, 14];
   probe "cin_keep" at [0, 14, 11];
   probe "cin_final" at [0, 12, 14];
-  probe "n1_final" at [1, 19, 14];
+  probe "n1_final" at [1, 19, 17];
   probe "n5" at [1, 11, 12];
   probe "n6" at [1, 8, 15];
   probe "n7" at [1, 14, 15];
+  probe "carry_cin" at [1, 18, 17];
+  probe "carry_or" at [1, 18, 19];
   output "sum" at [1, 11, 18];
-  output "cout" at [0, 16, 18];
+  output "cout" at [0, 18, 19];
+  probe "carry_n5" at [0, 15, 18];
 
-  plane xy at z=1 {
-    y=3 "r.";
-    y=4 "r.";
-    y=5 ".#";
-    y=6 "r.";
-    y=7 "r.";
-    y=8 "P.";
-    y=9 "#.";
-    y=10 "Q.";
-    y=11 "r.";
-    y=12 "r.";
-    y=13 ".#";
-    y=14 "r.";
-    y=15 ".#";
-    y=17 "#.";
-    y=18 "r.";
-    y=19 "#.";
+  // x=0: top to bottom, columns are Y.
+  plane yz at x=0 {
+    //    01234567890123456789
+    z=19 "..................V.";
+    z=18 "...............U....";
+    z=17 ".............rP#Qr..";
+    z=16 ".............#......";
+    z=14 "......r.....UrP#rr..";
+    z=13 "......#r....#..#....";
+    z=12 ".......#r...U...#...";
+    z=11 "........#r..#Qr.rP#.";
+    z=10 ".........#r...#r#...";
+    z=9 "........#P#....#r...";
+    z=8 "........U.....r.#r..";
+    z=7 ".....rrP#Qrr...r.#..";
+    z=6 "...........#....r...";
+    z=5 "...........U.....r..";
+    z=4 ".........rP#Qrr...rr";
+    z=3 "........#.....#.r..#";
+    z=2 ".........U......#r..";
+    z=1 "...rr.rrP#Qrr.r..#r#";
   }
 
-  plane xy at z=2 {
-    y=3 ".r";
-    y=4 ".#";
-    y=8 ".#";
-    y=9 "Ur";
-    y=14 ".r";
-    y=16 "#.";
-    y=17 "r.";
-  }
-
-  plane xy at z=3 {
-    y=4 ".r";
-    y=5 ".P";
-    y=6 ".#";
-    y=7 ".Q";
-    y=8 "#r";
-    y=9 ".#";
-    y=13 ".r";
-    y=14 "#.";
-    y=16 "r.";
-    y=19 "#.";
-  }
-
-  plane xy at z=4 {
-    y=6 ".U";
-    y=9 "rr";
-    y=10 "Pr";
-    y=11 "#P";
-    y=12 "Q#";
-    y=13 "r.";
-    y=14 "r.";
-    y=16 ".r";
-    y=17 ".P";
-    y=18 "rr";
-    y=19 "r.";
-  }
-
-  plane xy at z=5 {
-    y=6 ".#";
-    y=11 "U.";
-    y=12 ".r";
-    y=13 ".#";
-    y=17 "r.";
-  }
-
-  plane xy at z=6 {
-    y=5 ".#";
-    y=6 ".r";
-    y=11 "#.";
-    y=13 ".r";
-    y=14 ".P";
-    y=15 ".P";
-    y=16 "rP";
-    y=17 ".P";
-    y=18 ".P";
-    y=19 ".#";
-  }
-
-  plane xy at z=7 {
-    y=5 "rr";
-    y=6 "r.";
-    y=7 "P.";
-    y=8 "#.";
-    y=9 "Q.";
-    y=10 "r.";
-    y=11 "r.";
-    y=15 "r.";
-    y=17 "#.";
-    y=18 ".#";
-    y=19 ".r";
-  }
-
-  plane xy at z=8 {
-    y=8 "U.";
-    y=14 "r.";
-    y=16 "#.";
-    y=17 "r.";
-    y=18 ".r";
-  }
-
-  plane xy at z=9 {
-    y=8 "#.";
-    y=9 "P.";
-    y=10 "#.";
-    y=14 ".r";
-    y=15 "#r";
-    y=16 "r.";
-    y=18 "r.";
-  }
-
-  plane xy at z=10 {
-    y=9 "#.";
-    y=10 "r.";
-    y=14 "#.";
-    y=15 "r.";
-    y=16 "#.";
-    y=19 "r#";
-  }
-
-  plane xy at z=11 {
-    y=8 "#.";
-    y=9 "rr";
-    y=10 ".P";
-    y=11 ".#";
-    y=12 "#Q";
-    y=13 "Qr";
-    y=14 "rr";
-    y=16 "r.";
-    y=17 "#.";
-    y=18 ".#";
-    y=19 ".r";
-  }
-
-  plane xy at z=12 {
-    y=7 "#.";
-    y=8 "r.";
-    y=11 ".U";
-    y=12 "U.";
-    y=16 "#.";
-    y=17 "r.";
-    y=18 "rr";
-  }
-
-  plane xy at z=13 {
-    y=6 "#.";
-    y=7 "r.";
-    y=11 ".#";
-    y=12 "#.";
-    y=15 "#.";
-    y=18 ".#";
-    y=19 "r.";
-  }
-
-  plane xy at z=14 {
-    y=6 "rr";
-    y=7 ".P";
-    y=8 ".#";
-    y=9 ".Q";
-    y=10 ".r";
-    y=11 "#r";
-    y=12 "UP";
-    y=13 "rP";
-    y=14 "P#";
-    y=15 "#Q";
-    y=16 "rr";
-    y=17 "rr";
-    y=19 ".r";
-  }
-
-  plane xy at z=15 {
-    y=8 ".U";
-    y=11 "U.";
-    y=14 ".U";
-  }
-
-  plane xy at z=16 {
-    y=8 ".#";
-    y=11 "#.";
-    y=13 "#.";
-    y=14 ".#";
-  }
-
-  plane xy at z=17 {
-    y=8 ".r";
-    y=9 ".r";
-    y=10 ".P";
-    y=11 "U#";
-    y=12 "rQ";
-    y=13 "Pr";
-    y=14 "Pr";
-    y=15 "P.";
-    y=16 "#.";
-    y=17 "Q.";
-    y=18 "r.";
-  }
-
-  plane xy at z=18 {
-    y=11 ".U";
-    y=16 "U.";
+  // x=1: top to bottom, columns are Y.
+  plane yz at x=1 {
+    //    01234567890123456789
+    z=19 "................rD#r";
+    z=18 "...........U..#r...#";
+    z=17 "........rrP#Qrr..rUU";
+    z=16 "........#.....#...##";
+    z=15 "........U.....U...UU";
+    z=14 "......rP#QrrPP#Qrr##";
+    z=13 "...........#......UU";
+    z=12 "...........U......##";
+    z=11 ".........rP#Qrr...WU";
+    z=10 "...................#";
+    z=9 "..............rr...U";
+    z=8 "...................#";
+    z=7 ".....r.............U";
+    z=6 ".....#r......rPPPPP#";
+    z=5 "......#.....r#......";
+    z=4 "......U..rrP#...rPr.";
+    z=3 "....rP#Qr#...r......";
+    z=2 "...r#...#r....r.....";
+    z=1 ".....#.......#.#....";
   }
 
   expect "a_lift" = a;
@@ -240,15 +95,18 @@ cell "full-adder-2x20x20" size [2, 20, 20] {
   expect "n1_keep" = ~(a|b);
   expect "n2" = ~(a|~(a|b));
   expect "n3" = ~(b|~(a|b));
-  expect "n4" = ~(~(a|~(a|b))|~(b|~(a|b)));
-  expect "n4_keep" = ~(~(a|~(a|b))|~(b|~(a|b)));
-  expect "n4_final" = ~(~(a|~(a|b))|~(b|~(a|b)));
+  expect "n4" = ~(a^b);
+  expect "n4_keep" = ~(a^b);
+  expect "n4_final" = ~(a^b);
   expect "cin_keep" = cin;
   expect "cin_final" = cin;
   expect "n1_final" = ~(a|b);
-  expect "n5" = ~(~(~(a|~(a|b))|~(b|~(a|b)))|cin);
-  expect "n6" = ~(~(~(a|~(a|b))|~(b|~(a|b)))|~(~(~(a|~(a|b))|~(b|~(a|b)))|cin));
-  expect "n7" = ~(cin|~(~(~(a|~(a|b))|~(b|~(a|b)))|cin));
+  expect "n5" = ~((~(a^b))|cin);
+  expect "n6" = ~((~(a^b))|~((~(a^b))|cin));
+  expect "n7" = ~(cin|~((~(a^b))|cin));
   expect "sum" = a^b^cin;
+  expect "carry_n5" = ~((~(a^b))|cin);
+  expect "carry_cin" = cin;
+  expect "carry_or" = (~(a|b))|(~((~(a^b))|cin));
   expect "cout" = a&b|a&cin|b&cin;
 }

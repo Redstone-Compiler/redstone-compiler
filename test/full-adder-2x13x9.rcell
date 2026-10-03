@@ -1,0 +1,67 @@
+rcell 1;
+
+// Two five-wide XNOR cores, with direct torch/switch-to-repeater reads.
+// z is height. Each YZ row spans y=0..12; two physical thickness planes.
+// The carry bridge at (0,5,7) is solid: leave (0,5,6) AIR for the
+// descending XNOR wire. Replacing this bridge with supported dust cuts it.
+cell "full-adder-2x13x9" size [2, 13, 9] {
+  glyph "U" = torch on z-;
+  glyph "W" = torch on x-;
+  glyph "V" = torch on x+;
+  glyph "P" = repeater toward y- delay 1;
+  glyph "Q" = repeater toward y+ delay 1;
+  glyph "T" = torch on y-;
+  auto-support dust repeater;
+  input "a" at [0, 0, 1] on x+;
+  input "b" at [0, 4, 1] on x+;
+  input "cin" at [0, 12, 4] on x+;
+  probe "n1" at [1, 2, 1];
+  probe "n2" at [1, 0, 2];
+  probe "n3" at [1, 4, 2];
+  probe "xnor" at [1, 2, 5];
+  probe "second_input" at [1, 6, 4];
+  probe "n5" at [1, 10, 4];
+  probe "n6" at [1, 8, 5];
+  probe "n7" at [1, 12, 5];
+  probe "carry_n5" at [0, 10, 7];
+  probe "carry_n1" at [0, 3, 7];
+  output "sum" at [1, 10, 8];
+  output "cout" at [0, 7, 8];
+
+  // Input joins, carry relay, and repeater -> solid -> repeater bridge.
+  plane yz at x=0 {
+  z=8 ".......U.....";
+  z=7 "..#TP#P#QrU..";
+  z=6 "..U.......#..";
+  z=5 "..#..r....V..";
+  z=4 "..U...rrPP#Q.";
+  z=3 "..#..........";
+  z=2 "..V..........";
+  z=1 ".P#Q.........";
+  }
+
+  // Logic cores and the descending connection between them.
+  plane yz at x=1 {
+  z=8 "..........U..";
+  z=7 "........rP#Qr";
+  z=6 "..#rrr..#...#";
+  z=5 "..U.....U.#.U";
+  z=4 "rP#Qr.rP#QWP#";
+  z=3 "#...#........";
+  z=2 "U.#.U........";
+  z=1 "#QWP#........";
+  }
+
+  expect "n1" = ~(a|b);
+  expect "n2" = ~(a|~(a|b));
+  expect "n3" = ~(b|~(a|b));
+  expect "xnor" = ~(a^b);
+  expect "second_input" = ~(a^b);
+  expect "n5" = ~((~(a^b))|cin);
+  expect "n6" = ~((~(a^b))|~((~(a^b))|cin));
+  expect "n7" = ~(cin|~((~(a^b))|cin));
+  expect "carry_n5" = ~((~(a^b))|cin);
+  expect "carry_n1" = ~(a|b);
+  expect "sum" = a^b^cin;
+  expect "cout" = a&b|a&cin|b&cin;
+}

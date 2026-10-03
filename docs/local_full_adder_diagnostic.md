@@ -25,21 +25,29 @@ All runs use seed 42. These environment variables affect only this harness:
 | --- | --- | --- |
 | `LOCAL_FA_BEAM` | 64 | 1..512 |
 | `LOCAL_FA_ROUTE_BEAM` | 8 | 1..32 |
-| `LOCAL_FA_DEPTH` | 4 | 1..8 |
+| `LOCAL_FA_DEPTH` | 4 | 1..16 |
 | `LOCAL_FA_WIDTH` | 2 | 1..10 |
 | `LOCAL_FA_SIDE` | 10 | 1..20 |
+| `LOCAL_FA_HEIGHT` | same as `LOCAL_FA_SIDE` | 1..20 |
 | `LOCAL_FA_SECONDS` | 10 | 1..30 |
 | `LOCAL_FA_SCHEDULE` | topological | topological, frontier, reconvergence |
 | `LOCAL_FA_FLEXIBLE` | unset | `1` enables nonadjacent NOT placement and routed NOT inputs |
 | `LOCAL_FA_NOT_SITES` | unset (unlimited) | 1..256; legal torch/support poses per parent, selected before cloning/routing |
-| `LOCAL_FA_GRAPH` | buffered | buffered, nor9 |
+| `LOCAL_FA_GRAPH` | buffered | buffered, nor9, nor10 |
+| `LOCAL_FA_PINS` | free | free, manual (exact manual input coordinates in 2x14x10) |
+| `LOCAL_FA_JOINT` | unset | `1` routes simultaneously ready OR consumers of one signal before beam sampling |
 
 The harness also accepts experimental schedule `defer_not`: move a NOT behind
 an immediately following independent OR, while retaining a valid topological
 order. This is diagnostic-only, not a new production schedule policy.
 
-Dimensions are `(width, side, side)` in compiler `(x,y,z)` coordinates, where
-`z` is height. Clear experimental environment variables before the baseline.
+Dimensions are `(width, side, height)` in compiler `(x,y,z)` coordinates, where
+`z` is height. If `LOCAL_FA_HEIGHT` is unset, height defaults to `side`.
+`LOCAL_FA_PINS=manual` requires 2x14x10 and fixes `a=(0,0,3)`, `b=(0,0,1)`,
+and `cin=(0,13,5)`; `free` uses the existing boundary search. The `nor10`
+graph adds the compact manual cell's carry recomputation
+`carry_n5 = NOR(n7,cin)` before `cout`. Clear experimental environment
+variables before the baseline.
 For a one-variable comparison:
 
 ```powershell
@@ -102,9 +110,10 @@ The local OR expansion originally searched only from its first input toward its
 second. On a frozen prefix, depth 8 / route beam 32 found zero routes in that
 direction and six in the reverse direction, all passing the structural isolation
 check. Production combinational OR expansion now tries the reverse direction
-when the first direction yields no raw route and the second input is a legal
-diode source. It still applies the existing isolation filter. This is a bounded
-fallback, not two unlimited searches or a relaxation of crosstalk rules.
+when the first direction yields no electrically isolated route and the second
+input is a legal diode source. It still applies the existing isolation filter.
+This is a bounded fallback, not two unlimited searches or a relaxation of
+crosstalk rules.
 
 `reverse_or_fallback_preserves_live_full_adder_signals` contains a fixed physical
 prefix, independent of candidate generation. It requires the forward search to
@@ -177,3 +186,126 @@ geometry of the two XOR branches, including access to both endpoints after
 their NOTs are placed. Repeatedly widening the whole search did not solve it in
 these bounded experiments. Preserve the frozen regression and simulator
 semantics when investigating earlier branch placement or larger local patterns.
+
+## 2x14x10 target, 2026-09-24
+
+The manual [2x14x10 cell](full_adder_input_boundary.md) passes its truth and
+transition checks, so this is a feasible physical box. The diagnostic now
+accepts its independent height and exact input switch positions. Every run
+below used release mode, seed 42, route depth 8, route beam 32, topological
+schedule unless stated, and a 10-second cooperative step-boundary limit.
+Search times are single measurements excluding compilation. The ignored test
+reports `ok` even when no candidate is found; the outcome is `valid=0` in
+every row.
+
+| Graph / pins / search change | Search time | First empty placement frontier |
+| --- | ---: | --- |
+| nor9 / free / beam 64 | 419 ms | step 10/23, first XNOR branch join, 3 parents |
+| nor9 / manual / beam 64 | 35 ms | step 8/23, second operand branch, 8 parents |
+| buffered / free / beam 64 | 345 ms | step 13/24, first XOR branch join, 3 parents |
+| nor10 / free / beam 64 | 380 ms | step 10/25, first XNOR branch join, 3 parents |
+| nor10 / manual / beam 64 | 35 ms | step 8/25, second operand branch, 8 parents |
+| nor10 / free / beam 256 | 1,795 ms | step 14/25, second cin branch, 60 parents |
+| nor10 / free / beam 256, flexible NOT, 32 sites | 2,771 ms | step 14/25, second cin branch, 89 parents |
+| nor10 / free / beam 512 | 2,483 ms | step 10/25, first XNOR branch join, 42 parents |
+| nor10 / free / beam 64, defer NOT | 404 ms | step 10/25, first XNOR branch join, 3 parents |
+
+The exact-pin `nor10` run finishes its first NOR but loses every route when
+the second operand branch tries to reuse `a` after the first torch/branch has
+been placed. At that step it tested 8 parent worlds and 32 route calls;
+the depth-8 route frontier remained nonempty, so this is a bounded search
+failure, not a proof that the connection cannot be built. The manual circuit
+routes `b` in a reserved bottom bus with repeaters and has a deliberately
+repacked XNOR core. The placer currently commits to small local joins before
+allocating that bus or the later carry/`cin` corridors.
+
+With free input locations, beam 256 gets past the first XNOR join and produces
+39 candidates there. It next runs out while joining `cin` to the second
+carry/sum branch, despite 60 parent worlds and 240 route calls. Flexible NOT
+placement with a 32-site cap reaches the same stage. Beam 512 returns to an
+earlier failure because the bounded sampling and ranking select a different
+frontier; larger beam is not monotonic here. None of these runs reached the
+final output placement or physical candidate verification.
+
+Priority extensions suggested by this experiment:
+
+1. Plan fanout access and reserve electrical clearance for `a`, `b`, `cin`,
+   and the first NOR/XNOR joins before committing each short route. Evaluate
+   branch joins together or retain partial worlds with distinct future access
+   corridors. The current ranking collapses to 3–60 parents at those joins.
+2. Expose compact NOR and relay recipes, including bottom-level repeater buses
+   and vertical polarity-preserving transport, as routable placement options.
+   The OR router already tries individual horizontal repeaters as a fallback,
+   but it does not plan the complete bus/relay structures in the manual cell.
+   Increasing route depth alone does not reserve those corridors.
+3. Compare equivalent mapped graphs such as `nor9` and the `nor10` local
+   recomputation candidate before search. Their truth tables match but their
+   routing demands differ; gate count alone is a poor objective.
+4. Add an output-boundary contract for `s` after the earlier joins are
+   solvable. This harness fixes only input coordinates, and its configuration
+   leaves `materialize_outputs=false`; current output generation has no
+   named-position constraint. It therefore does not yet check the requested
+   sum-at-opposite-edge interface.
+
+Reproduce the closest logical and input-pin comparison:
+
+```sh
+LOCAL_FA_WIDTH=2 LOCAL_FA_SIDE=14 LOCAL_FA_HEIGHT=10 \
+LOCAL_FA_GRAPH=nor10 LOCAL_FA_PINS=manual \
+LOCAL_FA_DEPTH=8 LOCAL_FA_ROUTE_BEAM=32 \
+cargo test --release --locked --lib diagnose_monolithic_full_adder -- --ignored --nocapture
+```
+
+## Joint fanout-route experiment, 2026-09-24
+
+`LOCAL_FA_JOINT=1` tries both routing orders for OR consumers that share the
+just-placed signal and whose other inputs are already placed. It places both
+routes in the same partial world **before** the normal beam sampling and skips
+those OR steps when reached later. This is a general graph pattern, not a
+full-adder coordinate rule. The feature is opt-in because committing those
+routes early can exclude a valid layout that needs later supports or a
+different net order. The normal placer remains the comparison control.
+
+The OR fallback now tries another routing family when the previous family has
+no *electrically isolated* route, even if it produced raw geometric paths.
+Previously the isolation check happened only after deciding whether to try
+reverse and repeater paths. This is a correctness-based routing choice, not a
+new numeric cutoff. In the measured full-adder frontiers below this correction
+did not change the first failed stage by itself.
+
+| Graph / pins / search | Search time | Outcome |
+| --- | ---: | --- |
+| nor10 / manual / joint, beam 64, depth 8 | 144 ms | 12 first-NOR worlds, none can route both ready operand branches; empty after step 5/25 |
+| nor10 / manual / joint, beam 64, depth 12 | 257 ms | Same empty frontier; extra route depth did not recover a joint path |
+| nor10 / free / joint, beam 64, depth 8 | 4,795 ms | 70 joint worlds after step 5, first XNOR join yields 277; empty at first `cin` join, step 12/25 |
+| nor10 / free / joint, beam 256, depth 8 | 21,129 ms | 288 joint worlds after step 5, first XNOR join yields 1,091; 50 reach first `cin` join, then second `cin`/`n5` joint plan empties after step 13/25 |
+
+All rows generated zero complete candidates (`valid=0`). The joint method
+demonstrates that preserving *both* operand-branch routes through sampling can
+move the first XNOR join past its old failure, including at beam 64. A release
+regression verifies the two jointly routed branch values across all four
+operand combinations in the simulator. It does not yet find a complete cell.
+
+The manual-pin failure is a useful counterexample to treating an early concrete
+route as a required proof of future feasibility. The manual fixture is known
+valid, but it uses a bottom repeater bus and later supports that this early
+OR-only plan cannot express. The next generalizable extension is a **soft route
+reservation**: retain a proposed corridor/port-access state alongside the
+uncommitted world, allow a route to be revised when a later branch is placed,
+and only reject when even an optimistic reachability check fails. Electrical
+isolation and simulator truth/transition verification remain mandatory when
+the routes become physical.
+
+Reproduce the opt-in trial:
+
+```sh
+LOCAL_FA_WIDTH=2 LOCAL_FA_SIDE=14 LOCAL_FA_HEIGHT=10 \
+LOCAL_FA_GRAPH=nor10 LOCAL_FA_JOINT=1 \
+LOCAL_FA_DEPTH=8 LOCAL_FA_ROUTE_BEAM=32 \
+cargo test --release --locked --lib diagnose_monolithic_full_adder -- --ignored --nocapture
+```
+
+Validation for this follow-up: `cargo build --release --locked` succeeds;
+`cargo test --release --locked --lib local_ -- --skip test_generate --skip
+debug_` passes 55 tests with 3 ignored. The ignored full-adder measurements
+above were run explicitly, and no complete automatic candidate was generated.

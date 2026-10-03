@@ -257,7 +257,14 @@ mod tests {
 
     const INVERTER: &str = include_str!("../../test/inverter.rcell");
     const NOR_CASCADE: &str = include_str!("../../test/nor-cascade-primitive.rcell");
-    const FULL_ADDER_2X20X20: &str = include_str!("../../test/full-adder-2x20x20.rcell");
+    const FULL_ADDER_BASELINE: &str = include_str!("../../test/full-adder-baseline.rcell");
+    const FULL_ADDER_COMPACT: &str = include_str!("../../test/full-adder-2x20x20.rcell");
+    const FULL_ADDER_LOW: &str = include_str!("../../test/full-adder-2x17x10.rcell");
+    const FULL_ADDER_SMALL: &str = include_str!("../../test/full-adder-2x13x9.rcell");
+    const FULL_ADDER_RIGHT_INPUTS: &str =
+        include_str!("../../test/full-adder-right-inputs-2x14x10.rcell");
+    const DISCONNECTED_FULL_ADDER: &str =
+        include_str!("../../test/rcell/archive/full-adder-2x20x20-disconnected.rcell");
 
     #[test]
     fn physical_cell_round_trips_canonical_text() -> eyre::Result<()> {
@@ -403,9 +410,50 @@ mod tests {
     }
 
     #[test]
-    fn full_adder_fits_2x20x20_with_three_switches_and_passes_all_cases() -> eyre::Result<()> {
-        let document: PhysicalCellDocument = FULL_ADDER_2X20X20.parse()?;
-        assert_eq!(document.size, DimSize(2, 20, 20));
+    fn full_adder_baseline_has_three_switches_and_passes_all_cases() -> eyre::Result<()> {
+        verify_full_adder(FULL_ADDER_BASELINE, DimSize(48, 22, 4))
+    }
+
+    #[test]
+    fn full_adder_compact_fits_2x20x20_and_passes_all_cases() -> eyre::Result<()> {
+        verify_full_adder(FULL_ADDER_COMPACT, DimSize(2, 20, 20))
+    }
+
+    #[test]
+    fn full_adder_low_fits_2x17x10_and_passes_all_cases() -> eyre::Result<()> {
+        verify_full_adder(FULL_ADDER_LOW, DimSize(2, 17, 10))
+    }
+
+    #[test]
+    fn full_adder_small_fits_2x13x9_and_passes_all_cases() -> eyre::Result<()> {
+        verify_full_adder(FULL_ADDER_SMALL, DimSize(2, 13, 9))
+    }
+
+    #[test]
+    fn full_adder_right_inputs_share_boundary_and_pass_all_cases() -> eyre::Result<()> {
+        verify_full_adder(FULL_ADDER_RIGHT_INPUTS, DimSize(2, 14, 10))?;
+        let document: PhysicalCellDocument = FULL_ADDER_RIGHT_INPUTS.parse()?;
+        let build = document.build()?;
+        // Y-min is the right-hand edge in the user's reference view.
+        assert_eq!(build.inputs["a"], Position(0, 0, 3));
+        assert_eq!(build.inputs["b"], Position(0, 0, 1));
+        assert_eq!(build.input_contacts["a"].len(), 1);
+        assert_eq!(build.input_contacts["b"].len(), 1);
+        let sum = build.outputs["sum"];
+        assert_eq!(sum, Position(0, document.size.1 - 1, 8));
+        assert!(build.world[sum].kind.is_repeater());
+        // A boundary observation is insufficient: the repeater must drive out
+        // through Y-max, opposite the operand switches at Y-min.
+        assert_eq!(
+            build.world[sum].direction,
+            crate::world::block::Direction::South
+        );
+        Ok(())
+    }
+
+    fn verify_full_adder(source: &str, size: DimSize) -> eyre::Result<()> {
+        let document: PhysicalCellDocument = source.parse()?;
+        assert_eq!(document.size, size);
         assert_eq!(
             document
                 .inputs
@@ -437,6 +485,221 @@ mod tests {
             verification.signatures["cout"].actual,
             vec![false, false, false, true, false, true, true, true]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn full_adder_baseline_passes_all_settled_input_transitions() -> eyre::Result<()> {
+        verify_full_adder_transitions(FULL_ADDER_BASELINE)
+    }
+
+    #[test]
+    fn full_adder_compact_passes_all_settled_input_transitions() -> eyre::Result<()> {
+        verify_full_adder_transitions(FULL_ADDER_COMPACT)
+    }
+
+    #[test]
+    fn full_adder_low_passes_all_settled_input_transitions() -> eyre::Result<()> {
+        verify_full_adder_transitions(FULL_ADDER_LOW)
+    }
+
+    #[test]
+    fn full_adder_small_passes_all_settled_input_transitions() -> eyre::Result<()> {
+        verify_full_adder_transitions(FULL_ADDER_SMALL)
+    }
+
+    #[test]
+    fn full_adder_right_inputs_pass_all_settled_input_transitions() -> eyre::Result<()> {
+        verify_full_adder_transitions(FULL_ADDER_RIGHT_INPUTS)
+    }
+
+    #[test]
+    fn compact_carry_bridge_preserves_descending_wire_headroom() -> eyre::Result<()> {
+        let mut document: PhysicalCellDocument = FULL_ADDER_SMALL.parse()?;
+        let plane = document
+            .planes
+            .iter_mut()
+            .find(|plane| plane.axes == crate::physical_cell::PlaneAxes::Yz && plane.fixed == 0)
+            .unwrap();
+        let row = plane.rows.get_mut(&7).unwrap();
+        assert_eq!(row.chars().nth(5), Some('#'));
+        row.replace_range(5..6, "r");
+        // Dust needs an extra support; the original hard-powered bridge did
+        // not. That support severs the lower XNOR connection despite no overlap.
+        let build = document.build()?;
+        assert!(build.auto_supports.contains(&Position(0, 5, 6)));
+        let verification = document.verify(&build)?;
+        assert!(!verification.failures.is_empty());
+        assert_eq!(
+            verification.signatures["xnor"].actual,
+            verification.signatures["xnor"].expected,
+        );
+        assert_eq!(
+            verification.signatures["second_input"].actual,
+            vec![false; 8]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn low_xnor_input_branch_requires_backfeed_isolation() -> eyre::Result<()> {
+        // The wired input must fan out to two NORs. Replacing its isolating
+        // repeater with dust lets a hard-powered NOR support feed the input
+        // back into itself, even though the source XNOR still computes correctly.
+        let mut document: PhysicalCellDocument = FULL_ADDER_LOW.parse()?;
+        let plane = document
+            .planes
+            .iter_mut()
+            .find(|plane| plane.axes == crate::physical_cell::PlaneAxes::Yz && plane.fixed == 0)
+            .unwrap();
+        let row = plane.rows.get_mut(&4).unwrap();
+        assert_eq!(row.chars().nth(10), Some('P'));
+        row.replace_range(10..11, "r");
+        let build = document.build()?;
+        let verification = document.verify(&build)?;
+        assert!(!verification.failures.is_empty());
+        assert_eq!(
+            verification.signatures["xnor"].actual,
+            verification.signatures["xnor"].expected,
+        );
+        assert_eq!(
+            verification.signatures["second_input"].actual,
+            vec![true; 8]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn compact_carry_requires_startup_pulse_filtering() -> eyre::Result<()> {
+        let unfiltered = FULL_ADDER_COMPACT.replace(
+            "glyph \"D\" = repeater toward y- delay 2;",
+            "glyph \"D\" = repeater toward y- delay 1;",
+        );
+        assert_ne!(unfiltered, FULL_ADDER_COMPACT);
+        let document: PhysicalCellDocument = unfiltered.parse()?;
+        let build = document.build()?;
+        let case = document.simulate_case(
+            &build,
+            BTreeMap::from([
+                ("a".to_owned(), true),
+                ("b".to_owned(), true),
+                ("cin".to_owned(), false),
+            ]),
+            0,
+        )?;
+        assert!(case.expected["cout"]);
+        assert!(!case.actual["cout"]);
+        assert!(case.simulator.is_torch_burned_out(build.outputs["cout"]));
+        for (name, value) in &case.expected {
+            if name != "cout" {
+                assert_eq!(case.actual[name], *value, "{name}");
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn vertical_relay_pairs_preserve_signal_and_expose_intermediate_polarity() -> eyre::Result<()> {
+        // A physical recipe with variable height, not a full-adder-specific pattern.
+        for pairs in 1..=6 {
+            let top = 4 * pairs;
+            let mut source = format!(
+                "rcell 1;\ncell \"relay\" size [2, 3, {}] {{\n\
+                 glyph \"U\" = torch on z-;\n\
+                 input \"a\" at [0, 1, 1] on x+;\n\
+                 output \"y\" at [1, 1, {top}];\n",
+                top + 1,
+            );
+            for stage in 1..2 * pairs {
+                source.push_str(&format!(
+                    "probe \"stage{stage}\" at [1, 1, {}];\n",
+                    stage * 2,
+                ));
+            }
+            source.push_str("plane yz at x=1 {\n");
+            for z in 1..=top {
+                let glyph = if z % 2 == 0 { 'U' } else { '#' };
+                source.push_str(&format!("z={z} \".{glyph}.\";\n"));
+            }
+            source.push_str("}\nexpect \"y\" = a;\n");
+            for stage in 1..2 * pairs {
+                let expression = if stage % 2 == 0 { "a" } else { "~a" };
+                source.push_str(&format!("expect \"stage{stage}\" = {expression};\n"));
+            }
+            source.push_str("}\n");
+            let document: PhysicalCellDocument = source.parse()?;
+            let build = document.build()?;
+            let verification = document.verify(&build)?;
+            assert!(verification.failures.is_empty(), "relay pairs={pairs}");
+            assert_eq!(verification.signatures["y"].actual, vec![false, true]);
+        }
+        Ok(())
+    }
+
+    fn verify_full_adder_transitions(source: &str) -> eyre::Result<()> {
+        let document: PhysicalCellDocument = source.parse()?;
+        let build = document.build()?;
+        let truth = document.verification_truth(&build)?;
+        for from in 0..8 {
+            for to in 0..8 {
+                let inputs = truth
+                    .input_names
+                    .iter()
+                    .enumerate()
+                    .map(|(index, name)| (name.clone(), from & (1 << index) != 0))
+                    .collect();
+                let mut case = document.simulate_case(&build, inputs, 0)?;
+                assert_eq!(case.actual, case.expected, "initial case {from}");
+                case.simulator
+                    .advance_idle_cycles(crate::world::simulator::MANUAL_INPUT_IDLE_CYCLES)?;
+                let contacts = truth
+                    .input_names
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(index, name)| {
+                        build.input_contacts[name]
+                            .iter()
+                            .map(move |position| (*position, to & (1 << index) != 0))
+                    })
+                    .collect();
+                case.simulator
+                    .drive_inputs_with_limits(contacts, 256, 50_000)?;
+                for (name, position) in build.observations() {
+                    assert_eq!(
+                        case.simulator.world()[position].kind.is_powered(),
+                        truth.output_tables[name][to],
+                        "{name} after transition {from} -> {to}"
+                    );
+                }
+                for (position, block) in case.simulator.world().iter_block() {
+                    if block.kind.is_torch() {
+                        assert!(
+                            !case.simulator.is_torch_burned_out(position),
+                            "torch {position:?} burned out after transition {from} -> {to}"
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn archived_full_adder_preserves_signals_but_reports_disconnected_carry() -> eyre::Result<()> {
+        let document: PhysicalCellDocument = DISCONNECTED_FULL_ADDER.parse()?;
+        let build = document.build()?;
+        let verification = document.verify(&build)?;
+        assert_eq!(verification.cases, 8);
+        assert_eq!(verification.failures.len(), 4);
+        assert_eq!(verification.first_divergence.unwrap().observation, "cout");
+        for (name, signature) in &verification.signatures {
+            if name == "cout" {
+                assert_eq!(signature.actual, vec![true; 8]);
+                assert!(signature.actual_influence.is_empty());
+            } else {
+                assert_eq!(signature.actual, signature.expected, "{name}");
+            }
+        }
         Ok(())
     }
 

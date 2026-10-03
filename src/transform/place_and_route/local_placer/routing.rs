@@ -640,6 +640,7 @@ pub(super) fn generate_routes_to_cobble_init_states(
 /// asymmetric. Try the other direction, then allow directional repeaters when
 /// dust-only routing in both directions has no route.
 /// A redstone-only target cannot be used as this router's diode source.
+#[cfg(test)]
 pub(super) fn generate_or_routes_with_fallbacks(
     config: &LocalPlacerConfig,
     world: &World3D,
@@ -660,6 +661,46 @@ pub(super) fn generate_or_routes_with_fallbacks(
     if result.routes.is_empty() && PlacedNode::new(to, world[to]).is_diode() {
         let mixed = generate_or_routes_with_repeaters(config, world, to, from);
         result.debug.merge(mixed.debug);
+        result.routes = mixed.routes;
+    }
+    result
+}
+
+/// Try the next routing family when the previous family has no electrically
+/// isolated route, even if it produced geometrically valid raw paths.
+pub(super) fn generate_or_routes_with_isolation(
+    config: &LocalPlacerConfig,
+    world: &World3D,
+    from: Position,
+    to: Position,
+    isolation: &RouteIsolation,
+) -> RouteResult {
+    let mut result = generate_or_routes(config, world, from, to);
+    result
+        .routes
+        .retain(|(candidate, path)| isolation.accepts_or_route(candidate, path));
+    if result.routes.is_empty() && PlacedNode::new(to, world[to]).is_diode() {
+        let mut reverse = generate_or_routes(config, world, to, from);
+        result.debug.merge(reverse.debug);
+        reverse
+            .routes
+            .retain(|(candidate, path)| isolation.accepts_or_route(candidate, path));
+        result.routes = reverse.routes;
+    }
+    if result.routes.is_empty() {
+        let mut mixed = generate_or_routes_with_repeaters(config, world, from, to);
+        result.debug.merge(mixed.debug);
+        mixed
+            .routes
+            .retain(|(candidate, path)| isolation.accepts_or_route(candidate, path));
+        result.routes = mixed.routes;
+    }
+    if result.routes.is_empty() && PlacedNode::new(to, world[to]).is_diode() {
+        let mut mixed = generate_or_routes_with_repeaters(config, world, to, from);
+        result.debug.merge(mixed.debug);
+        mixed
+            .routes
+            .retain(|(candidate, path)| isolation.accepts_or_route(candidate, path));
         result.routes = mixed.routes;
     }
     result
@@ -735,10 +776,15 @@ fn generate_or_routes_inner(
                             new_world.size.bound_on(position)
                                 && position != prev_pos
                                 && new_world[position].kind.is_repeater()
-                                && position.walk(new_world[position].direction.inverse()) == Some(repeater.position)
+                                && position.walk(new_world[position].direction.inverse())
+                                    == Some(repeater.position)
                         });
                         if !side_lock {
-                            let path = prevs.iter().copied().chain([repeater.position]).collect_vec();
+                            let path = prevs
+                                .iter()
+                                .copied()
+                                .chain([repeater.position])
+                                .collect_vec();
                             let nexts = repeater.propagation_bound(Some(&new_world));
                             next_queue.push((new_world, path, nexts));
                         }
@@ -774,7 +820,8 @@ fn generate_or_routes_inner(
 
         depth_debug.next_frontier_before_sampling = next_queue.len();
         queue = config.route_step_sampling_policy.sample_with_seed(
-            next_queue, config.sampling_seed(OR_ROUTE_STEP_SAMPLE_SCOPE, step),
+            next_queue,
+            config.sampling_seed(OR_ROUTE_STEP_SAMPLE_SCOPE, step),
         );
         depth_debug.next_frontier_after_sampling = queue.len();
         debug.depths.push(depth_debug);

@@ -29,6 +29,12 @@ impl LocalPlacerDebug {
                 step.generation_us,
                 step.total_us,
             );
+            if step.joint_route_attempted {
+                println!(
+                    "  jointly routed ready OR consumers: candidates={}",
+                    step.joint_route_candidates
+                );
+            }
             if let Some(route) = &step.route_debug {
                 println!(
                     "  routes={} candidates={} initial_states={} samples={:?}",
@@ -69,7 +75,9 @@ impl LocalPlacerDebug {
             .iter()
             .find(|step| step.sampled_len == 0)
             .map(|step| {
-                let kind = if step.input_queue_len == 0 {
+                let kind = if step.joint_route_attempted && step.joint_route_candidates == 0 {
+                    LocalPlacementFailureKind::NoLegalRoute
+                } else if step.input_queue_len == 0 {
                     LocalPlacementFailureKind::InitialFrontierEmpty
                 } else if step.generated_len > 0 {
                     LocalPlacementFailureKind::PlacementBeamExhausted
@@ -91,14 +99,26 @@ impl LocalPlacerDebug {
                     LocalPlacementFailureKind::NoLegalPlacement
                 };
                 LocalPlacementFailure {
-                    stage: step.stage,
+                    stage: if step.joint_route_attempted && step.joint_route_candidates == 0 {
+                        LocalPlacementStage::OrRouting
+                    } else {
+                        step.stage
+                    },
                     kind,
                     step: step.step,
                     total_steps: step.total_steps,
                     node_id: step.node_id,
-                    node_kind: step.node_kind.clone(),
+                    node_kind: if step.joint_route_attempted && step.joint_route_candidates == 0 {
+                        format!("JointReadyOr after {}", step.node_kind)
+                    } else {
+                        step.node_kind.clone()
+                    },
                     input_candidates: step.input_queue_len,
-                    generated_candidates: step.generated_len,
+                    generated_candidates: if step.joint_route_attempted {
+                        step.joint_route_candidates
+                    } else {
+                        step.generated_len
+                    },
                     route_calls: step
                         .route_debug
                         .as_ref()
@@ -170,6 +190,8 @@ pub struct StepDebug {
     pub generation_us: u128,
     pub total_us: u128,
     pub route_debug: Option<RouteDebug>,
+    pub joint_route_attempted: bool,
+    pub joint_route_candidates: usize,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -264,5 +286,27 @@ mod tests {
         assert_eq!(failure.step, 1);
         assert_eq!(failure.input_candidates, 4);
         assert_eq!(failure.route_calls, 4);
+    }
+
+    #[test]
+    fn failure_identifies_a_failed_joint_or_plan() {
+        let debug = LocalPlacerDebug {
+            steps: vec![StepDebug {
+                node_id: 3,
+                node_kind: "Logic(Not)".to_owned(),
+                stage: LocalPlacementStage::NotRouting,
+                input_queue_len: 8,
+                generated_len: 12,
+                joint_route_attempted: true,
+                joint_route_candidates: 0,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let failure = debug.failure().unwrap();
+        assert_eq!(failure.stage, LocalPlacementStage::OrRouting);
+        assert_eq!(failure.kind, LocalPlacementFailureKind::NoLegalRoute);
+        assert_eq!(failure.generated_candidates, 0);
+        assert!(failure.node_kind.starts_with("JointReadyOr"));
     }
 }

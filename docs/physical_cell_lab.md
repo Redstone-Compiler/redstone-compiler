@@ -83,16 +83,22 @@ glyph ">" = repeater toward y+ delay 1;
 ```
 
 For repeaters, the stored direction identifies the side from which the repeater
-reads its input; its hard-powered output is on the inverse side. A composable
-torch-to-torch logic edge therefore needs an explicit hard-power element:
+reads its input; its hard-powered output is on the inverse side. One isolated
+torch-to-torch logic edge uses an explicit hard-power element:
 
 ```text
 source torch -> repeater -> solid support -> destination torch
 ```
 
-A torch only weak-powers an adjacent solid block. Consequently
-`source torch -> solid support -> destination torch` is not a valid cascaded
-logic edge: weak power does not turn off a torch attached to that support.
+In the current simulator, a torch does not power a solid block beside it;
+it strongly powers the solid block directly above it. Powered dust directed
+into a solid block can disable a torch attached to that block without allowing
+the weakly powered block to power neighboring dust. Thus a lateral
+`source torch -> solid support -> destination torch` chain is invalid, while
+a vertical torch tower or a correctly connected dust input can work.
+Use `Simulator::rebuild_connectivity_cache` and
+`Simulator::cobble_disables_attached_torch` as the implementation reference;
+physical adjacency alone does not guarantee connectivity.
 
 Inputs materialize unpowered switches and name their attachment:
 
@@ -194,8 +200,8 @@ This is intended both for command-line diagnosis and later viewer overlays.
 Analyze a verified cell before manually compacting it:
 
 ```powershell
-cargo run --release --bin rcell -- test/full-adder-2x20x20.rcell `
-  test/full-adder-2x20x20.nbt `
+cargo run --release --bin rcell -- test/full-adder-baseline.rcell `
+  target/full-adder-baseline.nbt `
   --compact-report `
   --compact-json target/full-adder-compact.json
 ```

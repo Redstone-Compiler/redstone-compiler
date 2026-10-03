@@ -15,10 +15,11 @@ fn knob(name: &str, default: usize, max: usize) -> eyre::Result<usize> {
 #[ignore = "bounded local-only full-adder experiment; run explicitly with --nocapture"]
 fn diagnose_monolithic_full_adder() -> eyre::Result<()> {
     let beam = knob("LOCAL_FA_BEAM", 64, 512)?;
-    let depth = knob("LOCAL_FA_DEPTH", 4, 8)?;
+    let depth = knob("LOCAL_FA_DEPTH", 4, 16)?;
     let route_beam = knob("LOCAL_FA_ROUTE_BEAM", 8, 32)?;
     let width = knob("LOCAL_FA_WIDTH", 2, 10)?;
     let side = knob("LOCAL_FA_SIDE", 10, 20)?;
+    let height = knob("LOCAL_FA_HEIGHT", side, 20)?;
     let seconds = knob("LOCAL_FA_SECONDS", 10, 30)?;
     let schedule = match std::env::var("LOCAL_FA_SCHEDULE").as_deref() {
         Ok("frontier") => PlacementSchedulePolicy::MinFrontier,
@@ -30,8 +31,8 @@ fn diagnose_monolithic_full_adder() -> eyre::Result<()> {
     let variant = std::env::var("LOCAL_FA_GRAPH").unwrap_or_else(|_| "buffered".to_owned());
     let mut graph = match variant.as_str() {
         "buffered" => predefined_logics::buffered_full_adder_graph()?,
-        "nor9" => LogicGraph::from_assignments(
-            [
+        "nor9" | "nor10" => {
+            let mut assignments = vec![
                 ("n1", "~(a|b)"),
                 ("n2", "~(a|n1)"),
                 ("n3", "~(b|n1)"),
@@ -40,16 +41,28 @@ fn diagnose_monolithic_full_adder() -> eyre::Result<()> {
                 ("n6", "~(n4|n5)"),
                 ("n7", "~(cin|n5)"),
                 ("s", "~(n6|n7)"),
-                ("cout", "~(n1|n5)"),
-            ]
-            .map(|(name, expr)| (name.to_owned(), expr.to_owned())),
-        )?
-        .prepare_place()?,
+            ];
+            if variant == "nor10" {
+                // Match the compact manual cell's local carry recomputation.
+                assignments.push(("carry_n5", "~(n7|cin)"));
+                assignments.push(("cout", "~(n1|carry_n5)"));
+            } else {
+                assignments.push(("cout", "~(n1|n5)"));
+            }
+            LogicGraph::from_assignments(
+                assignments
+                    .into_iter()
+                    .map(|(name, expr)| (name.to_owned(), expr.to_owned())),
+            )?
+            .prepare_place()?
+        }
         other => eyre::bail!("unknown fixed graph: {other}"),
     };
     // The predefined graph exposes intermediate observations as outputs too.
     // Keep only the full-adder's public outputs; its internal logic is unchanged.
-    for name in ["c", "i", "d", "n1", "n2", "n3", "n4", "n5", "n6", "n7"] {
+    for name in [
+        "c", "i", "d", "n1", "n2", "n3", "n4", "n5", "n6", "n7", "carry_n5",
+    ] {
         graph.graph.remove_output(name);
     }
     let table = graph.truth_table()?;
@@ -90,8 +103,21 @@ fn diagnose_monolithic_full_adder() -> eyre::Result<()> {
         },
         ..Default::default()
     };
-    let dim = DimSize(width, side, side);
-    println!("LOCAL_FA config graph={variant} dim={dim:?} nodes={} beam={beam} route_beam={route_beam} depth={depth} schedule={schedule:?} flexible={flexible} seed=42 step_boundary_limit_s={seconds}", graph.nodes.len());
+    let dim = DimSize(width, side, height);
+    let pins = std::env::var("LOCAL_FA_PINS").unwrap_or_else(|_| "free".to_owned());
+    let input_constraints = match pins.as_str() {
+        "free" => LocalPlacerInputConstraints::default(),
+        "manual" => {
+            eyre::ensure!(dim == DimSize(2, 14, 10), "manual pins require 2x14x10");
+            LocalPlacerInputConstraints::new()
+                .with_input_positions("a", [Position(0, 0, 3)])
+                .with_input_positions("b", [Position(0, 0, 1)])
+                .with_input_positions("cin", [Position(0, 13, 5)])
+        }
+        other => eyre::bail!("unknown pin constraint: {other}"),
+    };
+    let joint = std::env::var("LOCAL_FA_JOINT").as_deref() == Ok("1");
+    println!("LOCAL_FA config graph={variant} dim={dim:?} pins={pins} nodes={} beam={beam} route_beam={route_beam} depth={depth} schedule={schedule:?} flexible={flexible} joint={joint} seed=42 step_boundary_limit_s={seconds}", graph.nodes.len());
     let defer_not = std::env::var("LOCAL_FA_SCHEDULE").as_deref() == Ok("defer_not");
     let mut order = PlacementScheduler::new(&graph).select(schedule).order;
     if defer_not {
@@ -111,6 +137,9 @@ fn diagnose_monolithic_full_adder() -> eyre::Result<()> {
     }
     let mut placer = LocalPlacer::new_with_visit_order(graph, config, order)?
         .with_time_limit(Duration::from_secs(seconds as u64));
+    if joint {
+        placer = placer.with_joint_ready_or_routes();
+    }
     if std::env::var_os("LOCAL_FA_NOT_SITES").is_some() {
         let sites = knob("LOCAL_FA_NOT_SITES", 32, 256)?;
         println!("LOCAL_FA not_site_limit={sites}");
@@ -121,7 +150,7 @@ fn diagnose_monolithic_full_adder() -> eyre::Result<()> {
     let candidates = placer.generate_with_outputs_and_input_constraints_debug_progress(
         dim,
         None,
-        &LocalPlacerInputConstraints::default(),
+        &input_constraints,
         Some(&mut debug),
         None,
     );
