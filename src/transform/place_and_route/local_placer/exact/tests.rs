@@ -70,6 +70,60 @@ fn nor_netlist_folds_or_nodes_into_gate_inputs() {
     }
 }
 
+/// The raw expression, the prepared graph, and the NOR netlist must compute
+/// the same function, including operator chains with three operands.
+#[test]
+fn nor_netlist_keeps_every_operand_of_long_chains() {
+    let cases: [(&str, fn(&BTreeMap<&str, bool>) -> bool); 4] = [
+        ("a&b&c", |v| v["a"] && v["b"] && v["c"]),
+        ("a|b|c", |v| v["a"] || v["b"] || v["c"]),
+        ("a^b^c", |v| v["a"] ^ v["b"] ^ v["c"]),
+        ("(~b&~c&a)|(b&c&a)", |v| v["a"] && (v["b"] == v["c"])),
+    ];
+    for (expr, expected) in cases {
+        let raw = LogicGraph::from_assignments([("out".to_owned(), expr.to_owned())]).unwrap();
+        let prepared = raw.clone().prepare_place().unwrap();
+        let netlist = NorNetlist::from_logic_graph(&prepared).unwrap();
+        let names = netlist.input_names();
+        let values = netlist.net_values();
+        let out = netlist
+            .outputs
+            .iter()
+            .find(|(name, _)| name == "out")
+            .unwrap()
+            .1;
+        let tables = [
+            ("raw", raw.truth_table().unwrap()),
+            ("prepared", prepared.truth_table().unwrap()),
+        ];
+        for case in 0..1usize << names.len() {
+            let assignment = names
+                .iter()
+                .enumerate()
+                .map(|(bit, name)| (name.as_str(), case & (1 << bit) != 0))
+                .collect::<BTreeMap<_, _>>();
+            let want = expected(&assignment);
+            for (stage, table) in &tables {
+                let index = table
+                    .input_names
+                    .iter()
+                    .enumerate()
+                    .fold(0, |index, (bit, name)| {
+                        index | (usize::from(assignment[name.as_str()]) << bit)
+                    });
+                assert_eq!(
+                    table.output_tables["out"][index], want,
+                    "{expr}: {stage}, case {assignment:?}"
+                );
+            }
+            assert_eq!(
+                values[out][case], want,
+                "{expr}: netlist, case {assignment:?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn exact_placer_builds_a_verified_inverter() {
     let placer = ExactLocalPlacer::new(&graph(&[("out", "~a")])).unwrap();
