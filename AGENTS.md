@@ -17,6 +17,7 @@
 - Further 2x13x9 compaction and carry bridge clearance: `docs/compact_full_adder_shrink.md`
 - Full adder with operand switches on the same boundary: `docs/full_adder_input_boundary.md`
 - Exact SAT-based local placer, survey, and construct/compact pipeline: `docs/exact_local_placer.md`
+- Solver modeling DSL (rsdsl v2, crate `crates/rsdsl`): design and parity measurements `docs/solver_dsl_design.md`; grammar and language spec `docs/solver_dsl_grammar.md`; the exact placer's model is `src/transform/place_and_route/local_placer/exact/exact_placer.rsdsl` (grounded by `exact/dsl.rs`)
 
 When asked to create or preserve project documentation, add an appropriate file under `docs/` and link it from this file when it is useful for future agents.
 

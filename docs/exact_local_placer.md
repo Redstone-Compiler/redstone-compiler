@@ -29,7 +29,21 @@ large-scale P&R:
   on some instances, not incremental), Z3/cvc5, OR-Tools CP-SAT (native
   OR-Tools install), clingo (ASP), Gurobi/CPLEX (academic licenses).
 
-## Model (`encode.rs`)
+## Model (`exact_placer.rsdsl`)
+
+The constraints live in the rsdsl model
+`src/transform/place_and_route/local_placer/exact/exact_placer.rsdsl`.
+`dsl.rs` turns the netlist, vocabulary, pins, and config into an rsdsl
+instance, grounds the model, and reads the variables back for decoding.
+Nothing in Rust adds constraints except blocking clauses (simulator
+rejections, `blocked`) and lazy loop formulas. `encode.rs` is the original
+hand-written encoder of the same model, kept behind the hidden
+`legacy_encoder` flag for parity checks (see `solver_dsl_design.md`,
+section 11).
+
+`ExactPlacerConfig::model_file` grounds another model file instead, and
+`model_params` overrides model params (for example `max_repeaters = 0`), so
+experiments need neither Rust changes nor CNF edits.
 
 - **Blocks.** Each cell picks exactly one kind: air, solid, dust, torch (five
   attachments), repeater (four directions), or an input switch at a
@@ -194,6 +208,10 @@ cargo test --release --lib diagnose_full_adder_construct_and_compact -- --ignore
 RECOMPACT_SOURCE=test/full-adder-right-inputs-2x14x10.rcell \
   cargo test --release --lib recompact_full_adder_rcell -- --ignored --nocapture
 cargo test --release --lib diagnose_exact_full_adder -- --ignored --nocapture
+# rsdsl versus the hand-written encoder
+cargo test --release --lib measure_encoders -- --ignored --nocapture
+ENCODER_CASE=xor SEEDS=4 cargo test --release --lib compare_encoder_portfolios -- --ignored --nocapture
+PIPE_LEGACY=1 cargo test --release --lib diagnose_full_adder_construct_and_compact -- --ignored --nocapture
 ```
 
 The harnesses print their knobs and write `.rcell`/`.nbt` files when given
