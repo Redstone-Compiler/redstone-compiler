@@ -321,6 +321,45 @@ Two encoding details mattered for these runs:
   Without the overlap slice, a step could expose a signal in a form the next
   step cannot extend, such as an outward repeater.
 
+### Larger circuits (2026-10-04)
+
+`diagnose_construct_circuit` runs construction and compaction on small
+circuits written as expressions (`CIRCUIT=mux2|half-adder|adder2|mux4|
+full-adder`). It also prints the NOR netlist and the number of nets that must
+cross the seam after each construction step: placed inputs and gates that a
+later gate still reads, plus finished outputs.
+
+The first runs exposed a netlist bug, now fixed. The expression parser builds
+one n-ary node per operator chain, and `decompose_and`/`decompose_xor`
+dropped every operand after the second. As a result, `a1^b1^c0` became
+`a1^c0`, and the 4:1 mux lost all four data inputs, so its output was the
+constant 1, which the placer proved unplaceable. `decompose_binops` now
+splits such chains first (`nor_netlist_keeps_every_operand_of_long_chains`).
+
+Results (height 10, windows 2..4, 60-second steps, 8 workers). The mux2 and
+half-adder netlists use only two-operand chains, so the bug did not affect
+them; the 2-bit adder row is from before the fix:
+
+| Circuit | Gates | Max live nets | Result (width 2) |
+|---------|------:|--------------:|------------------|
+| mux2 | 7 | 3 | built in 9 s (2x14x10, 207 blocks); compacted to 2x7x4, 28 blocks, in 183 s |
+| half adder | 7 | 3 | built in 13 s (2x14x10, 187 blocks); compacted to 2x7x7, 72 blocks, in 316 s |
+| full adder (`nor9`) | 9 | 4 | built in 27–33 s, or after one restart (see above) |
+| 4:1 mux | 20 | 6 | 5 attempts timed out at g31, g35 or g58 (stopped) |
+| 2-bit adder | 26 | 8 | all 8 attempts timed out, with the pre-fix 22-gate netlist |
+
+Every compacted cell passed RCELL verification. Construction grows the layout
+along Y only and keeps finished outputs to the end, so every live net crosses
+every seam. A 2x10 cross-section carries the four live nets of the full
+adder, but not six or more. The failing steps time out (Unknown) rather than
+prove infeasibility. Width 3 made it worse for the mux: each step is larger,
+and four attempts timed out at earlier gates (g24, g27, g56, g57). A greedy
+gate order that minimizes live nets after each step lowers the 2-bit adder
+from 8 to 6 but raises the mux from 6 to 8, so it was not adopted. Circuits
+beyond about four live nets should be split into local cells by global
+placement, or construction should let finished signals leave the box early
+instead of carrying them to the end.
+
 ## Configuration
 
 `ExactPlacerConfig` holds the problem (box, pins, fixed cells, observations,
@@ -348,6 +387,7 @@ cargo test --release --lib diagnose_full_adder_construct_and_compact -- --ignore
 RECOMPACT_SOURCE=test/full-adder-right-inputs-2x14x10.rcell \
   cargo test --release --lib recompact_full_adder_rcell -- --ignored --nocapture
 cargo test --release --lib diagnose_exact_full_adder -- --ignored --nocapture
+CIRCUIT=mux2 cargo test --release --lib diagnose_construct_circuit -- --ignored --nocapture
 # rsdsl versus the hand-written encoder
 cargo test --release --lib measure_encoders -- --ignored --nocapture
 ENCODER_CASE=xor SEEDS=4 cargo test --release --lib compare_encoder_portfolios -- --ignored --nocapture

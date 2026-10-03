@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use super::*;
@@ -1873,4 +1874,159 @@ fn compare_torch_lower_bound() {
             );
         }
     }
+}
+
+/// Nets that must cross the seam after each construction step: inputs and
+/// gates already placed that a later gate still reads, plus finished outputs.
+fn live_after_each_step(netlist: &NorNetlist, order: &[NetId]) -> Vec<usize> {
+    let outputs = netlist
+        .outputs
+        .iter()
+        .map(|(_, net)| *net)
+        .collect::<BTreeSet<_>>();
+    let mut placed = BTreeSet::new();
+    (0..order.len())
+        .map(|step| {
+            placed.insert(order[step]);
+            placed.extend(netlist.nets[order[step]].gate_inputs.iter().copied());
+            placed
+                .iter()
+                .filter(|&&net| {
+                    outputs.contains(&net)
+                        || order[step + 1..]
+                            .iter()
+                            .any(|&gate| netlist.nets[gate].gate_inputs.contains(&net))
+                })
+                .count()
+        })
+        .collect()
+}
+
+/// Construction plus compaction for small circuits:
+/// `CIRCUIT=mux2|half-adder|adder2|mux4|full-adder CIRCUIT_WIDTH=2
+/// CIRCUIT_HEIGHT=10 CIRCUIT_STEP_SECONDS=60 CIRCUIT_COMPACT_SECONDS=300
+/// CIRCUIT_SEED=1 CIRCUIT_WRITE=<prefix>`; `CIRCUIT_NETLIST_ONLY=1` stops
+/// after printing the NOR netlist and its live-net counts.
+#[test]
+#[ignore = "circuit pipeline measurement; run explicitly with --nocapture"]
+fn diagnose_construct_circuit() -> eyre::Result<()> {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_test_writer()
+        .try_init();
+    let circuit = std::env::var("CIRCUIT").unwrap_or_else(|_| "mux2".to_owned());
+    let (assignments, internal): (Vec<(&str, &str)>, Vec<&str>) = match circuit.as_str() {
+        "half-adder" => (vec![("sum", "a^b"), ("carry", "a&b")], vec![]),
+        "adder2" => (
+            vec![
+                ("s0", "a0^b0"),
+                ("c0", "a0&b0"),
+                ("s1", "a1^b1^c0"),
+                ("c1", "(a1&b1)|(c0&(a1^b1))"),
+            ],
+            vec!["c0"],
+        ),
+        "mux4" => (
+            vec![("out", "(~s1&~s0&a)|(~s1&s0&b)|(s1&~s0&c)|(s1&s0&d)")],
+            vec![],
+        ),
+        _ => (vec![("out", "(a&~s)|(b&s)")], vec![]),
+    };
+    let graph = if circuit == "full-adder" {
+        full_adder_graph("nor9")
+    } else {
+        let mut graph = LogicGraph::from_assignments(
+            assignments
+                .iter()
+                .map(|(name, expr)| (name.to_string(), expr.to_string())),
+        )?
+        .prepare_place()?;
+        for name in internal {
+            graph.graph.remove_output(name);
+        }
+        graph
+    };
+    let placer = ExactLocalPlacer::new(&graph)?.with_name(format!("exact-{circuit}"));
+    let netlist = placer.netlist();
+    println!(
+        "CIRCUIT {circuit} inputs={:?} outputs={:?} gates={}",
+        netlist.input_names(),
+        netlist
+            .outputs
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>(),
+        netlist.gates().count()
+    );
+    for gate in netlist.gates() {
+        let inputs = netlist.nets[gate]
+            .gate_inputs
+            .iter()
+            .map(|&input| netlist.nets[input].name.as_str())
+            .collect::<Vec<_>>();
+        println!("CIRCUIT gate {} = NOR{inputs:?}", netlist.nets[gate].name);
+    }
+    let order = netlist
+        .topological_order()
+        .into_iter()
+        .filter(|&net| netlist.nets[net].driver == NetDriver::Gate)
+        .collect::<Vec<_>>();
+    let live = live_after_each_step(netlist, &order);
+    println!(
+        "CIRCUIT live nets per step {live:?} max={}",
+        live.iter().max().unwrap_or(&0)
+    );
+    if std::env::var("CIRCUIT_NETLIST_ONLY").as_deref() == Ok("1") {
+        return Ok(());
+    }
+    let seed = env_usize("CIRCUIT_SEED", 1) as u32;
+    let construction = ConstructionConfig {
+        width: env_usize("CIRCUIT_WIDTH", 2),
+        height: env_usize("CIRCUIT_HEIGHT", 10),
+        step_time_limit: Duration::from_secs(env_usize("CIRCUIT_STEP_SECONDS", 60) as u64),
+        window: 2,
+        max_window: 4,
+        seed,
+        ..Default::default()
+    };
+    let (layout, placement, report) = placer.construct(&construction)?;
+    println!(
+        "CIRCUIT constructed dim={:?} blocks={} seed={} restarts={:?} elapsed={:?}",
+        layout.dim,
+        placement.block_count,
+        report.seed,
+        report
+            .restarts
+            .iter()
+            .map(|(seed, _)| *seed)
+            .collect::<Vec<_>>(),
+        report.elapsed
+    );
+    let compaction = CompactionConfig {
+        seed,
+        time_limit: Some(Duration::from_secs(
+            env_usize("CIRCUIT_COMPACT_SECONDS", 300) as u64,
+        )),
+        ..Default::default()
+    };
+    let (compacted, best, report) = placer.compact(layout, &compaction)?;
+    let result = best.unwrap_or(placement);
+    let document = result.rcell.to_string();
+    let reparsed: crate::physical_cell::PhysicalCellDocument = document.parse()?;
+    let build = reparsed.build()?;
+    let verification = reparsed.verify(&build)?;
+    println!(
+        "CIRCUIT compacted dim={:?} blocks={} removed={:?} elapsed={:?} rcell_failures={}",
+        compacted.dim,
+        result.block_count,
+        report.removed,
+        report.elapsed,
+        verification.failures.len()
+    );
+    if let Ok(prefix) = std::env::var("CIRCUIT_WRITE") {
+        std::fs::write(format!("{prefix}.rcell"), document)?;
+        crate::nbt::NBTRoot::from(&result.placed.world).save(format!("{prefix}.nbt"));
+    }
+    assert!(verification.failures.is_empty());
+    Ok(())
 }
