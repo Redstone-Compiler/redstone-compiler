@@ -273,6 +273,7 @@ mod tests {
         include_str!("../../test/full-adder-exact-optimized-2x8x8.rcell");
     const FULL_ADDER_RIGHT_INPUTS_COMPACTED: &str =
         include_str!("../../test/full-adder-right-inputs-compacted-2x10x10.rcell");
+    const ADDER2_EXACT: &str = include_str!("../../test/adder2-exact-2x14x10.rcell");
     const DISCONNECTED_FULL_ADDER: &str =
         include_str!("../../test/rcell/archive/full-adder-2x20x20-disconnected.rcell");
 
@@ -486,7 +487,7 @@ mod tests {
 
     #[test]
     fn generated_exact_full_adder_passes_all_settled_input_transitions() -> eyre::Result<()> {
-        verify_full_adder_transitions(FULL_ADDER_EXACT)
+        verify_settled_transitions(FULL_ADDER_EXACT)
     }
 
     /// The rsdsl-model pipeline's cell: settled start, operands on the Y-min
@@ -505,7 +506,48 @@ mod tests {
 
     #[test]
     fn optimized_exact_full_adder_passes_all_settled_input_transitions() -> eyre::Result<()> {
-        verify_full_adder_transitions(FULL_ADDER_EXACT_OPTIMIZED)
+        verify_settled_transitions(FULL_ADDER_EXACT_OPTIMIZED)
+    }
+
+    /// The rsdsl-model pipeline's 2-bit ripple-carry adder, built flat from a
+    /// hand-written NOR netlist: bit 0 is a half adder (no carry in) and `c1`
+    /// is the carry out of bit 1. Checks the arithmetic, not only the
+    /// cell's own `expect` lines.
+    #[test]
+    fn exact_two_bit_adder_adds_in_all_cases() -> eyre::Result<()> {
+        let document: PhysicalCellDocument = ADDER2_EXACT.parse()?;
+        assert_eq!(document.size, DimSize(2, 14, 10));
+        assert!(document.settled_start);
+        let build = document.build()?;
+        let verification = document.verify(&build)?;
+        assert_eq!(verification.cases, 16);
+        assert!(verification.failures.is_empty());
+        let bit = |case: usize, name: &str| {
+            let index = verification
+                .input_names
+                .iter()
+                .position(|input| input == name)
+                .unwrap();
+            (case >> index) & 1
+        };
+        for case in 0..16 {
+            let a = bit(case, "a0") + 2 * bit(case, "a1");
+            let b = bit(case, "b0") + 2 * bit(case, "b1");
+            let sum = a + b;
+            for (output, expected) in [("s0", sum & 1), ("s1", (sum >> 1) & 1), ("c1", sum >> 2)] {
+                assert_eq!(
+                    verification.signatures[output].actual[case],
+                    expected == 1,
+                    "{output} for {a} + {b}"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn exact_two_bit_adder_passes_all_settled_input_transitions() -> eyre::Result<()> {
+        verify_settled_transitions(ADDER2_EXACT)
     }
 
     #[test]
@@ -518,7 +560,7 @@ mod tests {
     #[test]
     fn compacted_right_inputs_full_adder_passes_all_settled_input_transitions(
     ) -> eyre::Result<()> {
-        verify_full_adder_transitions(FULL_ADDER_RIGHT_INPUTS_COMPACTED)
+        verify_settled_transitions(FULL_ADDER_RIGHT_INPUTS_COMPACTED)
     }
 
     fn verify_full_adder(source: &str, size: DimSize) -> eyre::Result<()> {
@@ -560,27 +602,27 @@ mod tests {
 
     #[test]
     fn full_adder_baseline_passes_all_settled_input_transitions() -> eyre::Result<()> {
-        verify_full_adder_transitions(FULL_ADDER_BASELINE)
+        verify_settled_transitions(FULL_ADDER_BASELINE)
     }
 
     #[test]
     fn full_adder_compact_passes_all_settled_input_transitions() -> eyre::Result<()> {
-        verify_full_adder_transitions(FULL_ADDER_COMPACT)
+        verify_settled_transitions(FULL_ADDER_COMPACT)
     }
 
     #[test]
     fn full_adder_low_passes_all_settled_input_transitions() -> eyre::Result<()> {
-        verify_full_adder_transitions(FULL_ADDER_LOW)
+        verify_settled_transitions(FULL_ADDER_LOW)
     }
 
     #[test]
     fn full_adder_small_passes_all_settled_input_transitions() -> eyre::Result<()> {
-        verify_full_adder_transitions(FULL_ADDER_SMALL)
+        verify_settled_transitions(FULL_ADDER_SMALL)
     }
 
     #[test]
     fn full_adder_right_inputs_pass_all_settled_input_transitions() -> eyre::Result<()> {
-        verify_full_adder_transitions(FULL_ADDER_RIGHT_INPUTS)
+        verify_settled_transitions(FULL_ADDER_RIGHT_INPUTS)
     }
 
     #[test]
@@ -706,12 +748,13 @@ mod tests {
         Ok(())
     }
 
-    fn verify_full_adder_transitions(source: &str) -> eyre::Result<()> {
+    fn verify_settled_transitions(source: &str) -> eyre::Result<()> {
         let document: PhysicalCellDocument = source.parse()?;
         let build = document.build()?;
         let truth = document.verification_truth(&build)?;
-        for from in 0..8 {
-            for to in 0..8 {
+        let cases = 1 << truth.input_names.len();
+        for from in 0..cases {
+            for to in 0..cases {
                 let inputs = truth
                     .input_names
                     .iter()

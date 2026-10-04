@@ -567,7 +567,10 @@ hand-written one has 15 gates and at most 5 live nets. With all current
 defaults it builds on the first attempt in 310 s (2x32x10, 424 blocks), and
 compacts to 2x21x10 with 160 blocks in 30 minutes. Another 30 minutes
 (`RECOMPACT_CIRCUIT=adder2-nor`) reach 2x14x10 with 137 blocks, still
-improving, against 313-480 blocks for the 26-gate version. That is about 68
+improving, against 313-480 blocks for the 26-gate version. That cell is the
+fixture `test/adder2-exact-2x14x10.rcell` (141 blocks with the four input
+levers); `physical_cell` tests check its arithmetic in all 16 cases and all
+256 settled input transitions. That is about 68
 blocks per bit, close to the 60-block full adder alone. A ripple-carry chain
 passes only the carry between bits, which suits construction along Y.
 Splitting into cells pays off mainly in time when one cell is reused many

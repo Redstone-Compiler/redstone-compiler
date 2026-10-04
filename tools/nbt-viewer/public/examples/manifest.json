@@ -1,6 +1,14 @@
 [
   {
     "kind": "nbt",
+    "name": "adder2-exact-2x14x10.nbt",
+    "file": "adder2-exact-2x14x10.nbt",
+    "path": "examples/adder2-exact-2x14x10.nbt",
+    "size": 854,
+    "outputsPath": "examples/adder2-exact-2x14x10.outputs.json"
+  },
+  {
+    "kind": "nbt",
     "name": "alu-export.nbt",
     "file": "alu-export.nbt",
     "path": "examples/alu-export.nbt",
