@@ -7,6 +7,9 @@
 //! slice so the next window can pick it up. Each step is a small exact
 //! problem, and the final step checks the whole circuit's outputs. The result
 //! is long but valid; `compact` then shortens it.
+//!
+//! Every live net crosses every seam, so the gate order and how long outputs
+//! are carried decide how crowded the cross-section gets.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
@@ -15,10 +18,65 @@ use eyre::bail;
 
 use super::encode::{CellKind, TORCH_ATTACH};
 use super::layout::{ExactLayout, InputPolicy, OutputPolicy};
-use super::netlist::{NetDriver, NetId};
+use super::netlist::{NetDriver, NetId, NorNetlist};
 use super::{ExactLocalPlacer, ExactOutcome, ExactPlacement, ExactPlacerConfig, ExactTuning};
 use crate::world::block::Direction;
 use crate::world::position::{DimSize, Position};
+
+/// The order in which construction places gates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateOrder {
+    /// Depth-first from net 0 upward (the original order).
+    NetIndex,
+    /// Output by output, smallest fan-in cone first, depth-first inside each
+    /// cone, so an output and its private logic finish before the next one
+    /// starts.
+    SmallestConeFirst,
+}
+
+/// Gates in construction order.
+pub(super) fn gate_order(netlist: &NorNetlist, order: GateOrder) -> Vec<NetId> {
+    fn visit(netlist: &NorNetlist, net: NetId, done: &mut [bool], order: &mut Vec<NetId>) {
+        if done[net] {
+            return;
+        }
+        done[net] = true;
+        for &input in &netlist.nets[net].gate_inputs {
+            visit(netlist, input, done, order);
+        }
+        if netlist.nets[net].driver == NetDriver::Gate {
+            order.push(net);
+        }
+    }
+    let mut roots = (0..netlist.nets.len()).collect::<Vec<_>>();
+    if order == GateOrder::SmallestConeFirst {
+        let cone = |root: NetId| {
+            let mut seen = BTreeSet::new();
+            let mut stack = vec![root];
+            while let Some(net) = stack.pop() {
+                if seen.insert(net) {
+                    stack.extend(netlist.nets[net].gate_inputs.iter().copied());
+                }
+            }
+            seen.len()
+        };
+        let mut outputs = netlist
+            .outputs
+            .iter()
+            .map(|(_, net)| *net)
+            .collect::<Vec<_>>();
+        outputs.sort_by_key(|&net| (cone(net), net));
+        // Gates outside every output cone still come last, in index order.
+        outputs.extend(roots);
+        roots = outputs;
+    }
+    let mut done = vec![false; netlist.nets.len()];
+    let mut gates = Vec::new();
+    for net in roots {
+        visit(netlist, net, &mut done, &mut gates);
+    }
+    gates
+}
 
 #[derive(Debug, Clone)]
 pub struct ConstructionConfig {
@@ -64,6 +122,11 @@ pub struct ConstructionConfig {
     pub max_refinements: usize,
     /// Search and verification constants for every step.
     pub tuning: ExactTuning,
+    pub gate_order: GateOrder,
+    /// Outputs without a face policy stop crossing seams once no later gate
+    /// reads them; they only need to stay observable somewhere in the box.
+    /// Off, every output is carried to the last slice.
+    pub early_outputs: bool,
     /// Diagnostic only: see `ExactPlacerConfig::legacy_encoder`.
     #[doc(hidden)]
     pub legacy_encoder: bool,
@@ -92,6 +155,8 @@ impl Default for ConstructionConfig {
             max_backtracks: 0,
             max_refinements: 8,
             tuning: ExactTuning::default(),
+            gate_order: GateOrder::SmallestConeFirst,
+            early_outputs: true,
             legacy_encoder: false,
         }
     }
@@ -189,11 +254,7 @@ impl ExactLocalPlacer {
     ) -> eyre::Result<(ExactLayout, ExactPlacement, ConstructionReport)> {
         let started = Instant::now();
         let netlist = &self.netlist;
-        let order = netlist
-            .topological_order()
-            .into_iter()
-            .filter(|&net| netlist.nets[net].driver == NetDriver::Gate)
-            .collect::<Vec<_>>();
+        let order = gate_order(netlist, config.gate_order);
         if order.is_empty() {
             bail!("netlist has no gates to construct");
         }
@@ -291,13 +352,19 @@ impl ExactLocalPlacer {
         let netlist = &self.netlist;
         let gate = order[step];
         let is_last = step + 1 == order.len();
-        let output_nets = netlist
+        // Outputs that must reach the last slice: face-bound ones, or all of
+        // them without `early_outputs`.
+        let carried_outputs = netlist
             .outputs
             .iter()
+            .filter(|(name, _)| {
+                !config.early_outputs
+                    || config.output_policies.get(name) == Some(&OutputPolicy::MaxYFace)
+            })
             .map(|(_, net)| *net)
             .collect::<BTreeSet<_>>();
         let consumers = |net: NetId, after: usize| {
-            output_nets.contains(&net)
+            carried_outputs.contains(&net)
                 || order[after..]
                     .iter()
                     .any(|&gate| netlist.nets[gate].gate_inputs.contains(&net))
@@ -400,18 +467,31 @@ impl ExactLocalPlacer {
                     }
                 }
             } else {
-                let live = state
+                let placed = state
                     .available
                     .iter()
                     .chain(needed_inputs.iter())
                     .chain(std::iter::once(&gate))
                     .copied()
+                    .collect::<BTreeSet<_>>();
+                let mut observations = placed
+                    .iter()
+                    .copied()
                     .filter(|&net| consumers(net, step + 1))
-                    .collect::<BTreeSet<_>>()
-                    .into_iter()
                     .map(|net| (net, last_slice.clone()))
                     .collect::<Vec<_>>();
-                exact.observations = Some(live);
+                // Finished outputs stay observable but may sit anywhere.
+                let everywhere = (0..dim.0)
+                    .flat_map(|x| {
+                        (0..dim.1).flat_map(move |y| (0..dim.2).map(move |z| Position(x, y, z)))
+                    })
+                    .collect::<Vec<_>>();
+                for (_, net) in &netlist.outputs {
+                    if placed.contains(net) && !consumers(*net, step + 1) {
+                        observations.push((*net, everywhere.clone()));
+                    }
+                }
+                exact.observations = Some(observations);
             }
             let step_started = Instant::now();
             let (outcome, stats) = self.place(&exact)?;

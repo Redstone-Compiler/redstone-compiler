@@ -125,6 +125,32 @@ fn nor_netlist_keeps_every_operand_of_long_chains() {
     }
 }
 
+/// Both orders place every gate once, after its inputs; smallest-cone-first
+/// finishes the small output before starting the larger one's private logic.
+#[test]
+fn gate_orders_are_topological_and_finish_small_cones_first() {
+    let netlist =
+        NorNetlist::from_logic_graph(&graph(&[("big", "a^b^c"), ("small", "~(a|b)")])).unwrap();
+    let gates = netlist.gates().collect::<BTreeSet<_>>();
+    for order in [GateOrder::NetIndex, GateOrder::SmallestConeFirst] {
+        let placed = construct::gate_order(&netlist, order);
+        assert_eq!(placed.iter().copied().collect::<BTreeSet<_>>(), gates);
+        assert_eq!(placed.len(), gates.len());
+        for (index, &gate) in placed.iter().enumerate() {
+            for input in &netlist.nets[gate].gate_inputs {
+                if gates.contains(input) {
+                    assert!(placed[..index].contains(input), "{order:?}");
+                }
+            }
+        }
+    }
+    let placed = construct::gate_order(&netlist, GateOrder::SmallestConeFirst);
+    let output = |name: &str| netlist.outputs.iter().find(|(n, _)| n == name).unwrap().1;
+    // `small` is a single NOR gate, so it comes first.
+    assert_eq!(placed[0], output("small"));
+    assert_eq!(placed.last(), Some(&output("big")));
+}
+
 #[test]
 fn exact_placer_builds_a_verified_inverter() {
     let placer = ExactLocalPlacer::new(&graph(&[("out", "~a")])).unwrap();
@@ -173,6 +199,14 @@ fn exact_placer_builds_verified_and_and_or_gates() {
         config.workers = 4;
         config.time_limit = Some(Duration::from_secs(60));
         expect_placed(&placer, &config);
+    }
+}
+
+/// `index` selects `GateOrder::NetIndex`; anything else the default.
+fn gate_order_from_env(name: &str) -> GateOrder {
+    match std::env::var(name).as_deref() {
+        Ok("index") => GateOrder::NetIndex,
+        _ => GateOrder::SmallestConeFirst,
     }
 }
 
@@ -932,6 +966,8 @@ fn diagnose_full_adder_construct_and_compact() -> eyre::Result<()> {
         block_seam: std::env::var("PIPE_BLOCK_SEAM").as_deref() == Ok("1"),
         max_restarts: env_usize("PIPE_RESTARTS", 7),
         max_backtracks: env_usize("PIPE_BACKTRACKS", 0),
+        gate_order: gate_order_from_env("PIPE_ORDER"),
+        early_outputs: std::env::var("PIPE_EARLY_OUTPUTS").as_deref() != Ok("0"),
         ..Default::default()
     };
     let (layout, placement, report) = placer.construct(&construction)?;
@@ -1877,13 +1913,14 @@ fn compare_torch_lower_bound() {
 }
 
 /// Nets that must cross the seam after each construction step: inputs and
-/// gates already placed that a later gate still reads, plus finished outputs.
-fn live_after_each_step(netlist: &NorNetlist, order: &[NetId]) -> Vec<usize> {
-    let outputs = netlist
-        .outputs
-        .iter()
-        .map(|(_, net)| *net)
-        .collect::<BTreeSet<_>>();
+/// gates already placed that a later gate still reads, plus the finished
+/// outputs in `kept` (carried to the last slice).
+fn live_after_each_step(
+    netlist: &NorNetlist,
+    order: &[NetId],
+    kept: &BTreeSet<NetId>,
+) -> Vec<usize> {
+    let outputs = kept;
     let mut placed = BTreeSet::new();
     (0..order.len())
         .map(|step| {
@@ -1966,16 +2003,21 @@ fn diagnose_construct_circuit() -> eyre::Result<()> {
             .collect::<Vec<_>>();
         println!("CIRCUIT gate {} = NOR{inputs:?}", netlist.nets[gate].name);
     }
-    let order = netlist
-        .topological_order()
-        .into_iter()
-        .filter(|&net| netlist.nets[net].driver == NetDriver::Gate)
-        .collect::<Vec<_>>();
-    let live = live_after_each_step(netlist, &order);
-    println!(
-        "CIRCUIT live nets per step {live:?} max={}",
-        live.iter().max().unwrap_or(&0)
-    );
+    let all_outputs = netlist
+        .outputs
+        .iter()
+        .map(|(_, net)| *net)
+        .collect::<BTreeSet<_>>();
+    for order in [GateOrder::NetIndex, GateOrder::SmallestConeFirst] {
+        let gates = construct::gate_order(netlist, order);
+        for (label, kept) in [("kept", &all_outputs), ("early", &BTreeSet::new())] {
+            let live = live_after_each_step(netlist, &gates, kept);
+            println!(
+                "CIRCUIT live nets {order:?} outputs {label} {live:?} max={}",
+                live.iter().max().unwrap_or(&0)
+            );
+        }
+    }
     if std::env::var("CIRCUIT_NETLIST_ONLY").as_deref() == Ok("1") {
         return Ok(());
     }
@@ -1987,6 +2029,8 @@ fn diagnose_construct_circuit() -> eyre::Result<()> {
         window: 2,
         max_window: 4,
         seed,
+        gate_order: gate_order_from_env("CIRCUIT_ORDER"),
+        early_outputs: std::env::var("CIRCUIT_EARLY_OUTPUTS").as_deref() != Ok("0"),
         ..Default::default()
     };
     let (layout, placement, report) = placer.construct(&construction)?;

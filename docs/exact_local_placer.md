@@ -225,9 +225,11 @@ These keep every exact solve small:
 1. **Construction.** Gates are appended in topological order, each in a
    short Y window. Earlier slices stay fixed, apart from an overlap that may
    be reshaped. Inputs appear when first needed; face-bound operands start at
-   Y = 0. Every net still needed later must be observable on the window's
-   last slice. The last step checks the real outputs, for example the sum on
-   the Y-max face.
+   Y = 0. Every net still read by a later gate must be observable on the
+   window's last slice. Outputs with a face policy are carried there too;
+   other outputs only need to stay observable somewhere once no later gate
+   reads them (`early_outputs`). The last step checks the real outputs, for
+   example the sum on the Y-max face.
 2. **Compaction.** One Y slice or Z layer is removed and everything beyond it
    shifted back. Only the cells next to the seam are re-solved; all others
    stay fixed. Accepted repairs are simulator-verified, and the emptiest
@@ -266,6 +268,26 @@ repairs are available but off by default because none rescued seeds 2 or 4:
   for gate `s` timed out.
 - `block_seam`: on backtracking, block only the seam slice instead of the
   whole previous window. The re-solved seam still left `s` unplaceable.
+
+Because every live net crosses every seam, the gate order matters.
+`GateOrder::SmallestConeFirst` (the default) builds output by output,
+smallest fan-in cone first, depth-first inside each cone, so an output and
+its private logic finish before the next output starts. Together with
+`early_outputs`, the full adder's live nets after each step drop from
+`[3, 3, 3, 2, 4, 4, 4, 3, 2]` to `[3, 3, 3, 2, 4, 3, 3, 2, 0]`. The 2-bit
+adder's maximum drops from 8 to 6. `GateOrder::NetIndex` is the original
+depth-first order by net index. Full-adder construction with both changes
+(same settings as above):
+
+| Seed | Before | Smallest cone first, early outputs |
+|------|--------|------------------------------------|
+| 1    | 27 s, 300 blocks | 31 s, 278 blocks |
+| 2    | 261 s, 1 restart, 306 blocks | 66 s, no restart, 297 blocks |
+| 3    | 33 s, 297 blocks | 22 s, 297 blocks |
+| 4    | 352 s, 1 restart, 300 blocks | 372 s, 1 restart, 279 blocks |
+
+Seed 4 still fails at the last gate (`s`, which must drive out of the Y-max
+face) on its first attempt.
 
 `ExactLocalPlacer::synthesize` runs construction followed by compaction.
 `ExactLayout::from_rcell` loads any RCELL so that existing cells can be
@@ -338,7 +360,7 @@ splits such chains first (`nor_netlist_keeps_every_operand_of_long_chains`).
 
 Results (height 10, windows 2..4, 60-second steps, 8 workers). The mux2 and
 half-adder netlists use only two-operand chains, so the bug did not affect
-them; the 2-bit adder row is from before the fix:
+them. The 2-bit adder also failed before the fix (22-gate netlist):
 
 | Circuit | Gates | Max live nets | Result (width 2) |
 |---------|------:|--------------:|------------------|
@@ -346,19 +368,20 @@ them; the 2-bit adder row is from before the fix:
 | half adder | 7 | 3 | built in 13 s (2x14x10, 187 blocks); compacted to 2x7x7, 72 blocks, in 316 s |
 | full adder (`nor9`) | 9 | 4 | built in 27–33 s, or after one restart (see above) |
 | 4:1 mux | 20 | 6 | 5 attempts timed out at g31, g35 or g58 (stopped) |
-| 2-bit adder | 26 | 8 | all 8 attempts timed out, with the pre-fix 22-gate netlist |
+| 2-bit adder | 26 | 8 (6 with smallest cone first and early outputs) | all 8 attempts failed; with the new order the best attempt finished `s0` and `c1` and placed 19 of 26 gates |
 
 Every compacted cell passed RCELL verification. Construction grows the layout
-along Y only and keeps finished outputs to the end, so every live net crosses
-every seam. A 2x10 cross-section carries the four live nets of the full
+along Y only, so every live net crosses every seam (these runs predate
+`early_outputs`). A 2x10 cross-section carries the four live nets of the full
 adder, but not six or more. The failing steps time out (Unknown) rather than
 prove infeasibility. Width 3 made it worse for the mux: each step is larger,
 and four attempts timed out at earlier gates (g24, g27, g56, g57). A greedy
 gate order that minimizes live nets after each step lowers the 2-bit adder
-from 8 to 6 but raises the mux from 6 to 8, so it was not adopted. Circuits
-beyond about four live nets should be split into local cells by global
-placement, or construction should let finished signals leave the box early
-instead of carrying them to the end.
+from 8 to 6 but raises the mux from 6 to 8, so it was not adopted;
+smallest-cone-first with early outputs (see above) reaches the same 6 for the
+adder without hurting the mux, which has a single output. Circuits beyond
+about four live nets should still be split into local cells by global
+placement.
 
 ## Configuration
 
