@@ -364,6 +364,27 @@ or plus 5 s of step minimization (C), seeds 1..4:
 The rule speeds most seeds up but removes no blocks, while minimization
 halves them.
 
+Compaction can add dead blocks too: a slice-removal repair only has to fit.
+On the 2-bit adder, 20 minutes went entirely to slice removal (19 repairs,
+some adding blocks), and block reduction never ran. Two compaction options
+address this:
+
+- `CompactionConfig::repair_optimize` (default 5 s) minimizes the repaired
+  window right after a repair.
+- `max_removals_per_round` (default off) caps slice removals per round, so
+  block reduction gets a turn.
+
+| Setting | Full adder, one run (seed 1) | 2-bit adder, 20 min of compaction |
+|---------|------------------------------|-----------------------------------|
+| neither | 2x11x6, 65 blocks (1031 s) | 2x33x10, 480 blocks, 77 removable alone |
+| `repair_optimize` | 2x8x8, 60 blocks (1291 s) | 2x35x10, 554 blocks, 90 removable |
+| both, cap 4 | 2x11x7, 79 blocks (out of time) | 2x48x10, 313 blocks, 8 removable |
+
+The cap trades box length for block count. That helps a large circuit that
+cannot converge in time, but it slowed the full adder, so it stays off.
+These are single runs and vary noticeably between runs; the 2-bit adder's
+construction also needed 0-3 restarts across runs with step minimization.
+
 `ExactLocalPlacer::synthesize` runs construction followed by compaction.
 `ExactLayout::from_rcell` loads any RCELL so that existing cells can be
 compacted too (`recompact_full_adder_rcell`).
@@ -465,8 +486,10 @@ With the outward fix and per-step minimization (C above), the same run
 constructs 2x18x10 with 160 blocks in 60 s. Compaction then converges in
 1031 s at **2x11x6 with 65 blocks**, with no block removable on its own.
 Without per-step minimization (A), compaction ran out its 1800 s at 2x11x10
-with 85 blocks and removed no Z layer. The 65-block cell is saved as
-`test/full-adder-exact-optimized-2x11x6.rcell` (replacing the 2x14x9 cell)
+with 85 blocks and removed no Z layer. Adding `repair_optimize` (see the dead
+blocks section) gave **2x8x8 with 60 blocks** (80 s + 1291 s), with no
+removable block. That cell is saved as
+`test/full-adder-exact-optimized-2x8x8.rcell` (replacing the 2x14x9 cell)
 and passes the same regression tests: all eight cases and every settled
 input transition.
 
@@ -479,6 +502,7 @@ input transition.
 | Generated, recompacted twice (`continue_after_gain`, given signals) | 2x11x8 | 176 | 84 |
 | Generated, one pipeline run with given signals (20 minutes) | 2x11x6 | 132 | 78 |
 | Generated, one pipeline run with step minimization (18 minutes) | 2x11x6 | 132 | 65 |
+| Generated, one pipeline run with step and repair minimization (23 minutes) | 2x8x8 | 128 | 60 |
 
 ### Larger circuits (2026-10-04)
 

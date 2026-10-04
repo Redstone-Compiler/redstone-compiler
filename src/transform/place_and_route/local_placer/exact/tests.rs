@@ -215,6 +215,32 @@ fn step_optimize_from_env(name: &str) -> Option<Duration> {
     }
 }
 
+/// Seconds of minimization after each slice-removal repair; `0` turns it
+/// off, unset keeps the default.
+fn repair_optimize_from_env(name: &str) -> Option<Duration> {
+    match std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+    {
+        Some(0) => None,
+        Some(seconds) => Some(Duration::from_secs(seconds)),
+        None => CompactionConfig::default().repair_optimize,
+    }
+}
+
+/// Slice removals per compaction round; `0` means no cap, unset keeps the
+/// default.
+fn removals_per_round_from_env(name: &str) -> Option<usize> {
+    match std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+    {
+        Some(0) => None,
+        Some(cap) => Some(cap),
+        None => CompactionConfig::default().max_removals_per_round,
+    }
+}
+
 /// `name=value,...` model params; values are `true`, `false` or integers.
 fn model_params_from_env(name: &str) -> BTreeMap<String, rsdsl::IValue> {
     std::env::var(name)
@@ -1041,6 +1067,8 @@ fn diagnose_full_adder_construct_and_compact() -> eyre::Result<()> {
         )),
         output_policies,
         legacy_encoder: std::env::var("PIPE_LEGACY").as_deref() == Ok("1"),
+        repair_optimize: repair_optimize_from_env("PIPE_REPAIR_OPTIMIZE"),
+        max_removals_per_round: removals_per_round_from_env("PIPE_REMOVALS_PER_ROUND"),
         ..Default::default()
     };
     let (compacted, best, report) = placer.compact(layout, &compaction)?;
@@ -1098,6 +1126,8 @@ fn recompact_full_adder_rcell() -> eyre::Result<()> {
             .collect(),
         continue_after_gain: std::env::var("RECOMPACT_CONTINUE").as_deref() != Ok("0"),
         given_outside_signals: std::env::var("RECOMPACT_GIVEN").as_deref() != Ok("0"),
+        repair_optimize: repair_optimize_from_env("RECOMPACT_REPAIR_OPTIMIZE"),
+        max_removals_per_round: removals_per_round_from_env("RECOMPACT_REMOVALS_PER_ROUND"),
         repeat_rounds: std::env::var("RECOMPACT_ROUNDS").as_deref() != Ok("0"),
         reduction_axes: match std::env::var("RECOMPACT_REDUCTION_AXES").as_deref() {
             Ok("1") => vec![1],
@@ -2108,6 +2138,8 @@ fn diagnose_construct_circuit() -> eyre::Result<()> {
         time_limit: Some(Duration::from_secs(
             env_usize("CIRCUIT_COMPACT_SECONDS", 300) as u64,
         )),
+        max_removals_per_round: removals_per_round_from_env("CIRCUIT_REMOVALS_PER_ROUND"),
+        repair_optimize: repair_optimize_from_env("CIRCUIT_REPAIR_OPTIMIZE"),
         ..Default::default()
     };
     let (compacted, best, report) = placer.compact(layout, &compaction)?;

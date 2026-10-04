@@ -41,6 +41,17 @@ pub struct CompactionConfig {
     /// layout's, so a window solve does not re-justify the rest of the box
     /// (see `ConstructionConfig::given_frozen_signals`).
     pub given_outside_signals: bool,
+    /// After a slice-removal repair, spend up to this long minimizing the
+    /// same window, so repairs (which only have to fit) do not add dead
+    /// blocks. `None` keeps the repair as found.
+    pub repair_optimize: Option<Duration>,
+    /// Slice removals per round before block reduction gets a turn. A long
+    /// constructed layout can otherwise spend the whole budget removing
+    /// slices (the 2-bit adder did, and kept its dead blocks). `None` (the
+    /// default) removes slices until none can be: with a cap of 4 the full
+    /// adder ran out of time at 2x11x7 with 79 blocks instead of converging
+    /// at 2x8x8 with 60.
+    pub max_removals_per_round: Option<usize>,
     /// Model params for every window (see `ExactPlacerConfig::model_params`).
     pub model_params: BTreeMap<String, rsdsl::IValue>,
     /// Simulator rejections each attempt's workers may hit before giving up.
@@ -73,6 +84,8 @@ impl Default for CompactionConfig {
             repeat_rounds: true,
             continue_after_gain: true,
             given_outside_signals: true,
+            repair_optimize: Some(Duration::from_secs(5)),
+            max_removals_per_round: None,
             model_params: BTreeMap::new(),
             max_refinements: 8,
             tuning: ExactTuning::default(),
@@ -130,13 +143,19 @@ impl ExactLocalPlacer {
         }
         loop {
             report.rounds += 1;
+            let removed = report.removed.len();
             self.remove_slices(&mut layout, &mut best, &mut report, config, &expired);
+            // A capped round may have left removable slices behind.
+            let capped = config
+                .max_removals_per_round
+                .is_some_and(|cap| report.removed.len() - removed >= cap);
             if !config.minimize_blocks || expired() {
                 break;
             }
             let reductions = report.block_reductions;
             self.reduce_blocks(&mut layout, &mut best, &mut report, config, &expired);
-            if !config.repeat_rounds || report.block_reductions == reductions || expired() {
+            let reduced = report.block_reductions > reductions;
+            if !config.repeat_rounds || !(reduced || capped) || expired() {
                 break;
             }
         }
@@ -153,7 +172,14 @@ impl ExactLocalPlacer {
         expired: &impl Fn() -> bool,
     ) {
         let mut radius = config.window_radius;
+        let mut removals = 0;
         'outer: loop {
+            if config
+                .max_removals_per_round
+                .is_some_and(|cap| removals >= cap)
+            {
+                break;
+            }
             for &axis in &config.axes {
                 let length = if axis == 1 {
                     layout.dim.1
@@ -179,7 +205,24 @@ impl ExactLocalPlacer {
                     };
                     report.attempts += 1;
                     let window = (index.saturating_sub(radius), index + radius);
-                    if let Some(placement) = self.resolve_window(&cut, axis, window, None, config) {
+                    if let Some(mut placement) =
+                        self.resolve_window(&cut, axis, window, None, config)
+                    {
+                        if let Some(budget) = config.repair_optimize {
+                            // A repair only has to fit; trade its dead wires
+                            // away while the window is still the one solved.
+                            let repaired = ExactLayout::from_placement(cut.dim, &placement);
+                            let quick = CompactionConfig {
+                                attempt_time_limit: budget,
+                                ..config.clone()
+                            };
+                            let limit = repaired.cells.len().saturating_sub(1);
+                            if let (Some(better), _) =
+                                self.optimize_window(&repaired, axis, window, limit, &quick)
+                            {
+                                placement = better;
+                            }
+                        }
                         tracing::info!(
                             axis,
                             index,
@@ -190,6 +233,7 @@ impl ExactLocalPlacer {
                         *layout = ExactLayout::from_placement(cut.dim, &placement);
                         *best = Some(placement);
                         report.removed.push((axis, index));
+                        removals += 1;
                         radius = config.window_radius;
                         continue 'outer;
                     }
