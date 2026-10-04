@@ -398,10 +398,7 @@ window solves, 8 workers):
    restarts the pass at the first window. The second round removed no
    further slice.
 
-`repeat_rounds` now does these reruns inside one `compact` call. The result
-is saved as `test/full-adder-exact-optimized-2x12x8.rcell` (replacing the
-2x14x9 cell) and passes the same regression tests: all eight cases and every
-settled input transition.
+`repeat_rounds` now does these reruns inside one `compact` call.
 
 Two more changes target time per pass, measured from the same 153-block cell
 with a 20-minute budget:
@@ -418,14 +415,18 @@ seconds and are proven optimal. That run reached 80 blocks at 2x12x9, then
 its second round removed slices Y11 and Z0 (2x11x8, volume 176) just before
 time ran out. Pinning the outside signals can also rule out a repair. In the
 first round it missed the Z1 removal that the run without given signals
-found.
+found. Recompacting that 2x11x8 cell once more converged at 84 blocks after
+843 s. It is saved as `test/full-adder-exact-optimized-2x11x8.rcell`
+(replacing the 2x14x9 cell) and passes the same regression tests: all eight
+cases and every settled input transition.
 
 | Cell | Box | Volume | Blocks |
 | --- | --- | ---: | ---: |
 | Manual, right-hand inputs | 2x14x10 | 280 | 129 |
 | Manual cell + automatic compaction | 2x10x10 | 200 | 99 |
 | Generated, pipeline (2026-10-03) | 2x14x9 | 252 | 153 |
-| Generated, recompacted twice | 2x12x8 | 192 | 84 |
+| Generated, recompacted twice (before the pass changes) | 2x12x8 | 192 | 84 |
+| Generated, recompacted twice (`continue_after_gain`, given signals) | 2x11x8 | 176 | 84 |
 
 ### Larger circuits (2026-10-04)
 
@@ -451,20 +452,23 @@ them. The 2-bit adder also failed before the fix (22-gate netlist):
 | mux2 | 7 | 3 | built in 9 s (2x14x10, 207 blocks); compacted to 2x7x4, 28 blocks, in 183 s |
 | half adder | 7 | 3 | built in 13 s (2x14x10, 187 blocks); compacted to 2x7x7, 72 blocks, in 316 s |
 | full adder (`nor9`) | 9 | 4 | built in 27–33 s, or after one restart (see above) |
-| 4:1 mux | 20 | 6 | 5 attempts timed out at g31, g35 or g58 (stopped) |
-| 2-bit adder | 26 | 8 (6 with smallest cone first and early outputs) | all 8 attempts failed; with the new order the best attempt finished `s0` and `c1` and placed 19 of 26 gates |
+| 4:1 mux | 20 | 6 | 5 attempts timed out at g31, g35 or g58 (stopped); with given signals, attempts reach g58 or `out_n` (gate 16 or 19) and still time out (4 attempts, stopped) |
+| 2-bit adder | 26 | 8 (6 with smallest cone first and early outputs) | all 8 attempts failed; with the new order the best placed 19 of 26 gates; with given signals it builds on the first attempt in 146 s (2x52x10, 799 blocks) and compacts to 2x40x10 with 643 blocks in 20 minutes |
 
 Every compacted cell passed RCELL verification. Construction grows the layout
-along Y only, so every live net crosses every seam (these runs predate
-`early_outputs`). A 2x10 cross-section carries the four live nets of the full
-adder, but not six or more. The failing steps time out (Unknown) rather than
-prove infeasibility. Width 3 made it worse for the mux: each step is larger,
+along Y only, so every live net crosses every seam. Before given signals,
+the 2x10 cross-section carried the four live nets of the full adder but not
+six or more. Much of that limit turned out to be the cost of re-justifying
+the frozen layout in every step: with given signals the adder (peak 6) builds
+on its first attempt. The mux still fails near its end, where six nets cross
+and the last gate is a four-input NOR. The failing steps time out (Unknown)
+rather than prove infeasibility. Width 3 made it worse for the mux: each step is larger,
 and four attempts timed out at earlier gates (g24, g27, g56, g57). A greedy
 gate order that minimizes live nets after each step lowers the 2-bit adder
 from 8 to 6 but raises the mux from 6 to 8, so it was not adopted;
 smallest-cone-first with early outputs (see above) reaches the same 6 for the
-adder without hurting the mux, which has a single output. Circuits beyond
-about four live nets should still be split into local cells by global
+adder without hurting the mux, which has a single output. Circuits much
+beyond six live nets should still be split into local cells by global
 placement.
 
 ## Configuration
