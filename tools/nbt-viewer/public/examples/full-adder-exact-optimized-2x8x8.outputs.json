@@ -1,0 +1,21 @@
+{
+  "format": "redstone-compiler.outputs.v1",
+  "outputs": [
+    {
+      "name": "sum",
+      "position": [
+        1,
+        7,
+        6
+      ]
+    },
+    {
+      "name": "cout",
+      "position": [
+        0,
+        5,
+        2
+      ]
+    }
+  ]
+}

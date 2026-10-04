@@ -118,6 +118,14 @@
   },
   {
     "kind": "nbt",
+    "name": "full-adder-exact-optimized-2x8x8.nbt",
+    "file": "full-adder-exact-optimized-2x8x8.nbt",
+    "path": "examples/full-adder-exact-optimized-2x8x8.nbt",
+    "size": 551,
+    "outputsPath": "examples/full-adder-exact-optimized-2x8x8.outputs.json"
+  },
+  {
+    "kind": "nbt",
     "name": "full-adder-right-inputs-2x14x10.nbt",
     "file": "full-adder-right-inputs-2x14x10.nbt",
     "path": "examples/full-adder-right-inputs-2x14x10.nbt",
