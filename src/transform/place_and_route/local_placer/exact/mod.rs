@@ -143,6 +143,9 @@ pub struct ExactTuning {
     /// Largest total objective weight; the cost counter takes one input per
     /// unit of weight.
     pub max_objective_weight: u64,
+    /// Fold fixed and given cells to constants while grounding (`@fold`
+    /// rules), instead of leaving them to the solver as unit clauses.
+    pub fold_fixed_cells: bool,
 }
 
 impl Default for ExactTuning {
@@ -153,6 +156,7 @@ impl Default for ExactTuning {
             sim_max_events: 50_000,
             torch_bound_max_states: 200_000,
             max_objective_weight: 100_000,
+            fold_fixed_cells: true,
         }
     }
 }

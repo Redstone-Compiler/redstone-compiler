@@ -189,6 +189,9 @@ pub(crate) struct RuleDef {
     pub label: String,
     body: Arc<Vec<Stmt>>,
     guarded: Option<Vec<String>>,
+    /// `@fold`: its requires are unit facts, applied before every other rule
+    /// so that they fold to constants there.
+    fold: bool,
     has_contrib: bool,
     has_require: bool,
     span: Span,
@@ -225,6 +228,9 @@ pub struct GroundOptions {
     /// Encode OR auxiliaries as positive variables instead of negated AND
     /// variables (changes only the solver's initial phases).
     pub positive_or_aux: bool,
+    /// Run `@fold` rules as ordinary rules, without fixing their literals
+    /// first (same models, larger CNF).
+    pub no_fold: bool,
 }
 
 #[derive(Clone)]
@@ -232,8 +238,9 @@ enum Val {
     C(Value),
     F(F),
     I(IntTerm),
-    /// `Family[key]` of a choice, awaiting `is`.
-    Choice(u32, Vec<Value>),
+    /// `Family[key]` of a choice, awaiting `is`: the key's index, or `None`
+    /// when the key is outside the domain.
+    Choice(u32, Option<u32>),
     /// A type name used as a set (`d in Dir4`) or as a qualifier.
     Type(Type),
 }
@@ -324,6 +331,10 @@ pub struct Program {
     guard_lookup: HashMap<(usize, Vec<Value>), Lit>,
     options: GroundOptions,
     mode: Mode,
+    /// Running `@fold` rules: requires record their literals as fixed.
+    folding: bool,
+    /// Reusable buffer for family indices and fact arguments.
+    key_scratch: Vec<Value>,
     current_rule: Option<usize>,
     pub warnings: Vec<Diagnostic>,
     pub(crate) sources: crate::diag::SourceMap,
@@ -377,6 +388,8 @@ impl Program {
             guard_lookup: HashMap::default(),
             options,
             mode: Mode::Collect,
+            folding: false,
+            key_scratch: Vec::new(),
             current_rule: None,
             warnings: Vec::new(),
             sources: Default::default(),
@@ -1171,6 +1184,7 @@ impl Program {
                 }
                 ItemKind::Rule { label, body } => {
                     let mut guarded = None;
+                    let mut fold = false;
                     for a in &item.annotations {
                         match a.name.as_str() {
                             "guarded" => {
@@ -1215,17 +1229,26 @@ impl Program {
                                 }
                                 guarded = Some(per);
                             }
+                            "fold" => fold = true,
                             "label" => {}
                             other => return Err(unknown_annotation(other, a.span, "rule")),
                         }
+                    }
+                    let has_contrib =
+                        contains(body, |s| matches!(s.kind, StmtKind::Contribute { .. }));
+                    if fold && has_contrib {
+                        return Err(err(
+                            "E0706",
+                            "a `@fold` rule cannot contribute to relations",
+                            item.span,
+                        ));
                     }
                     self.rules.push(RuleDef {
                         label: label.clone(),
                         body: Arc::new(body.clone()),
                         guarded,
-                        has_contrib: contains(body, |s| {
-                            matches!(s.kind, StmtKind::Contribute { .. })
-                        }),
+                        fold,
+                        has_contrib,
                         has_require: contains(body, |s| matches!(s.kind, StmtKind::Require(_))),
                         span: item.span,
                         clauses: 0,
@@ -1518,6 +1541,25 @@ impl Program {
     // ----- rules -------------------------------------------------------------
 
     fn run_rules(&mut self) -> Result<()> {
+        // Pass 0: `@fold` rules fix literals before anything uses them.
+        if self.options.no_fold {
+            for rule in &mut self.rules {
+                rule.fold = false;
+            }
+        }
+        if self.rules.iter().any(|r| r.fold) {
+            self.mode = Mode::Emit;
+            self.folding = true;
+            for r in 0..self.rules.len() {
+                if self.rules[r].fold {
+                    let before = self.encoder.clause_count;
+                    self.run_rule(r)?;
+                    self.rules[r].clauses = self.encoder.clause_count - before;
+                }
+            }
+            self.folding = false;
+            self.fix_choice_siblings();
+        }
         // Pass 1: collect relation contributions.
         self.mode = Mode::Collect;
         for r in 0..self.rules.len() {
@@ -1551,7 +1593,7 @@ impl Program {
         // Pass 2: emit constraints.
         self.mode = Mode::Emit;
         for r in 0..self.rules.len() {
-            if self.rules[r].has_require {
+            if self.rules[r].has_require && !self.rules[r].fold {
                 let before = self.encoder.clause_count;
                 self.run_rule(r)?;
                 self.rules[r].clauses = self.encoder.clause_count - before;
@@ -1572,7 +1614,7 @@ impl Program {
             }
             let dims = self.defs[d].index.clone();
             for key in self.product(&dims)? {
-                self.get_def(d as u32, key, Span::default())?;
+                self.get_def(d as u32, &key, Span::default())?;
             }
         }
         for i in 0..self.ints.len() {
@@ -1582,6 +1624,25 @@ impl Program {
         self.encoder.origin = 0;
         self.encoder.guard = None;
         Ok(())
+    }
+
+    /// A choice takes exactly one option, so an option fixed true fixes the
+    /// others of the same key false.
+    fn fix_choice_siblings(&mut self) {
+        for choice in &self.choices {
+            for options in &choice.options {
+                if options
+                    .iter()
+                    .any(|o| self.encoder.value(o.lit) == Some(true))
+                {
+                    for o in options {
+                        if self.encoder.value(o.lit).is_none() {
+                            self.encoder.fix(-o.lit);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Sums every `minimize` (and negated `maximize`) item into positive
@@ -1707,6 +1768,30 @@ impl Program {
                     let valuation = self.valuation(env);
                     let label = self.rules[self.current_rule.unwrap()].label.clone();
                     self.encoder.origin = self.new_origin(label, valuation);
+                }
+                if self.folding {
+                    let units = match &f {
+                        // A contradiction is emitted as the empty clause below.
+                        F::Const(_) => Vec::new(),
+                        F::Lit(l) => vec![*l],
+                        F::And(items) if items.iter().all(|i| matches!(i, F::Lit(_))) => items
+                            .iter()
+                            .map(|i| match i {
+                                F::Lit(l) => *l,
+                                _ => unreachable!(),
+                            })
+                            .collect(),
+                        _ => {
+                            return Err(err(
+                                "E0706",
+                                "a `@fold` rule may only require literals",
+                                expr.span,
+                            ))
+                        }
+                    };
+                    for lit in units {
+                        self.encoder.fix(lit);
+                    }
                 }
                 self.encoder.require(f);
                 Ok(())
@@ -1892,10 +1977,11 @@ impl Program {
         Ok(())
     }
 
-    fn get_def(&mut self, d: u32, key: Vec<Value>, span: Span) -> Result<F> {
-        if let Some(f) = self.defs[d as usize].memo.get(&key) {
+    fn get_def(&mut self, d: u32, key: &[Value], span: Span) -> Result<F> {
+        if let Some(f) = self.defs[d as usize].memo.get(key) {
             return Ok(f.clone());
         }
+        let key = key.to_vec();
         if !self.defs[d as usize].in_progress.insert(key.clone()) {
             return Err(err(
                 "E0501",
@@ -1986,7 +2072,8 @@ impl Program {
                 Ok(())
             }
             BinderKind::In { name, source } => {
-                let values: Vec<Value> = match source {
+                // Sets are shared slices; iterate them without copying.
+                let values: Arc<[Value]> = match source {
                     InSource::Range(range) => {
                         let lo = self.const_int_env(&range.lo, env)?;
                         let hi = self.const_int_env(&range.hi, env)?;
@@ -1994,13 +2081,13 @@ impl Program {
                         (lo..=hi).map(Value::Int).collect()
                     }
                     InSource::Expr(e) => match self.eval(e, env, None)? {
-                        Val::C(Value::Set(items)) => items.to_vec(),
-                        Val::Type(t) => self.values_of(&t)?.to_vec(),
+                        Val::C(Value::Set(items)) => items,
+                        Val::Type(t) => self.values_of(&t)?,
                         _ => return Err(err("E0411", "expected a set to iterate over", e.span)),
                     },
                 };
-                for v in values {
-                    env.push((name.clone(), Val::C(v)));
+                for v in values.iter() {
+                    env.push((name.clone(), Val::C(v.clone())));
                     let r = self.bind_from(binders, index + 1, guard, env, f);
                     env.pop();
                     r?;
@@ -2113,7 +2200,7 @@ impl Program {
                         .collect();
                     let mut out = Vec::new();
                     for key in self.product(&types)? {
-                        if self.fact_holds(fact, key.clone(), span)? {
+                        if self.fact_holds(fact, &key, span)? {
                             out.push(key.into());
                         }
                     }
@@ -2128,21 +2215,21 @@ impl Program {
         }
     }
 
-    fn fact_holds(&mut self, fact: u32, args: Vec<Value>, span: Span) -> Result<bool> {
+    fn fact_holds(&mut self, fact: u32, args: &[Value], span: Span) -> Result<bool> {
         if args.iter().any(Value::is_none) {
             return Ok(false);
         }
         match &self.facts[fact as usize].kind {
-            FactKind::Extern { set, .. } => Ok(set.contains(&args)),
+            FactKind::Extern { set, .. } => Ok(set.contains(args)),
             FactKind::Derived { body, memo } => {
-                if let Some(&b) = memo.get(&args) {
+                if let Some(&b) = memo.get(args) {
                     return Ok(b);
                 }
                 let body = body.clone();
                 let mut env: Env = self.facts[fact as usize]
                     .params
                     .iter()
-                    .zip(&args)
+                    .zip(args)
                     .map(|((n, _), v)| (n.clone().unwrap(), Val::C(v.clone())))
                     .collect();
                 let b = self.const_bool(&body, &mut env).map_err(|d| {
@@ -2153,7 +2240,7 @@ impl Program {
                 })?;
                 let _ = span;
                 if let FactKind::Derived { memo, .. } = &mut self.facts[fact as usize].kind {
-                    memo.insert(args, b);
+                    memo.insert(args.to_vec(), b);
                 }
                 Ok(b)
             }
@@ -2382,10 +2469,10 @@ impl Program {
         }
         match self.names.get(name).copied() {
             Some(Decl::Def(d)) if self.defs[d as usize].index.is_empty() => {
-                return Ok(Val::F(self.get_def(d, Vec::new(), span)?));
+                return Ok(Val::F(self.get_def(d, &[], span)?));
             }
             Some(Decl::Fact(f)) if self.facts[f as usize].params.is_empty() => {
-                return Ok(Val::C(Value::Bool(self.fact_holds(f, Vec::new(), span)?)));
+                return Ok(Val::C(Value::Bool(self.fact_holds(f, &[], span)?)));
             }
             _ => Err(err("E0413", format!("`{name}` needs arguments"), span)),
         }
@@ -2777,8 +2864,8 @@ impl Program {
         span: Span,
     ) -> Result<Val> {
         match self.eval(lhs, env, None)? {
-            Val::Choice(c, key) => {
-                if key.iter().any(Value::is_none) {
+            Val::Choice(c, k) => {
+                let Some(k) = k else {
                     let Some(outside) = self.choices[c as usize].outside else {
                         return Err(err(
                             "E0421",
@@ -2795,15 +2882,13 @@ impl Program {
                     };
                     let v = Value::Member(c, outside, Arc::from(Vec::new()));
                     return Ok(Val::C(Value::Bool(self.const_matches(&v, pattern, env)?)));
-                }
-                let Some(&k) = self.choices[c as usize].lookup.get(&key) else {
-                    return Err(err("E0400", "index is outside the choice's domain", span));
                 };
                 let alts = self.resolve_alts(c, pattern, env)?;
+                let encoder = &self.encoder;
                 let lits = self.choices[c as usize].options[k as usize]
                     .iter()
                     .filter(|o| alts.iter().any(|alt| alt.matches(c, o.member, &o.payload)))
-                    .map(|o| F::Lit(o.lit))
+                    .map(|o| encoder.lit_f(o.lit))
                     .collect();
                 Ok(const_or_formula(F::or(lits)))
             }
@@ -2928,7 +3013,18 @@ impl Program {
                             }
                             _ => {
                                 let ty = self.type_of(v);
-                                let resolved = self.resolve_constant(name, ty.as_ref(), *span)?;
+                                // Patterns resolve the same way every time;
+                                // share the name cache with `eval_name`.
+                                let key = (*span, ty);
+                                let resolved = match self.name_cache.get(&key) {
+                                    Some(Val::C(value)) => value.clone(),
+                                    _ => {
+                                        let value =
+                                            self.resolve_constant(name, key.1.as_ref(), *span)?;
+                                        self.name_cache.insert(key, Val::C(value.clone()));
+                                        value
+                                    }
+                                };
                                 &resolved == v
                             }
                         }
@@ -3028,7 +3124,25 @@ impl Program {
                 span,
             ));
         }
-        let mut key = Vec::with_capacity(args.len());
+        // Reuse one buffer for the key; lookups that hit allocate nothing.
+        let mut key = std::mem::take(&mut self.key_scratch);
+        key.clear();
+        let result = self.index_with(decl.unwrap(), &dims, args, env, span, &mut key, name);
+        self.key_scratch = key;
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn index_with(
+        &mut self,
+        decl: Decl,
+        dims: &[Dim],
+        args: &[Expr],
+        env: &mut Env,
+        span: Span,
+        key: &mut Vec<Value>,
+        name: &str,
+    ) -> Result<Val> {
         for (arg, dim) in args.iter().zip(dims.iter()) {
             let v = self.const_eval(arg, env, Some(&dim.ty))?;
             if !v.is_none() && !self.conforms(&v, &dim.ty) {
@@ -3041,13 +3155,23 @@ impl Program {
             key.push(v);
         }
         let outside = key.iter().any(Value::is_none);
-        match decl.unwrap() {
-            Decl::Choice(c) => Ok(Val::Choice(c, key)),
+        match decl {
+            Decl::Choice(c) => {
+                if outside {
+                    return Ok(Val::Choice(c, None));
+                }
+                let Some(&k) = self.choices[c as usize].lookup.get(key.as_slice()) else {
+                    return Err(err("E0400", "index is outside the choice's domain", span));
+                };
+                Ok(Val::Choice(c, Some(k)))
+            }
             Decl::Var(v) => {
                 if outside {
                     return Ok(Val::C(Value::Bool(self.vars[v as usize].outside)));
                 }
-                Ok(Val::F(F::Lit(self.vars[v as usize].lookup[&key])))
+                Ok(const_or_formula(
+                    self.encoder.lit_f(self.vars[v as usize].lookup[key.as_slice()]),
+                ))
             }
             Decl::Def(d) => {
                 if outside {
@@ -3072,7 +3196,7 @@ impl Program {
                     };
                 }
                 Ok(Val::I(IntTerm::Var {
-                    lits: def.lookup[&key].clone(),
+                    lits: def.lookup[key.as_slice()].clone(),
                     lo: def.lo,
                     offset: 0,
                 }))
@@ -3193,11 +3317,21 @@ impl Program {
                         span,
                     ));
                 }
-                let mut values = Vec::with_capacity(args.len());
+                // Reuse one buffer for the arguments; memo hits allocate nothing.
+                let mut values = std::mem::take(&mut self.key_scratch);
+                values.clear();
                 for (arg, (_, ty)) in args.iter().zip(params.iter()) {
-                    values.push(self.const_eval(arg, env, Some(ty))?);
+                    match self.const_eval(arg, env, Some(ty)) {
+                        Ok(v) => values.push(v),
+                        Err(e) => {
+                            self.key_scratch = values;
+                            return Err(e);
+                        }
+                    }
                 }
-                Ok(Val::C(Value::Bool(self.fact_holds(fact, values, span)?)))
+                let holds = self.fact_holds(fact, &values, span);
+                self.key_scratch = values;
+                Ok(Val::C(Value::Bool(holds?)))
             }
             Some(Decl::Relation(rel)) => {
                 if !self.relations[rel as usize].frozen {

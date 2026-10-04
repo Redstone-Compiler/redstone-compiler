@@ -490,6 +490,7 @@ model minimizes non-air blocks plus optional repeater and torch weights.
 | `@label("text")` | declarations | Rule label for clauses produced by the declaration itself. |
 | `@encoding(name)` | int (`order`), cardinality statements (`pairwise`, `seqcounter`, `totalizer`, `auto`) | Encoding choice. |
 | `@guarded(per = binders)` | rule | Adds a selector literal per distinct valuation of the listed binders, or one per rule without `per`. Rust assumes them true by default and can drop any for UNSAT cores, relaxation, or toggling. This generalizes `relax_soundness`. |
+| `@fold` | rule | Runs the rule before all others; its `require`s must be literals (or conjunctions of them), which become fixed. A choice option fixed true fixes its siblings false. Later formulas fold fixed literals to constants, so constraints over fixed parts of the instance never reach the solver (the units are still emitted). `GroundOptions::no_fold` runs such rules as ordinary ones. It cannot contribute to relations. |
 
 Unknown annotations are errors, so a misspelled `@encodng` cannot silently do
 nothing.

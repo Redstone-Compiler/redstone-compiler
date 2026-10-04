@@ -346,6 +346,51 @@ and `Program::write_wcnf` exports weighted partial MaxSAT. The exact placer's
 R15 is met for formula size and solver load, not for grounding time; search
 speed is within the run-to-run variance measured so far.
 
+### Grounding profile (2026-10-04)
+
+Profiled with macOS `sample` on a loop of `measure_encoders` (release with
+`CARGO_PROFILE_RELEASE_DEBUG=line-tables-only`). The call tree was folded by a
+small script into inclusive and self time per function.
+
+- Grounding is 98% of `Encoding::build_dsl`, and running rules is 92%; the
+  host side (`Prepared`, read-back, `Cnf`) is under 3%. The old per-rule
+  report divided by the round count twice. Per rule, the soundness rule
+  ("건전성") takes about 130 ms of the 315 ms full-adder box, justification
+  40 ms, and the switch-neighbor rule 39 ms.
+- About 30% of self time is the allocator (malloc, free, realloc, memmove).
+  By caller: formula construction (`F::junction`, `F::imp`, `F::not`) 30%,
+  `Encoder::require` 10%, environment drops in `exec` 9%, order-encoded
+  comparisons (`int_cmp`, from `Rank[s] < Rank[t]`) 9%, and
+  `resolve_constant` in patterns 6%. The rest is the tree walk itself:
+  `eval`, `eval_binary`, index and fact lookups.
+- Making lookups allocation-free on hits (index keys in a reused buffer,
+  `Val::Choice` carrying the resolved key index, slice-keyed def and fact
+  memos, a Tseitin cache keyed by a reused sorted buffer, cached pattern
+  constants, sets iterated without copying) left the time unchanged within
+  noise (316-327 ms). The cost is spread over the whole interpreter;
+  compiling rules remains the way to cut it. These changes keep the CNF
+  byte-identical (`print_cnf_hashes` matches the previous commit). An
+  earlier variant that sorted Tseitin children in place changed only the
+  order of auxiliary clauses, and the XOR placement test went from about 2 s
+  to 41 s, so clause order is part of what must stay fixed.
+
+What did pay off is grounding less. Compaction windows and construction steps
+fix most of the box (and give its signals), yet every rule still unfolded
+over it. `@fold` rules now fix those literals first, and the rest of
+grounding folds them away. On a block-reduction window of the 2x8x8 full
+adder (`measure_window_encoding`, 48 of 128 cells free):
+
+| | Vars | Clauses | Literals | Encode |
+| --- | ---: | ---: | ---: | ---: |
+| before | 58,861 | 291,745 | 809,293 | 75 ms |
+| `@fold` | 25,018 | 124,415 | 343,077 | 40 ms |
+
+What remains is mostly the window's own constraints (justification's order
+encoding, then soundness). The models are the same, so placements do not
+change. Search quality was within run-to-run variance: full-adder
+construction gave 151-201 blocks with folding, 151-183 without, and 127-164
+in an earlier run without.
+
 ---
 
 ## Appendix A. The current exact placer model

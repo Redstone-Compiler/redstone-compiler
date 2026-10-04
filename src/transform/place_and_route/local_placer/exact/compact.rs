@@ -133,13 +133,7 @@ impl ExactLocalPlacer {
                 .is_some_and(|limit| started.elapsed() >= limit)
         };
         if config.given_outside_signals && !config.legacy_encoder && layout.signals.is_empty() {
-            // A layout read from RCELL has no solver signals yet: solve it
-            // once with every cell fixed to read them off.
-            match self.try_resolve_window(&layout, 1, (0, 0), None, config) {
-                Ok(Some(placement)) => layout.signals = placement.signals.into_iter().collect(),
-                Ok(None) => tracing::warn!("could not read the layout's signals"),
-                Err(error) => tracing::warn!(%error, "could not read the layout's signals"),
-            }
+            self.read_signals(&mut layout, config);
         }
         loop {
             report.rounds += 1;
@@ -400,9 +394,19 @@ impl ExactLocalPlacer {
         })
     }
 
+    /// A layout read from RCELL has no solver signals yet: solve it once with
+    /// every cell fixed to read them off.
+    pub(super) fn read_signals(&self, layout: &mut ExactLayout, config: &CompactionConfig) {
+        match self.try_resolve_window(layout, 1, (0, 0), None, config) {
+            Ok(Some(placement)) => layout.signals = placement.signals.into_iter().collect(),
+            Ok(None) => tracing::warn!("could not read the layout's signals"),
+            Err(error) => tracing::warn!(%error, "could not read the layout's signals"),
+        }
+    }
+
     /// The placer configuration that frees `window` along `axis` and fixes
     /// every other cell of `cut`.
-    fn window_config(
+    pub(super) fn window_config(
         &self,
         cut: &ExactLayout,
         axis: usize,

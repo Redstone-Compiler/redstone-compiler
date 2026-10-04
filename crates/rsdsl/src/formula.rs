@@ -205,11 +205,19 @@ pub struct Encoder {
     /// Selector appended (negated) to clauses from `require`.
     pub guard: Option<Lit>,
     pub var_origin: Vec<VarOrigin>,
-    cache: FxMap<(bool, Vec<Lit>), Aux>,
+    /// Tseitin auxiliaries by sorted child literals, conjunctions and
+    /// disjunctions apart, so that a lookup borrows the literals.
+    and_cache: FxMap<Vec<Lit>, Aux>,
+    or_cache: FxMap<Vec<Lit>, Aux>,
     /// Reused buffer for normalizing clauses.
     scratch: Vec<Lit>,
+    /// Reused buffer for Tseitin cache keys.
+    key_scratch: Vec<Lit>,
     /// Represent OR auxiliaries as negated AND variables (the default).
     pub or_as_negated_and: bool,
+    /// Known values of variables (`1` true, `-1` false, `0` free), fixed
+    /// before the rules that use them are grounded so they fold away.
+    fixed: Vec<i8>,
 }
 
 impl Default for Encoder {
@@ -229,9 +237,12 @@ impl Encoder {
             guard: None,
             // Index 0 is unused so that `var_origin[var]` works directly.
             var_origin: vec![VarOrigin::True],
-            cache: FxMap::default(),
+            and_cache: FxMap::default(),
+            or_cache: FxMap::default(),
             scratch: Vec::new(),
+            key_scratch: Vec::new(),
             or_as_negated_and: true,
+            fixed: Vec::new(),
         };
         let t = encoder.new_var(VarOrigin::True);
         debug_assert_eq!(t, 1);
@@ -241,6 +252,31 @@ impl Encoder {
 
     pub fn tru(&self) -> Lit {
         1
+    }
+
+    /// The known value of `lit`, if it was fixed.
+    pub fn value(&self, lit: Lit) -> Option<bool> {
+        match self.fixed.get(lit.unsigned_abs() as usize).copied().unwrap_or(0) {
+            0 => None,
+            v => Some((v > 0) == (lit > 0)),
+        }
+    }
+
+    /// Records `lit` as true; later formulas can fold it to a constant.
+    pub fn fix(&mut self, lit: Lit) {
+        let var = lit.unsigned_abs() as usize;
+        if self.fixed.len() <= var {
+            self.fixed.resize(var + 1, 0);
+        }
+        self.fixed[var] = if lit > 0 { 1 } else { -1 };
+    }
+
+    /// `lit` as a formula, folded to a constant when its value is fixed.
+    pub fn lit_f(&self, lit: Lit) -> F {
+        match self.value(lit) {
+            Some(b) => F::Const(b),
+            None => F::Lit(lit),
+        }
     }
 
     pub fn new_var(&mut self, origin: VarOrigin) -> Lit {
@@ -311,35 +347,57 @@ impl Encoder {
                     1 => return child_lits[0],
                     _ => {}
                 }
-                let mut sorted = child_lits.clone();
-                sorted.sort_unstable();
-                let key = (is_and, sorted);
-                if !self.cache.contains_key(&key) {
-                    let var = self.new_var(VarOrigin::Aux(self.origin));
-                    // A disjunction is the negation of a conjunction variable,
-                    // so the solver's default false phase starts every
-                    // auxiliary junction as "true" for ORs and "false" for
-                    // ANDs, matching the hand-written encoder.
-                    let lit = if is_and || !self.or_as_negated_and {
-                        var
-                    } else {
-                        -var
-                    };
-                    self.cache.insert(
-                        key.clone(),
-                        Aux {
-                            lit,
-                            pos: false,
-                            neg: false,
-                        },
-                    );
+                // The cache key is the sorted children, built in a reused
+                // buffer; the clauses below keep the children's order, which
+                // the solver's search is sensitive to.
+                let mut key = std::mem::take(&mut self.key_scratch);
+                key.clear();
+                key.extend_from_slice(&child_lits);
+                key.sort_unstable();
+                let cached = if is_and {
+                    self.and_cache.get(key.as_slice())
+                } else {
+                    self.or_cache.get(key.as_slice())
                 }
-                let entry = self.cache.get_mut(&key).unwrap();
-                let aux = entry.lit;
-                let need_pos = pol.pos() && !entry.pos;
-                let need_neg = pol.neg() && !entry.neg;
-                entry.pos |= pol.pos();
-                entry.neg |= pol.neg();
+                .map(|entry| (entry.lit, entry.pos, entry.neg));
+                let (aux, had_pos, had_neg) = match cached {
+                    Some(found) => found,
+                    None => {
+                        let var = self.new_var(VarOrigin::Aux(self.origin));
+                        // A disjunction is the negation of a conjunction
+                        // variable, so the solver's default false phase
+                        // starts every auxiliary junction as "true" for ORs
+                        // and "false" for ANDs, matching the hand-written
+                        // encoder.
+                        let lit = if is_and || !self.or_as_negated_and {
+                            var
+                        } else {
+                            -var
+                        };
+                        (lit, false, false)
+                    }
+                };
+                let need_pos = pol.pos() && !had_pos;
+                let need_neg = pol.neg() && !had_neg;
+                if cached.is_none() || need_pos || need_neg {
+                    let entry = Aux {
+                        lit: aux,
+                        pos: had_pos || pol.pos(),
+                        neg: had_neg || pol.neg(),
+                    };
+                    let cache = if is_and {
+                        &mut self.and_cache
+                    } else {
+                        &mut self.or_cache
+                    };
+                    match cache.get_mut(key.as_slice()) {
+                        Some(existing) => *existing = entry,
+                        None => {
+                            cache.insert(key.clone(), entry);
+                        }
+                    }
+                }
+                self.key_scratch = key;
                 // aux -> f
                 if need_pos {
                     if is_and {

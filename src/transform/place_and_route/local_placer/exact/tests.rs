@@ -1036,6 +1036,10 @@ fn diagnose_full_adder_construct_and_compact() -> eyre::Result<()> {
         early_outputs: std::env::var("PIPE_EARLY_OUTPUTS").as_deref() != Ok("0"),
         given_frozen_signals: std::env::var("PIPE_GIVEN").as_deref() != Ok("0"),
         step_optimize: step_optimize_from_env("PIPE_STEP_OPTIMIZE"),
+        tuning: ExactTuning {
+            fold_fixed_cells: std::env::var("PIPE_FOLD").as_deref() != Ok("0"),
+            ..Default::default()
+        },
         model_params: model_params_from_env("PIPE_MODEL_PARAMS"),
         ..Default::default()
     };
@@ -1396,6 +1400,151 @@ fn encoders_accept_each_others_layouts() {
     }
 }
 
+/// Encode time of one compaction window of the 2x8x8 full adder (Y slices
+/// 3..6 free, the rest fixed with given signals, optimizing), the shape of
+/// every block-reduction attempt:
+/// `cargo test --release --lib measure_window_encoding -- --ignored --nocapture`.
+#[test]
+#[ignore = "measurement; run explicitly with --nocapture"]
+fn measure_window_encoding() {
+    let source = include_str!("../../../../../test/full-adder-exact-optimized-2x8x8.rcell");
+    let document: crate::physical_cell::PhysicalCellDocument = source.parse().unwrap();
+    let mut layout = ExactLayout::from_rcell(&document).unwrap();
+    for (name, _) in layout.outputs.iter_mut() {
+        if name == "sum" {
+            *name = "s".to_owned();
+        }
+    }
+    let placer = ExactLocalPlacer::new(&full_adder_graph("nor9")).unwrap();
+    let compaction = CompactionConfig {
+        output_policies: [("s".to_owned(), OutputPolicy::MaxYFace)]
+            .into_iter()
+            .collect(),
+        given_outside_signals: std::env::var("ENCODE_GIVEN").as_deref() != Ok("0"),
+        ..Default::default()
+    };
+    if compaction.given_outside_signals {
+        placer.read_signals(&mut layout, &compaction);
+        assert!(!layout.signals.is_empty());
+    }
+    let limit = layout.cells.len() - 1;
+    let mut config = placer
+        .window_config(&layout, 1, (3, 6), Some(limit), &compaction)
+        .unwrap();
+    config.optimize = true;
+    let rounds = env_usize("ENCODE_ROUNDS", 20) as u32;
+    let started = std::time::Instant::now();
+    let mut encoding = None;
+    for _ in 0..rounds {
+        encoding = Some(Encoding::build(placer.netlist(), &config).unwrap());
+    }
+    let elapsed = started.elapsed() / rounds;
+    let encoding = encoding.unwrap();
+    if let (Some(program), true) = (&encoding.program, std::env::var("ENCODE_RULES").is_ok()) {
+        let mut stats = program.rule_stats();
+        stats.sort_by_key(|(_, clauses, _)| std::cmp::Reverse(*clauses));
+        for (rule, clauses, time) in stats {
+            println!("  RULE {time:>8.2?} {clauses:>8} {rule}");
+        }
+    }
+    println!(
+        "ENCODE window 2x8x8 y=3..6 given={} vars={} clauses={} literals={} time={elapsed:?}",
+        compaction.given_outside_signals,
+        encoding.cnf.num_vars(),
+        encoding.cnf.clause_count(),
+        encoding.cnf.literals().len() - encoding.cnf.clause_count(),
+    );
+}
+
+/// Optimizes block-reduction windows of the 2x8x8 full adder with and
+/// without folding fixed cells, each for `WINDOW_SECONDS` (5), and prints the
+/// cost reached: does a smaller CNF change how far a short optimize gets?
+/// `cargo test --release --lib compare_window_folding -- --ignored --nocapture`.
+#[test]
+#[ignore = "measurement; run explicitly with --nocapture"]
+fn compare_window_folding() {
+    // `WINDOW_SOURCE=<rcell>` should be a loose layout (a construction
+    // result): windows of an optimized cell have nothing left to gain.
+    let source = match std::env::var("WINDOW_SOURCE") {
+        Ok(path) => std::fs::read_to_string(path).unwrap(),
+        Err(_) => {
+            include_str!("../../../../../test/full-adder-exact-optimized-2x8x8.rcell").to_owned()
+        }
+    };
+    let document: crate::physical_cell::PhysicalCellDocument = source.parse().unwrap();
+    let mut layout = ExactLayout::from_rcell(&document).unwrap();
+    for (name, _) in layout.outputs.iter_mut() {
+        if name == "sum" {
+            *name = "s".to_owned();
+        }
+    }
+    let placer = ExactLocalPlacer::new(&full_adder_graph("nor9")).unwrap();
+    let compaction = CompactionConfig {
+        output_policies: [("s".to_owned(), OutputPolicy::MaxYFace)]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+    placer.read_signals(&mut layout, &compaction);
+    let seconds = env_usize("WINDOW_SECONDS", 5) as u64;
+    let step = env_usize("WINDOW_STEP", 1);
+    for fold in [true, false] {
+        let mut costs = Vec::new();
+        for low in (0..layout.dim.1.saturating_sub(2)).step_by(step) {
+            let mut config = placer
+                .window_config(&layout, 1, (low, low + 3), None, &compaction)
+                .unwrap();
+            config.optimize = true;
+            config.time_limit = Some(Duration::from_secs(seconds));
+            config.tuning.fold_fixed_cells = fold;
+            let started = std::time::Instant::now();
+            let (outcome, stats) = placer.place(&config).unwrap();
+            let solved = matches!(outcome, ExactOutcome::Placed(_));
+            costs.push(format!(
+                "y{low}:{}{}@{:.1}s",
+                stats.cost.map_or("-".to_owned(), |c| c.to_string()),
+                if stats.optimal {
+                    "*"
+                } else if solved {
+                    ""
+                } else {
+                    "?"
+                },
+                started.elapsed().as_secs_f64()
+            ));
+        }
+        println!("FOLD fold={fold} {}", costs.join(" "));
+    }
+}
+
+/// Prints a hash of the CNF for a few fixed problems, to check that a
+/// grounder change keeps the solver's input identical:
+/// `cargo test --release --lib print_cnf_hashes -- --ignored --nocapture`.
+#[test]
+#[ignore = "diagnostic; run explicitly with --nocapture"]
+fn print_cnf_hashes() {
+    use std::hash::{Hash, Hasher};
+    for (name, graph, dim) in [
+        ("xor 2x6x4", graph(&[("out", "a^b")]), DimSize(2, 6, 4)),
+        ("nor 1x5x2", graph(&[("out", "~(a|b)")]), DimSize(1, 5, 2)),
+        (
+            "full adder 2x14x10",
+            full_adder_graph("nor9"),
+            DimSize(2, 14, 10),
+        ),
+    ] {
+        let netlist = NorNetlist::from_logic_graph(&graph).unwrap();
+        let encoding = Encoding::build(&netlist, &ExactPlacerConfig::new(dim)).unwrap();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        encoding.cnf.literals().hash(&mut hasher);
+        println!(
+            "CNFHASH {name} {:016x} vars={}",
+            hasher.finish(),
+            encoding.cnf.num_vars()
+        );
+    }
+}
+
 /// Formula sizes and encode times of both encoders:
 /// `cargo test --release --lib measure_encoders -- --ignored --nocapture`.
 #[test]
@@ -1439,8 +1588,9 @@ fn measure_encoders() {
             drop(solver);
             if let Some(program) = &encoding.program {
                 if std::env::var("ENCODE_RULES").is_ok() {
+                    // Stats belong to the last encoding only, not to all rounds.
                     for (rule, clauses, time) in program.rule_stats() {
-                        println!("  RULE {:>8.2?} {clauses:>8} {rule}", time / rounds);
+                        println!("  RULE {time:>8.2?} {clauses:>8} {rule}");
                     }
                 }
             }
