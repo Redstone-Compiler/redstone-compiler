@@ -275,8 +275,7 @@ mod tests {
         include_str!("../../test/full-adder-right-inputs-compacted-2x10x10.rcell");
     const ADDER2_EXACT: &str = include_str!("../../test/adder2-exact-2x14x10.rcell");
     const ADDER_CARRY_TILE: &str = include_str!("../../test/adder-carry-tile-2x16x10.rcell");
-    const ADDER_CARRY_CHAIN4: &str =
-        include_str!("../../test/adder-carry-chain4-13x16x10.rcell");
+    const ADDER_CARRY_CHAIN4: &str = include_str!("../../test/adder-carry-chain4-13x16x10.rcell");
     const DISCONNECTED_FULL_ADDER: &str =
         include_str!("../../test/rcell/archive/full-adder-2x20x20-disconnected.rcell");
 
