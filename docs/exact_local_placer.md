@@ -416,7 +416,15 @@ its second round removed slices Y11 and Z0 (2x11x8, volume 176) just before
 time ran out. Pinning the outside signals can also rule out a repair. In the
 first round it missed the Z1 removal that the run without given signals
 found. Recompacting that 2x11x8 cell once more converged at 84 blocks after
-843 s. It is saved as `test/full-adder-exact-optimized-2x11x8.rcell`
+843 s.
+
+**End to end.** With all of the above (given frozen signals in construction;
+rounds, continued passes and given outside signals in compaction), one
+pipeline run from the `nor9` netlist (seed 1) builds 2x18x10 with 300 blocks
+in 14 s. Compaction then converges in 1190 s, well inside its 1800 s
+budget, at **2x11x6 with 78 blocks**. On the way it passed 2x12x7 with 71
+blocks: the compactor shrinks the box first and minimizes blocks second.
+The result is saved as `test/full-adder-exact-optimized-2x11x6.rcell`
 (replacing the 2x14x9 cell) and passes the same regression tests: all eight
 cases and every settled input transition.
 
@@ -427,6 +435,7 @@ cases and every settled input transition.
 | Generated, pipeline (2026-10-03) | 2x14x9 | 252 | 153 |
 | Generated, recompacted twice (before the pass changes) | 2x12x8 | 192 | 84 |
 | Generated, recompacted twice (`continue_after_gain`, given signals) | 2x11x8 | 176 | 84 |
+| Generated, one pipeline run with everything (20 minutes) | 2x11x6 | 132 | 78 |
 
 ### Larger circuits (2026-10-04)
 
