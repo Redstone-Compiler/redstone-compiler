@@ -2213,21 +2213,71 @@ fn carry_adder_netlist_keeps_the_carry_terms_apart() {
     assert_eq!(netlist.nets[inner].gate_inputs.len(), 2);
 }
 
-/// Construct-then-compact pipeline for a full-adder tile that repeats along
-/// X into a ripple-carry adder, then a check of the assembled chain.
+/// The carry interface of `carry_adder_graph`.
+fn adder_carry() -> CarryTiling {
+    CarryTiling {
+        input: "ncin".to_owned(),
+        output: "ncout".to_owned(),
+    }
+}
+
+/// Writes a cell to `directory` as `<name>.rcell`, its settled world as
+/// `<name>.nbt`, and its interface metadata (inputs and outputs, for the
+/// viewer) as `<name>.outputs.json`.
+fn write_cell(
+    directory: &std::path::Path,
+    name: &str,
+    document: &crate::physical_cell::PhysicalCellDocument,
+    build: &crate::physical_cell::PhysicalCellBuild,
+) -> eyre::Result<()> {
+    std::fs::create_dir_all(directory)?;
+    let path = directory.join(name);
+    std::fs::write(path.with_extension("rcell"), document.to_string())?;
+    crate::nbt::NBTRoot::from(&document.export_world(build)).save(path.with_extension("nbt"));
+    std::fs::write(
+        path.with_extension("outputs.json"),
+        serde_json::to_string_pretty(&document.interface_json())?,
+    )?;
+    println!("TILE wrote {}.{{rcell,nbt,outputs.json}}", path.display());
+    Ok(())
+}
+
+/// File names of the kept cells: the tile by its own size (without the ghost
+/// slices), a chain by its bits and box.
+fn tile_file_name(size: DimSize) -> String {
+    format!(
+        "adder-carry-tile-{}x{}x{}",
+        size.0 - CarryTiling::GHOST,
+        size.1,
+        size.2
+    )
+}
+
+fn chain_file_name(bits: usize, size: DimSize) -> String {
+    format!("adder-carry-chain{bits}-{}x{}x{}", size.0, size.1, size.2)
+}
+
+/// One run from the netlist to the files: builds the full-adder carry tile
+/// (`docs/carry_tiles.md`), compacts it, chains it, checks every chain of
+/// 1..=`TILE_BITS` bits in every case and the `TILE_LONG_BITS` chains with
+/// sampled cases and a random input walk, and writes the tile and the
+/// `TILE_WRITE_BITS` chains to `TILE_OUT` (`.rcell`, settled `.nbt`,
+/// `.outputs.json`). With the defaults it takes about an hour, most of it
+/// compaction (construction alone gives a valid but large tile in minutes).
 ///
-/// Knobs: `TILE_WIDTH` (2, the tile's X slices), `TILE_HEIGHT` (8),
+/// Knobs: `TILE_OUT` (`target/carry-adder`), `TILE_BITS` (4),
+/// `TILE_LONG_BITS` (`8,16`; empty for none), `TILE_WRITE_BITS` (`4`),
+/// `TILE_SAMPLES` (200), `TILE_WALK` (200), `TILE_COMPACT_SECONDS` (2400),
+/// `TILE_SOURCE=<tile .rcell>` (compact and check that tile instead of
+/// constructing one); construction: `TILE_WIDTH` (2), `TILE_HEIGHT` (10),
 /// `TILE_WINDOW`, `TILE_MAX_WINDOW`, `TILE_STEP_SECONDS`,
 /// `TILE_CARRY_SECONDS` (180, the carry-out step), `TILE_RESTART_SECONDS`
-/// (600, one construction attempt), `TILE_SEED`,
-/// `TILE_WORKERS`, `TILE_RESTARTS`, `TILE_COMPACT_SECONDS` (1200),
-/// `TILE_BITS` (5, the longest chain checked), `TILE_CARRY=xor` (`nor9`'s
-/// carry), `TILE_NETLIST=carry` (the carry alone), `TILE_MODEL_PARAMS`,
-/// `TILE_SOURCE=<tile .rcell>` (compact that tile instead of constructing),
-/// `TILE_WRITE=<path prefix>`.
+/// (600), `TILE_RESTARTS` (7), `TILE_SEED`, `TILE_WORKERS`; experiments:
+/// `TILE_CARRY=xor` (`nor9`'s carry), `TILE_NETLIST=carry` (the carry
+/// alone), `TILE_MODEL_PARAMS`.
 #[test]
-#[ignore = "carry tile pipeline measurement; run explicitly with --nocapture"]
-fn diagnose_carry_adder_tile() -> eyre::Result<()> {
+#[ignore = "builds the carry tile and its chains; run explicitly with --nocapture"]
+fn synthesize_carry_adder() -> eyre::Result<()> {
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .with_test_writer()
@@ -2250,11 +2300,11 @@ fn diagnose_carry_adder_tile() -> eyre::Result<()> {
     } else {
         carry_adder_graph(xor_carry)
     };
-    let placer = ExactLocalPlacer::new(&logic)?.with_name("exact-adder-tile");
-    let carry = CarryTiling {
-        input: "ncin".to_owned(),
-        output: "ncout".to_owned(),
-    };
+    let placer = ExactLocalPlacer::new(&logic)?.with_name("exact-adder-carry-tile");
+    let carry = adder_carry();
+    let out = std::path::PathBuf::from(
+        std::env::var("TILE_OUT").unwrap_or_else(|_| "target/carry-adder".to_owned()),
+    );
     let width = env_usize("TILE_WIDTH", 2);
     let input_policies = [
         ("a".to_owned(), InputPolicy::MinYFace),
@@ -2278,7 +2328,7 @@ fn diagnose_carry_adder_tile() -> eyre::Result<()> {
     let construction = ConstructionConfig {
         width: CarryTiling::GHOST + width,
         model_params: model_params.clone(),
-        height: env_usize("TILE_HEIGHT", 8),
+        height: env_usize("TILE_HEIGHT", 10),
         window: env_usize("TILE_WINDOW", 2),
         max_window: env_usize("TILE_MAX_WINDOW", 5),
         step_time_limit: Duration::from_secs(env_usize("TILE_STEP_SECONDS", 60) as u64),
@@ -2300,13 +2350,14 @@ fn diagnose_carry_adder_tile() -> eyre::Result<()> {
         workers: env_usize("TILE_WORKERS", 8),
         seed: env_usize("TILE_SEED", 1) as u32,
         time_limit: Some(Duration::from_secs(
-            env_usize("TILE_COMPACT_SECONDS", 1200) as u64
+            env_usize("TILE_COMPACT_SECONDS", 2400) as u64
         )),
         output_policies,
         carry: Some(carry.clone()),
         model_params,
         ..Default::default()
     };
+    let started = std::time::Instant::now();
     let (layout, placement) = if let Ok(source) = std::env::var("TILE_SOURCE") {
         // Compact an earlier tile further instead of constructing one.
         let document: crate::physical_cell::PhysicalCellDocument =
@@ -2328,9 +2379,6 @@ fn diagnose_carry_adder_tile() -> eyre::Result<()> {
             report.steps,
             report.elapsed
         );
-        if let Ok(prefix) = std::env::var("TILE_WRITE") {
-            std::fs::write(format!("{prefix}-loose.rcell"), placement.rcell.to_string())?;
-        }
         (layout, placement)
     };
     let (compacted, best, report) = placer.compact(layout, &compaction)?;
@@ -2340,46 +2388,88 @@ fn diagnose_carry_adder_tile() -> eyre::Result<()> {
         compacted.dim, tile.block_count, report.removed, report.block_reductions, report.elapsed
     );
     println!("{}", tile.rcell);
-    if let Ok(prefix) = std::env::var("TILE_WRITE") {
-        std::fs::write(format!("{prefix}.rcell"), tile.rcell.to_string())?;
-        crate::nbt::NBTRoot::from(&tile.placed.world).save(format!("{prefix}.nbt"));
-    }
-    let mut failing = None;
-    for bits in 1..=env_usize("TILE_BITS", 5) {
+    let tile_build = tile.rcell.build()?;
+    write_cell(
+        &out,
+        &tile_file_name(tile.rcell.size),
+        &tile.rcell,
+        &tile_build,
+    )?;
+
+    let bit_list = |name: &str, default: &str| {
+        std::env::var(name)
+            .unwrap_or_else(|_| default.to_owned())
+            .split(',')
+            .filter(|bits| !bits.is_empty())
+            .map(|bits| bits.parse::<usize>())
+            .collect::<Result<Vec<_>, _>>()
+    };
+    let write_bits = bit_list("TILE_WRITE_BITS", "4")?;
+    let long_bits = if carry_only {
+        Vec::new()
+    } else {
+        bit_list("TILE_LONG_BITS", "8,16")?
+    };
+    let exhaustive_bits = env_usize("TILE_BITS", 4);
+    let mut failures = Vec::new();
+    let all_bits = (1..=exhaustive_bits)
+        .chain(long_bits.iter().copied())
+        .chain(write_bits.iter().copied())
+        .collect::<BTreeSet<_>>();
+    for bits in all_bits {
         let chain = assemble_chain(
             placer.netlist(),
             &carry,
             &compacted,
             bits,
-            "exact-adder-chain",
+            &format!("exact-adder-carry-chain{bits}"),
         )?;
         let build = chain.build()?;
-        let verification = chain.verify(&build)?;
-        println!(
-            "TILE chain bits={bits} dim={:?} cases={} failures={}",
-            chain.size,
-            verification.cases,
-            verification.failures.len()
-        );
-        if let Ok(prefix) = std::env::var("TILE_WRITE") {
-            std::fs::write(format!("{prefix}-chain{bits}.rcell"), chain.to_string())?;
-            crate::nbt::NBTRoot::from(&build.world).save(format!("{prefix}-chain{bits}.nbt"));
+        if bits <= exhaustive_bits {
+            let verification = chain.verify(&build)?;
+            println!(
+                "TILE chain bits={bits} dim={:?} cases={} failures={}",
+                chain.size,
+                verification.cases,
+                verification.failures.len()
+            );
+            if let Some(failure) = verification.failures.first() {
+                failures.push(format!("{bits} bits: {:?}", failure.inputs));
+            }
         }
-        if failing.is_none() && !verification.failures.is_empty() {
-            failing = Some((bits, verification.failures[0].clone()));
+        if long_bits.contains(&bits) {
+            for failure in sample_adder_chain(
+                &build,
+                bits,
+                env_usize("TILE_SAMPLES", 200),
+                env_usize("TILE_WALK", 200),
+                env_usize("TILE_SEED", 1) as u64,
+            )? {
+                failures.push(format!("{bits} bits: {failure}"));
+            }
+        }
+        if write_bits.contains(&bits) {
+            write_cell(&out, &chain_file_name(bits, chain.size), &chain, &build)?;
         }
     }
-    eyre::ensure!(
-        failing.is_none(),
-        "a chain fails (bits, first case): {failing:?}"
+    println!(
+        "TILE done in {:?}: tile {:?} with {} blocks, {} failures",
+        started.elapsed(),
+        compacted.dim,
+        tile.block_count,
+        failures.len()
     );
+    for failure in failures.iter().take(5) {
+        println!("  {failure}");
+    }
+    eyre::ensure!(failures.is_empty(), "a chain fails");
     Ok(())
 }
 
-/// Chains a full-adder tile RCELL (from `diagnose_carry_adder_tile`) for
+/// Chains a full-adder tile RCELL (from `synthesize_carry_adder`) for
 /// 1..=`TILE_BITS` bits and reports each chain's failing cases:
 /// `TILE_SOURCE=<tile .rcell>`, `TILE_BITS` (6), `TILE_CARRY=xor` (a tile
-/// built with `nor9`'s carry), `TILE_WRITE=<path prefix>`.
+/// built with `nor9`'s carry), `TILE_OUT=<directory>` (writes the chains).
 #[test]
 #[ignore = "carry chain check of a tile file; run explicitly with --nocapture"]
 fn check_carry_adder_chain() -> eyre::Result<()> {
@@ -2388,12 +2478,14 @@ fn check_carry_adder_chain() -> eyre::Result<()> {
     let tile = ExactLayout::from_rcell(&document)?;
     let xor_carry = std::env::var("TILE_CARRY").as_deref() == Ok("xor");
     let placer = ExactLocalPlacer::new(&carry_adder_graph(xor_carry))?;
-    let carry = CarryTiling {
-        input: "ncin".to_owned(),
-        output: "ncout".to_owned(),
-    };
     for bits in 1..=env_usize("TILE_BITS", 6) {
-        let chain = assemble_chain(placer.netlist(), &carry, &tile, bits, "exact-adder-chain")?;
+        let chain = assemble_chain(
+            placer.netlist(),
+            &adder_carry(),
+            &tile,
+            bits,
+            "exact-adder-chain",
+        )?;
         let build = chain.build()?;
         let verification = chain.verify(&build)?;
         println!(
@@ -2402,8 +2494,13 @@ fn check_carry_adder_chain() -> eyre::Result<()> {
             verification.failures.len(),
             verification.failures.first().map(|failure| &failure.inputs)
         );
-        if let Ok(prefix) = std::env::var("TILE_WRITE") {
-            std::fs::write(format!("{prefix}-chain{bits}.rcell"), chain.to_string())?;
+        if let Ok(directory) = std::env::var("TILE_OUT") {
+            write_cell(
+                std::path::Path::new(&directory),
+                &chain_file_name(bits, chain.size),
+                &chain,
+                &build,
+            )?;
         }
     }
     Ok(())
@@ -2520,34 +2617,40 @@ fn diagnose_monotone_carry_cell() -> eyre::Result<()> {
     Ok(())
 }
 
-/// Checks a long chain of a full-adder tile against `a + b + cin` without
+/// What output `name` of an n-bit ripple-carry adder chain shows for
+/// `a + b + cin`: `s{i}` the sum bits, `ncout{i}` the complement of the carry
+/// out of bit `i`, `cout` the last carry.
+fn expected_chain_output(name: &str, bits: usize, a: u64, b: u64, cin: bool) -> Option<bool> {
+    let sum = a + b + u64::from(cin);
+    if name == "cout" {
+        return Some(sum >> bits & 1 == 1);
+    }
+    if let Some(bit) = name.strip_prefix("ncout") {
+        let bit = bit.parse::<usize>().ok()?;
+        let low = (1u64 << (bit + 1)) - 1;
+        let carry = ((a & low) + (b & low) + u64::from(cin)) >> (bit + 1) & 1 == 1;
+        return Some(!carry);
+    }
+    let bit = name.strip_prefix('s')?.parse::<usize>().ok()?;
+    Some(sum >> bit & 1 == 1)
+}
+
+/// Checks an assembled full-adder chain against `a + b + cin` without
 /// enumerating every case: worst-case carry patterns (full propagation,
-/// generation at every bit, alternation), random cases from a settled
-/// start, and a random walk of input changes on one simulator (outputs
-/// after each change, no burned-out torch).
-/// `TILE_SOURCE=<tile .rcell>`, `TILE_BITS` (8), `TILE_SAMPLES` (200),
-/// `TILE_WALK` (200), `TILE_SEED` (1), `TILE_WRITE=<path prefix>`.
-#[test]
-#[ignore = "long carry chain check of a tile file; run explicitly with --nocapture"]
-fn check_long_carry_adder_chain() -> eyre::Result<()> {
+/// generation at every bit, alternation) and `samples` random cases, each
+/// from a settled start, then a random walk of `walk` input changes on one
+/// simulator (every output after each change, no burned-out torch).
+/// Returns the failures.
+fn sample_adder_chain(
+    build: &crate::physical_cell::PhysicalCellBuild,
+    bits: usize,
+    samples: usize,
+    walk: usize,
+    seed: u64,
+) -> eyre::Result<Vec<String>> {
     use crate::world::simulator::{Simulator, MANUAL_INPUT_IDLE_CYCLES};
     use crate::world::World;
 
-    let source = std::fs::read_to_string(std::env::var("TILE_SOURCE")?)?;
-    let document: crate::physical_cell::PhysicalCellDocument = source.parse()?;
-    let tile = ExactLayout::from_rcell(&document)?;
-    let placer = ExactLocalPlacer::new(&carry_adder_graph(false))?;
-    let carry = CarryTiling {
-        input: "ncin".to_owned(),
-        output: "ncout".to_owned(),
-    };
-    let bits = env_usize("TILE_BITS", 8);
-    let chain = assemble_chain(placer.netlist(), &carry, &tile, bits, "exact-adder-chain")?;
-    let build = chain.build()?;
-    if let Ok(prefix) = std::env::var("TILE_WRITE") {
-        std::fs::write(format!("{prefix}-chain{bits}.rcell"), chain.to_string())?;
-        crate::nbt::NBTRoot::from(&build.world).save(format!("{prefix}-chain{bits}.nbt"));
-    }
     let mask = (1u64 << bits) - 1;
     let assignment = |a: u64, b: u64, cin: bool| {
         let mut inputs = BTreeMap::new();
@@ -2559,14 +2662,9 @@ fn check_long_carry_adder_chain() -> eyre::Result<()> {
         inputs
     };
     let check = |simulator: &Simulator, a: u64, b: u64, cin: bool| -> Result<(), String> {
-        let sum = a + b + u64::from(cin);
         for (name, position) in build.observations() {
-            let expected = if name == "cout" {
-                sum >> bits & 1 == 1
-            } else {
-                let bit = name[1..].parse::<usize>().unwrap();
-                sum >> bit & 1 == 1
-            };
+            let expected = expected_chain_output(name, bits, a, b, cin)
+                .ok_or_else(|| format!("output {name} is not an adder output"))?;
             if simulator.world()[position].kind.is_powered() != expected {
                 return Err(format!("{name} wrong for {a} + {b} + {}", u8::from(cin)));
             }
@@ -2598,7 +2696,7 @@ fn check_long_carry_adder_chain() -> eyre::Result<()> {
         Simulator::from_settled_with_limits_and_trace(&world, 4096, 1_000_000, 0)
             .map_err(|error| eyre::eyre!(error.message().to_owned()))
     };
-    let mut seed = env_usize("TILE_SEED", 1) as u64 | 1;
+    let mut seed = seed | 1;
     let mut random = move || {
         seed ^= seed << 13;
         seed ^= seed >> 7;
@@ -2616,7 +2714,7 @@ fn check_long_carry_adder_chain() -> eyre::Result<()> {
         (alternating, !alternating & mask, true),
         (alternating, alternating, false),
     ];
-    for _ in 0..env_usize("TILE_SAMPLES", 200) {
+    for _ in 0..samples {
         cases.push((random() & mask, random() & mask, random() & 1 == 1));
     }
     let mut failures = Vec::new();
@@ -2627,34 +2725,62 @@ fn check_long_carry_adder_chain() -> eyre::Result<()> {
             failures.push(failure);
         }
     }
-    println!(
-        "CHAIN bits={bits} settled cases={} failures={}",
-        cases.len(),
-        failures.len()
-    );
     let mut simulator = settled()?;
-    let mut walk_failures = Vec::new();
-    let steps = env_usize("TILE_WALK", 200);
-    for _ in 0..steps {
+    for _ in 0..walk {
         let (a, b, cin) = (random() & mask, random() & mask, random() & 1 == 1);
         simulator.advance_idle_cycles(MANUAL_INPUT_IDLE_CYCLES)?;
         drive(&mut simulator, &assignment(a, b, cin))?;
         if let Err(failure) = check(&simulator, a, b, cin) {
-            walk_failures.push(failure);
+            failures.push(format!("walk: {failure}"));
             simulator = settled()?;
         }
     }
     println!(
-        "CHAIN bits={bits} walk steps={steps} failures={}",
-        walk_failures.len()
+        "CHAIN bits={bits} sampled cases={} walk={walk} failures={}",
+        cases.len(),
+        failures.len()
     );
-    for failure in failures.iter().chain(&walk_failures).take(5) {
+    Ok(failures)
+}
+
+/// Checks a long chain of a full-adder tile file with `sample_adder_chain`:
+/// `TILE_SOURCE=<tile .rcell>`, `TILE_BITS` (8), `TILE_SAMPLES` (200),
+/// `TILE_WALK` (200), `TILE_SEED` (1), `TILE_OUT=<directory>` (writes the chain).
+#[test]
+#[ignore = "long carry chain check of a tile file; run explicitly with --nocapture"]
+fn check_long_carry_adder_chain() -> eyre::Result<()> {
+    let source = std::fs::read_to_string(std::env::var("TILE_SOURCE")?)?;
+    let document: crate::physical_cell::PhysicalCellDocument = source.parse()?;
+    let tile = ExactLayout::from_rcell(&document)?;
+    let placer = ExactLocalPlacer::new(&carry_adder_graph(false))?;
+    let bits = env_usize("TILE_BITS", 8);
+    let chain = assemble_chain(
+        placer.netlist(),
+        &adder_carry(),
+        &tile,
+        bits,
+        "exact-adder-chain",
+    )?;
+    let build = chain.build()?;
+    if let Ok(directory) = std::env::var("TILE_OUT") {
+        write_cell(
+            std::path::Path::new(&directory),
+            &chain_file_name(bits, chain.size),
+            &chain,
+            &build,
+        )?;
+    }
+    let failures = sample_adder_chain(
+        &build,
+        bits,
+        env_usize("TILE_SAMPLES", 200),
+        env_usize("TILE_WALK", 200),
+        env_usize("TILE_SEED", 1) as u64,
+    )?;
+    for failure in failures.iter().take(5) {
         println!("  {failure}");
     }
-    eyre::ensure!(
-        failures.is_empty() && walk_failures.is_empty(),
-        "the chain fails"
-    );
+    eyre::ensure!(failures.is_empty(), "the chain fails");
     Ok(())
 }
 

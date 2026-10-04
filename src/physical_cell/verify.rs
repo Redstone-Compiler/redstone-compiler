@@ -51,6 +51,41 @@ pub struct PhysicalCellDivergence {
 }
 
 impl PhysicalCellDocument {
+    /// The world to save: settled with every input off when the cell
+    /// declares `start settled;`, so a paste or a viewer shows real torch
+    /// states instead of every torch lit; otherwise as built.
+    pub fn export_world(&self, build: &PhysicalCellBuild) -> crate::world::World3D {
+        if self.settled_start {
+            if let Ok(simulator) =
+                Simulator::from_settled_with_limits_and_trace(&World::from(&build.world), 256, 50_000, 0)
+            {
+                return simulator.world().clone();
+            }
+        }
+        build.world.clone()
+    }
+
+    /// The cell's interface as `redstone-compiler.outputs.v1` metadata: the
+    /// outputs, and the inputs' names for viewers.
+    pub fn interface_json(&self) -> serde_json::Value {
+        let endpoints = |items: Vec<(&str, Position)>| {
+            items
+                .into_iter()
+                .map(|(name, position)| {
+                    serde_json::json!({
+                        "name": name,
+                        "position": [position.0, position.1, position.2],
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+        serde_json::json!({
+            "format": "redstone-compiler.outputs.v1",
+            "inputs": endpoints(self.inputs.iter().map(|input| (input.name.as_str(), input.position)).collect()),
+            "outputs": endpoints(self.outputs.iter().map(|output| (output.name.as_str(), output.position)).collect()),
+        })
+    }
+
     fn verification_truth(
         &self,
         build: &PhysicalCellBuild,

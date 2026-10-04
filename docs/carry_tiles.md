@@ -8,8 +8,9 @@ Y-min face, sums on the Y-max face, the carry crossing each seam.
 Code: the tiling rules in `exact_placer.rsdsl` (section "tiling"),
 `CarryTiling` in `exact/mod.rs`, the carry steps in `construct.rs`
 (`construction_steps`), and `assemble_chain` in `exact/tiling.rs`. Harnesses
-in `exact/tests.rs`: `diagnose_carry_adder_tile`, `check_carry_adder_chain`,
-`check_long_carry_adder_chain`, `trace_carry_adder_chain_case`, and the
+in `exact/tests.rs`: `synthesize_carry_adder` (the whole run, below),
+`check_carry_adder_chain` and `check_long_carry_adder_chain` (chains of a
+tile file), `trace_carry_adder_chain_case`, and the
 probes `diagnose_carry_only_tile` and `diagnose_monotone_carry_cell`.
 
 ## How the carry crosses the seam
@@ -138,7 +139,7 @@ What works (`construction_steps`, `construct_step`):
 | monotone carry and rule, corridor, 2 wide, height 10 | 268 s, 2x28x10, 303 blocks | 2x17x10, 175 blocks (1200 s, still shrinking); recompacted to 2x16x10, 164 blocks (1135 s, converged) | 1-5 bits pass every case; 8 and 16 bits pass 208 cases each and a 200-step random walk |
 
 Block counts are the tile's (the ghost block excluded). Chains are checked by
-`diagnose_carry_adder_tile` (every case, 1 to 5 bits) and
+`synthesize_carry_adder` (every case, 1 to 5 bits) and
 `check_long_carry_adder_chain` (worst-case carry patterns, random cases, and a
 random walk of input changes on one simulator, checking every output and
 torch burnout after each change).
@@ -161,3 +162,23 @@ torches, the corridor, and a taller box.
 `physical_cell` tests check the chain's arithmetic in all 512 cases and the
 tile's 8 cases and 64 settled transitions; `exact` tests check that the tile
 still satisfies the model with every cell fixed and that two copies chain.
+
+## Rebuilding
+
+One ignored test does the whole run: construction, compaction, chains of
+1-4 bits in every case, 8- and 16-bit chains with sampled cases and a random
+input walk, and the files (tile and 4-bit chain as `.rcell`, settled `.nbt`,
+and `.outputs.json` with input and output names for the viewer) in
+`TILE_OUT`:
+
+```sh
+TILE_OUT=target/carry-adder cargo test --release --lib synthesize_carry_adder -- --ignored --nocapture
+```
+
+With the defaults (height 10, 40 minutes of compaction) it takes about an
+hour; construction alone gives a valid tile in about 5 minutes
+(`TILE_COMPACT_SECONDS=0` stops there). `TILE_SOURCE=<tile .rcell>` starts
+from a kept tile instead: with `TILE_COMPACT_SECONDS=0` it rewrites the
+fixtures above byte for byte in about a second. The doc comment of
+`synthesize_carry_adder` lists every knob.
+
