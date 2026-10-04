@@ -472,7 +472,9 @@ the frozen layout in every step: with given signals the adder (peak 6) builds
 on its first attempt. The mux still fails near its end, where six nets cross
 and the last gate is a four-input NOR. The failing steps time out (Unknown)
 rather than prove infeasibility. Width 3 made it worse for the mux: each step is larger,
-and four attempts timed out at earlier gates (g24, g27, g56, g57). A greedy
+and four attempts timed out at earlier gates (g24, g27, g56, g57). With given
+signals, width-3 steps still took 2-3 times as long as width-2 ones, and the
+first two attempts timed out at g31 and g27. A greedy
 gate order that minimizes live nets after each step lowers the 2-bit adder
 from 8 to 6 but raises the mux from 6 to 8, so it was not adopted;
 smallest-cone-first with early outputs (see above) reaches the same 6 for the
