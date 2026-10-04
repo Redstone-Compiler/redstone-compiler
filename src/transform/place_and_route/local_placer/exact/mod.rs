@@ -102,6 +102,11 @@ pub struct ExactPlacerConfig {
     /// grounding `exact_placer.rsdsl`.
     #[doc(hidden)]
     pub legacy_encoder: bool,
+    /// Diagnostic only: ground in the original rule order without folding
+    /// required units (fixed and given cells) into later formulas. Same
+    /// models, larger CNF; for comparisons and for checking the folding.
+    #[doc(hidden)]
+    pub no_fold: bool,
     /// After the first verified layout, keep asking for a cheaper one (the
     /// model's `minimize` cost, by default the number of non-air blocks)
     /// until a cheaper one is proven impossible or time runs out. The bound
@@ -143,9 +148,6 @@ pub struct ExactTuning {
     /// Largest total objective weight; the cost counter takes one input per
     /// unit of weight.
     pub max_objective_weight: u64,
-    /// Fold required units (fixed and given cells) to constants while
-    /// grounding, instead of leaving them to the solver as unit clauses.
-    pub fold_fixed_cells: bool,
 }
 
 impl Default for ExactTuning {
@@ -156,7 +158,6 @@ impl Default for ExactTuning {
             sim_max_events: 50_000,
             torch_bound_max_states: 200_000,
             max_objective_weight: 100_000,
-            fold_fixed_cells: true,
         }
     }
 }
@@ -183,6 +184,7 @@ impl ExactPlacerConfig {
             allow_unpowered_wires: false,
             relax_soundness: false,
             legacy_encoder: false,
+            no_fold: false,
             optimize: false,
             core_guided: false,
             model_file: None,

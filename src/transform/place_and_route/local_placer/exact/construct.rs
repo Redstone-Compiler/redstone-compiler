@@ -142,6 +142,9 @@ pub struct ConstructionConfig {
     /// Diagnostic only: see `ExactPlacerConfig::legacy_encoder`.
     #[doc(hidden)]
     pub legacy_encoder: bool,
+    /// Diagnostic only: see `ExactPlacerConfig::no_fold`.
+    #[doc(hidden)]
+    pub no_fold: bool,
 }
 
 impl Default for ConstructionConfig {
@@ -173,6 +176,7 @@ impl Default for ConstructionConfig {
             step_optimize: Some(Duration::from_secs(5)),
             model_params: BTreeMap::new(),
             legacy_encoder: false,
+            no_fold: false,
         }
     }
 }
@@ -468,6 +472,7 @@ impl ExactLocalPlacer {
             exact.rank_levels = config.rank_levels;
             exact.stage_levels = config.stage_levels;
             exact.legacy_encoder = config.legacy_encoder;
+            exact.no_fold = config.no_fold;
             // Stop at the attempt's deadline too, so a restart starts on time.
             let remaining =
                 deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));

@@ -1038,10 +1038,7 @@ fn diagnose_full_adder_construct_and_compact() -> eyre::Result<()> {
         early_outputs: std::env::var("PIPE_EARLY_OUTPUTS").as_deref() != Ok("0"),
         given_frozen_signals: std::env::var("PIPE_GIVEN").as_deref() != Ok("0"),
         step_optimize: step_optimize_from_env("PIPE_STEP_OPTIMIZE"),
-        tuning: ExactTuning {
-            fold_fixed_cells: std::env::var("PIPE_FOLD").as_deref() != Ok("0"),
-            ..Default::default()
-        },
+        no_fold: std::env::var("PIPE_FOLD").as_deref() == Ok("0"),
         model_params: model_params_from_env("PIPE_MODEL_PARAMS"),
         ..Default::default()
     };
@@ -1498,7 +1495,7 @@ fn compare_window_folding() {
                 .unwrap();
             config.optimize = true;
             config.time_limit = Some(Duration::from_secs(seconds));
-            config.tuning.fold_fixed_cells = fold;
+            config.no_fold = !fold;
             let started = std::time::Instant::now();
             let (outcome, stats) = placer.place(&config).unwrap();
             let solved = matches!(outcome, ExactOutcome::Placed(_));
@@ -1535,7 +1532,7 @@ fn compare_xor_folding() {
             config.workers = env_usize("FOLD_WORKERS", 4);
             config.seed = seed;
             config.time_limit = Some(Duration::from_secs(60));
-            config.tuning.fold_fixed_cells = fold;
+            config.no_fold = !fold;
             let started = std::time::Instant::now();
             let (outcome, _) = placer.place(&config).unwrap();
             let ok = matches!(outcome, ExactOutcome::Placed(_));

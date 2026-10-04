@@ -325,7 +325,8 @@ simulator still checks the whole layout. Full-adder construction, seeds 1..4:
 Since 2026-10-04 the grounder goes further: the units required by "고정된
 칸" and "주어진 신호" fold automatically, so fixed kinds and given signals
 become constants while grounding and constraints among frozen cells never
-reach the solver (`ExactTuning::fold_fixed_cells`, default on; see
+reach the solver (always on; the diagnostic `ExactPlacerConfig::no_fold`
+turns it off for comparisons; see
 `solver_dsl_design.md`, "Grounding profile"). A 2x8x8 compaction window
 shrinks from 292k to 105k clauses.
 

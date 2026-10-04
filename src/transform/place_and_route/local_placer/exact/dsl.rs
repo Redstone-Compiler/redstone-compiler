@@ -611,7 +611,7 @@ fn ground(
         guards: config.relax_soundness,
         provenance,
         positive_or_aux: false,
-        no_fold: !config.tuning.fold_fixed_cells,
+        no_fold: config.no_fold,
     };
     let custom;
     let model = match &config.model_file {

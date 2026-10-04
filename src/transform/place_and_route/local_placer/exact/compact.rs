@@ -70,6 +70,9 @@ pub struct CompactionConfig {
     /// Diagnostic only: see `ExactPlacerConfig::legacy_encoder`.
     #[doc(hidden)]
     pub legacy_encoder: bool,
+    /// Diagnostic only: see `ExactPlacerConfig::no_fold`.
+    #[doc(hidden)]
+    pub no_fold: bool,
 }
 
 impl Default for CompactionConfig {
@@ -98,6 +101,7 @@ impl Default for CompactionConfig {
             axes: vec![1, 2],
             output_policies: BTreeMap::new(),
             legacy_encoder: false,
+            no_fold: false,
         }
     }
 }
@@ -427,6 +431,7 @@ impl ExactLocalPlacer {
         exact.rank_levels = config.rank_levels;
         exact.stage_levels = config.stage_levels;
         exact.legacy_encoder = config.legacy_encoder;
+        exact.no_fold = config.no_fold;
         exact.time_limit = Some(config.attempt_time_limit);
         exact.max_refinements = config.max_refinements;
         exact.tuning = config.tuning.clone();
