@@ -1,0 +1,77 @@
+{
+  "format": "redstone-compiler.outputs.v1",
+  "outputs": [
+    {
+      "name": "ncout0",
+      "position": [
+        5,
+        2,
+        7
+      ]
+    },
+    {
+      "name": "s0",
+      "position": [
+        4,
+        15,
+        5
+      ]
+    },
+    {
+      "name": "ncout1",
+      "position": [
+        7,
+        2,
+        7
+      ]
+    },
+    {
+      "name": "s1",
+      "position": [
+        6,
+        15,
+        5
+      ]
+    },
+    {
+      "name": "ncout2",
+      "position": [
+        9,
+        2,
+        7
+      ]
+    },
+    {
+      "name": "s2",
+      "position": [
+        8,
+        15,
+        5
+      ]
+    },
+    {
+      "name": "ncout3",
+      "position": [
+        11,
+        2,
+        7
+      ]
+    },
+    {
+      "name": "s3",
+      "position": [
+        10,
+        15,
+        5
+      ]
+    },
+    {
+      "name": "cout",
+      "position": [
+        12,
+        2,
+        7
+      ]
+    }
+  ]
+}

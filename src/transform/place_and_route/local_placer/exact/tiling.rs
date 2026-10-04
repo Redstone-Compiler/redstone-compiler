@@ -24,11 +24,14 @@ const DRIVER: usize = 4;
 /// Assembles `bits` copies of `tile` (a layout solved with `carry`) into one
 /// RCELL document with `expect` lines for every output.
 ///
-/// Tile `i`'s inputs and outputs get the suffix `i` (`a` becomes `a0`, ...).
-/// In front, a switch `cin` drives the first carry in through an inverter
-/// and a repeater into the block the first carry-in torch reads, so `cin`
-/// has the carry's own polarity. Behind the last tile, a torch attached to
-/// its carry-out block is the output `cout`.
+/// Tile `i`'s inputs and outputs get the suffix `i` (`a` becomes `a0`, ...),
+/// its carry-out block included (`ncout0`, ...), so each tile's `expect`
+/// lines read the previous tile's carry by name and stay as long as one
+/// tile's (written out, the carry would double with every bit). In front, a
+/// switch `cin` drives the first carry in through an inverter and a repeater
+/// into the block the first carry-in torch reads, so `cin` has the carry's
+/// own polarity. Behind the last tile, a torch attached to its carry-out block
+/// is the output `cout`.
 pub fn assemble_chain(
     netlist: &NorNetlist,
     carry: &CarryTiling,
@@ -48,12 +51,14 @@ pub fn assemble_chain(
         .iter()
         .find(|(input, ..)| *input == carry.input)
         .ok_or_else(|| eyre!("the tile has no `{}` switch", carry.input))?;
-    let carry_out = netlist
-        .outputs
-        .iter()
-        .find(|(output, _)| *output == carry.output)
-        .map(|&(_, net)| net)
-        .ok_or_else(|| eyre!("`{}` is not a netlist output", carry.output))?;
+    ensure!(
+        netlist
+            .outputs
+            .iter()
+            .any(|(output, _)| *output == carry.output),
+        "`{}` is not a netlist output",
+        carry.output
+    );
 
     // The driver's repeater stands on a block below the carry row.
     let dz = usize::from(z0 == 0);
@@ -101,9 +106,7 @@ pub fn assemble_chain(
             }
         }
         for (output, position) in &tile.outputs {
-            if *output != carry.output {
-                outputs.push((format!("{output}{bit}"), shift(*position)));
-            }
+            outputs.push((format!("{output}{bit}"), shift(*position)));
         }
         let rename = |input: &str| {
             if input == carry.input {
@@ -113,19 +116,17 @@ pub fn assemble_chain(
             }
         };
         for &(ref output, net) in &netlist.outputs {
-            if *output != carry.output {
-                expectations.push((
-                    format!("{output}{bit}"),
-                    net_expression_with(netlist, net, &rename),
-                ));
-            }
+            expectations.push((
+                format!("{output}{bit}"),
+                net_expression_with(netlist, net, &rename),
+            ));
         }
-        carry_in = net_expression_with(netlist, carry_out, &rename);
+        carry_in = format!("{}{bit}", carry.output);
     }
     let end = Position(DRIVER + width * bits, y0, row);
     cells.insert(end, CellKind::Torch(Direction::West));
     outputs.push(("cout".to_owned(), end));
-    expectations.push(("cout".to_owned(), format!("~({carry_in})")));
+    expectations.push(("cout".to_owned(), format!("~{carry_in}")));
     Ok(rcell_document(
         name,
         dim,

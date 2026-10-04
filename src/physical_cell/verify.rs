@@ -274,6 +274,9 @@ mod tests {
     const FULL_ADDER_RIGHT_INPUTS_COMPACTED: &str =
         include_str!("../../test/full-adder-right-inputs-compacted-2x10x10.rcell");
     const ADDER2_EXACT: &str = include_str!("../../test/adder2-exact-2x14x10.rcell");
+    const ADDER_CARRY_TILE: &str = include_str!("../../test/adder-carry-tile-2x16x10.rcell");
+    const ADDER_CARRY_CHAIN4: &str =
+        include_str!("../../test/adder-carry-chain4-13x16x10.rcell");
     const DISCONNECTED_FULL_ADDER: &str =
         include_str!("../../test/rcell/archive/full-adder-2x20x20-disconnected.rcell");
 
@@ -543,6 +546,57 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    /// Four copies of the exact placer's full-adder carry tile side by side
+    /// (`docs/carry_tiles.md`), with a `cin` driver in front and a `cout`
+    /// torch behind. Checks `a + b + cin` in all 512 cases, independent of
+    /// the chain's own `expect` lines.
+    #[test]
+    fn exact_carry_tile_chain_adds_four_bits_in_all_cases() -> eyre::Result<()> {
+        let document: PhysicalCellDocument = ADDER_CARRY_CHAIN4.parse()?;
+        let build = document.build()?;
+        let verification = document.verify(&build)?;
+        assert_eq!(verification.cases, 512);
+        assert!(verification.failures.is_empty());
+        let bit = |case: usize, name: &str| {
+            let index = verification
+                .input_names
+                .iter()
+                .position(|input| input == name)
+                .unwrap();
+            (case >> index) & 1
+        };
+        for case in 0..512 {
+            let (mut a, mut b) = (0, 0);
+            for i in 0..4 {
+                a |= bit(case, &format!("a{i}")) << i;
+                b |= bit(case, &format!("b{i}")) << i;
+            }
+            let sum = a + b + bit(case, "cin");
+            for i in 0..4 {
+                assert_eq!(
+                    verification.signatures[&format!("s{i}")].actual[case],
+                    (sum >> i) & 1 == 1,
+                    "s{i} for {a} + {b}"
+                );
+            }
+            assert_eq!(verification.signatures["cout"].actual[case], sum >= 16);
+        }
+        Ok(())
+    }
+
+    /// The tile alone, with the ghost switch and block that stand for the
+    /// previous tile's carry out.
+    #[test]
+    fn exact_carry_tile_passes_all_cases_with_its_ghost_carry() -> eyre::Result<()> {
+        let document: PhysicalCellDocument = ADDER_CARRY_TILE.parse()?;
+        assert_eq!(document.size, DimSize(4, 16, 10));
+        let build = document.build()?;
+        let verification = document.verify(&build)?;
+        assert_eq!(verification.cases, 8);
+        assert!(verification.failures.is_empty());
+        verify_settled_transitions(ADDER_CARRY_TILE)
     }
 
     #[test]

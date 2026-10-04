@@ -2743,3 +2743,33 @@ fn trace_carry_adder_chain_case() -> eyre::Result<()> {
     }
     Ok(())
 }
+
+/// The kept full-adder carry tile still satisfies the model with every cell
+/// fixed, and two copies chain into a 2-bit adder.
+#[test]
+fn carry_adder_tile_fixture_satisfies_the_model_and_chains() -> eyre::Result<()> {
+    let source = include_str!("../../../../../test/adder-carry-tile-2x16x10.rcell");
+    let document: crate::physical_cell::PhysicalCellDocument = source.parse()?;
+    let tile = ExactLayout::from_rcell(&document)?;
+    let placer = ExactLocalPlacer::new(&carry_adder_graph(false))?;
+    let carry = CarryTiling {
+        input: "ncin".to_owned(),
+        output: "ncout".to_owned(),
+    };
+    let compaction = CompactionConfig {
+        workers: 1,
+        carry: Some(carry.clone()),
+        output_policies: [("s".to_owned(), OutputPolicy::MaxYFace)]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+    let exact = placer.window_config(&tile, 1, (0, 0), None, &compaction)?;
+    assert!(matches!(placer.place(&exact)?.0, ExactOutcome::Placed(_)));
+    let chain = assemble_chain(placer.netlist(), &carry, &tile, 2, "chain")?;
+    let build = chain.build()?;
+    let verification = chain.verify(&build)?;
+    assert_eq!(verification.cases, 32);
+    assert!(verification.failures.is_empty());
+    Ok(())
+}

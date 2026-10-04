@@ -135,7 +135,7 @@ What works (`construction_steps`, `construct_step`):
 | --- | --- | --- | --- |
 | `nor9` carry, 2 wide, height 8 | 127 s, 2x17x8, 122 blocks | 2x12x8, 111 blocks (554 s) | 1-3 bits pass; 4 bits fail 1/512, 5 bits 7/2048 (burnout) |
 | monotone netlist, no monotone rule, 2 wide, height 8 | 68 s, 2x20x8, 165 blocks | 2x10x7, 80 blocks (500 s) | 1-5 bits pass every case; 8 bits fail at 85 + 170 + 1 (burnout) |
-| monotone carry and rule, corridor, 2 wide, height 10 | 268 s, 2x28x10, 303 blocks | 2x17x10, 175 blocks (1200 s, still shrinking) | 1-5 bits pass every case; 8 bits pass 308 cases and a 300-step random walk; 16 bits pass 108 cases and a 100-step walk |
+| monotone carry and rule, corridor, 2 wide, height 10 | 268 s, 2x28x10, 303 blocks | 2x17x10, 175 blocks (1200 s, still shrinking); recompacted to 2x16x10, 164 blocks (1135 s, converged) | 1-5 bits pass every case; 8 and 16 bits pass 208 cases each and a 200-step random walk |
 
 Block counts are the tile's (the ghost block excluded). Chains are checked by
 `diagnose_carry_adder_tile` (every case, 1 to 5 bits) and
@@ -144,5 +144,20 @@ random walk of input changes on one simulator, checking every output and
 torch burnout after each change).
 
 The monotone tile is about twice the size of the glitching one: two more
-torches, the corridor, and a taller box. Compaction ran out of time while
-still removing slices.
+torches, the corridor, and a taller box.
+
+## Fixtures
+
+- `test/adder-carry-tile-2x16x10.rcell` (and `.nbt`): the tile, 164 blocks,
+  in its 4x16x10 box with the ghost switch `ncin` and ghost block in front.
+  Operands `a` at (2, 0, 7) and `b` at (3, 0, 2) on the Y-min face, `s` on the
+  Y-max face at (2, 15, 5), the carry column at (y, z) = (2, 7).
+- `test/adder-carry-chain4-13x16x10.rcell` (and `.nbt`, viewer example): four
+  tiles, `cin` in front, `cout` behind, and each carry-out block as an output
+  (`ncout0` ...). `assemble_chain` names them so each bit's `expect` line reads
+  the previous carry by name; written out, the carry expression doubled with
+  every bit (a 16-bit chain's RCELL was 12 MB).
+
+`physical_cell` tests check the chain's arithmetic in all 512 cases and the
+tile's 8 cases and 64 settled transitions; `exact` tests check that the tile
+still satisfies the model with every cell fixed and that two copies chain.
