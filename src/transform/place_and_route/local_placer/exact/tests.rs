@@ -1091,7 +1091,8 @@ fn diagnose_full_adder_construct_and_compact() -> eyre::Result<()> {
 
 /// Compacts an existing full-adder RCELL (generated or hand-made) further.
 /// Knobs: `RECOMPACT_SOURCE=<rcell path>`, `RECOMPACT_WRITE=<path prefix>`,
-/// `RECOMPACT_SECONDS`, `RECOMPACT_WORKERS`, `RECOMPACT_RADIUS`,
+/// `RECOMPACT_CIRCUIT=<name>` (another `circuit_graph` circuit instead of the
+/// full adder), `RECOMPACT_SECONDS`, `RECOMPACT_WORKERS`, `RECOMPACT_RADIUS`,
 /// `RECOMPACT_ATTEMPT_SECONDS`, `RECOMPACT_CONTINUE=0` (restart each
 /// block-reduction pass after a gain), `RECOMPACT_ROUNDS=0`,
 /// `RECOMPACT_REDUCTION_AXES=1` (Y windows only), `RECOMPACT_GIVEN=0` (no
@@ -1107,12 +1108,23 @@ fn recompact_full_adder_rcell() -> eyre::Result<()> {
     let document: crate::physical_cell::PhysicalCellDocument =
         std::fs::read_to_string(&path)?.parse()?;
     let mut layout = ExactLayout::from_rcell(&document)?;
-    for (name, _) in layout.outputs.iter_mut() {
-        if name == "sum" {
-            *name = "s".to_owned();
+    // Another circuit's cell keeps its own output names and has no face policy.
+    let circuit = std::env::var("RECOMPACT_CIRCUIT").ok();
+    if circuit.is_none() {
+        for (name, _) in layout.outputs.iter_mut() {
+            if name == "sum" {
+                *name = "s".to_owned();
+            }
         }
     }
-    let placer = ExactLocalPlacer::new(&full_adder_graph("nor9"))?.with_name("exact-full-adder");
+    let graph = match &circuit {
+        Some(circuit) => circuit_graph(circuit)?,
+        None => full_adder_graph("nor9"),
+    };
+    let placer = ExactLocalPlacer::new(&graph)?.with_name(format!(
+        "exact-{}",
+        circuit.as_deref().unwrap_or("full-adder")
+    ));
     let compaction = CompactionConfig {
         workers: env_usize("RECOMPACT_WORKERS", 8),
         window_radius: 1,
@@ -1121,9 +1133,12 @@ fn recompact_full_adder_rcell() -> eyre::Result<()> {
         time_limit: Some(Duration::from_secs(
             env_usize("RECOMPACT_SECONDS", 1200) as u64
         )),
-        output_policies: [("s".to_owned(), OutputPolicy::MaxYFace)]
-            .into_iter()
-            .collect(),
+        output_policies: match circuit {
+            Some(_) => BTreeMap::new(),
+            None => [("s".to_owned(), OutputPolicy::MaxYFace)]
+                .into_iter()
+                .collect(),
+        },
         continue_after_gain: std::env::var("RECOMPACT_CONTINUE").as_deref() != Ok("0"),
         given_outside_signals: std::env::var("RECOMPACT_GIVEN").as_deref() != Ok("0"),
         repair_optimize: repair_optimize_from_env("RECOMPACT_REPAIR_OPTIMIZE"),
@@ -2023,8 +2038,67 @@ fn live_after_each_step(
         .collect()
 }
 
+/// The small circuits the construction harnesses measure, by name.
+fn circuit_graph(circuit: &str) -> eyre::Result<LogicGraph> {
+    let (assignments, internal): (Vec<(&str, &str)>, Vec<&str>) = match circuit {
+        "half-adder" => (vec![("sum", "a^b"), ("carry", "a&b")], vec![]),
+        "adder2" => (
+            vec![
+                ("s0", "a0^b0"),
+                ("c0", "a0&b0"),
+                ("s1", "a1^b1^c0"),
+                ("c1", "(a1&b1)|(c0&(a1^b1))"),
+            ],
+            vec!["c0"],
+        ),
+        // The same 2-bit ripple-carry adder written as NOR gates by hand: a
+        // half adder for bit 0 (XNOR from four NORs, then s0 and c0) and the
+        // nor9 full adder for bit 1 with c0 as its carry in.
+        "adder2-nor" => (
+            vec![
+                ("h1", "~(a0|b0)"),
+                ("h2", "~(a0|h1)"),
+                ("h3", "~(b0|h1)"),
+                ("h4", "~(h2|h3)"),
+                ("s0", "~h4"),
+                ("c0", "~(s0|h1)"),
+                ("n1", "~(a1|b1)"),
+                ("n2", "~(a1|n1)"),
+                ("n3", "~(b1|n1)"),
+                ("n4", "~(n2|n3)"),
+                ("n5", "~(n4|c0)"),
+                ("n6", "~(n4|n5)"),
+                ("n7", "~(c0|n5)"),
+                ("s1", "~(n6|n7)"),
+                ("c1", "~(n1|n5)"),
+            ],
+            vec![
+                "h1", "h2", "h3", "h4", "c0", "n1", "n2", "n3", "n4", "n5", "n6", "n7",
+            ],
+        ),
+        "mux4" => (
+            vec![("out", "(~s1&~s0&a)|(~s1&s0&b)|(s1&~s0&c)|(s1&s0&d)")],
+            vec![],
+        ),
+        _ => (vec![("out", "(a&~s)|(b&s)")], vec![]),
+    };
+    if circuit == "full-adder" {
+        return Ok(full_adder_graph("nor9"));
+    }
+    let mut graph = LogicGraph::from_assignments(
+        assignments
+            .iter()
+            .map(|(name, expr)| (name.to_string(), expr.to_string())),
+    )?
+    .prepare_place()?;
+    for name in internal {
+        graph.graph.remove_output(name);
+    }
+    Ok(graph)
+}
+
 /// Construction plus compaction for small circuits:
-/// `CIRCUIT=mux2|half-adder|adder2|mux4|full-adder CIRCUIT_WIDTH=2
+/// `CIRCUIT=mux2|half-adder|adder2|adder2-nor|mux4|full-adder CIRCUIT_WIDTH=2
 /// CIRCUIT_HEIGHT=10 CIRCUIT_STEP_SECONDS=60 CIRCUIT_COMPACT_SECONDS=300
 /// CIRCUIT_SEED=1 CIRCUIT_WRITE=<prefix>`; `CIRCUIT_NETLIST_ONLY=1` stops
 /// after printing the NOR netlist and its live-net counts.
@@ -2036,39 +2110,27 @@ fn diagnose_construct_circuit() -> eyre::Result<()> {
         .with_test_writer()
         .try_init();
     let circuit = std::env::var("CIRCUIT").unwrap_or_else(|_| "mux2".to_owned());
-    let (assignments, internal): (Vec<(&str, &str)>, Vec<&str>) = match circuit.as_str() {
-        "half-adder" => (vec![("sum", "a^b"), ("carry", "a&b")], vec![]),
-        "adder2" => (
-            vec![
-                ("s0", "a0^b0"),
-                ("c0", "a0&b0"),
-                ("s1", "a1^b1^c0"),
-                ("c1", "(a1&b1)|(c0&(a1^b1))"),
-            ],
-            vec!["c0"],
-        ),
-        "mux4" => (
-            vec![("out", "(~s1&~s0&a)|(~s1&s0&b)|(s1&~s0&c)|(s1&s0&d)")],
-            vec![],
-        ),
-        _ => (vec![("out", "(a&~s)|(b&s)")], vec![]),
-    };
-    let graph = if circuit == "full-adder" {
-        full_adder_graph("nor9")
-    } else {
-        let mut graph = LogicGraph::from_assignments(
-            assignments
-                .iter()
-                .map(|(name, expr)| (name.to_string(), expr.to_string())),
-        )?
-        .prepare_place()?;
-        for name in internal {
-            graph.graph.remove_output(name);
-        }
-        graph
-    };
+    let graph = circuit_graph(&circuit)?;
     let placer = ExactLocalPlacer::new(&graph)?.with_name(format!("exact-{circuit}"));
     let netlist = placer.netlist();
+    if circuit.starts_with("adder2") {
+        // Both adder netlists must add: {c1, s1, s0} = a1a0 + b1b0.
+        let names = netlist.input_names();
+        let values = netlist.net_values();
+        let output = |name: &str| netlist.outputs.iter().find(|(n, _)| n == name).unwrap().1;
+        for case in 0..1usize << names.len() {
+            let bit = |name: &str| {
+                usize::from(case & (1 << names.iter().position(|n| n == name).unwrap()) != 0)
+            };
+            let sum = bit("a0") + 2 * bit("a1") + bit("b0") + 2 * bit("b1");
+            for (name, shift) in [("s0", 0), ("s1", 1), ("c1", 2)] {
+                eyre::ensure!(
+                    values[output(name)][case] == (sum >> shift & 1 == 1),
+                    "{circuit}: {name} is wrong in case {case}"
+                );
+            }
+        }
+    }
     println!(
         "CIRCUIT {circuit} inputs={:?} outputs={:?} gates={}",
         netlist.input_names(),

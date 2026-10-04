@@ -549,6 +549,22 @@ adder without hurting the mux, which has a single output. Circuits much
 beyond six live nets should still be split into local cells by global
 placement.
 
+**Netlist quality matters more than flat versus split (2026-10-04).** The
+2-bit adder above comes from expressions, so XOR and AND decomposition
+gives it 26 NOR gates with an inverter on every input. `CIRCUIT=adder2-nor`
+is the same adder written as NOR gates by hand: a half adder for bit 0 (an
+XNOR from four NORs, then `s0` and `c0 = NOR(s0, h1)`) and `nor9` for bit 1
+with `c0` as its carry in. The harness checks that both netlists add. The
+hand-written one has 15 gates and at most 5 live nets. With all current
+defaults it builds on the first attempt in 310 s (2x32x10, 424 blocks), and
+compacts to 2x21x10 with 160 blocks in 30 minutes. Another 30 minutes
+(`RECOMPACT_CIRCUIT=adder2-nor`) reach 2x14x10 with 137 blocks, still
+improving, against 313-480 blocks for the 26-gate version. That is about 68
+blocks per bit, close to the 60-block full adder alone. A ripple-carry chain
+passes only the carry between bits, which suits construction along Y.
+Splitting into cells pays off mainly in time when one cell is reused many
+times, or for wide circuits.
+
 ## Configuration
 
 `ExactPlacerConfig` holds the problem (box, pins, fixed cells, observations,
