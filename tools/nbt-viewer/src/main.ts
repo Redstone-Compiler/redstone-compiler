@@ -3197,7 +3197,11 @@ function renderSelection(block: StructureBlock | undefined): void {
 function renderSwitches(structure?: StructureModel): void {
   switchesList.replaceChildren();
   const switches = structure?.blocks.filter(block => block.palette.name === 'minecraft:lever') ?? [];
-  switchesCount.textContent = switches.length === 0 ? 'No switches' : `${switches.length} switches`;
+  const outputs = structure ? outputBlocks(structure) : [];
+  switchesCount.textContent = [
+    switches.length === 0 ? 'No switches' : `${switches.length} switches`,
+    ...(outputs.length === 0 ? [] : [`${outputs.length} outputs`]),
+  ].join(' · ');
   switchesActions.classList.toggle('hidden', switches.length === 0);
 
   if (switches.length === 0) {
@@ -3231,6 +3235,72 @@ function renderSwitches(structure?: StructureModel): void {
     });
     switchesList.append(row);
   });
+  renderOutputs(outputs);
+}
+
+/** Named outputs from the example's output metadata, with their blocks. */
+function outputBlocks(structure: StructureModel): Array<{ name: string; pos: [number, number, number]; block?: StructureBlock }> {
+  if (!currentOutputMetadataJson) return [];
+  let outputs: Array<{ name: string; position: [number, number, number] }>;
+  try {
+    outputs = JSON.parse(currentOutputMetadataJson).outputs ?? [];
+  } catch {
+    return [];
+  }
+  return outputs.map(output => {
+    // Metadata uses the compiler's (x, y, z) with z up; NBT positions are (y, z, x).
+    const [x, y, z] = output.position;
+    const pos: [number, number, number] = [y, z, x];
+    return { name: output.name, pos, block: structure.blocks.find(block => samePos(block.pos, pos)) };
+  });
+}
+
+/** Lists the outputs below the switches; a row selects its block. */
+function renderOutputs(outputs: ReturnType<typeof outputBlocks>): void {
+  if (outputs.length === 0) return;
+  const title = document.createElement('div');
+  title.className = 'switch-section-title';
+  title.textContent = 'Outputs';
+  switchesList.append(title);
+  outputs.forEach(output => {
+    const row = document.createElement('button');
+    row.className = 'switch-entry';
+    row.type = 'button';
+    if (selectedBlock && samePos(output.pos, selectedBlock.pos)) row.classList.add('selected');
+
+    const label = document.createElement('span');
+    label.className = 'switch-entry-label';
+    label.textContent = `${output.name}  ${output.pos.join(',')}`;
+
+    const state = document.createElement('span');
+    state.className = 'switch-entry-state';
+    const powered = blockPowered(output.block);
+    state.textContent = powered === undefined ? '-' : powered ? 'On' : 'Off';
+
+    row.append(label, state);
+    row.addEventListener('click', () => {
+      viewer.setSelectedBlock(output.block);
+      renderSelection(output.block);
+    });
+    switchesList.append(row);
+  });
+}
+
+/** Whether a redstone component is powered, from its block state (blocks keep none). */
+function blockPowered(block: StructureBlock | undefined): boolean | undefined {
+  const properties = block?.palette.properties;
+  switch (block?.palette.name) {
+    case 'minecraft:redstone_torch':
+    case 'minecraft:redstone_wall_torch':
+      return properties?.lit === 'true';
+    case 'minecraft:repeater':
+    case 'minecraft:lever':
+      return properties?.powered === 'true';
+    case 'minecraft:redstone_wire':
+      return Number(properties?.power ?? 0) > 0;
+    default:
+      return undefined;
+  }
 }
 
 function getLeverPowered(block: StructureBlock | undefined): boolean {

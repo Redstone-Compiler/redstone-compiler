@@ -75,7 +75,24 @@ fn compile(options: &Options) -> eyre::Result<()> {
         .output
         .clone()
         .unwrap_or_else(|| options.input.with_extension("nbt"));
-    NBTRoot::from(&build.world).save(&output);
+    // A cell that starts settled is exported settled (every input off), so
+    // a viewer or a paste shows real torch states instead of all lit.
+    let settled = document
+        .settled_start
+        .then(|| {
+            Simulator::from_settled_with_limits_and_trace(
+                &redstone_compiler::world::World::from(&build.world),
+                256,
+                50_000,
+                0,
+            )
+            .ok()
+        })
+        .flatten();
+    match &settled {
+        Some(simulator) => NBTRoot::from(simulator.world()).save(&output),
+        None => NBTRoot::from(&build.world).save(&output),
+    }
 
     if options.emit {
         print!("{document}");

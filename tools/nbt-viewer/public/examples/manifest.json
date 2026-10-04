@@ -4,7 +4,7 @@
     "name": "adder-carry-chain4-13x16x10.nbt",
     "file": "adder-carry-chain4-13x16x10.nbt",
     "path": "examples/adder-carry-chain4-13x16x10.nbt",
-    "size": 2313,
+    "size": 2376,
     "outputsPath": "examples/adder-carry-chain4-13x16x10.outputs.json"
   },
   {
@@ -12,7 +12,7 @@
     "name": "adder-carry-tile-2x16x10.nbt",
     "file": "adder-carry-tile-2x16x10.nbt",
     "path": "examples/adder-carry-tile-2x16x10.nbt",
-    "size": 917,
+    "size": 979,
     "outputsPath": "examples/adder-carry-tile-2x16x10.outputs.json"
   },
   {
@@ -20,7 +20,7 @@
     "name": "adder2-exact-2x14x10.nbt",
     "file": "adder2-exact-2x14x10.nbt",
     "path": "examples/adder2-exact-2x14x10.nbt",
-    "size": 854,
+    "size": 916,
     "outputsPath": "examples/adder2-exact-2x14x10.outputs.json"
   },
   {

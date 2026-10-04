@@ -408,6 +408,12 @@ input {
 }
 
 .file-entry-name,
+.switch-section-title {
+  margin: 8px 7px 4px;
+  color: #9ea9b3;
+  font-size: 12px;
+}
+
 .switch-entry-label {
   min-width: 0;
   overflow: hidden;
