@@ -2123,3 +2123,623 @@ fn diagnose_construct_circuit() -> eyre::Result<()> {
     assert!(verification.failures.is_empty());
     Ok(())
 }
+
+/// A tile that only passes its carry on: solved once with ghost slices,
+/// then chained, the last torch must follow `cin` through every tile.
+#[test]
+fn carry_tile_chains_its_carry() {
+    let mut logic = graph(&[("cin", "~ncin"), ("ncout", "~cin")]);
+    logic.graph.remove_output("cin");
+    let placer = ExactLocalPlacer::new(&logic).unwrap();
+    let carry = CarryTiling {
+        input: "ncin".to_owned(),
+        output: "ncout".to_owned(),
+    };
+    let mut config = ExactPlacerConfig::new(DimSize(4, 2, 4));
+    config.carry = Some(carry.clone());
+    config.workers = 4;
+    config.time_limit = Some(Duration::from_secs(60));
+    let placement = expect_placed(&placer, &config);
+    let tile = ExactLayout::from_placement(config.dim, &placement);
+    println!("{}", placement.rcell);
+    let chain = assemble_chain(placer.netlist(), &carry, &tile, 3, "carry-chain").unwrap();
+    println!("{chain}");
+    let build = chain.build().unwrap();
+    let verification = chain.verify(&build).unwrap();
+    assert_eq!(verification.cases, 2);
+    assert!(
+        verification.failures.is_empty(),
+        "{:?}",
+        verification.failures
+    );
+}
+
+/// The full adder as a carry tile. The carry in arrives inverted (`ncin`,
+/// read by the carry-in torch) and the carry out leaves inverted on a block
+/// (`ncout`), whose torch is the next tile's carry-in torch.
+///
+/// The sum is `nor9`'s. The carry is not: `nor9`'s `cout = NOR(n1, n5)`
+/// goes through the XNOR `n4`, which is not monotone, so when the operands
+/// change the block glitches, the next tile's sum and carry turn the glitch
+/// into several, and a 4-bit chain burned a torch out. `ncout = NOR(a, b) |
+/// NOR(a, cin) | NOR(b, cin)` (every prime implicant) only falls while the
+/// inputs only rise, and passes a glitch on as one glitch at most.
+/// `xor_carry` restores `nor9`'s carry for comparison.
+pub(super) fn carry_adder_graph(xor_carry: bool) -> LogicGraph {
+    let mut assignments = vec![
+        ("cin", "~ncin"),
+        ("n1", "~(a|b)"),
+        ("n2", "~(a|n1)"),
+        ("n3", "~(b|n1)"),
+        ("n4", "~(n2|n3)"),
+        ("n5", "~(n4|cin)"),
+        ("n6", "~(n4|n5)"),
+        ("n7", "~(cin|n5)"),
+        ("s", "~(n6|n7)"),
+    ];
+    if xor_carry {
+        assignments.push(("ncout", "n1|n5"));
+    } else {
+        assignments.push(("m1", "~(a|cin)"));
+        assignments.push(("m2", "~(b|cin)"));
+        // `m1 | m2` as a net of its own (an OR is a NOT over a NOR), so
+        // construction ORs two terms at a time onto a block.
+        assignments.push(("mm", "~(~(m1|m2))"));
+        assignments.push(("ncout", "n1|mm"));
+    }
+    let mut logic = graph(&assignments);
+    for name in [
+        "cin", "n1", "n2", "n3", "n4", "n5", "n6", "n7", "m1", "m2", "mm",
+    ] {
+        logic.graph.remove_output(name);
+    }
+    logic
+}
+
+#[test]
+fn carry_adder_netlist_keeps_the_carry_terms_apart() {
+    let netlist = NorNetlist::from_logic_graph(&carry_adder_graph(false)).unwrap();
+    println!("{:?}", netlist.summary());
+    let ncout = netlist
+        .outputs
+        .iter()
+        .find(|(name, _)| name == "ncout")
+        .unwrap()
+        .1;
+    // ncout = NOT(NOR(n1, mm)), mm = NOT(NOR(m1, m2)).
+    let [inner] = netlist.nets[ncout].gate_inputs[..] else {
+        panic!("ncout is a NOT");
+    };
+    assert_eq!(netlist.nets[inner].gate_inputs.len(), 2);
+}
+
+/// Construct-then-compact pipeline for a full-adder tile that repeats along
+/// X into a ripple-carry adder, then a check of the assembled chain.
+///
+/// Knobs: `TILE_WIDTH` (2, the tile's X slices), `TILE_HEIGHT` (8),
+/// `TILE_WINDOW`, `TILE_MAX_WINDOW`, `TILE_STEP_SECONDS`,
+/// `TILE_CARRY_SECONDS` (180, the carry-out step), `TILE_RESTART_SECONDS`
+/// (600, one construction attempt), `TILE_SEED`,
+/// `TILE_WORKERS`, `TILE_RESTARTS`, `TILE_COMPACT_SECONDS` (1200),
+/// `TILE_BITS` (5, the longest chain checked), `TILE_CARRY=xor` (`nor9`'s
+/// carry), `TILE_NETLIST=carry` (the carry alone), `TILE_MODEL_PARAMS`,
+/// `TILE_SOURCE=<tile .rcell>` (compact that tile instead of constructing),
+/// `TILE_WRITE=<path prefix>`.
+#[test]
+#[ignore = "carry tile pipeline measurement; run explicitly with --nocapture"]
+fn diagnose_carry_adder_tile() -> eyre::Result<()> {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_test_writer()
+        .try_init();
+    let xor_carry = std::env::var("TILE_CARRY").as_deref() == Ok("xor");
+    // `TILE_NETLIST=carry`: the monotone carry alone, no sum.
+    let carry_only = std::env::var("TILE_NETLIST").as_deref() == Ok("carry");
+    let logic = if carry_only {
+        let mut logic = graph(&[
+            ("cin", "~ncin"),
+            ("n1", "~(a|b)"),
+            ("m1", "~(a|cin)"),
+            ("m2", "~(b|cin)"),
+            ("ncout", "n1|m1|m2"),
+        ]);
+        for name in ["cin", "n1", "m1", "m2"] {
+            logic.graph.remove_output(name);
+        }
+        logic
+    } else {
+        carry_adder_graph(xor_carry)
+    };
+    let placer = ExactLocalPlacer::new(&logic)?.with_name("exact-adder-tile");
+    let carry = CarryTiling {
+        input: "ncin".to_owned(),
+        output: "ncout".to_owned(),
+    };
+    let width = env_usize("TILE_WIDTH", 2);
+    let input_policies = [
+        ("a".to_owned(), InputPolicy::MinYFace),
+        ("b".to_owned(), InputPolicy::MinYFace),
+    ]
+    .into_iter()
+    .collect::<BTreeMap<_, _>>();
+    let output_policies = [("s".to_owned(), OutputPolicy::MaxYFace)]
+        .into_iter()
+        .filter(|_| !carry_only)
+        .collect::<BTreeMap<_, _>>();
+    // `nor9`'s carry is not monotone; without this its tile cannot be placed.
+    let mut model_params = if xor_carry {
+        [("monotone_signals".to_owned(), rsdsl::IValue::Bool(false))]
+            .into_iter()
+            .collect()
+    } else {
+        BTreeMap::new()
+    };
+    model_params.extend(model_params_from_env("TILE_MODEL_PARAMS"));
+    let construction = ConstructionConfig {
+        width: CarryTiling::GHOST + width,
+        model_params: model_params.clone(),
+        height: env_usize("TILE_HEIGHT", 8),
+        window: env_usize("TILE_WINDOW", 2),
+        max_window: env_usize("TILE_MAX_WINDOW", 5),
+        step_time_limit: Duration::from_secs(env_usize("TILE_STEP_SECONDS", 60) as u64),
+        carry_step_time_limit: Some(Duration::from_secs(
+            env_usize("TILE_CARRY_SECONDS", 180) as u64
+        )),
+        workers: env_usize("TILE_WORKERS", 8),
+        seed: env_usize("TILE_SEED", 1) as u32,
+        max_restarts: env_usize("TILE_RESTARTS", 7),
+        restart_after: Some(Duration::from_secs(
+            env_usize("TILE_RESTART_SECONDS", 600) as u64
+        )),
+        input_policies,
+        output_policies: output_policies.clone(),
+        carry: Some(carry.clone()),
+        ..Default::default()
+    };
+    let compaction = CompactionConfig {
+        workers: env_usize("TILE_WORKERS", 8),
+        seed: env_usize("TILE_SEED", 1) as u32,
+        time_limit: Some(Duration::from_secs(
+            env_usize("TILE_COMPACT_SECONDS", 1200) as u64
+        )),
+        output_policies,
+        carry: Some(carry.clone()),
+        model_params,
+        ..Default::default()
+    };
+    let (layout, placement) = if let Ok(source) = std::env::var("TILE_SOURCE") {
+        // Compact an earlier tile further instead of constructing one.
+        let document: crate::physical_cell::PhysicalCellDocument =
+            std::fs::read_to_string(source)?.parse()?;
+        let layout = ExactLayout::from_rcell(&document)?;
+        let exact = placer.window_config(&layout, 1, (0, 0), None, &compaction)?;
+        let ExactOutcome::Placed(placement) = placer.place(&exact)?.0 else {
+            eyre::bail!("the source tile does not verify under the model");
+        };
+        (layout, *placement)
+    } else {
+        let (layout, placement, report) = placer.construct(&construction)?;
+        println!(
+            "TILE constructed dim={:?} blocks={} seed={} restarts={} steps={:?} elapsed={:?}",
+            layout.dim,
+            placement.block_count,
+            report.seed,
+            report.restarts.len(),
+            report.steps,
+            report.elapsed
+        );
+        if let Ok(prefix) = std::env::var("TILE_WRITE") {
+            std::fs::write(format!("{prefix}-loose.rcell"), placement.rcell.to_string())?;
+        }
+        (layout, placement)
+    };
+    let (compacted, best, report) = placer.compact(layout, &compaction)?;
+    let tile = best.unwrap_or(placement);
+    println!(
+        "TILE compacted dim={:?} blocks={} removed={:?} reductions={} elapsed={:?}",
+        compacted.dim, tile.block_count, report.removed, report.block_reductions, report.elapsed
+    );
+    println!("{}", tile.rcell);
+    if let Ok(prefix) = std::env::var("TILE_WRITE") {
+        std::fs::write(format!("{prefix}.rcell"), tile.rcell.to_string())?;
+        crate::nbt::NBTRoot::from(&tile.placed.world).save(format!("{prefix}.nbt"));
+    }
+    let mut failing = None;
+    for bits in 1..=env_usize("TILE_BITS", 5) {
+        let chain = assemble_chain(
+            placer.netlist(),
+            &carry,
+            &compacted,
+            bits,
+            "exact-adder-chain",
+        )?;
+        let build = chain.build()?;
+        let verification = chain.verify(&build)?;
+        println!(
+            "TILE chain bits={bits} dim={:?} cases={} failures={}",
+            chain.size,
+            verification.cases,
+            verification.failures.len()
+        );
+        if let Ok(prefix) = std::env::var("TILE_WRITE") {
+            std::fs::write(format!("{prefix}-chain{bits}.rcell"), chain.to_string())?;
+            crate::nbt::NBTRoot::from(&build.world).save(format!("{prefix}-chain{bits}.nbt"));
+        }
+        if failing.is_none() && !verification.failures.is_empty() {
+            failing = Some((bits, verification.failures[0].clone()));
+        }
+    }
+    eyre::ensure!(
+        failing.is_none(),
+        "a chain fails (bits, first case): {failing:?}"
+    );
+    Ok(())
+}
+
+/// Chains a full-adder tile RCELL (from `diagnose_carry_adder_tile`) for
+/// 1..=`TILE_BITS` bits and reports each chain's failing cases:
+/// `TILE_SOURCE=<tile .rcell>`, `TILE_BITS` (6), `TILE_CARRY=xor` (a tile
+/// built with `nor9`'s carry), `TILE_WRITE=<path prefix>`.
+#[test]
+#[ignore = "carry chain check of a tile file; run explicitly with --nocapture"]
+fn check_carry_adder_chain() -> eyre::Result<()> {
+    let source = std::fs::read_to_string(std::env::var("TILE_SOURCE")?)?;
+    let document: crate::physical_cell::PhysicalCellDocument = source.parse()?;
+    let tile = ExactLayout::from_rcell(&document)?;
+    let xor_carry = std::env::var("TILE_CARRY").as_deref() == Ok("xor");
+    let placer = ExactLocalPlacer::new(&carry_adder_graph(xor_carry))?;
+    let carry = CarryTiling {
+        input: "ncin".to_owned(),
+        output: "ncout".to_owned(),
+    };
+    for bits in 1..=env_usize("TILE_BITS", 6) {
+        let chain = assemble_chain(placer.netlist(), &carry, &tile, bits, "exact-adder-chain")?;
+        let build = chain.build()?;
+        let verification = chain.verify(&build)?;
+        println!(
+            "CHAIN bits={bits} cases={} failures={} first={:?}",
+            verification.cases,
+            verification.failures.len(),
+            verification.failures.first().map(|failure| &failure.inputs)
+        );
+        if let Ok(prefix) = std::env::var("TILE_WRITE") {
+            std::fs::write(format!("{prefix}-chain{bits}.rcell"), chain.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+/// Places only the monotone carry of `carry_adder_graph` (`n1`, `m1`, `m2`
+/// and the carry-out block) as a tile, in one solve, to tell a hard carry
+/// step from an impossible one: `CARRY_DIM` (4x5x5, ghost slices included),
+/// `CARRY_SECONDS` (120), `CARRY_WORKERS` (8), `CARRY_MODEL_PARAMS`
+/// (for example `seam_isolation=false`).
+#[test]
+#[ignore = "carry tile feasibility probe; run explicitly with --nocapture"]
+fn diagnose_carry_only_tile() -> eyre::Result<()> {
+    let mut logic = graph(&[
+        ("cin", "~ncin"),
+        ("n1", "~(a|b)"),
+        ("m1", "~(a|cin)"),
+        ("m2", "~(b|cin)"),
+        ("ncout", "n1|m1|m2"),
+    ]);
+    for name in ["cin", "n1", "m1", "m2"] {
+        logic.graph.remove_output(name);
+    }
+    let placer = ExactLocalPlacer::new(&logic)?.with_name("carry-only-tile");
+    let dim_text = std::env::var("CARRY_DIM").unwrap_or_else(|_| "4x5x5".to_owned());
+    let parts = dim_text
+        .split('x')
+        .map(|part| part.parse::<usize>())
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut config = ExactPlacerConfig::new(DimSize(parts[0], parts[1], parts[2]));
+    config.carry = Some(CarryTiling {
+        input: "ncin".to_owned(),
+        output: "ncout".to_owned(),
+    });
+    config.workers = env_usize("CARRY_WORKERS", 8);
+    config.time_limit = Some(Duration::from_secs(env_usize("CARRY_SECONDS", 120) as u64));
+    config.model_params = model_params_from_env("CARRY_MODEL_PARAMS");
+    let started = std::time::Instant::now();
+    let (outcome, stats) = placer.place(&config)?;
+    match outcome {
+        ExactOutcome::Placed(placement) => {
+            println!(
+                "CARRY placed blocks={} in {:?}",
+                placement.block_count,
+                started.elapsed()
+            );
+            println!("{}", placement.rcell);
+        }
+        other => println!(
+            "CARRY {other:?} in {:?} vars={} clauses={}",
+            started.elapsed(),
+            stats.variables,
+            stats.clauses
+        ),
+    }
+    Ok(())
+}
+
+/// The monotone carry as an ordinary cell (switches `a`, `b`, `cin`, output
+/// `cout` on a torch), to compare with `diagnose_carry_only_tile`:
+/// `CARRY_DIM` (2x6x6), `CARRY_SECONDS` (120), `CARRY_WORKERS` (8);
+/// `CARRY_CONSTRUCT=1` builds it gate by gate instead (`CARRY_HEIGHT`, 6).
+#[test]
+#[ignore = "carry cell probe; run explicitly with --nocapture"]
+fn diagnose_monotone_carry_cell() -> eyre::Result<()> {
+    let mut logic = graph(&[
+        ("n1", "~(a|b)"),
+        ("m1", "~(a|cin)"),
+        ("m2", "~(b|cin)"),
+        ("cout", "~(n1|m1|m2)"),
+    ]);
+    for name in ["n1", "m1", "m2"] {
+        logic.graph.remove_output(name);
+    }
+    let placer = ExactLocalPlacer::new(&logic)?.with_name("monotone-carry");
+    if std::env::var("CARRY_CONSTRUCT").as_deref() == Ok("1") {
+        let (layout, placement, report) = placer.construct(&ConstructionConfig {
+            height: env_usize("CARRY_HEIGHT", 6),
+            ..Default::default()
+        })?;
+        println!(
+            "CARRY constructed dim={:?} blocks={} steps={:?}",
+            layout.dim, placement.block_count, report.steps
+        );
+        println!("{}", placement.rcell);
+        return Ok(());
+    }
+    let dim_text = std::env::var("CARRY_DIM").unwrap_or_else(|_| "2x6x6".to_owned());
+    let parts = dim_text
+        .split('x')
+        .map(|part| part.parse::<usize>())
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut config = ExactPlacerConfig::new(DimSize(parts[0], parts[1], parts[2]));
+    config.workers = env_usize("CARRY_WORKERS", 8);
+    config.time_limit = Some(Duration::from_secs(env_usize("CARRY_SECONDS", 120) as u64));
+    let started = std::time::Instant::now();
+    let (outcome, stats) = placer.place(&config)?;
+    match outcome {
+        ExactOutcome::Placed(placement) => {
+            println!(
+                "CARRY placed blocks={} in {:?}",
+                placement.block_count,
+                started.elapsed()
+            );
+            println!("{}", placement.rcell);
+        }
+        other => println!(
+            "CARRY {other:?} in {:?} vars={} clauses={}",
+            started.elapsed(),
+            stats.variables,
+            stats.clauses
+        ),
+    }
+    Ok(())
+}
+
+/// Checks a long chain of a full-adder tile against `a + b + cin` without
+/// enumerating every case: worst-case carry patterns (full propagation,
+/// generation at every bit, alternation), random cases from a settled
+/// start, and a random walk of input changes on one simulator (outputs
+/// after each change, no burned-out torch).
+/// `TILE_SOURCE=<tile .rcell>`, `TILE_BITS` (8), `TILE_SAMPLES` (200),
+/// `TILE_WALK` (200), `TILE_SEED` (1), `TILE_WRITE=<path prefix>`.
+#[test]
+#[ignore = "long carry chain check of a tile file; run explicitly with --nocapture"]
+fn check_long_carry_adder_chain() -> eyre::Result<()> {
+    use crate::world::simulator::{Simulator, MANUAL_INPUT_IDLE_CYCLES};
+    use crate::world::World;
+
+    let source = std::fs::read_to_string(std::env::var("TILE_SOURCE")?)?;
+    let document: crate::physical_cell::PhysicalCellDocument = source.parse()?;
+    let tile = ExactLayout::from_rcell(&document)?;
+    let placer = ExactLocalPlacer::new(&carry_adder_graph(false))?;
+    let carry = CarryTiling {
+        input: "ncin".to_owned(),
+        output: "ncout".to_owned(),
+    };
+    let bits = env_usize("TILE_BITS", 8);
+    let chain = assemble_chain(placer.netlist(), &carry, &tile, bits, "exact-adder-chain")?;
+    let build = chain.build()?;
+    if let Ok(prefix) = std::env::var("TILE_WRITE") {
+        std::fs::write(format!("{prefix}-chain{bits}.rcell"), chain.to_string())?;
+        crate::nbt::NBTRoot::from(&build.world).save(format!("{prefix}-chain{bits}.nbt"));
+    }
+    let mask = (1u64 << bits) - 1;
+    let assignment = |a: u64, b: u64, cin: bool| {
+        let mut inputs = BTreeMap::new();
+        for bit in 0..bits {
+            inputs.insert(format!("a{bit}"), a >> bit & 1 == 1);
+            inputs.insert(format!("b{bit}"), b >> bit & 1 == 1);
+        }
+        inputs.insert("cin".to_owned(), cin);
+        inputs
+    };
+    let check = |simulator: &Simulator, a: u64, b: u64, cin: bool| -> Result<(), String> {
+        let sum = a + b + u64::from(cin);
+        for (name, position) in build.observations() {
+            let expected = if name == "cout" {
+                sum >> bits & 1 == 1
+            } else {
+                let bit = name[1..].parse::<usize>().unwrap();
+                sum >> bit & 1 == 1
+            };
+            if simulator.world()[position].kind.is_powered() != expected {
+                return Err(format!("{name} wrong for {a} + {b} + {}", u8::from(cin)));
+            }
+        }
+        for (position, block) in simulator.world().iter_block() {
+            if block.kind.is_torch() && simulator.is_torch_burned_out(position) {
+                return Err(format!(
+                    "torch {position:?} burned out at {a} + {b} + {}",
+                    u8::from(cin)
+                ));
+            }
+        }
+        Ok(())
+    };
+    let drive = |simulator: &mut Simulator, inputs: &BTreeMap<String, bool>| -> eyre::Result<()> {
+        let contacts = inputs
+            .iter()
+            .flat_map(|(name, &value)| {
+                build.input_contacts[name]
+                    .iter()
+                    .map(move |position| (*position, value))
+            })
+            .collect();
+        simulator.drive_inputs_with_limits(contacts, 4096, 1_000_000)?;
+        Ok(())
+    };
+    let world = World::from(&build.world);
+    let settled = || {
+        Simulator::from_settled_with_limits_and_trace(&world, 4096, 1_000_000, 0)
+            .map_err(|error| eyre::eyre!(error.message().to_owned()))
+    };
+    let mut seed = env_usize("TILE_SEED", 1) as u64 | 1;
+    let mut random = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let alternating = 0x5555_5555_5555_5555 & mask;
+    let mut cases = vec![
+        (0, mask, false),
+        (0, mask, true),
+        (mask, mask, false),
+        (mask, mask, true),
+        (mask, 0, true),
+        (1, mask, false),
+        (alternating, !alternating & mask, true),
+        (alternating, alternating, false),
+    ];
+    for _ in 0..env_usize("TILE_SAMPLES", 200) {
+        cases.push((random() & mask, random() & mask, random() & 1 == 1));
+    }
+    let mut failures = Vec::new();
+    for &(a, b, cin) in &cases {
+        let mut simulator = settled()?;
+        drive(&mut simulator, &assignment(a, b, cin))?;
+        if let Err(failure) = check(&simulator, a, b, cin) {
+            failures.push(failure);
+        }
+    }
+    println!(
+        "CHAIN bits={bits} settled cases={} failures={}",
+        cases.len(),
+        failures.len()
+    );
+    let mut simulator = settled()?;
+    let mut walk_failures = Vec::new();
+    let steps = env_usize("TILE_WALK", 200);
+    for _ in 0..steps {
+        let (a, b, cin) = (random() & mask, random() & mask, random() & 1 == 1);
+        simulator.advance_idle_cycles(MANUAL_INPUT_IDLE_CYCLES)?;
+        drive(&mut simulator, &assignment(a, b, cin))?;
+        if let Err(failure) = check(&simulator, a, b, cin) {
+            walk_failures.push(failure);
+            simulator = settled()?;
+        }
+    }
+    println!(
+        "CHAIN bits={bits} walk steps={steps} failures={}",
+        walk_failures.len()
+    );
+    for failure in failures.iter().chain(&walk_failures).take(5) {
+        println!("  {failure}");
+    }
+    eyre::ensure!(
+        failures.is_empty() && walk_failures.is_empty(),
+        "the chain fails"
+    );
+    Ok(())
+}
+
+/// Prints the torch toggles in one case of a chained full-adder tile:
+/// `TILE_SOURCE`, `TILE_BITS` (8), `TILE_CASE=a,b,cin` (85,170,1),
+/// `TILE_TRACE_X` (only torches at this X; all by default).
+#[test]
+#[ignore = "carry chain trace; run explicitly with --nocapture"]
+fn trace_carry_adder_chain_case() -> eyre::Result<()> {
+    use crate::world::simulator::Simulator;
+    use crate::world::World;
+
+    let source = std::fs::read_to_string(std::env::var("TILE_SOURCE")?)?;
+    let document: crate::physical_cell::PhysicalCellDocument = source.parse()?;
+    let tile = ExactLayout::from_rcell(&document)?;
+    let placer = ExactLocalPlacer::new(&carry_adder_graph(false))?;
+    let carry = CarryTiling {
+        input: "ncin".to_owned(),
+        output: "ncout".to_owned(),
+    };
+    let bits = env_usize("TILE_BITS", 8);
+    let chain = assemble_chain(placer.netlist(), &carry, &tile, bits, "exact-adder-chain")?;
+    let build = chain.build()?;
+    let case = std::env::var("TILE_CASE").unwrap_or_else(|_| "85,170,1".to_owned());
+    let values = case
+        .split(',')
+        .map(|value| value.parse::<u64>())
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut simulator = Simulator::from_settled_with_limits_and_trace(
+        &World::from(&build.world),
+        4096,
+        1_000_000,
+        0,
+    )
+    .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
+    simulator.set_trace_limit(1_000_000);
+    let mut contacts = Vec::new();
+    for bit in 0..bits {
+        for (name, value) in [("a", values[0]), ("b", values[1])] {
+            for position in &build.input_contacts[&format!("{name}{bit}")] {
+                contacts.push((*position, value >> bit & 1 == 1));
+            }
+        }
+    }
+    for position in &build.input_contacts["cin"] {
+        contacts.push((*position, values[2] == 1));
+    }
+    simulator.drive_inputs_with_limits(contacts, 4096, 1_000_000)?;
+    let only_x = std::env::var("TILE_TRACE_X")
+        .ok()
+        .and_then(|x| x.parse::<usize>().ok());
+    // A torch's state as each event reaching it found it; a change between
+    // two such events is a toggle.
+    let mut toggles = BTreeMap::<[usize; 3], Vec<(usize, String)>>::new();
+    for entry in simulator.trace() {
+        if !entry.block_before.contains("Torch") {
+            continue;
+        }
+        let states = toggles.entry(entry.target_position).or_default();
+        if states
+            .last()
+            .is_none_or(|(_, before)| *before != entry.block_before)
+        {
+            states.push((entry.cycle, entry.block_before.clone()));
+        }
+    }
+    for states in toggles.values_mut() {
+        states.remove(0);
+    }
+    for (position, events) in &toggles {
+        if only_x.is_some_and(|x| position[0] != x) {
+            continue;
+        }
+        let burned = simulator.is_torch_burned_out(Position(position[0], position[1], position[2]));
+        println!(
+            "TORCH {position:?} toggles={} burned={burned} {:?}",
+            events.len(),
+            events
+                .iter()
+                .map(|(cycle, state)| format!(
+                    "{cycle}:{}",
+                    if state.contains("true") { "on" } else { "off" }
+                ))
+                .collect::<Vec<_>>()
+        );
+    }
+    Ok(())
+}

@@ -70,6 +70,9 @@ pub struct CompactionConfig {
     /// Diagnostic only: see `ExactPlacerConfig::no_fold`.
     #[doc(hidden)]
     pub no_fold: bool,
+    /// Keep the layout a tile that repeats along X (see
+    /// `ExactPlacerConfig::carry`).
+    pub carry: Option<super::CarryTiling>,
 }
 
 impl Default for CompactionConfig {
@@ -98,6 +101,7 @@ impl Default for CompactionConfig {
             axes: vec![1, 2],
             output_policies: BTreeMap::new(),
             no_fold: false,
+            carry: None,
         }
     }
 }
@@ -427,6 +431,7 @@ impl ExactLocalPlacer {
         exact.rank_levels = config.rank_levels;
         exact.stage_levels = config.stage_levels;
         exact.no_fold = config.no_fold;
+        exact.carry = config.carry.clone();
         exact.time_limit = Some(config.attempt_time_limit);
         exact.max_refinements = config.max_refinements;
         exact.tuning = config.tuning.clone();

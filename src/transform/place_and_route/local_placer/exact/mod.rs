@@ -27,6 +27,7 @@ mod netlist;
 mod solver;
 #[cfg(test)]
 mod tests;
+mod tiling;
 mod verify;
 
 use std::collections::BTreeMap;
@@ -40,6 +41,7 @@ pub use dimacs::DimacsComments;
 pub use encode::CellKind;
 pub use layout::{ExactLayout, InputPolicy, OutputPolicy};
 pub use netlist::{Net, NetDriver, NetId, NorNetlist};
+pub use tiling::assemble_chain;
 pub use verify::ExactVerificationFailure;
 
 use self::cnf::Lit;
@@ -124,8 +126,39 @@ pub struct ExactPlacerConfig {
     /// Extra model params, for example `max_repeaters`; they override the
     /// model's defaults and the params the placer derives from this config.
     pub model_params: BTreeMap<String, rsdsl::IValue>,
+    /// Lay the cell out as a tile that repeats along X with a ripple carry.
+    pub carry: Option<CarryTiling>,
     /// Search and verification constants.
     pub tuning: ExactTuning,
+}
+
+/// A cell that tiles along X, each copy passing a carry to the next (a
+/// ripple-carry adder bit, say).
+///
+/// The carry crosses the seam as a torch: the next tile's carry-in torch,
+/// at its first X slice, is attached across the seam to this tile's
+/// carry-out block, at its last X slice in the same `(y, z)` column. A torch
+/// inverts, so the carry-out block carries the complement of the carry, and
+/// the input the tile is solved with is the complement of the carry in.
+///
+/// The box holds the tile at `x >= 2` behind two ghost slices that stand for
+/// the previous tile: the `input` switch at `x = 0`, attached East, drives
+/// the ghost block at `x = 1`, which the carry-in torch at `x = 2` reads.
+/// The `output` is observed on the carry-out block at `x = dim.0 - 1` in the
+/// switch's column. Nothing else may interact across the seam, where the
+/// neighbor holds another bit's signals; the simulator still checks only
+/// the box, so check an assembled chain too.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CarryTiling {
+    /// The complement of the carry in, driven by the switch in the ghost slice.
+    pub input: String,
+    /// The complement of the carry out, observed on a block.
+    pub output: String,
+}
+
+impl CarryTiling {
+    /// Width of the ghost slices in front of the tile.
+    pub const GHOST: usize = 2;
 }
 
 /// Search and verification constants. The defaults are the values the placer
@@ -184,6 +217,7 @@ impl ExactPlacerConfig {
             core_guided: false,
             model_file: None,
             model_params: BTreeMap::new(),
+            carry: None,
             tuning: ExactTuning::default(),
         }
     }

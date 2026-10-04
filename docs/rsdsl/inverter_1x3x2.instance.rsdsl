@@ -20,6 +20,12 @@ fact output_class = [(out, out)];
 fact driving = [];
 fact fixed = [];
 fact given_sig = [];
+fact ghost = [];
+fact seam = [];
+fact carry_site = [];
+fact solid_output = [];
+fact increasing = [];
+fact decreasing = [];
 
 param rank_levels = 8;
 param stage_levels = 8;

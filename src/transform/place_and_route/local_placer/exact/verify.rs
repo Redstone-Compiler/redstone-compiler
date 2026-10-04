@@ -408,14 +408,23 @@ pub(super) fn diagnose(
 
 /// Boolean expression of a net over the inputs, in RCELL `expect` syntax.
 pub(super) fn net_expression(netlist: &NorNetlist, net: usize) -> String {
+    net_expression_with(netlist, net, &|name| name.to_owned())
+}
+
+/// Like `net_expression`, with each input written as `input(name)`.
+pub(super) fn net_expression_with(
+    netlist: &NorNetlist,
+    net: usize,
+    input: &dyn Fn(&str) -> String,
+) -> String {
     match &netlist.nets[net].driver {
-        NetDriver::Input(name) => name.clone(),
+        NetDriver::Input(name) => input(name),
         NetDriver::Gate => format!(
             "~({})",
             netlist.nets[net]
                 .gate_inputs
                 .iter()
-                .map(|&input| net_expression(netlist, input))
+                .map(|&gate_input| net_expression_with(netlist, gate_input, input))
                 .collect::<Vec<_>>()
                 .join("|")
         ),
@@ -429,6 +438,44 @@ pub(super) fn to_rcell(
     netlist: &NorNetlist,
     decoded: &Decoded,
 ) -> PhysicalCellDocument {
+    let cells = decoded
+        .kinds
+        .iter()
+        .enumerate()
+        .filter(|(_, kind)| **kind != CellKind::Air)
+        .map(|(cell, kind)| {
+            let position = Position(cell % dim.0, (cell / dim.0) % dim.1, cell / (dim.0 * dim.1));
+            (position, *kind)
+        })
+        .collect::<BTreeMap<_, _>>();
+    let inputs = decoded
+        .inputs
+        .iter()
+        .map(|(input, position)| {
+            let CellKind::Switch(attach) = cells[position] else {
+                unreachable!("input sites hold switches")
+            };
+            (input.clone(), *position, attach)
+        })
+        .collect::<Vec<_>>();
+    let expectations = netlist
+        .outputs
+        .iter()
+        .map(|(output, net)| (output.clone(), net_expression(netlist, *net)))
+        .collect();
+    rcell_document(name, dim, &cells, &inputs, &decoded.outputs, expectations)
+}
+
+/// An RCELL document (one `yz` plane per x) for the given non-air cells,
+/// input switches, output cells, and `expect` expressions.
+pub(super) fn rcell_document(
+    name: &str,
+    dim: DimSize,
+    cells: &BTreeMap<Position, CellKind>,
+    inputs: &[(String, Position, Direction)],
+    outputs: &[(String, Position)],
+    expectations: Vec<(String, String)>,
+) -> PhysicalCellDocument {
     let mut glyphs = BTreeMap::new();
     let mut glyph_of = BTreeMap::new();
     let mut next = [
@@ -441,8 +488,11 @@ pub(super) fn to_rcell(
         for z in 0..dim.2 {
             let mut row = String::new();
             for y in 0..dim.1 {
-                let cell = x + dim.0 * (y + dim.1 * z);
-                let glyph = match decoded.kinds[cell] {
+                let kind = cells
+                    .get(&Position(x, y, z))
+                    .copied()
+                    .unwrap_or(CellKind::Air);
+                let glyph = match kind {
                     CellKind::Air | CellKind::Switch(_) => '.',
                     CellKind::Solid => '#',
                     CellKind::Dust => 'r',
@@ -476,37 +526,6 @@ pub(super) fn to_rcell(
             rows,
         });
     }
-    let inputs = decoded
-        .inputs
-        .iter()
-        .map(|(input, position)| {
-            let cell = position.0 + dim.0 * (position.1 + dim.1 * position.2);
-            let CellKind::Switch(attach) = decoded.kinds[cell] else {
-                unreachable!("input sites hold switches")
-            };
-            CellInput {
-                name: input.clone(),
-                position: *position,
-                support: axis(attach),
-            }
-        })
-        .collect();
-    let outputs = decoded
-        .outputs
-        .iter()
-        .map(|(output, position)| CellOutput {
-            name: output.clone(),
-            position: *position,
-        })
-        .collect();
-    let expectations = netlist
-        .outputs
-        .iter()
-        .map(|(output, net)| CellExpectation {
-            output: output.clone(),
-            expression: net_expression(netlist, *net),
-        })
-        .collect();
     PhysicalCellDocument {
         name: name.to_owned(),
         size: dim,
@@ -514,10 +533,26 @@ pub(super) fn to_rcell(
         // Exported worlds store settled torch states (see `settled_world`).
         settled_start: true,
         glyphs,
-        inputs,
+        inputs: inputs
+            .iter()
+            .map(|(input, position, attach)| CellInput {
+                name: input.clone(),
+                position: *position,
+                support: axis(*attach),
+            })
+            .collect(),
         probes: Vec::new(),
-        outputs,
+        outputs: outputs
+            .iter()
+            .map(|(output, position)| CellOutput {
+                name: output.clone(),
+                position: *position,
+            })
+            .collect(),
         planes,
-        expectations,
+        expectations: expectations
+            .into_iter()
+            .map(|(output, expression)| CellExpectation { output, expression })
+            .collect(),
     }
 }

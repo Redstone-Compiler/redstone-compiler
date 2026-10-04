@@ -19,7 +19,7 @@ use super::encode::{
     Relation, SignalClass, SinkKind, SourceKind, SwitchSite, CARDINALS, TORCH_ATTACH,
 };
 use super::netlist::{NetId, NorNetlist};
-use super::ExactPlacerConfig;
+use super::{CarryTiling, ExactPlacerConfig};
 use crate::world::block::Direction;
 use crate::world::position::Position;
 
@@ -103,6 +103,8 @@ struct Observation {
     class: usize,
     /// Candidate observation cells.
     cells: Vec<usize>,
+    /// Observed on a block: the carry out of a tile (`CarryTiling`).
+    solid: bool,
 }
 
 /// The compile-time world of one placement problem, computed and validated
@@ -114,6 +116,10 @@ struct Prepared {
     cases: usize,
     /// Switch candidates of the present inputs as `(cell, attach, net)`.
     sites: Vec<(usize, Direction, NetId)>,
+    /// The carry input's net (`CarryTiling`).
+    carry_net: Option<NetId>,
+    /// Input names; bit `i` of a case is input `i`.
+    input_names: Vec<String>,
     present_classes: Vec<usize>,
     observations: Vec<Observation>,
 }
@@ -122,6 +128,25 @@ impl Prepared {
     fn new(netlist: &NorNetlist, config: &ExactPlacerConfig) -> eyre::Result<Self> {
         let geometry = Geometry { dim: config.dim };
         ensure!(geometry.len() > 0, "empty placement box");
+        if let Some(carry) = &config.carry {
+            ensure!(
+                config.dim.0 >= CarryTiling::GHOST + 2,
+                "a carry tile needs two ghost slices and at least two tile slices along X"
+            );
+            ensure!(
+                netlist.input_net(&carry.input).is_some(),
+                "carry input `{}` is not a netlist input",
+                carry.input
+            );
+            ensure!(
+                netlist
+                    .outputs
+                    .iter()
+                    .any(|(name, _)| *name == carry.output),
+                "carry output `{}` is not a netlist output",
+                carry.output
+            );
+        }
         let input_count = netlist.input_names().len();
         ensure!(
             input_count <= MAX_INPUTS,
@@ -135,6 +160,11 @@ impl Prepared {
             class_names,
             cases: 1 << input_count,
             sites: Vec::new(),
+            carry_net: config
+                .carry
+                .as_ref()
+                .and_then(|carry| netlist.input_net(&carry.input)),
+            input_names: netlist.input_names(),
             present_classes: Vec::new(),
             observations: Vec::new(),
         };
@@ -163,10 +193,36 @@ impl Prepared {
             }
             let net = netlist.input_net(&name).unwrap();
             self.present_classes.push(self.class_of_net(net));
+            let carry = config.carry.as_ref();
+            let is_carry = carry.is_some_and(|carry| carry.input == name);
             let candidates = match config.input_sites.get(&name) {
                 Some(sites) => sites.clone(),
-                None => default_input_sites(config.dim),
+                // The carry switch may sit in any column of the ghost slice.
+                None if is_carry => (0..config.dim.2)
+                    .flat_map(|z| (0..config.dim.1).map(move |y| Position(0, y, z)))
+                    .map(|position| (position, Direction::East))
+                    .collect(),
+                None => default_input_sites(config.dim)
+                    .into_iter()
+                    .filter(|(position, _)| carry.is_none() || position.0 >= CarryTiling::GHOST)
+                    .collect(),
             };
+            if let Some(carry) = carry {
+                for (position, attach) in &candidates {
+                    if is_carry {
+                        ensure!(
+                            position.0 == 0 && *attach == Direction::East,
+                            "carry input `{}` must sit at x = 0, attached East",
+                            carry.input
+                        );
+                    } else {
+                        ensure!(
+                            position.0 >= CarryTiling::GHOST,
+                            "input `{name}` site {position:?} is in a ghost slice"
+                        );
+                    }
+                }
+            }
             ensure!(
                 !candidates.is_empty(),
                 "input `{name}` has no candidate site"
@@ -213,7 +269,27 @@ impl Prepared {
                 .collect(),
         };
         let symbols = unique_names(requested.iter().map(|(name, ..)| name.as_str()));
+        let last = config.dim.0 - 1;
         for ((name, net, positions), symbol) in requested.into_iter().zip(symbols) {
+            // The carry out sits on the tile's last X slice.
+            let solid = config
+                .carry
+                .as_ref()
+                .is_some_and(|carry| carry.output == name);
+            let positions = match positions {
+                Some(positions) if solid => Some(
+                    positions
+                        .into_iter()
+                        .filter(|position| position.0 == last)
+                        .collect(),
+                ),
+                None if solid => Some(
+                    (0..config.dim.2)
+                        .flat_map(|z| (0..config.dim.1).map(move |y| Position(last, y, z)))
+                        .collect(),
+                ),
+                positions => positions,
+            };
             let function = net_function(&values, net);
             let Some(class) = self
                 .classes
@@ -241,6 +317,7 @@ impl Prepared {
                 function,
                 class,
                 cells,
+                solid,
             });
         }
         Ok(())
@@ -304,8 +381,18 @@ impl Prepared {
             "driving",
             "fixed",
             "given_sig",
+            "ghost",
+            "seam",
+            "carry_site",
+            "solid_output",
+            "increasing",
+            "decreasing",
         ] {
             instance.fact(fact);
+        }
+        if let Some(carry) = &config.carry {
+            self.tiling_facts(&mut instance);
+            self.monotone_facts(&mut instance, carry);
         }
         for (&position, &function) in &config.given_signals {
             ensure!(
@@ -366,7 +453,10 @@ impl Prepared {
                 vec![symbol.clone(), IValue::sym(&names[observation.class])],
             );
             if config.driving_outputs.contains(&observation.name) {
-                instance.row("driving", vec![symbol]);
+                instance.row("driving", vec![symbol.clone()]);
+            }
+            if observation.solid {
+                instance.row("solid_output", vec![symbol]);
             }
         }
         for (&position, &kind) in &config.fixed_cells {
@@ -411,6 +501,74 @@ impl Prepared {
             instance.param(name, value.clone());
         }
         Ok(instance)
+    }
+
+    /// Ghost cells, seam pairs, and the carry columns (one per candidate site
+    /// of the carry switch) of a `CarryTiling` box.
+    fn tiling_facts(&self, instance: &mut Instance) {
+        let geometry = &self.geometry;
+        let dim = geometry.dim;
+        let at =
+            |x: usize, y: usize, z: usize| cell_value(geometry, geometry.index(Position(x, y, z)));
+        let (first, last) = (CarryTiling::GHOST, dim.0 - 1);
+        for z in 0..dim.2 {
+            for y in 0..dim.1 {
+                for x in 0..first {
+                    instance.row("ghost", vec![at(x, y, z)]);
+                }
+                instance.row(
+                    "seam",
+                    vec![at(last, y, z), IValue::sym("East"), at(first, y, z)],
+                );
+                instance.row(
+                    "seam",
+                    vec![at(first, y, z), IValue::sym("West"), at(last, y, z)],
+                );
+            }
+        }
+        let carry_cells = self
+            .sites
+            .iter()
+            .filter(|&&(_, _, net)| Some(net) == self.carry_net)
+            .map(|&(cell, _, _)| cell);
+        for cell in carry_cells {
+            let Position(_, y, z) = geometry.position(cell);
+            instance.row(
+                "carry_site",
+                vec![at(0, y, z), at(1, y, z), at(first, y, z), at(last, y, z)],
+            );
+        }
+    }
+
+    /// The classes that only rise or only fall while every input moves its
+    /// tile's way: the carry input falls (it is the carry's complement), the
+    /// other inputs rise. Constant classes are both.
+    fn monotone_facts(&self, instance: &mut Instance, carry: &CarryTiling) {
+        let flip = self
+            .input_names
+            .iter()
+            .position(|name| *name == carry.input)
+            .map_or(0, |index| 1usize << index);
+        // Case `x` comes before case `y` when, read in the rising direction,
+        // every input that is on in `x` is on in `y`.
+        let before = |x: usize, y: usize| (x ^ flip) & !(y ^ flip) == 0;
+        for (class, name) in self.classes.iter().zip(&self.class_names) {
+            let (mut rises, mut falls) = (true, true);
+            for x in 0..self.cases {
+                for y in 0..self.cases {
+                    if before(x, y) && class.value(x) != class.value(y) {
+                        rises &= class.value(y);
+                        falls &= class.value(x);
+                    }
+                }
+            }
+            if rises {
+                instance.row("increasing", vec![IValue::sym(name)]);
+            }
+            if falls {
+                instance.row("decreasing", vec![IValue::sym(name)]);
+            }
+        }
     }
 
     /// Reads the grounded families back into the encoder's layout.

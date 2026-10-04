@@ -1,8 +1,8 @@
 rsdsl 2;
 model exact_placer;
 
-// The exact local placer's constraint model (grounded by exact/dsl.rs;
-// encode.rs is the hand-written original). Language: docs/solver_dsl_grammar.md.
+// The exact local placer's constraint model (grounded by exact/dsl.rs).
+// Language: docs/solver_dsl_grammar.md.
 
 // ===== compile-time world ====================================================
 
@@ -34,6 +34,20 @@ fact fixed(Cell, Kind);                // fixed block kinds, as members of `Kind
 fact given_sig(Cell, Class);
 fact given(c: Cell) := any(given_sig(c, k) for k: Class);
 
+// Tiling along X with a ripple carry (`CarryTiling` in mod.rs; see the
+// tiling rules below). Ghost cells stand for the previous tile.
+fact ghost(Cell);
+// Beyond the box face at `c`, toward `d`, lies a copy of `n` (a neighbor tile).
+fact seam(c: Cell, d: Dir4, n: Cell);
+// One candidate carry column: switch `l` and block `s` in the ghost slices,
+// the tile's carry-in torch `t`, and its carry-out block `p`.
+fact carry_site(l: Cell, s: Cell, t: Cell, p: Cell);
+fact solid_output(Output);             // observed on a block (the carry out)
+// Classes that only rise (fall) while every input moves its tile's way: the
+// operands and the carry in rise, so the carry input's complement falls.
+fact increasing(Class);
+fact decreasing(Class);
+
 // A repeater may point out of the box only where it drives an output into the
 // neighbor cell, or where one is already fixed. Elsewhere its output would
 // reach nothing.
@@ -61,6 +75,12 @@ param min_torches: int = 0;
 // be an output observation. Removes dead wires from the search space; not
 // strictly sound, since a dead wire can still shape a neighboring dust line.
 param require_useful: bool = false;
+// Diagnostic: drop the tiling seam rules to measure what they cost (the
+// layouts are then not safe to tile).
+param seam_isolation: bool = true;
+// Monotone signals stay monotone in a carry tile (see the tiling rules);
+// off, a tile may glitch its carry.
+param monotone_signals: bool = true;
 
 fn dir(a: Attach) -> Dir6 = match a {
     Floor => Down, East => East, West => West, North => North, South => South,
@@ -435,6 +455,8 @@ def Observe[o: Output, c: Cell] :=
     and (if driving(o) {
             Kind[c] is Torch(_)
             or any(Kind[c] is Repeater(d) for d: Dir4 where not has(step(c, opposite(d))))
+         } else if solid_output(o) {
+            Kind[c] is Solid
          } else {
             Kind[c] is Dust | Repeater(_) | Torch(_)
          })
@@ -443,6 +465,81 @@ def Observe[o: Output, c: Cell] :=
 rule "출력: 허용된 위치에서 관측" {
     forall o: Output {
         require any(Observe[o, c] for c: Cell where output_site(o, c));
+    }
+}
+
+// ===== tiling ================================================================
+//
+// The tile repeats along X, and each copy passes a carry to the next. The
+// next tile's torch, attached across the seam, reads this tile's carry-out
+// block `p` (so the block carries the complement of the carry). In the box,
+// two ghost slices stand for the previous tile: a switch at x = 0 drives the
+// block at x = 1 that the carry-in torch `t` reads. Beyond the seam lies a
+// copy of the tile with another bit's signals, so nothing else may interact
+// across it.
+
+rule "유령 칸: 앞 타일의 캐리 스위치와 그것이 켜는 블록만" {
+    forall c: Cell where ghost(c) {
+        require not Kind[c] is Air ->
+               any(Kind[l] is Switch(_, _) for (l, s, t, p) in carry_site where l == c)
+            or any(Kind[l] is Switch(_, _) and Kind[c] is Solid
+                   for (l, s, t, p) in carry_site where s == c);
+    }
+}
+
+rule "캐리: 스위치 열의 토치가 앞 타일을 읽고, 같은 열의 끝 블록이 다음 타일로" {
+    forall (l, s, t, p) in carry_site {
+        require Kind[l] is Switch(_, _) -> Kind[t] is Torch(West);
+        // Once the carry out is required (construction places the carry in
+        // a step earlier), it is observed in the switch's column.
+        forall o: Output where solid_output(o) {
+            require Kind[l] is Switch(_, _) -> Observe[o, p];
+        }
+    }
+}
+
+// Classes are functions, so a block that must carry the carry out (an OR of
+// falling signals) may also be powered by a signal with the same steady
+// values that rises and falls on the way, through the XOR of the sum. Such a
+// block glitches while the operands change; the next tile's carry repeats
+// the glitch and adds its own, until a torch down the chain burns out. With
+// every input moving one way, a signal that may only move one way is fed
+// only by signals that move the same way, so by induction it changes once.
+rule "단조: 단조 신호는 같은 방향의 단조 신호에서만 전원을 받음" {
+    forall (s, t, f, to) in Feeds where monotone_signals {
+        forall k: Class where increasing(k) {
+            require Feeds(s, t, f, to) and Sig[t] is Carry(k)
+                -> any(Sig[s] is Carry(j) for j: Class where increasing(j));
+        }
+        forall k: Class where decreasing(k) {
+            require Feeds(s, t, f, to) and Sig[t] is Carry(k)
+                -> any(Sig[s] is Carry(j) for j: Class where decreasing(j));
+        }
+    }
+}
+
+rule "이음면: 이웃 타일과는 캐리 말고 상호작용 없음" {
+    forall (c, d, n) in seam where seam_isolation {
+        // Dust connects to, and trades power with, dust, torches, switches,
+        // and repeaters on its axis.
+        require not (Kind[c] is Dust and Kind[n] is Dust | Torch(_) | Switch(_, _));
+        require not (Kind[c] is Dust and Kind[n] is Repeater(d) | Repeater(opposite(d)));
+        // A dust staircase up to the neighbor's dust.
+        require not (Kind[c] is Dust and Kind[step(n, Up)] is Dust
+                     and not Kind[step(c, Up)] is Solid);
+        // Dust powers the block it points at.
+        require not (Points[c, d] and Kind[n] is Solid);
+        // Torches power dust and the repeaters that read them.
+        require not (Kind[c] is Torch(_) and Kind[n] is Dust | Repeater(opposite(d)));
+        // A repeater on the seam axis reads from or writes into the neighbor.
+        require Kind[c] is Repeater(d) | Repeater(opposite(d)) -> Kind[n] is Air;
+        // Strongly powered blocks power dust; any powered block, a repeater
+        // reading it.
+        require not (Hard[c] and Kind[n] is Dust);
+        require not (Kind[c] is Solid and Kind[n] is Repeater(opposite(d)));
+        // Switches power dust and repeaters, and readers of a block beside a
+        // switch see it powered; keep the neighbor empty.
+        require Kind[c] is Switch(_, _) -> Kind[n] is Air;
     }
 }
 

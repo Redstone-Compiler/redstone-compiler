@@ -19,7 +19,9 @@ use eyre::bail;
 use super::encode::{CellKind, TORCH_ATTACH};
 use super::layout::{ExactLayout, InputPolicy, OutputPolicy};
 use super::netlist::{NetDriver, NetId, NorNetlist};
-use super::{ExactLocalPlacer, ExactOutcome, ExactPlacement, ExactPlacerConfig, ExactTuning};
+use super::{
+    CarryTiling, ExactLocalPlacer, ExactOutcome, ExactPlacement, ExactPlacerConfig, ExactTuning,
+};
 use crate::world::block::Direction;
 use crate::world::position::{DimSize, Position};
 
@@ -78,8 +80,151 @@ pub(super) fn gate_order(netlist: &NorNetlist, order: GateOrder) -> Vec<NetId> {
     gates
 }
 
+/// Gates per construction step, in order: one gate each, except for a
+/// `CarryTiling`'s carry output.
+///
+/// The carry switch and the carry-out block share a column, so the carry
+/// path leaves that column and must come back to it. Solving the whole way
+/// in one window failed (`docs/carry_tiles.md`). Instead the gate that reads
+/// the carry input gets its own step, with the switch on the window's last
+/// slice; construction then keeps a corridor clear from the carry-out cell
+/// along +Y (see `construct_step`); the rest of the carry path follows gate
+/// by gate (an OR and the NOR the netlist realizes it with as one step); and
+/// the carry output, an OR, is one last step that ORs the carry onto a block
+/// and runs it back down the corridor. The carry comes as early as it can, right after the
+/// gates it needs, so the corridor is short and few other nets cross the
+/// seams beside it.
+pub(super) fn construction_steps(
+    netlist: &NorNetlist,
+    order: GateOrder,
+    carry: Option<&CarryTiling>,
+) -> Vec<Vec<NetId>> {
+    let order = gate_order(netlist, order);
+    let path = carry.map_or_else(BTreeSet::new, |carry| carry_path(netlist, carry));
+    let (Some(carry), Some(input)) = (
+        carry,
+        carry.and_then(|carry| netlist.input_net(&carry.input)),
+    ) else {
+        return order.into_iter().map(|gate| vec![gate]).collect();
+    };
+    let Some(&(_, output)) = netlist
+        .outputs
+        .iter()
+        .find(|(name, _)| *name == carry.output)
+    else {
+        return order.into_iter().map(|gate| vec![gate]).collect();
+    };
+    if path.is_empty() {
+        return order.into_iter().map(|gate| vec![gate]).collect();
+    }
+    // An OR is a NOT over the NOR of its terms. A block carries the OR
+    // itself (and a repeater reading it passes it on), so the pair is one
+    // step and neither gate needs a torch.
+    let or_inner = |outer: NetId| match netlist.nets[outer].gate_inputs[..] {
+        [inner]
+            if path.contains(&inner)
+                && netlist
+                    .gates()
+                    .filter(|&gate| netlist.nets[gate].gate_inputs.contains(&inner))
+                    .count()
+                    == 1 =>
+        {
+            Some(inner)
+        }
+        _ => None,
+    };
+    let mut out = vec![output];
+    if let Some(inner) = or_inner(output) {
+        out.insert(0, inner);
+    }
+    let path_order = order
+        .iter()
+        .copied()
+        .filter(|gate| path.contains(gate) && !out.contains(gate))
+        .collect::<Vec<_>>();
+    let (entry, middle): (Vec<NetId>, Vec<NetId>) = path_order
+        .into_iter()
+        .partition(|&gate| netlist.nets[gate].gate_inputs.contains(&input));
+    // Gates the carry path reads that do not depend on the carry input.
+    let mut needed = BTreeSet::new();
+    let mut stack = path.iter().copied().collect::<Vec<_>>();
+    while let Some(net) = stack.pop() {
+        for &input in &netlist.nets[net].gate_inputs {
+            if netlist.nets[input].driver == NetDriver::Gate
+                && !path.contains(&input)
+                && needed.insert(input)
+            {
+                stack.push(input);
+            }
+        }
+    }
+    let mut steps = order
+        .iter()
+        .filter(|gate| needed.contains(gate))
+        .map(|&gate| vec![gate])
+        .collect::<Vec<_>>();
+    if !entry.is_empty() {
+        steps.push(entry);
+    }
+    let inners = middle
+        .iter()
+        .filter_map(|&gate| or_inner(gate))
+        .collect::<BTreeSet<_>>();
+    for &gate in &middle {
+        if inners.contains(&gate) {
+            continue;
+        }
+        steps.push(or_inner(gate).into_iter().chain([gate]).collect());
+    }
+    steps.push(out);
+    steps.extend(
+        order
+            .iter()
+            .filter(|gate| !path.contains(gate) && !needed.contains(gate))
+            .map(|&gate| vec![gate]),
+    );
+    steps
+}
+
+/// Gates that depend on the carry input and feed the carry output.
+fn carry_path(netlist: &NorNetlist, carry: &CarryTiling) -> BTreeSet<NetId> {
+    let (Some(input), Some(&(_, output))) = (
+        netlist.input_net(&carry.input),
+        netlist
+            .outputs
+            .iter()
+            .find(|(name, _)| *name == carry.output),
+    ) else {
+        return BTreeSet::new();
+    };
+    let depends = |net: NetId| {
+        let mut stack = vec![net];
+        let mut seen = BTreeSet::new();
+        while let Some(net) = stack.pop() {
+            if net == input {
+                return true;
+            }
+            if seen.insert(net) {
+                stack.extend(netlist.nets[net].gate_inputs.iter().copied());
+            }
+        }
+        false
+    };
+    let mut cone = BTreeSet::new();
+    let mut stack = vec![output];
+    while let Some(net) = stack.pop() {
+        if cone.insert(net) {
+            stack.extend(netlist.nets[net].gate_inputs.iter().copied());
+        }
+    }
+    cone.into_iter()
+        .filter(|&net| netlist.nets[net].driver == NetDriver::Gate && depends(net))
+        .collect()
+}
+
 #[derive(Debug, Clone)]
 pub struct ConstructionConfig {
+    /// Box width along X (with a `carry`, the two ghost slices included).
     pub width: usize,
     pub height: usize,
     /// First window length tried for each gate, in Y slices.
@@ -142,6 +287,11 @@ pub struct ConstructionConfig {
     /// Diagnostic only: see `ExactPlacerConfig::no_fold`.
     #[doc(hidden)]
     pub no_fold: bool,
+    /// Build a tile that repeats along X (see `ExactPlacerConfig::carry`).
+    pub carry: Option<CarryTiling>,
+    /// Time limit of the step that places the carry-out block, which has to
+    /// fit the whole carry logic around one cell (`step_time_limit` if unset).
+    pub carry_step_time_limit: Option<Duration>,
 }
 
 impl Default for ConstructionConfig {
@@ -173,6 +323,8 @@ impl Default for ConstructionConfig {
             step_optimize: Some(Duration::from_secs(5)),
             model_params: BTreeMap::new(),
             no_fold: false,
+            carry: None,
+            carry_step_time_limit: None,
         }
     }
 }
@@ -271,7 +423,7 @@ impl ExactLocalPlacer {
     ) -> eyre::Result<(ExactLayout, ExactPlacement, ConstructionReport)> {
         let started = Instant::now();
         let netlist = &self.netlist;
-        let order = gate_order(netlist, config.gate_order);
+        let order = construction_steps(netlist, config.gate_order, config.carry.as_ref());
         if order.is_empty() {
             bail!("netlist has no gates to construct");
         }
@@ -293,7 +445,7 @@ impl ExactLocalPlacer {
                 bail!(
                     "construction attempt with seed {} ran out of time at gate {}",
                     config.seed,
-                    netlist.nets[order[step]].name
+                    self.step_name(&order[step])
                 );
             }
             match self.construct_step(
@@ -315,13 +467,13 @@ impl ExactLocalPlacer {
                     if step == 0 || report.backtracks >= config.max_backtracks {
                         bail!(
                             "construction could not place gate {} within {} slices",
-                            netlist.nets[order[step]].name,
+                            self.step_name(&order[step]),
                             config.max_window
                         );
                     }
                     report.backtracks += 1;
                     tracing::info!(
-                        gate = netlist.nets[order[step]].name,
+                        gate = self.step_name(&order[step]),
                         "construction backtracks"
                     );
                     blocked[step].clear();
@@ -399,10 +551,19 @@ impl ExactLocalPlacer {
         Ok(())
     }
 
+    /// The gates of a construction step, as one name.
+    fn step_name(&self, gates: &[NetId]) -> String {
+        gates
+            .iter()
+            .map(|&gate| self.netlist.nets[gate].name.as_str())
+            .collect::<Vec<_>>()
+            .join("+")
+    }
+
     #[allow(clippy::type_complexity)]
     fn construct_step(
         &self,
-        order: &[NetId],
+        order: &[Vec<NetId>],
         step: usize,
         state: &StepState,
         blocked: &[Vec<(Position, CellKind)>],
@@ -410,7 +571,8 @@ impl ExactLocalPlacer {
         deadline: Option<Instant>,
     ) -> eyre::Result<Option<(StepState, Vec<(Position, CellKind)>, (String, usize, f64))>> {
         let netlist = &self.netlist;
-        let gate = order[step];
+        let gates = &order[step];
+        let gate_name = self.step_name(gates);
         let is_last = step + 1 == order.len();
         // Outputs that must reach the last slice: face-bound ones, or all of
         // them without `early_outputs`.
@@ -427,11 +589,12 @@ impl ExactLocalPlacer {
             carried_outputs.contains(&net)
                 || order[after..]
                     .iter()
+                    .flatten()
                     .any(|&gate| netlist.nets[gate].gate_inputs.contains(&net))
         };
-        let mut needed_inputs = netlist.nets[gate]
-            .gate_inputs
+        let mut needed_inputs = gates
             .iter()
+            .flat_map(|&gate| netlist.nets[gate].gate_inputs.iter())
             .filter(|&&input| matches!(netlist.nets[input].driver, NetDriver::Input(_)))
             .filter(|&&input| !state.available.contains(&input))
             .copied()
@@ -447,9 +610,29 @@ impl ExactLocalPlacer {
             }
         }
         let length = state.length;
+        // The carry column, once the carry switch is placed, and whether
+        // this step places the carry output. Until then the carry-out cell
+        // is an unpowered block and a corridor from it along +Y stays clear,
+        // with blocks under it, so the carry output can come back to the
+        // column on a line of repeaters.
+        let carry_output = config.carry.as_ref().and_then(|carry| {
+            netlist
+                .outputs
+                .iter()
+                .find(|(name, _)| *name == carry.output)
+                .map(|&(_, net)| net)
+        });
+        let carry_out = carry_output.is_some_and(|net| gates.contains(&net));
+        let corridor = config
+            .carry
+            .as_ref()
+            .and_then(|carry| state.placed_inputs.get(&carry.input))
+            .filter(|_| carry_output.is_some_and(|net| !state.available.contains(&net)))
+            .map(|(position, _)| (position.1, position.2));
+        let min_overlap = config.overlap;
         // Cheapest re-solve first: fewest slices (overlap + window), then the
         // smaller overlap.
-        let mut attempts = (config.overlap..=config.max_overlap.max(config.overlap))
+        let mut attempts = (min_overlap..=config.max_overlap.max(min_overlap))
             .flat_map(|overlap| {
                 (config.window..=config.max_window).map(move |window| (overlap, window))
             })
@@ -457,7 +640,7 @@ impl ExactLocalPlacer {
         attempts.sort_by_key(|&(overlap, window)| (overlap + window, overlap));
         for (overlap, window) in attempts {
             let frozen = length.saturating_sub(overlap);
-            if overlap > config.overlap && frozen == length.saturating_sub(overlap - 1) {
+            if overlap > min_overlap && frozen == length.saturating_sub(overlap - 1) {
                 // Nothing more to unfreeze (the layout is shorter).
                 continue;
             }
@@ -468,15 +651,22 @@ impl ExactLocalPlacer {
             exact.rank_levels = config.rank_levels;
             exact.stage_levels = config.stage_levels;
             exact.no_fold = config.no_fold;
+            exact.carry = config.carry.clone();
             // Stop at the attempt's deadline too, so a restart starts on time.
             let remaining =
                 deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
             if remaining.is_some_and(|remaining| remaining.is_zero()) {
                 return Ok(None);
             }
-            exact.time_limit = Some(remaining.map_or(config.step_time_limit, |remaining| {
-                remaining.min(config.step_time_limit)
-            }));
+            let step_time_limit = if carry_out {
+                config
+                    .carry_step_time_limit
+                    .unwrap_or(config.step_time_limit)
+            } else {
+                config.step_time_limit
+            };
+            exact.time_limit =
+                Some(remaining.map_or(step_time_limit, |remaining| remaining.min(step_time_limit)));
             exact.max_refinements = config.max_refinements;
             exact.tuning = config.tuning.clone();
             exact.model_params = config.model_params.clone();
@@ -501,6 +691,28 @@ impl ExactLocalPlacer {
                     }
                 }
             }
+            if let Some((y0, z0)) = corridor {
+                let x = dim.0 - 1;
+                for y in y0..dim.1 {
+                    let cell = Position(x, y, z0);
+                    exact.given_signals.remove(&cell);
+                    if carry_out {
+                        exact.fixed_cells.remove(&cell);
+                    } else if y == y0 {
+                        // The carry-out block, kept unpowered: nothing may
+                        // power it but the carry output.
+                        exact.fixed_cells.insert(cell, CellKind::Solid);
+                        exact.given_signals.insert(cell, 0);
+                    } else {
+                        exact.fixed_cells.insert(cell, CellKind::Air);
+                        if z0 > 0 {
+                            exact
+                                .fixed_cells
+                                .insert(Position(x, y, z0 - 1), CellKind::Solid);
+                        }
+                    }
+                }
+            }
             for name in netlist.input_names() {
                 let net = netlist.input_net(&name).unwrap();
                 if let Some((position, attach)) = state.placed_inputs.get(&name) {
@@ -515,9 +727,20 @@ impl ExactLocalPlacer {
                         .get(&name)
                         .copied()
                         .unwrap_or(InputPolicy::Anywhere);
-                    exact
-                        .input_sites
-                        .insert(name.clone(), sites_in(dim, frozen..dim.1, policy));
+                    let sites = match &config.carry {
+                        // The carry switch: the ghost slice's last column, so
+                        // the corridor starts beyond the window, and above the
+                        // floor, so the corridor has blocks under it.
+                        Some(carry) if carry.input == name => (1..dim.2)
+                            .map(|z| (Position(0, dim.1 - 1, z), Direction::East))
+                            .collect(),
+                        Some(_) => sites_in(dim, frozen..dim.1, policy)
+                            .into_iter()
+                            .filter(|(position, _)| position.0 >= CarryTiling::GHOST)
+                            .collect(),
+                        None => sites_in(dim, frozen..dim.1, policy),
+                    };
+                    exact.input_sites.insert(name.clone(), sites);
                 } else {
                     exact.absent_inputs.insert(name.clone());
                 }
@@ -537,7 +760,7 @@ impl ExactLocalPlacer {
                     .available
                     .iter()
                     .chain(needed_inputs.iter())
-                    .chain(std::iter::once(&gate))
+                    .chain(gates.iter())
                     .copied()
                     .collect::<BTreeSet<_>>();
                 let mut observations = placed
@@ -563,7 +786,7 @@ impl ExactLocalPlacer {
             let (outcome, stats) = self.place(&exact)?;
             let ExactOutcome::Placed(placement) = outcome else {
                 tracing::info!(
-                    gate = netlist.nets[gate].name,
+                    gate = gate_name,
                     window,
                     overlap,
                     seconds = step_started.elapsed().as_secs_f64(),
@@ -572,7 +795,7 @@ impl ExactLocalPlacer {
                     "construction step failed"
                 );
                 if matches!(outcome, ExactOutcome::Unknown { .. }) {
-                    self.diagnose_failed_step(&exact, &netlist.nets[gate].name, window)?;
+                    self.diagnose_failed_step(&exact, &gate_name, window)?;
                 }
                 continue;
             };
@@ -595,7 +818,7 @@ impl ExactLocalPlacer {
             }
             let seconds = step_started.elapsed().as_secs_f64();
             tracing::info!(
-                gate = netlist.nets[gate].name,
+                gate = gate_name,
                 window,
                 overlap,
                 seconds,
@@ -624,7 +847,7 @@ impl ExactLocalPlacer {
                 .collect();
             let mut available = state.available.clone();
             available.extend(needed_inputs.iter().copied());
-            available.insert(gate);
+            available.extend(gates.iter().copied());
             let next = StepState {
                 length: dim.1,
                 cells,
@@ -633,11 +856,7 @@ impl ExactLocalPlacer {
                 available,
                 result: Some((dim, *placement)),
             };
-            return Ok(Some((
-                next,
-                window_cells,
-                (netlist.nets[gate].name.clone(), window, seconds),
-            )));
+            return Ok(Some((next, window_cells, (gate_name, window, seconds))));
         }
         Ok(None)
     }
