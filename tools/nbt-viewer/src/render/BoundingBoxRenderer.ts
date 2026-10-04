@@ -6,6 +6,8 @@ export type ViewerBoundingBox = {
   label: string;
   min: [number, number, number];
   max: [number, number, number];
+  /** Fixed color; boxes without one cycle through the palette. */
+  color?: [number, number, number];
 };
 
 type ProjectedPoint = [number, number] | undefined;
@@ -147,7 +149,7 @@ export class BoundingBoxRenderer extends Renderer {
     this.boxes.forEach((box, index) => {
       const selected = box.id === this.selectedId;
       const hovered = box.id === this.hoveredId;
-      const baseColor: [number, number, number] = selected ? [1, 0.92, 0.34] : boxColor(index);
+      const baseColor: [number, number, number] = selected ? [1, 0.92, 0.34] : (box.color ?? boxColor(index));
       const target = hovered ? hoveredMesh : selected ? selectedMesh : mesh;
       const color = hovered ? brightenColor(baseColor) : baseColor;
       const thickness = hovered
@@ -161,6 +163,13 @@ export class BoundingBoxRenderer extends Renderer {
     this.mesh = mesh.rebuild(this.gl, { pos: true, color: true });
     this.hoveredMesh = hoveredMesh.rebuild(this.gl, { pos: true, color: true });
     this.selectedMesh = selectedMesh.rebuild(this.gl, { pos: true, color: true });
+  }
+
+  /** Screen position (CSS pixels) of a world point, if it is in front of the camera. */
+  projectPoint(point: [number, number, number], viewMatrix: mat4, width: number, height: number): ProjectedPoint {
+    const viewProjection = mat4.create();
+    mat4.multiply(viewProjection, this.projMatrix, viewMatrix);
+    return this.project(point, viewProjection, width, height);
   }
 
   private project(

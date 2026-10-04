@@ -3,7 +3,7 @@ import type { Viz } from '@viz-js/viz';
 import { unzipSync } from 'fflate';
 import { loadNbtFile, stringifyNbt } from './nbt/loadNbt';
 import { toStructureModel } from './nbt/toStructure';
-import { StructureViewer } from './render/StructureViewer';
+import { StructureViewer, type ViewerPin } from './render/StructureViewer';
 import { highlightRcir } from './syntax/rcir';
 import { highlightVerilog, type VerilogHighlightState } from './syntax/verilog';
 import {
@@ -207,6 +207,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
           </div>
           <button id="toggle-blocks" class="file-button graph-button snapshot-box-button active" type="button" aria-pressed="true">Blocks</button>
           <button id="toggle-grid" class="file-button graph-button snapshot-box-button active" type="button" aria-pressed="true">Grid</button>
+          <button id="toggle-pins" class="file-button graph-button snapshot-box-button active" type="button" aria-pressed="true" title="Mark inputs (green), outputs (orange) and carry blocks (blue)">I/O</button>
           <button id="toggle-snapshot-boxes" class="file-button graph-button snapshot-box-button hidden" type="button">Boxes</button>
           <button id="toggle-snapshot-routes" class="file-button graph-button snapshot-box-button hidden" type="button">Routes</button>
           <button id="open-graphs" class="file-button graph-button" type="button">Graphs</button>
@@ -437,6 +438,7 @@ const traceSimulationState = document.querySelector<HTMLElement>('#trace-simulat
 const openGraphsButton = document.querySelector<HTMLButtonElement>('#open-graphs')!;
 const toggleBlocksButton = document.querySelector<HTMLButtonElement>('#toggle-blocks')!;
 const toggleGridButton = document.querySelector<HTMLButtonElement>('#toggle-grid')!;
+const togglePinsButton = document.querySelector<HTMLButtonElement>('#toggle-pins')!;
 const toggleSnapshotBoxesButton = document.querySelector<HTMLButtonElement>('#toggle-snapshot-boxes')!;
 const toggleSnapshotRoutesButton = document.querySelector<HTMLButtonElement>('#toggle-snapshot-routes')!;
 const closeGraphsButton = document.querySelector<HTMLButtonElement>('#close-graphs')!;
@@ -597,6 +599,13 @@ toggleGridButton.addEventListener('click', () => {
   viewer.setGridVisible(gridVisible);
   toggleGridButton.classList.toggle('active', gridVisible);
   toggleGridButton.setAttribute('aria-pressed', String(gridVisible));
+});
+
+togglePinsButton.addEventListener('click', () => {
+  const visible = !togglePinsButton.classList.contains('active');
+  viewer.setPinsVisible(visible);
+  togglePinsButton.classList.toggle('active', visible);
+  togglePinsButton.setAttribute('aria-pressed', String(visible));
 });
 
 window.addEventListener('keydown', event => {
@@ -3128,6 +3137,7 @@ async function openFile(
 
     if (structure) {
       await viewer.setStructure(structure);
+      viewer.setPins(structurePins(structure));
       renderSwitches(structure);
       viewerEmpty.classList.add('hidden');
       inspector.textContent = [
@@ -3159,6 +3169,7 @@ async function openFile(
     toggleSwitchButton.classList.add('hidden');
     viewerEmpty.classList.remove('hidden');
     inspector.textContent = error instanceof Error ? error.message : String(error);
+    viewer.setPins([]);
     renderSwitches();
     renderTrace([], [], emptyWaveform, undefined);
     updateSnapshotBoxes();
@@ -3213,6 +3224,7 @@ function renderSwitches(structure?: StructureModel): void {
 
   switchesPanel.open = true;
   switchesList.className = 'switches-list';
+  const inputs = structure ? metadataBlocks(structure, 'inputs') : [];
   switches.forEach((block, index) => {
     const row = document.createElement('button');
     row.className = 'switch-entry';
@@ -3221,7 +3233,8 @@ function renderSwitches(structure?: StructureModel): void {
 
     const label = document.createElement('span');
     label.className = 'switch-entry-label';
-    label.textContent = `#${index + 1}  ${block.pos.join(',')}`;
+    const name = inputs.find(input => samePos(input.pos, block.pos))?.name;
+    label.textContent = `#${index + 1}  ${name ? `${name}  ` : ''}${block.pos.join(',')}`;
 
     const state = document.createElement('span');
     state.className = 'switch-entry-state';
@@ -3238,21 +3251,53 @@ function renderSwitches(structure?: StructureModel): void {
   renderOutputs(outputs);
 }
 
-/** Named outputs from the example's output metadata, with their blocks. */
-function outputBlocks(structure: StructureModel): Array<{ name: string; pos: [number, number, number]; block?: StructureBlock }> {
+type MetadataEndpoint = { name: string; position: [number, number, number] };
+
+/** Named endpoints (`inputs` or `outputs`) from the loaded metadata, with their blocks. */
+function metadataBlocks(
+  structure: StructureModel,
+  key: 'inputs' | 'outputs',
+): Array<{ name: string; pos: [number, number, number]; block?: StructureBlock }> {
   if (!currentOutputMetadataJson) return [];
-  let outputs: Array<{ name: string; position: [number, number, number] }>;
+  let endpoints: MetadataEndpoint[];
   try {
-    outputs = JSON.parse(currentOutputMetadataJson).outputs ?? [];
+    endpoints = JSON.parse(currentOutputMetadataJson)[key] ?? [];
   } catch {
     return [];
   }
-  return outputs.map(output => {
+  return endpoints.map(endpoint => {
     // Metadata uses the compiler's (x, y, z) with z up; NBT positions are (y, z, x).
-    const [x, y, z] = output.position;
+    const [x, y, z] = endpoint.position;
     const pos: [number, number, number] = [y, z, x];
-    return { name: output.name, pos, block: structure.blocks.find(block => samePos(block.pos, pos)) };
+    return { name: endpoint.name, pos, block: structure.blocks.find(block => samePos(block.pos, pos)) };
   });
+}
+
+function outputBlocks(structure: StructureModel): ReturnType<typeof metadataBlocks> {
+  return metadataBlocks(structure, 'outputs');
+}
+
+/**
+ * Marks for the 3D view: every switch (named from the metadata's inputs when
+ * it has them, else by its number in the switch list) and every named output;
+ * an output on a plain block is a carry block between cells.
+ */
+function structurePins(structure: StructureModel): ViewerPin[] {
+  const inputs = metadataBlocks(structure, 'inputs');
+  const switches = structure.blocks.filter(block => block.palette.name === 'minecraft:lever');
+  const pins: ViewerPin[] = switches.map((block, index) => ({
+    label: inputs.find(input => samePos(input.pos, block.pos))?.name ?? `#${index + 1}`,
+    pos: block.pos,
+    kind: 'input',
+  }));
+  for (const output of outputBlocks(structure)) {
+    pins.push({
+      label: output.name,
+      pos: output.pos,
+      kind: blockPowered(output.block) === undefined ? 'carry' : 'output',
+    });
+  }
+  return pins;
 }
 
 /** Lists the outputs below the switches; a row selects its block. */
