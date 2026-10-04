@@ -270,7 +270,7 @@ mod tests {
         include_str!("../../test/full-adder-right-inputs-2x14x10.rcell");
     const FULL_ADDER_EXACT: &str = include_str!("../../test/full-adder-exact-2x13x7.rcell");
     const FULL_ADDER_EXACT_OPTIMIZED: &str =
-        include_str!("../../test/full-adder-exact-optimized-2x14x9.rcell");
+        include_str!("../../test/full-adder-exact-optimized-2x12x8.rcell");
     const FULL_ADDER_RIGHT_INPUTS_COMPACTED: &str =
         include_str!("../../test/full-adder-right-inputs-compacted-2x10x10.rcell");
     const DISCONNECTED_FULL_ADDER: &str =
@@ -493,7 +493,7 @@ mod tests {
     /// face, sum on the Y-max face.
     #[test]
     fn optimized_exact_full_adder_keeps_interface_and_passes_all_cases() -> eyre::Result<()> {
-        verify_full_adder(FULL_ADDER_EXACT_OPTIMIZED, DimSize(2, 14, 9))?;
+        verify_full_adder(FULL_ADDER_EXACT_OPTIMIZED, DimSize(2, 12, 8))?;
         let document: PhysicalCellDocument = FULL_ADDER_EXACT_OPTIMIZED.parse()?;
         assert!(document.settled_start);
         let build = document.build()?;

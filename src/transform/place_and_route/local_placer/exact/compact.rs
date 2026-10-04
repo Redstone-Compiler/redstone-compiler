@@ -25,8 +25,14 @@ pub struct CompactionConfig {
     /// Minimize each block-reduction window's cost in one solve (`optimize`)
     /// instead of asking for one block fewer per attempt (rsdsl model only).
     pub optimize_windows: bool,
-    /// Y slices re-solved together in each block-reduction window.
+    /// Slices re-solved together in each block-reduction window.
     pub reduction_window: usize,
+    /// Axes the block-reduction window slides along: 1 = Y slices (the whole
+    /// cross-section), 2 = Z layers (the whole length).
+    pub reduction_axes: Vec<usize>,
+    /// Alternate slice removal and block reduction until neither makes
+    /// progress: fewer blocks often free a slice that could not be removed.
+    pub repeat_rounds: bool,
     /// Simulator rejections each attempt's workers may hit before giving up.
     pub max_refinements: usize,
     /// Search and verification constants for every attempt.
@@ -53,6 +59,8 @@ impl Default for CompactionConfig {
             minimize_blocks: true,
             optimize_windows: true,
             reduction_window: 3,
+            reduction_axes: vec![1, 2],
+            repeat_rounds: true,
             max_refinements: 8,
             tuning: ExactTuning::default(),
             attempt_time_limit: Duration::from_secs(20),
@@ -75,13 +83,16 @@ pub struct CompactionReport {
     pub attempts: usize,
     /// Accepted window re-solves that saved at least one block.
     pub block_reductions: usize,
+    /// Rounds of slice removal followed by block reduction.
+    pub rounds: usize,
     pub elapsed: Duration,
 }
 
 impl ExactLocalPlacer {
     /// Repeatedly removes the slice whose repair succeeds, emptiest first,
     /// widening the repair window when stuck, until no single-slice removal
-    /// can be repaired within the limits. Then optionally trades blocks away.
+    /// can be repaired within the limits. Then optionally trades blocks away,
+    /// and with `repeat_rounds` starts over while that keeps saving blocks.
     pub fn compact(
         &self,
         mut layout: ExactLayout,
@@ -95,6 +106,30 @@ impl ExactLocalPlacer {
                 .time_limit
                 .is_some_and(|limit| started.elapsed() >= limit)
         };
+        loop {
+            report.rounds += 1;
+            self.remove_slices(&mut layout, &mut best, &mut report, config, &expired);
+            if !config.minimize_blocks || expired() {
+                break;
+            }
+            let reductions = report.block_reductions;
+            self.reduce_blocks(&mut layout, &mut best, &mut report, config, &expired);
+            if !config.repeat_rounds || report.block_reductions == reductions || expired() {
+                break;
+            }
+        }
+        report.elapsed = started.elapsed();
+        Ok((layout, best, report))
+    }
+
+    fn remove_slices(
+        &self,
+        layout: &mut ExactLayout,
+        best: &mut Option<ExactPlacement>,
+        report: &mut CompactionReport,
+        config: &CompactionConfig,
+        expired: &impl Fn() -> bool,
+    ) {
         let mut radius = config.window_radius;
         'outer: loop {
             for &axis in &config.axes {
@@ -130,8 +165,8 @@ impl ExactLocalPlacer {
                             blocks = placement.block_count,
                             "compaction step"
                         );
-                        layout = ExactLayout::from_placement(cut.dim, &placement);
-                        best = Some(placement);
+                        *layout = ExactLayout::from_placement(cut.dim, &placement);
+                        *best = Some(placement);
                         report.removed.push((axis, index));
                         radius = config.window_radius;
                         continue 'outer;
@@ -144,77 +179,103 @@ impl ExactLocalPlacer {
             }
             break;
         }
-        if config.minimize_blocks {
-            // Slide a `reduction_window`-slice window along Y, asking for fewer blocks. With
-            // `optimize_windows` each window is minimized in one solve, and a
-            // window proven optimal stays done until the layout changes.
-            let optimize = config.optimize_windows && !config.legacy_encoder;
-            let mut settled = std::collections::BTreeSet::new();
-            'shrink: loop {
-                for low in 0..layout.dim.1 {
-                    if expired() {
-                        break 'shrink;
-                    }
-                    if settled.contains(&low) {
-                        continue;
-                    }
-                    let limit = layout.cells.len().saturating_sub(1);
-                    report.attempts += 1;
-                    let window = (low, low + config.reduction_window);
-                    if optimize {
-                        let (placement, optimal) =
-                            self.optimize_window(&layout, window, limit, config);
-                        if optimal {
-                            settled.insert(low);
-                        }
-                        let Some(placement) = placement else {
-                            continue;
-                        };
-                        tracing::info!(
-                            low,
-                            blocks = placement.block_count,
-                            optimal,
-                            "compaction block reduction"
-                        );
-                        layout = ExactLayout::from_placement(layout.dim, &placement);
-                        best = Some(placement);
-                        report.block_reductions += 1;
-                        // Any change alters every other window's fixed cells.
-                        settled.clear();
-                        continue 'shrink;
-                    }
-                    if let Some(placement) =
-                        self.resolve_window(&layout, 1, window, Some(limit), config)
-                    {
-                        tracing::info!(
-                            low,
-                            blocks = placement.block_count,
-                            "compaction block reduction"
-                        );
-                        layout = ExactLayout::from_placement(layout.dim, &placement);
-                        best = Some(placement);
-                        report.block_reductions += 1;
-                        continue 'shrink;
-                    }
-                }
-                break;
-            }
-        }
-        report.elapsed = started.elapsed();
-        Ok((layout, best, report))
     }
 
-    /// Minimizes the block count inside a Y window (at most `limit` blocks
-    /// overall). Returns the improved placement, if any, and whether the
-    /// window is proven optimal (no layout with fewer blocks exists there).
+    /// Slides a `reduction_window`-slice window along each reduction axis,
+    /// asking for fewer blocks. With `optimize_windows` each window is
+    /// minimized in one solve, and a window proven optimal stays done until
+    /// the layout changes.
+    fn reduce_blocks(
+        &self,
+        layout: &mut ExactLayout,
+        best: &mut Option<ExactPlacement>,
+        report: &mut CompactionReport,
+        config: &CompactionConfig,
+        expired: &impl Fn() -> bool,
+    ) {
+        let optimize = config.optimize_windows && !config.legacy_encoder;
+        let mut settled = std::collections::BTreeSet::new();
+        'shrink: loop {
+            let windows = config
+                .reduction_axes
+                .iter()
+                .flat_map(|&axis| {
+                    let length = if axis == 1 {
+                        layout.dim.1
+                    } else {
+                        layout.dim.2
+                    };
+                    (0..length
+                        .saturating_sub(config.reduction_window.saturating_sub(1))
+                        .max(1))
+                        .map(move |low| (axis, low))
+                })
+                .collect::<Vec<_>>();
+            for (axis, low) in windows {
+                if expired() {
+                    break 'shrink;
+                }
+                if settled.contains(&(axis, low)) {
+                    continue;
+                }
+                let limit = layout.cells.len().saturating_sub(1);
+                report.attempts += 1;
+                let window = (low, low + config.reduction_window);
+                if optimize {
+                    let (placement, optimal) =
+                        self.optimize_window(layout, axis, window, limit, config);
+                    if optimal {
+                        settled.insert((axis, low));
+                    }
+                    let Some(placement) = placement else {
+                        continue;
+                    };
+                    tracing::info!(
+                        axis,
+                        low,
+                        blocks = placement.block_count,
+                        optimal,
+                        "compaction block reduction"
+                    );
+                    *layout = ExactLayout::from_placement(layout.dim, &placement);
+                    *best = Some(placement);
+                    report.block_reductions += 1;
+                    // Any change alters every other window's fixed cells.
+                    settled.clear();
+                    continue 'shrink;
+                }
+                if let Some(placement) =
+                    self.resolve_window(layout, axis, window, Some(limit), config)
+                {
+                    tracing::info!(
+                        axis,
+                        low,
+                        blocks = placement.block_count,
+                        "compaction block reduction"
+                    );
+                    *layout = ExactLayout::from_placement(layout.dim, &placement);
+                    *best = Some(placement);
+                    report.block_reductions += 1;
+                    continue 'shrink;
+                }
+            }
+            break;
+        }
+    }
+
+    /// Minimizes the block count inside a window along `axis` (at most
+    /// `limit` blocks overall). Returns the improved placement, if any, and
+    /// whether the window is proven optimal (no layout with fewer blocks
+    /// exists there).
     fn optimize_window(
         &self,
         layout: &ExactLayout,
+        axis: usize,
         window: (usize, usize),
         limit: usize,
         config: &CompactionConfig,
     ) -> (Option<ExactPlacement>, bool) {
-        match self.window_config(layout, 1, window, Some(limit), config) {
+        match self.window_config(layout, axis, window, Some(limit), config) {
             Ok(mut exact) => {
                 exact.optimize = true;
                 match self.place(&exact) {

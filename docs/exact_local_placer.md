@@ -236,8 +236,12 @@ These keep every exact solve small:
    slices are tried first. When no seam can be repaired, the window radius
    grows up to `max_window_radius`.
 3. **Block minimization.** Optionally, a `reduction_window`-slice window
-   (3) slides along Y and is re-solved for fewer blocks (in one optimizing
-   solve with `optimize_windows`).
+   (3) slides along each of `reduction_axes` (Y slices, then Z layers) and
+   is re-solved for fewer blocks (in one optimizing solve with
+   `optimize_windows`).
+4. **Rounds.** With `repeat_rounds`, slice removal and block minimization
+   alternate until a round saves no block: fewer blocks often free a slice
+   that could not be removed before.
 
 Construction depends on the seed: a step can leave live signals at the seam
 in a shape the next gate cannot use within its time limit. When a gate fails
@@ -342,6 +346,35 @@ Two encoding details mattered for these runs:
 - Each step must leave every still-needed net observable on its last slice.
   Without the overlap slice, a step could expose a signal in a form the next
   step cannot extend, such as an outward repeater.
+
+### Further compaction (2026-10-04)
+
+The 153-block 2x14x9 cell was not converged. The pipeline ran slice removal
+once, then block reduction, and never retried slice removal on the smaller
+layout. Recompacting the saved cell (`recompact_full_adder_rcell`, 20-second
+window solves, 8 workers):
+
+1. First rerun (20 minutes): slices Y5, Z1 and Y11 came out (2x12x8), then
+   block reduction reached 106 blocks. The compactor without the new options
+   reached 107 in the same budget; both were still improving when time ran
+   out.
+2. Second rerun from 106 blocks: converged at **84 blocks** after 2021 s.
+   Every gain came from Y windows. No Z window ever saved a block, but they
+   only run once every Y window of a pass has failed, because each gain
+   restarts the pass at the first window. The second round removed no
+   further slice.
+
+`repeat_rounds` now does these reruns inside one `compact` call. The result
+is saved as `test/full-adder-exact-optimized-2x12x8.rcell` (replacing the
+2x14x9 cell) and passes the same regression tests: all eight cases and every
+settled input transition.
+
+| Cell | Box | Volume | Blocks |
+| --- | --- | ---: | ---: |
+| Manual, right-hand inputs | 2x14x10 | 280 | 129 |
+| Manual cell + automatic compaction | 2x10x10 | 200 | 99 |
+| Generated, pipeline (2026-10-03) | 2x14x9 | 252 | 153 |
+| Generated, recompacted twice | 2x12x8 | 192 | 84 |
 
 ### Larger circuits (2026-10-04)
 
