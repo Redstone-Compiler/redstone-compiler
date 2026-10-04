@@ -32,6 +32,9 @@ pub struct ExactLayout {
     pub cells: BTreeMap<Position, CellKind>,
     pub inputs: Vec<(String, Position, Direction)>,
     pub outputs: Vec<(String, Position)>,
+    /// Signal function of every non-air cell when the layout came from a
+    /// solve (empty for a layout read from RCELL).
+    pub signals: BTreeMap<Position, u64>,
 }
 
 impl ExactLayout {
@@ -60,6 +63,7 @@ impl ExactLayout {
             cells,
             inputs,
             outputs,
+            signals: placement.signals.iter().copied().collect(),
         }
     }
 
@@ -95,6 +99,7 @@ impl ExactLayout {
             cells,
             inputs,
             outputs,
+            signals: BTreeMap::new(),
         })
     }
 
@@ -151,11 +156,18 @@ impl ExactLayout {
             .filter(|(_, position)| coordinate(*position) != index)
             .map(|(name, position)| (name.clone(), shift(*position)))
             .collect();
+        let signals = self
+            .signals
+            .iter()
+            .filter(|(position, _)| coordinate(**position) != index)
+            .map(|(position, function)| (shift(*position), *function))
+            .collect();
         Some(Self {
             dim,
             cells,
             inputs,
             outputs,
+            signals,
         })
     }
 }

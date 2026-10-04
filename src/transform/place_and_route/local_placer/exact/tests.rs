@@ -1022,8 +1022,10 @@ fn diagnose_full_adder_construct_and_compact() -> eyre::Result<()> {
 /// Compacts an existing full-adder RCELL (generated or hand-made) further.
 /// Knobs: `RECOMPACT_SOURCE=<rcell path>`, `RECOMPACT_WRITE=<path prefix>`,
 /// `RECOMPACT_SECONDS`, `RECOMPACT_WORKERS`, `RECOMPACT_RADIUS`,
-/// `RECOMPACT_ATTEMPT_SECONDS`, `RECOMPACT_ROUNDS=0`,
-/// `RECOMPACT_REDUCTION_AXES=1` (Y windows only).
+/// `RECOMPACT_ATTEMPT_SECONDS`, `RECOMPACT_CONTINUE=0` (restart each
+/// block-reduction pass after a gain), `RECOMPACT_ROUNDS=0`,
+/// `RECOMPACT_REDUCTION_AXES=1` (Y windows only), `RECOMPACT_GIVEN=0` (no
+/// given signals outside the window).
 #[test]
 #[ignore = "full-adder recompaction measurement; run explicitly with --nocapture"]
 fn recompact_full_adder_rcell() -> eyre::Result<()> {
@@ -1052,6 +1054,8 @@ fn recompact_full_adder_rcell() -> eyre::Result<()> {
         output_policies: [("s".to_owned(), OutputPolicy::MaxYFace)]
             .into_iter()
             .collect(),
+        continue_after_gain: std::env::var("RECOMPACT_CONTINUE").as_deref() != Ok("0"),
+        given_outside_signals: std::env::var("RECOMPACT_GIVEN").as_deref() != Ok("0"),
         repeat_rounds: std::env::var("RECOMPACT_ROUNDS").as_deref() != Ok("0"),
         reduction_axes: match std::env::var("RECOMPACT_REDUCTION_AXES").as_deref() {
             Ok("1") => vec![1],

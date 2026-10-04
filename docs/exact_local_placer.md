@@ -238,7 +238,12 @@ These keep every exact solve small:
 3. **Block minimization.** Optionally, a `reduction_window`-slice window
    (3) slides along each of `reduction_axes` (Y slices, then Z layers) and
    is re-solved for fewer blocks (in one optimizing solve with
-   `optimize_windows`).
+   `optimize_windows`). After a gain the pass goes on with the next window
+   (`continue_after_gain`) and ends after a full pass without one.
+   With `given_outside_signals`, the cells outside a window keep their
+   current signals as given signals (see construction), so a window solve
+   does not re-justify the rest of the box. A layout read from RCELL gets
+   its signals from one solve with every cell fixed.
 4. **Rounds.** With `repeat_rounds`, slice removal and block minimization
    alternate until a round saves no block: fewer blocks often free a slice
    that could not be removed before.
@@ -397,6 +402,23 @@ window solves, 8 workers):
 is saved as `test/full-adder-exact-optimized-2x12x8.rcell` (replacing the
 2x14x9 cell) and passes the same regression tests: all eight cases and every
 settled input transition.
+
+Two more changes target time per pass, measured from the same 153-block cell
+with a 20-minute budget:
+
+| Block-reduction pass | Result after 20 minutes |
+|----------------------|-------------------------|
+| Restart at the first window after a gain (before) | 2x12x8, 106 blocks |
+| `continue_after_gain` | 2x12x8, 85 blocks |
+| `continue_after_gain` + `given_outside_signals` | 2x11x8, 86 blocks |
+
+Continuing the pass let later windows have their turn: the Z windows saved
+blocks for the first time. With given signals, most windows solve in a few
+seconds and are proven optimal. That run reached 80 blocks at 2x12x9, then
+its second round removed slices Y11 and Z0 (2x11x8, volume 176) just before
+time ran out. Pinning the outside signals can also rule out a repair. In the
+first round it missed the Z1 removal that the run without given signals
+found.
 
 | Cell | Box | Volume | Blocks |
 | --- | --- | ---: | ---: |

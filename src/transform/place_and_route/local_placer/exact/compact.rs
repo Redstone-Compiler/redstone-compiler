@@ -33,6 +33,14 @@ pub struct CompactionConfig {
     /// Alternate slice removal and block reduction until neither makes
     /// progress: fewer blocks often free a slice that could not be removed.
     pub repeat_rounds: bool,
+    /// After a block-reduction window saves blocks, go on with the next
+    /// window instead of starting the pass over at the first one, so later
+    /// windows (and the Z windows after the Y ones) get their turn.
+    pub continue_after_gain: bool,
+    /// Fix the signals of the cells outside each window to the current
+    /// layout's, so a window solve does not re-justify the rest of the box
+    /// (see `ConstructionConfig::given_frozen_signals`).
+    pub given_outside_signals: bool,
     /// Simulator rejections each attempt's workers may hit before giving up.
     pub max_refinements: usize,
     /// Search and verification constants for every attempt.
@@ -61,6 +69,8 @@ impl Default for CompactionConfig {
             reduction_window: 3,
             reduction_axes: vec![1, 2],
             repeat_rounds: true,
+            continue_after_gain: true,
+            given_outside_signals: true,
             max_refinements: 8,
             tuning: ExactTuning::default(),
             attempt_time_limit: Duration::from_secs(20),
@@ -106,6 +116,15 @@ impl ExactLocalPlacer {
                 .time_limit
                 .is_some_and(|limit| started.elapsed() >= limit)
         };
+        if config.given_outside_signals && !config.legacy_encoder && layout.signals.is_empty() {
+            // A layout read from RCELL has no solver signals yet: solve it
+            // once with every cell fixed to read them off.
+            match self.try_resolve_window(&layout, 1, (0, 0), None, config) {
+                Ok(Some(placement)) => layout.signals = placement.signals.into_iter().collect(),
+                Ok(None) => tracing::warn!("could not read the layout's signals"),
+                Err(error) => tracing::warn!(%error, "could not read the layout's signals"),
+            }
+        }
         loop {
             report.rounds += 1;
             self.remove_slices(&mut layout, &mut best, &mut report, config, &expired);
@@ -182,9 +201,9 @@ impl ExactLocalPlacer {
     }
 
     /// Slides a `reduction_window`-slice window along each reduction axis,
-    /// asking for fewer blocks. With `optimize_windows` each window is
-    /// minimized in one solve, and a window proven optimal stays done until
-    /// the layout changes.
+    /// asking for fewer blocks, until a full pass saves nothing. With
+    /// `optimize_windows` each window is minimized in one solve, and a window
+    /// proven optimal stays done until the layout around it changes.
     fn reduce_blocks(
         &self,
         layout: &mut ExactLayout,
@@ -194,72 +213,73 @@ impl ExactLocalPlacer {
         expired: &impl Fn() -> bool,
     ) {
         let optimize = config.optimize_windows && !config.legacy_encoder;
+        // Block reduction keeps the box, so the windows stay the same.
+        let windows = config
+            .reduction_axes
+            .iter()
+            .flat_map(|&axis| {
+                let length = if axis == 1 {
+                    layout.dim.1
+                } else {
+                    layout.dim.2
+                };
+                (0..length
+                    .saturating_sub(config.reduction_window.saturating_sub(1))
+                    .max(1))
+                    .map(move |low| (axis, low))
+            })
+            .collect::<Vec<_>>();
         let mut settled = std::collections::BTreeSet::new();
-        'shrink: loop {
-            let windows = config
-                .reduction_axes
-                .iter()
-                .flat_map(|&axis| {
-                    let length = if axis == 1 {
-                        layout.dim.1
-                    } else {
-                        layout.dim.2
-                    };
-                    (0..length
-                        .saturating_sub(config.reduction_window.saturating_sub(1))
-                        .max(1))
-                        .map(move |low| (axis, low))
-                })
-                .collect::<Vec<_>>();
-            for (axis, low) in windows {
-                if expired() {
-                    break 'shrink;
-                }
-                if settled.contains(&(axis, low)) {
-                    continue;
-                }
-                let limit = layout.cells.len().saturating_sub(1);
-                report.attempts += 1;
-                let window = (low, low + config.reduction_window);
-                if optimize {
-                    let (placement, optimal) =
-                        self.optimize_window(layout, axis, window, limit, config);
-                    if optimal {
-                        settled.insert((axis, low));
-                    }
-                    let Some(placement) = placement else {
-                        continue;
-                    };
-                    tracing::info!(
-                        axis,
-                        low,
-                        blocks = placement.block_count,
-                        optimal,
-                        "compaction block reduction"
-                    );
-                    *layout = ExactLayout::from_placement(layout.dim, &placement);
-                    *best = Some(placement);
-                    report.block_reductions += 1;
-                    // Any change alters every other window's fixed cells.
-                    settled.clear();
-                    continue 'shrink;
-                }
-                if let Some(placement) =
-                    self.resolve_window(layout, axis, window, Some(limit), config)
-                {
-                    tracing::info!(
-                        axis,
-                        low,
-                        blocks = placement.block_count,
-                        "compaction block reduction"
-                    );
-                    *layout = ExactLayout::from_placement(layout.dim, &placement);
-                    *best = Some(placement);
-                    report.block_reductions += 1;
-                    continue 'shrink;
-                }
+        let mut next = 0;
+        // Windows tried since the last gain; a full pass without one ends.
+        let mut idle = 0;
+        while idle < windows.len() {
+            if expired() {
+                break;
             }
-            break;
+            let (axis, low) = windows[next];
+            next = (next + 1) % windows.len();
+            idle += 1;
+            if settled.contains(&(axis, low)) {
+                continue;
+            }
+            let limit = layout.cells.len().saturating_sub(1);
+            report.attempts += 1;
+            let window = (low, low + config.reduction_window);
+            let (placement, optimal) = if optimize {
+                self.optimize_window(layout, axis, window, limit, config)
+            } else {
+                (
+                    self.resolve_window(layout, axis, window, Some(limit), config),
+                    false,
+                )
+            };
+            if optimal {
+                settled.insert((axis, low));
+            }
+            let Some(placement) = placement else {
+                continue;
+            };
+            tracing::info!(
+                axis,
+                low,
+                blocks = placement.block_count,
+                optimal,
+                "compaction block reduction"
+            );
+            *layout = ExactLayout::from_placement(layout.dim, &placement);
+            *best = Some(placement);
+            report.block_reductions += 1;
+            // The change alters every other window's fixed cells; this
+            // window's own outside did not change, so its proof still holds.
+            settled.clear();
+            if optimal {
+                settled.insert((axis, low));
+            }
+            idle = 0;
+            if !config.continue_after_gain {
+                next = 0;
+            }
         }
     }
 
@@ -372,6 +392,11 @@ impl ExactLocalPlacer {
                     }
                     let kind = cut.cells.get(&position).copied().unwrap_or(CellKind::Air);
                     exact.fixed_cells.insert(position, kind);
+                    if config.given_outside_signals && !config.legacy_encoder {
+                        if let Some(&function) = cut.signals.get(&position) {
+                            exact.given_signals.insert(position, function);
+                        }
+                    }
                 }
             }
         }
