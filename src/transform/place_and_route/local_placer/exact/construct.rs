@@ -139,9 +139,6 @@ pub struct ConstructionConfig {
     pub step_optimize: Option<Duration>,
     /// Model params for every step (see `ExactPlacerConfig::model_params`).
     pub model_params: BTreeMap<String, rsdsl::IValue>,
-    /// Diagnostic only: see `ExactPlacerConfig::legacy_encoder`.
-    #[doc(hidden)]
-    pub legacy_encoder: bool,
     /// Diagnostic only: see `ExactPlacerConfig::no_fold`.
     #[doc(hidden)]
     pub no_fold: bool,
@@ -175,7 +172,6 @@ impl Default for ConstructionConfig {
             given_frozen_signals: true,
             step_optimize: Some(Duration::from_secs(5)),
             model_params: BTreeMap::new(),
-            legacy_encoder: false,
             no_fold: false,
         }
     }
@@ -471,7 +467,6 @@ impl ExactLocalPlacer {
             exact.seed = config.seed;
             exact.rank_levels = config.rank_levels;
             exact.stage_levels = config.stage_levels;
-            exact.legacy_encoder = config.legacy_encoder;
             exact.no_fold = config.no_fold;
             // Stop at the attempt's deadline too, so a restart starts on time.
             let remaining =
@@ -489,7 +484,7 @@ impl ExactLocalPlacer {
             for (position, kind) in &state.cells {
                 if position.1 < frozen {
                     exact.fixed_cells.insert(*position, *kind);
-                    if config.given_frozen_signals && !config.legacy_encoder {
+                    if config.given_frozen_signals {
                         if let Some(&function) = state.signals.get(position) {
                             exact.given_signals.insert(*position, function);
                         }

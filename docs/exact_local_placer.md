@@ -36,10 +36,11 @@ The constraints live in the rsdsl model
 `dsl.rs` turns the netlist, vocabulary, pins, and config into an rsdsl
 instance, grounds the model, and reads the variables back for decoding.
 Nothing in Rust adds constraints except blocking clauses (simulator
-rejections, `blocked`) and lazy loop formulas. `encode.rs` is the original
-hand-written encoder of the same model, kept behind the hidden
-`legacy_encoder` flag for parity checks (see `solver_dsl_design.md`,
-section 11).
+rejections, `blocked`) and lazy loop formulas. A hand-written encoder of the
+same model preceded it; once the parity checks in `solver_dsl_design.md`
+(section 11) passed, it was removed (2026-10-04). `encode.rs` now holds only
+the types both sides share: the block vocabulary, pin geometry, and the
+`Encoding` the placer decodes from.
 
 `ExactPlacerConfig::model_file` grounds another model file instead, and
 `model_params` overrides model params (for example `max_repeaters = 0`), so
@@ -113,8 +114,7 @@ traces one block's events. Three causes, in order of frequency:
    of its strong sources (torch below, repeater facing it, attached switch) is
    on. The model used the block's total power whenever such a source merely
    existed. `Strong[k, c]` in `exact_placer.rsdsl` fixes the soundness rule
-   for solid→dust relations (`legacy_semantics = true` restores the old rule
-   for parity tests).
+   for solid→dust relations.
 3. **Simulator bug: sources on one block.** Switches (and torches below a
    block) sent hard power without naming their source, so two of them on one
    block shared a bookkeeping key and turning one off unpowered the block.
@@ -127,8 +127,8 @@ start-up glitches, not feedback, and the rule made search slower.
 Effect: OR 1x5x3 went from 64 rejections (Unknown) to 0; full-adder
 construction, seed 1, from 438 s with 258 rejections to 27 s with none, and the
 generated cell passes `rcell` verification. Seed 2 still fails to place gate
-`s` within four slices, now on search time alone (the legacy encoder also
-fails that seed).
+`s` within four slices, now on search time alone (the hand-written encoder
+also failed that seed).
 
 ### Optimizing a cost (2026-10-03)
 
@@ -601,10 +601,8 @@ RECOMPACT_SOURCE=test/full-adder-right-inputs-2x14x10.rcell \
   cargo test --release --lib recompact_full_adder_rcell -- --ignored --nocapture
 cargo test --release --lib diagnose_exact_full_adder -- --ignored --nocapture
 CIRCUIT=mux2 cargo test --release --lib diagnose_construct_circuit -- --ignored --nocapture
-# rsdsl versus the hand-written encoder
+# grounded formula sizes and encode times
 cargo test --release --lib measure_encoders -- --ignored --nocapture
-ENCODER_CASE=xor SEEDS=4 cargo test --release --lib compare_encoder_portfolios -- --ignored --nocapture
-PIPE_LEGACY=1 cargo test --release --lib diagnose_full_adder_construct_and_compact -- --ignored --nocapture
 ```
 
 The harnesses print their knobs and write `.rcell`/`.nbt` files when given

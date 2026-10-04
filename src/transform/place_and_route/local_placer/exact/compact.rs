@@ -67,9 +67,6 @@ pub struct CompactionConfig {
     /// Axes to shrink: 1 = Y (length), 2 = Z (height).
     pub axes: Vec<usize>,
     pub output_policies: BTreeMap<String, OutputPolicy>,
-    /// Diagnostic only: see `ExactPlacerConfig::legacy_encoder`.
-    #[doc(hidden)]
-    pub legacy_encoder: bool,
     /// Diagnostic only: see `ExactPlacerConfig::no_fold`.
     #[doc(hidden)]
     pub no_fold: bool,
@@ -100,7 +97,6 @@ impl Default for CompactionConfig {
             stage_levels: 24,
             axes: vec![1, 2],
             output_policies: BTreeMap::new(),
-            legacy_encoder: false,
             no_fold: false,
         }
     }
@@ -136,7 +132,7 @@ impl ExactLocalPlacer {
                 .time_limit
                 .is_some_and(|limit| started.elapsed() >= limit)
         };
-        if config.given_outside_signals && !config.legacy_encoder && layout.signals.is_empty() {
+        if config.given_outside_signals && layout.signals.is_empty() {
             self.read_signals(&mut layout, config);
         }
         loop {
@@ -257,7 +253,7 @@ impl ExactLocalPlacer {
         config: &CompactionConfig,
         expired: &impl Fn() -> bool,
     ) {
-        let optimize = config.optimize_windows && !config.legacy_encoder;
+        let optimize = config.optimize_windows;
         // Block reduction keeps the box, so the windows stay the same.
         let windows = config
             .reduction_axes
@@ -430,7 +426,6 @@ impl ExactLocalPlacer {
         exact.seed = config.seed;
         exact.rank_levels = config.rank_levels;
         exact.stage_levels = config.stage_levels;
-        exact.legacy_encoder = config.legacy_encoder;
         exact.no_fold = config.no_fold;
         exact.time_limit = Some(config.attempt_time_limit);
         exact.max_refinements = config.max_refinements;
@@ -449,7 +444,7 @@ impl ExactLocalPlacer {
                     }
                     let kind = cut.cells.get(&position).copied().unwrap_or(CellKind::Air);
                     exact.fixed_cells.insert(position, kind);
-                    if config.given_outside_signals && !config.legacy_encoder {
+                    if config.given_outside_signals {
                         if let Some(&function) = cut.signals.get(&position) {
                             exact.given_signals.insert(position, function);
                         }

@@ -432,7 +432,8 @@ impl Prepared {
         };
         let mut encoding = Encoding {
             geometry,
-            cnf: Cnf::new(),
+            // Replaced by the grounded formula once the tables are read back.
+            cnf: Cnf::from_literals(1, vec![1, 0], 1),
             classes: self.classes.clone(),
             cases: self.cases,
             air: Vec::new(),
@@ -440,9 +441,6 @@ impl Prepared {
             dust: Vec::new(),
             torch: Vec::new(),
             repeater: Vec::new(),
-            is_torch: Vec::new(),
-            is_repeater: Vec::new(),
-            is_switch: Vec::new(),
             switches: Vec::new(),
             class_lits: Vec::new(),
             values: Vec::new(),

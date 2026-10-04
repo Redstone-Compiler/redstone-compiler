@@ -229,9 +229,11 @@ a home:
    `encode.rs`, `cnf.rs`, and `dimacs.rs`. The simulator loop, construction,
    and compaction stay unchanged.
 
-Status: steps 1–4 are done and the placer grounds the DSL by default (section
-11). Step 5's deletion waits until the search measurements settle; the
-legacy encoder is one hidden flag away.
+Status: done. Steps 1–4 landed first and the placer grounded the DSL by
+default (section 11); step 5 followed on 2026-10-04. The hand-written
+encoder, the `Cnf` builder, and the legacy DIMACS legend are gone.
+`encode.rs` keeps only the shared vocabulary and geometry types, `cnf.rs` is
+a plain literal container, and `dimacs.rs` writes the grounded program.
 6. **Leave the heuristic placer alone.** It shares only the placement
    request. The model can validate or compact its output by fixing its blocks
    as instance facts, as today's compaction already does.
@@ -260,9 +262,8 @@ legacy encoder is one hidden flag away.
   (`program.rs`), Rust-built instances (`instance.rs`).
 - The exact placer grounds
   `src/transform/place_and_route/local_placer/exact/exact_placer.rsdsl` by
-  default (`exact/dsl.rs`). `encode.rs` stays behind the hidden
-  `legacy_encoder` flag for parity checks; `cnf.rs` and the legacy half of
-  `dimacs.rs` go with it once it is deleted.
+  (`exact/dsl.rs`), the only encoder since 2026-10-04 (see "Removing the
+  hand-written encoder" below).
 - `ExactPlacerConfig::model_file` and `model_params` swap the model or set
   its params at run time. `max_repeaters` is one such param in the shipped
   model.
@@ -288,6 +289,9 @@ legacy encoder is one hidden flag away.
 
 ### Parity
 
+These tests ran while both encoders existed; they were deleted with the
+hand-written encoder (see below).
+
 - `encoders_admit_the_same_layouts` enumerates every block layout each
   encoder admits and requires equal sets: inverter 1x3x2 (144 layouts) and
   1x4x2 (1,320), NOR 1x4x2 (200), NOR 1x5x2 with at most 9 blocks (1,206),
@@ -295,13 +299,16 @@ legacy encoder is one hidden flag away.
 - `encoders_accept_each_others_layouts`: a layout found with one encoder is
   SAT in the other with the same pins; both prove the 1x2x1 NOR box
   infeasible.
-- `model_accepts_*`: both accept the manual 2x14x10, 2x13x9, 2x17x10 and the
-  compacted 2x10x10 full adders.
+- `model_accepts_*`: both accepted the manual 2x14x10, 2x13x9, 2x17x10 and
+  the compacted 2x10x10 full adders (these tests remain, for the model only).
 - rsdsl unit tests check grounded CNF against brute-force model counts
   (choices, relations, `var over`, cardinality, order-encoded integers) and
   the diagnostics (E0304 stage errors, unknown members, `none` indices).
 
-### Size and time (`measure_encoders`, release, Apple M-series)
+### Size and time (`measure_encoders`, release, Apple M-series, 2026-10-03)
+
+Measured before automatic unit folding and before the hand-written encoder
+was removed; `measure_encoders` now prints only the rsdsl rows.
 
 | Problem | Encoder | Vars | Clauses | Literals | Relations | Encode | Load into CaDiCaL |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -401,6 +408,34 @@ unit test happened to draw 1.8 s before and 24.7 s after with four workers,
 so it now uses eight. Full-adder construction stayed within run-to-run
 variance: 134-182 blocks, 63-71 s, against 127-201 blocks across earlier
 runs.
+
+### Removing the hand-written encoder (2026-10-04)
+
+The hand-written encoder only ran behind the hidden `legacy_encoder` flag,
+and every model change after the switch (per-case strong power,
+`outward_ok`, given signals, unit folding) went into the rsdsl model alone.
+Keeping it meant keeping the old semantics behind a `legacy_semantics`
+model param, a second code path in every config (`ExactPlacerConfig`,
+`ConstructionConfig`, `CompactionConfig`), and parity tests that compared
+the model to an older version of itself. So it was deleted:
+
+- `encode.rs` (1,261 → 290 lines) keeps only the shared types: block
+  vocabulary, `SignalClass`, pin geometry, `Relation`, and `Encoding`.
+- `cnf.rs` (185 → 40) is a literal container; the clause builder, Tseitin
+  helpers, and cardinality encodings went with the encoder.
+- `dimacs.rs` (291 → 62) writes the grounded program; rsdsl's provenance
+  replaces the old legend and per-clause explanations.
+- The `legacy_encoder` flags, `PIPE_LEGACY`, the `legacy_semantics` param,
+  and the parity tests (`encoders_admit_the_same_layouts`,
+  `encoders_accept_each_others_layouts`, `compare_encoders`,
+  `compare_encoder_portfolios`) are gone. `measure_encoders` prints the rsdsl
+  rows only.
+
+The grounded CNF is byte-identical before and after (`print_cnf_hashes` on
+XOR 2x6x4, NOR 1x5x2, and the 2x14x10 full adder). What still checks
+correctness: rsdsl's brute-force model counts, the simulator verification of
+every placement, `model_accepts_*` on the manual full adders, and the
+verified fixtures under `test/`.
 
 ---
 

@@ -98,10 +98,6 @@ pub struct ExactPlacerConfig {
     /// literal that tests can assume false to locate model/simulator mismatches.
     #[doc(hidden)]
     pub relax_soundness: bool,
-    /// Diagnostic only: encode with the hand-written `encode.rs` instead of
-    /// grounding `exact_placer.rsdsl`.
-    #[doc(hidden)]
-    pub legacy_encoder: bool,
     /// Diagnostic only: ground in the original rule order without folding
     /// required units (fixed and given cells) into later formulas. Same
     /// models, larger CNF; for comparisons and for checking the folding.
@@ -183,7 +179,6 @@ impl ExactPlacerConfig {
             max_refinements: 64,
             allow_unpowered_wires: false,
             relax_soundness: false,
-            legacy_encoder: false,
             no_fold: false,
             optimize: false,
             core_guided: false,
@@ -812,64 +807,19 @@ impl ExactLocalPlacer {
         &self,
         config: &ExactPlacerConfig,
     ) -> eyre::Result<(Option<ExactPlacement>, bool, ExactPlacerStats)> {
-        if !config.legacy_encoder {
-            // One incremental solve per worker with the block count as cost.
-            let mut attempt = config.clone();
-            attempt.optimize = true;
-            for (name, weight) in [("block_cost", 1), ("repeater_cost", 0), ("torch_cost", 0)] {
-                attempt
-                    .model_params
-                    .insert(name.to_owned(), rsdsl::IValue::Int(weight));
-            }
-            let (outcome, stats) = self.place(&attempt)?;
-            let optimal = stats.optimal;
-            return Ok(match outcome {
-                ExactOutcome::Placed(placement) => (Some(*placement), optimal, stats),
-                _ => (None, false, stats),
-            });
+        // One incremental solve per worker with the block count as cost.
+        let mut attempt = config.clone();
+        attempt.optimize = true;
+        for (name, weight) in [("block_cost", 1), ("repeater_cost", 0), ("torch_cost", 0)] {
+            attempt
+                .model_params
+                .insert(name.to_owned(), rsdsl::IValue::Int(weight));
         }
-        let started = Instant::now();
-        let mut best: Option<ExactPlacement> = None;
-        let mut total = ExactPlacerStats::default();
-        let mut proven_optimal = false;
-        let mut bound = config.max_blocks;
-        loop {
-            let remaining = config
-                .time_limit
-                .map(|limit| limit.saturating_sub(started.elapsed()));
-            if remaining.is_some_and(|remaining| remaining.is_zero()) {
-                break;
-            }
-            let attempt = ExactPlacerConfig {
-                max_blocks: bound,
-                time_limit: remaining,
-                ..config.clone()
-            };
-            let (outcome, stats) = self.place(&attempt)?;
-            total.variables = stats.variables;
-            total.clauses = stats.clauses;
-            total.encode_time += stats.encode_time;
-            total.solve_time += stats.solve_time;
-            total.refinements += stats.refinements;
-            match outcome {
-                ExactOutcome::Placed(placement) => {
-                    // Count every non-air block, including switches, to match the bound.
-                    let used = placement.cells.len();
-                    total.winning_seed = stats.winning_seed;
-                    best = Some(*placement);
-                    if used == 0 {
-                        proven_optimal = true;
-                        break;
-                    }
-                    bound = Some(used - 1);
-                }
-                ExactOutcome::Infeasible => {
-                    proven_optimal = best.is_some();
-                    break;
-                }
-                ExactOutcome::Unknown { .. } => break,
-            }
-        }
-        Ok((best, proven_optimal, total))
+        let (outcome, stats) = self.place(&attempt)?;
+        let optimal = stats.optimal;
+        Ok(match outcome {
+            ExactOutcome::Placed(placement) => (Some(*placement), optimal, stats),
+            _ => (None, false, stats),
+        })
     }
 }
