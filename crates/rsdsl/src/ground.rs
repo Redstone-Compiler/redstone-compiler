@@ -189,9 +189,10 @@ pub(crate) struct RuleDef {
     pub label: String,
     body: Arc<Vec<Stmt>>,
     guarded: Option<Vec<String>>,
-    /// `@fold`: its requires are unit facts, applied before every other rule
-    /// so that they fold to constants there.
-    fold: bool,
+    /// Uses no relation (directly or through the defs it reads), so it can
+    /// run before relations are collected; its unit requires then fold into
+    /// everything grounded after it.
+    early: bool,
     has_contrib: bool,
     has_require: bool,
     span: Span,
@@ -228,8 +229,8 @@ pub struct GroundOptions {
     /// Encode OR auxiliaries as positive variables instead of negated AND
     /// variables (changes only the solver's initial phases).
     pub positive_or_aux: bool,
-    /// Run `@fold` rules as ordinary rules, without fixing their literals
-    /// first (same models, larger CNF).
+    /// Keep the original grounding order and do not fold unit requires into
+    /// later formulas (same models, larger CNF; for comparisons).
     pub no_fold: bool,
 }
 
@@ -331,10 +332,11 @@ pub struct Program {
     guard_lookup: HashMap<(usize, Vec<Value>), Lit>,
     options: GroundOptions,
     mode: Mode,
-    /// Running `@fold` rules: requires record their literals as fixed.
-    folding: bool,
     /// Reusable buffer for family indices and fact arguments.
     key_scratch: Vec<Value>,
+    /// The choice and key of every option literal, so that fixing an option
+    /// true fixes its siblings false at once.
+    option_owner: HashMap<Lit, (u32, u32)>,
     current_rule: Option<usize>,
     pub warnings: Vec<Diagnostic>,
     pub(crate) sources: crate::diag::SourceMap,
@@ -388,8 +390,8 @@ impl Program {
             guard_lookup: HashMap::default(),
             options,
             mode: Mode::Collect,
-            folding: false,
             key_scratch: Vec::new(),
+            option_owner: HashMap::default(),
             current_rule: None,
             warnings: Vec::new(),
             sources: Default::default(),
@@ -405,6 +407,9 @@ impl Program {
         p.check_instance_names(instance)?;
         p.ground_families(file)?;
         p.run_rules()?;
+        if !p.options.no_fold {
+            p.encoder.propagate_units();
+        }
         // The caches refer to AST nodes that are only borrowed while grounding.
         p.name_cache = HashMap::default();
         p.decl_cache = HashMap::default();
@@ -1184,7 +1189,6 @@ impl Program {
                 }
                 ItemKind::Rule { label, body } => {
                     let mut guarded = None;
-                    let mut fold = false;
                     for a in &item.annotations {
                         match a.name.as_str() {
                             "guarded" => {
@@ -1229,25 +1233,17 @@ impl Program {
                                 }
                                 guarded = Some(per);
                             }
-                            "fold" => fold = true,
                             "label" => {}
                             other => return Err(unknown_annotation(other, a.span, "rule")),
                         }
                     }
                     let has_contrib =
                         contains(body, |s| matches!(s.kind, StmtKind::Contribute { .. }));
-                    if fold && has_contrib {
-                        return Err(err(
-                            "E0706",
-                            "a `@fold` rule cannot contribute to relations",
-                            item.span,
-                        ));
-                    }
                     self.rules.push(RuleDef {
                         label: label.clone(),
                         body: Arc::new(body.clone()),
                         guarded,
-                        fold,
+                        early: false,
                         has_contrib,
                         has_require: contains(body, |s| matches!(s.kind, StmtKind::Require(_))),
                         span: item.span,
@@ -1541,23 +1537,31 @@ impl Program {
     // ----- rules -------------------------------------------------------------
 
     fn run_rules(&mut self) -> Result<()> {
-        // Pass 0: `@fold` rules fix literals before anything uses them.
-        if self.options.no_fold {
-            for rule in &mut self.rules {
-                rule.fold = false;
+        // Pass 0: rules that use no relation run first, so the literals their
+        // unit requires fix fold into relation contributions and later rules.
+        if !self.options.no_fold {
+            for (c, choice) in self.choices.iter().enumerate() {
+                for (k, options) in choice.options.iter().enumerate() {
+                    for o in options {
+                        self.option_owner.insert(o.lit, (c as u32, k as u32));
+                    }
+                }
             }
-        }
-        if self.rules.iter().any(|r| r.fold) {
-            self.mode = Mode::Emit;
-            self.folding = true;
             for r in 0..self.rules.len() {
-                if self.rules[r].fold {
+                let rule = &self.rules[r];
+                let early = rule.has_require
+                    && !rule.has_contrib
+                    && !self.uses_relations(&rule.body.clone(), &mut HashSet::default());
+                self.rules[r].early = early;
+            }
+            self.mode = Mode::Emit;
+            for r in 0..self.rules.len() {
+                if self.rules[r].early {
                     let before = self.encoder.clause_count;
                     self.run_rule(r)?;
                     self.rules[r].clauses = self.encoder.clause_count - before;
                 }
             }
-            self.folding = false;
             self.fix_choice_siblings();
         }
         // Pass 1: collect relation contributions.
@@ -1593,7 +1597,7 @@ impl Program {
         // Pass 2: emit constraints.
         self.mode = Mode::Emit;
         for r in 0..self.rules.len() {
-            if self.rules[r].has_require && !self.rules[r].fold {
+            if self.rules[r].has_require && !self.rules[r].early {
                 let before = self.encoder.clause_count;
                 self.run_rule(r)?;
                 self.rules[r].clauses = self.encoder.clause_count - before;
@@ -1624,6 +1628,50 @@ impl Program {
         self.encoder.origin = 0;
         self.encoder.guard = None;
         Ok(())
+    }
+
+    /// Whether `stmts` read a relation or a variable over one, directly or
+    /// through the defs they use (`seen` breaks cycles between defs).
+    fn uses_relations(&self, stmts: &[Stmt], seen: &mut HashSet<u32>) -> bool {
+        let mut found = false;
+        visit_stmt_names(stmts, &mut |name| {
+            if found {
+                return;
+            }
+            match self.names.get(name) {
+                Some(Decl::Relation(_)) => found = true,
+                Some(Decl::Var(v)) => {
+                    if matches!(self.vars[*v as usize].index, VarIndexKind::Over(_)) {
+                        found = true;
+                    }
+                }
+                Some(Decl::Def(d)) => {
+                    if seen.insert(*d) {
+                        let body = self.defs[*d as usize].body.clone();
+                        let stmt = Stmt {
+                            kind: StmtKind::Require((*body).clone()),
+                            annotations: Vec::new(),
+                            span: body.span,
+                        };
+                        found = self.uses_relations(std::slice::from_ref(&stmt), seen);
+                    }
+                }
+                _ => {}
+            }
+        });
+        found
+    }
+
+    /// Fixes `lit`; a choice option fixed true fixes its siblings false.
+    fn fix_lit(&mut self, lit: Lit) {
+        self.encoder.fix(lit);
+        if let Some(&(c, k)) = self.option_owner.get(&lit) {
+            for o in &self.choices[c as usize].options[k as usize] {
+                if o.lit != lit {
+                    self.encoder.fix(-o.lit);
+                }
+            }
+        }
     }
 
     /// A choice takes exactly one option, so an option fixed true fixes the
@@ -1769,28 +1817,19 @@ impl Program {
                     let label = self.rules[self.current_rule.unwrap()].label.clone();
                     self.encoder.origin = self.new_origin(label, valuation);
                 }
-                if self.folding {
-                    let units = match &f {
-                        // A contradiction is emitted as the empty clause below.
-                        F::Const(_) => Vec::new(),
-                        F::Lit(l) => vec![*l],
-                        F::And(items) if items.iter().all(|i| matches!(i, F::Lit(_))) => items
-                            .iter()
-                            .map(|i| match i {
-                                F::Lit(l) => *l,
-                                _ => unreachable!(),
-                            })
-                            .collect(),
-                        _ => {
-                            return Err(err(
-                                "E0706",
-                                "a `@fold` rule may only require literals",
-                                expr.span,
-                            ))
+                // A required literal holds in every model: fix it, so later
+                // formulas fold it (a guarded clause is not a unit).
+                if !self.options.no_fold && self.encoder.guard.is_none() {
+                    match &f {
+                        F::Lit(l) => self.fix_lit(*l),
+                        F::And(items) => {
+                            for item in items {
+                                if let F::Lit(l) = item {
+                                    self.fix_lit(*l);
+                                }
+                            }
                         }
-                    };
-                    for lit in units {
-                        self.encoder.fix(lit);
+                        _ => {}
                     }
                 }
                 self.encoder.require(f);
@@ -3170,7 +3209,8 @@ impl Program {
                     return Ok(Val::C(Value::Bool(self.vars[v as usize].outside)));
                 }
                 Ok(const_or_formula(
-                    self.encoder.lit_f(self.vars[v as usize].lookup[key.as_slice()]),
+                    self.encoder
+                        .lit_f(self.vars[v as usize].lookup[key.as_slice()]),
                 ))
             }
             Decl::Def(d) => {
@@ -3684,6 +3724,113 @@ fn mentions_any(e: &Expr, names: &[Option<Name>]) -> bool {
         }
     });
     found
+}
+
+/// Every name in `stmts`, including relation names in tuple binders and the
+/// binders of aggregates (unlike `visit_names`).
+fn visit_stmt_names(stmts: &[Stmt], f: &mut dyn FnMut(&str)) {
+    fn binders(bs: &[Binder], f: &mut dyn FnMut(&str)) {
+        for b in bs {
+            match &b.kind {
+                BinderKind::Tuple { relation, .. } => f(relation),
+                BinderKind::In {
+                    source: InSource::Expr(e),
+                    ..
+                } => expr(e, f),
+                _ => {}
+            }
+        }
+    }
+    fn expr(e: &Expr, f: &mut dyn FnMut(&str)) {
+        visit_names(e, f);
+        visit_binders(e, &mut |bs| binders(bs, f));
+    }
+    for s in stmts {
+        match &s.kind {
+            StmtKind::Require(e) => expr(e, f),
+            StmtKind::Forall {
+                binders: bs,
+                guard,
+                body,
+            } => {
+                binders(bs, f);
+                if let Some(g) = guard {
+                    expr(g, f);
+                }
+                visit_stmt_names(body, f);
+            }
+            StmtKind::If {
+                cond,
+                then,
+                otherwise,
+            } => {
+                expr(cond, f);
+                visit_stmt_names(then, f);
+                visit_stmt_names(otherwise, f);
+            }
+            StmtKind::Let { value, .. } => expr(value, f),
+            StmtKind::Contribute {
+                relation,
+                args,
+                value,
+            } => {
+                f(relation);
+                args.iter().for_each(|a| expr(a, f));
+                expr(value, f);
+            }
+        }
+    }
+}
+
+/// Calls `f` with the binders of every aggregate and comprehension in `e`.
+fn visit_binders(e: &Expr, f: &mut dyn FnMut(&[Binder])) {
+    match &e.kind {
+        ExprKind::Aggregate {
+            expr,
+            binders,
+            guard,
+            ..
+        }
+        | ExprKind::ListComp {
+            expr,
+            binders,
+            guard,
+        } => {
+            f(binders);
+            visit_binders(expr, f);
+            if let Some(g) = guard {
+                visit_binders(g, f);
+            }
+        }
+        ExprKind::Tuple(items) | ExprKind::List(items) => {
+            items.iter().for_each(|i| visit_binders(i, f))
+        }
+        ExprKind::Not(x) | ExprKind::Neg(x) | ExprKind::Is(x, _) | ExprKind::Field(x, _) => {
+            visit_binders(x, f)
+        }
+        ExprKind::Binary(_, l, r) => {
+            visit_binders(l, f);
+            visit_binders(r, f);
+        }
+        ExprKind::Index(b, args) | ExprKind::Call(b, args) => {
+            visit_binders(b, f);
+            args.iter().for_each(|a| visit_binders(a, f));
+        }
+        ExprKind::If {
+            cond,
+            then,
+            otherwise,
+        } => {
+            visit_binders(cond, f);
+            visit_binders(then, f);
+            visit_binders(otherwise, f);
+        }
+        ExprKind::Match { scrutinee, arms } => {
+            visit_binders(scrutinee, f);
+            arms.iter().for_each(|(_, v)| visit_binders(v, f));
+        }
+        _ => {}
+    }
 }
 
 fn visit_names(e: &Expr, f: &mut dyn FnMut(&str)) {

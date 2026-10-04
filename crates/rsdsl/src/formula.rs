@@ -256,7 +256,12 @@ impl Encoder {
 
     /// The known value of `lit`, if it was fixed.
     pub fn value(&self, lit: Lit) -> Option<bool> {
-        match self.fixed.get(lit.unsigned_abs() as usize).copied().unwrap_or(0) {
+        match self
+            .fixed
+            .get(lit.unsigned_abs() as usize)
+            .copied()
+            .unwrap_or(0)
+        {
             0 => None,
             v => Some((v > 0) == (lit > 0)),
         }
@@ -269,6 +274,102 @@ impl Encoder {
             self.fixed.resize(var + 1, 0);
         }
         self.fixed[var] = if lit > 0 { 1 } else { -1 };
+    }
+
+    /// Unit propagation over the clauses emitted so far, from the fixed
+    /// values and unit clauses. Satisfied clauses are dropped, false literals
+    /// removed, and every assigned variable is kept as a unit clause, so the
+    /// solver still assigns it. Order-independent folding: clauses written
+    /// before a unit was known shrink too. Stops without changes on a
+    /// conflict (the solver reports it).
+    pub fn propagate_units(&mut self) {
+        let vars = self.num_vars as usize + 1;
+        let mut value = vec![0i8; vars];
+        for (var, &v) in self.fixed.iter().enumerate().take(vars) {
+            value[var] = v;
+        }
+        let lit_value = |value: &[i8], l: Lit| -> i8 {
+            let v = value[l.unsigned_abs() as usize];
+            if l > 0 {
+                v
+            } else {
+                -v
+            }
+        };
+        // Clause start offsets.
+        let mut starts = Vec::with_capacity(self.clause_count + 1);
+        starts.push(0usize);
+        for (i, &l) in self.literals.iter().enumerate() {
+            if l == 0 {
+                starts.push(i + 1);
+            }
+        }
+        let mut changed = true;
+        let mut rounds = 0;
+        while changed && rounds < 64 {
+            changed = false;
+            rounds += 1;
+            for c in 0..self.clause_count {
+                let clause = &self.literals[starts[c]..starts[c + 1] - 1];
+                let mut open = None;
+                let mut open_count = 0;
+                let mut satisfied = false;
+                for &l in clause {
+                    match lit_value(&value, l) {
+                        1 => {
+                            satisfied = true;
+                            break;
+                        }
+                        0 => {
+                            open_count += 1;
+                            open = Some(l);
+                        }
+                        _ => {}
+                    }
+                }
+                if satisfied {
+                    continue;
+                }
+                match (open_count, open) {
+                    (0, _) => return, // conflict: leave the CNF to the solver
+                    (1, Some(l)) => {
+                        value[l.unsigned_abs() as usize] = if l > 0 { 1 } else { -1 };
+                        changed = true;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let mut literals = Vec::with_capacity(self.literals.len());
+        let mut origins = Vec::with_capacity(self.clause_origin.len());
+        let mut count = 0;
+        for c in 0..self.clause_count {
+            let clause = &self.literals[starts[c]..starts[c + 1] - 1];
+            if clause.iter().any(|&l| lit_value(&value, l) == 1) {
+                continue;
+            }
+            literals.extend(
+                clause
+                    .iter()
+                    .copied()
+                    .filter(|&l| lit_value(&value, l) == 0),
+            );
+            literals.push(0);
+            origins.push(self.clause_origin[c]);
+            count += 1;
+        }
+        for (var, &v) in value.iter().enumerate().skip(1) {
+            if v != 0 {
+                literals.push(if v > 0 { var as Lit } else { -(var as Lit) });
+                literals.push(0);
+                origins.push(0);
+                count += 1;
+            }
+        }
+        self.literals = literals;
+        self.clause_origin = origins;
+        self.clause_count = count;
+        self.fixed = value;
     }
 
     /// `lit` as a formula, folded to a constant when its value is fixed.

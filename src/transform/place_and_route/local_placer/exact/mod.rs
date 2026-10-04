@@ -143,8 +143,8 @@ pub struct ExactTuning {
     /// Largest total objective weight; the cost counter takes one input per
     /// unit of weight.
     pub max_objective_weight: u64,
-    /// Fold fixed and given cells to constants while grounding (`@fold`
-    /// rules), instead of leaving them to the solver as unit clauses.
+    /// Fold required units (fixed and given cells) to constants while
+    /// grounding, instead of leaving them to the solver as unit clauses.
     pub fold_fixed_cells: bool,
 }
 

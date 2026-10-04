@@ -322,12 +322,12 @@ simulator still checks the whole layout. Full-adder construction, seeds 1..4:
 | 3    | 22 s | 16 s |
 | 4    | 372 s, 1 restart | 51 s, no restart |
 
-Since 2026-10-04 the model's `@fold` rules ("고정된 칸", "주어진 신호") go
-further: fixed kinds and given signals become constants while grounding, so
-constraints among frozen cells never reach the solver
-(`ExactTuning::fold_fixed_cells`, default on; see `solver_dsl_design.md`,
-"Grounding profile"). A 2x8x8 compaction window shrinks from 292k to 124k
-clauses and grounds in 40 ms instead of 75 ms.
+Since 2026-10-04 the grounder goes further: the units required by "고정된
+칸" and "주어진 신호" fold automatically, so fixed kinds and given signals
+become constants while grounding and constraints among frozen cells never
+reach the solver (`ExactTuning::fold_fixed_cells`, default on; see
+`solver_dsl_design.md`, "Grounding profile"). A 2x8x8 compaction window
+shrinks from 292k to 105k clauses.
 
 The 2-bit adder, which failed in all eight attempts before, now constructs
 on the first attempt in 146 s (2x52x10, 799 blocks). Its gate `g46` takes

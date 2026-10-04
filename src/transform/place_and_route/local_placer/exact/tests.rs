@@ -186,7 +186,9 @@ fn exact_placer_proves_a_too_small_box_infeasible() {
 fn exact_placer_builds_a_verified_xor() {
     let placer = ExactLocalPlacer::new(&graph(&[("out", "a^b")])).unwrap();
     let mut config = ExactPlacerConfig::new(DimSize(2, 6, 4));
-    config.workers = 4;
+    // Solve times are heavy-tailed (1-60 s across seeds, see
+    // compare_xor_folding); eight workers make a slow draw less likely.
+    config.workers = 8;
     config.time_limit = Some(Duration::from_secs(60));
     expect_placed(&placer, &config);
 }
@@ -1514,6 +1516,36 @@ fn compare_window_folding() {
             ));
         }
         println!("FOLD fold={fold} {}", costs.join(" "));
+    }
+}
+
+/// Placement time of XOR 2x6x4 (4 workers, 60 s) over `FOLD_SEEDS` (6) base
+/// seeds, with automatic folding and with the original grounding order: the
+/// order change alone shifts each run, so compare the distributions.
+/// `cargo test --release --lib compare_xor_folding -- --ignored --nocapture`.
+#[test]
+#[ignore = "measurement; run explicitly with --nocapture"]
+fn compare_xor_folding() {
+    let placer = ExactLocalPlacer::new(&graph(&[("out", "a^b")])).unwrap();
+    let seeds = env_usize("FOLD_SEEDS", 6) as u32;
+    for fold in [true, false] {
+        let mut times = Vec::new();
+        for seed in 1..=seeds {
+            let mut config = ExactPlacerConfig::new(DimSize(2, 6, 4));
+            config.workers = env_usize("FOLD_WORKERS", 4);
+            config.seed = seed;
+            config.time_limit = Some(Duration::from_secs(60));
+            config.tuning.fold_fixed_cells = fold;
+            let started = std::time::Instant::now();
+            let (outcome, _) = placer.place(&config).unwrap();
+            let ok = matches!(outcome, ExactOutcome::Placed(_));
+            times.push(format!(
+                "{}{:.1}",
+                if ok { "" } else { "!" },
+                started.elapsed().as_secs_f64()
+            ));
+        }
+        println!("XORFOLD fold={fold} {}", times.join(" "));
     }
 }
 

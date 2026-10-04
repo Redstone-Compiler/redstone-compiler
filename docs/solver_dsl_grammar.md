@@ -490,7 +490,6 @@ model minimizes non-air blocks plus optional repeater and torch weights.
 | `@label("text")` | declarations | Rule label for clauses produced by the declaration itself. |
 | `@encoding(name)` | int (`order`), cardinality statements (`pairwise`, `seqcounter`, `totalizer`, `auto`) | Encoding choice. |
 | `@guarded(per = binders)` | rule | Adds a selector literal per distinct valuation of the listed binders, or one per rule without `per`. Rust assumes them true by default and can drop any for UNSAT cores, relaxation, or toggling. This generalizes `relax_soundness`. |
-| `@fold` | rule | Runs the rule before all others; its `require`s must be literals (or conjunctions of them), which become fixed. A choice option fixed true fixes its siblings false. Later formulas fold fixed literals to constants, so constraints over fixed parts of the instance never reach the solver (the units are still emitted). `GroundOptions::no_fold` runs such rules as ordinary ones. It cannot contribute to relations. |
 
 Unknown annotations are errors, so a misspelled `@encodng` cannot silently do
 nothing.
@@ -539,13 +538,26 @@ while each placer model adds its own interface rules.
 2. Load the instance and evaluate derived facts in dependency order.
 3. Create choice members, `var`s, and `int` literals by evaluating member
    guards.
-4. Collect relation contributions from every rule that does not iterate over
+4. Ground, in file order, the rules that use no relation (directly or
+   through the defs they read; the grounder checks this itself).
+5. Collect relation contributions from every rule that does not iterate over
    relations. Then, in stratified order, process the rules that do. Freeze
    each relation's tuple set before any rule iterates over it.
-5. Ground the remaining rule statements into Boolean IR, folding consts and
+6. Ground the remaining rule statements into Boolean IR, folding consts and
    `none` and hash-consing.
-6. Encode (section 7.2) and number the variables deterministically: by
+7. Encode (section 7.2) and number the variables deterministically: by
    declaration order, then index order, then member order.
+8. Propagate unit clauses over the whole CNF: drop satisfied clauses, remove
+   false literals, and keep every assigned variable as a unit clause.
+
+Unit folding is automatic. A `require` that grounds to a literal, or to a
+conjunction of literals, fixes them (unless a `@guarded` selector is
+attached). A choice option fixed true fixes its siblings false. Every formula
+grounded afterwards folds them to constants, which is why step 4 comes before
+relations are collected. Step 8 catches clauses written before a unit was
+known. Instance facts that pin choices, such as fixed cells, therefore never
+reach the solver beyond their unit clauses. `GroundOptions::no_fold` turns
+steps 4 and 8 and the folding off (same models, larger CNF).
 
 The order of declarations and rules in the file does not affect the result
 beyond numbering and clause order. The rule order in the file is kept for

@@ -376,20 +376,31 @@ small script into inclusive and self time per function.
 
 What did pay off is grounding less. Compaction windows and construction steps
 fix most of the box (and give its signals), yet every rule still unfolded
-over it. `@fold` rules now fix those literals first, and the rest of
-grounding folds them away. On a block-reduction window of the 2x8x8 full
-adder (`measure_window_encoding`, 48 of 128 cells free):
+over it. Required units now fold automatically (grammar section 9): rules
+that use no relation run first, a required literal is fixed (a fixed choice
+option fixes its siblings), later formulas fold fixed literals, and a final
+unit propagation over the CNF removes what was written before. A first
+version needed an explicit `@fold` annotation on the fixed-cell rules. On a
+block-reduction window of the 2x8x8 full adder (`measure_window_encoding`,
+48 of 128 cells free):
 
 | | Vars | Clauses | Literals | Encode |
 | --- | ---: | ---: | ---: | ---: |
 | before | 58,861 | 291,745 | 809,293 | 75 ms |
-| `@fold` | 25,018 | 124,415 | 343,077 | 40 ms |
+| `@fold` annotation | 25,018 | 124,415 | 343,077 | 40 ms |
+| automatic | 24,086 | 104,901 | 281,099 | 47 ms |
 
 What remains is mostly the window's own constraints (justification's order
 encoding, then soundness). The models are the same, so placements do not
-change. Search quality was within run-to-run variance: full-adder
-construction gave 151-201 blocks with folding, 151-183 without, and 127-164
-in an earlier run without.
+change, but the new rule order changes clause order on every problem, and
+the solver's run time is heavy-tailed in it. XOR 2x6x4 over six seeds (4
+workers, 60 s cap; `compare_xor_folding`): 24.7, >60, 7.9, 32.2, 40.2,
+8.3 s automatic against 1.8, >60, 25.2, 17.4, 36.6, >60 s before. With 8
+workers, four seeds: 2.0, >60, 8.7, 35.5 against 1.9, 16.4, 9.0, 18.2. The
+unit test happened to draw 1.8 s before and 24.7 s after with four workers,
+so it now uses eight. Full-adder construction stayed within run-to-run
+variance: 134-182 blocks, 63-71 s, against 127-201 blocks across earlier
+runs.
 
 ---
 

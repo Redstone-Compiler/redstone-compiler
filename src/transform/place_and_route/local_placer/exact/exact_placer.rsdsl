@@ -163,16 +163,15 @@ rule "입력마다 스위치는 정확히 하나" {
     }
 }
 
-// `@fold`: fixed and given cells become constants before the other rules are
-// grounded, so their constraints fold away instead of reaching the solver.
-@fold
+// Fixed and given cells: these requires are unit clauses. The grounder runs
+// rules that use no relation first and folds such units into everything after,
+// so constraints among fixed cells never reach the solver.
 rule "고정된 칸" {
     forall c: Cell, m: Kind where fixed(c, m) {
         require Kind[c] is m;
     }
 }
 
-@fold
 rule "주어진 신호" {
     forall (c, k) in given_sig {
         require Sig[c] is Carry(k);
