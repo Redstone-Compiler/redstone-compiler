@@ -299,6 +299,10 @@ impl Encoding {
                 !config.optimize,
                 "the legacy encoder has no objective; optimize needs the rsdsl model"
             );
+            ensure!(
+                config.given_signals.is_empty(),
+                "the legacy encoder does not support given signals"
+            );
             Self::build_legacy(netlist, config)
         } else {
             Self::build_dsl(netlist, config)

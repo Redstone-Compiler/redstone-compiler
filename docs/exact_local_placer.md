@@ -293,6 +293,35 @@ depth-first order by net index. Full-adder construction with both changes
 Seed 4 still fails at the last gate (`s`, which must drive out of the Y-max
 face) on its first attempt.
 
+**Given signals (2026-10-04).** A step fixes the kinds of the frozen slices,
+but the model still encoded their signals, contributing sources, ranks and
+stages, so every step re-justified the whole layout built so far. The
+diagnostic hook `EXACT_DIAGNOSE_FAILED_STEP=<prefix>` (with
+`EXACT_DIAGNOSE_SECONDS`, default 600) writes the first step that times out
+as DIMACS and solves it again for longer. For the 2-bit adder's gate `g46`
+(a 2x38x10 box, of which 60 cells are free), the CNF had 366 331 variables and
+2 881 975 clauses. 92% of the named variables belonged to the 700 frozen
+cells, and ten more minutes still ended in Unknown.
+
+`ConstructionConfig::given_frozen_signals` (default on) now passes the
+previous step's signals for frozen cells as `ExactPlacerConfig::
+given_signals`. The model fixes their class (`given_sig`) and drops the
+justification rules for them (contributing source, rank and stage order, and
+the torch's stage). They still act as sources for the free cells, and the
+simulator still checks the whole layout. Full-adder construction, seeds 1..4:
+
+| Seed | Before | Given signals |
+|------|--------|---------------|
+| 1    | 31 s | 14 s |
+| 2    | 66 s | 17 s |
+| 3    | 22 s | 16 s |
+| 4    | 372 s, 1 restart | 51 s, no restart |
+
+The 2-bit adder, which failed in all eight attempts before, now constructs
+on the first attempt in 146 s (2x52x10, 799 blocks). Its gate `g46` takes
+3.8 s. The 4:1 mux gets further (to g58 or the four-input `out_n`, gates 16
+and 19 of 20) but its first four attempts still timed out there.
+
 `ExactLocalPlacer::synthesize` runs construction followed by compaction.
 `ExactLayout::from_rcell` loads any RCELL so that existing cells can be
 compacted too (`recompact_full_adder_rcell`).

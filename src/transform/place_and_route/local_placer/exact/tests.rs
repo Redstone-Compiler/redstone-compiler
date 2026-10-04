@@ -968,6 +968,7 @@ fn diagnose_full_adder_construct_and_compact() -> eyre::Result<()> {
         max_backtracks: env_usize("PIPE_BACKTRACKS", 0),
         gate_order: gate_order_from_env("PIPE_ORDER"),
         early_outputs: std::env::var("PIPE_EARLY_OUTPUTS").as_deref() != Ok("0"),
+        given_frozen_signals: std::env::var("PIPE_GIVEN").as_deref() != Ok("0"),
         ..Default::default()
     };
     let (layout, placement, report) = placer.construct(&construction)?;
@@ -1020,7 +1021,9 @@ fn diagnose_full_adder_construct_and_compact() -> eyre::Result<()> {
 
 /// Compacts an existing full-adder RCELL (generated or hand-made) further.
 /// Knobs: `RECOMPACT_SOURCE=<rcell path>`, `RECOMPACT_WRITE=<path prefix>`,
-/// `RECOMPACT_SECONDS`, `RECOMPACT_WORKERS`, `RECOMPACT_RADIUS`.
+/// `RECOMPACT_SECONDS`, `RECOMPACT_WORKERS`, `RECOMPACT_RADIUS`,
+/// `RECOMPACT_ATTEMPT_SECONDS`, `RECOMPACT_ROUNDS=0`,
+/// `RECOMPACT_REDUCTION_AXES=1` (Y windows only).
 #[test]
 #[ignore = "full-adder recompaction measurement; run explicitly with --nocapture"]
 fn recompact_full_adder_rcell() -> eyre::Result<()> {
@@ -1049,6 +1052,11 @@ fn recompact_full_adder_rcell() -> eyre::Result<()> {
         output_policies: [("s".to_owned(), OutputPolicy::MaxYFace)]
             .into_iter()
             .collect(),
+        repeat_rounds: std::env::var("RECOMPACT_ROUNDS").as_deref() != Ok("0"),
+        reduction_axes: match std::env::var("RECOMPACT_REDUCTION_AXES").as_deref() {
+            Ok("1") => vec![1],
+            _ => vec![1, 2],
+        },
         ..Default::default()
     };
     println!(
@@ -2031,6 +2039,7 @@ fn diagnose_construct_circuit() -> eyre::Result<()> {
         seed,
         gate_order: gate_order_from_env("CIRCUIT_ORDER"),
         early_outputs: std::env::var("CIRCUIT_EARLY_OUTPUTS").as_deref() != Ok("0"),
+        given_frozen_signals: std::env::var("CIRCUIT_GIVEN").as_deref() != Ok("0"),
         ..Default::default()
     };
     let (layout, placement, report) = placer.construct(&construction)?;

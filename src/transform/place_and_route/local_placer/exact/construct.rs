@@ -127,6 +127,11 @@ pub struct ConstructionConfig {
     /// reads them; they only need to stay observable somewhere in the box.
     /// Off, every output is carried to the last slice.
     pub early_outputs: bool,
+    /// Fix the signals of frozen cells to the previous step's solution, so a
+    /// step no longer re-justifies (ranks, stages, contributing sources) the
+    /// whole layout built so far; those variables were over 90% of a late
+    /// step's encoding. The simulator still checks the whole layout.
+    pub given_frozen_signals: bool,
     /// Diagnostic only: see `ExactPlacerConfig::legacy_encoder`.
     #[doc(hidden)]
     pub legacy_encoder: bool,
@@ -157,6 +162,7 @@ impl Default for ConstructionConfig {
             tuning: ExactTuning::default(),
             gate_order: GateOrder::SmallestConeFirst,
             early_outputs: true,
+            given_frozen_signals: true,
             legacy_encoder: false,
         }
     }
@@ -205,6 +211,8 @@ fn sites_in(
 struct StepState {
     length: usize,
     cells: BTreeMap<Position, CellKind>,
+    /// Signal function of every non-air cell in the latest solution.
+    signals: BTreeMap<Position, u64>,
     placed_inputs: BTreeMap<String, (Position, Direction)>,
     available: BTreeSet<NetId>,
     result: Option<(DimSize, ExactPlacement)>,
@@ -263,6 +271,7 @@ impl ExactLocalPlacer {
         let mut states = vec![StepState {
             length: 0,
             cells: BTreeMap::new(),
+            signals: BTreeMap::new(),
             placed_inputs: BTreeMap::new(),
             available: BTreeSet::new(),
             result: None,
@@ -337,6 +346,48 @@ impl ExactLocalPlacer {
             placement,
             report,
         ))
+    }
+
+    /// Diagnostic hook: with `EXACT_DIAGNOSE_FAILED_STEP=<path prefix>`, the
+    /// first step in the process that times out is written as DIMACS and
+    /// solved again for `EXACT_DIAGNOSE_SECONDS` (600). It tells a step that
+    /// is merely slow from one the solver cannot decide. Construction then
+    /// carries on as if the step had failed normally.
+    fn diagnose_failed_step(
+        &self,
+        exact: &ExactPlacerConfig,
+        gate: &str,
+        window: usize,
+    ) -> eyre::Result<()> {
+        static DIAGNOSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        let Ok(prefix) = std::env::var("EXACT_DIAGNOSE_FAILED_STEP") else {
+            return Ok(());
+        };
+        if DIAGNOSED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return Ok(());
+        }
+        let seconds = std::env::var("EXACT_DIAGNOSE_SECONDS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(600);
+        let path = format!("{prefix}-{gate}-w{window}.cnf");
+        self.write_dimacs(exact, &path, super::DimacsComments::Legend)?;
+        let mut longer = exact.clone();
+        longer.time_limit = Some(Duration::from_secs(seconds));
+        let started = Instant::now();
+        let (outcome, stats) = self.place(&longer)?;
+        tracing::info!(
+            gate,
+            window,
+            path,
+            seconds = started.elapsed().as_secs_f64(),
+            variables = stats.variables,
+            clauses = stats.clauses,
+            refinements = stats.refinements,
+            outcome = ?outcome,
+            "construction step diagnosed"
+        );
+        Ok(())
     }
 
     #[allow(clippy::type_complexity)]
@@ -423,6 +474,11 @@ impl ExactLocalPlacer {
             for (position, kind) in &state.cells {
                 if position.1 < frozen {
                     exact.fixed_cells.insert(*position, *kind);
+                    if config.given_frozen_signals && !config.legacy_encoder {
+                        if let Some(&function) = state.signals.get(position) {
+                            exact.given_signals.insert(*position, function);
+                        }
+                    }
                 }
             }
             for x in 0..dim.0 {
@@ -505,6 +561,9 @@ impl ExactLocalPlacer {
                     outcome = ?outcome,
                     "construction step failed"
                 );
+                if matches!(outcome, ExactOutcome::Unknown { .. }) {
+                    self.diagnose_failed_step(&exact, &netlist.nets[gate].name, window)?;
+                }
                 continue;
             };
             let seconds = step_started.elapsed().as_secs_f64();
@@ -541,6 +600,7 @@ impl ExactLocalPlacer {
             let next = StepState {
                 length: dim.1,
                 cells,
+                signals: placement.signals.iter().copied().collect(),
                 placed_inputs,
                 available,
                 result: Some((dim, *placement)),

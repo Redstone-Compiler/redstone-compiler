@@ -69,6 +69,11 @@ pub struct ExactPlacerConfig {
     pub absent_inputs: std::collections::BTreeSet<String>,
     /// Cells whose block kind is fixed.
     pub fixed_cells: BTreeMap<Position, CellKind>,
+    /// Signal functions (bit per input case) of fixed cells taken from an
+    /// earlier verified layout. Their class is fixed and they need no
+    /// justification (rank, stage, contributing source) in this solve; the
+    /// simulator still checks the whole layout (rsdsl model only).
+    pub given_signals: BTreeMap<Position, u64>,
     /// Partial layouts to exclude: at least one listed cell must differ.
     pub blocked: Vec<Vec<(Position, CellKind)>>,
     /// Upper bound on a power chain between two torch stages (local rank).
@@ -162,6 +167,7 @@ impl ExactPlacerConfig {
             observations: None,
             absent_inputs: Default::default(),
             fixed_cells: BTreeMap::new(),
+            given_signals: BTreeMap::new(),
             blocked: Vec::new(),
             rank_levels: 24,
             stage_levels: 24,
@@ -235,6 +241,9 @@ pub struct ExactPlacerStats {
 pub struct ExactPlacement {
     pub placed: PlacedWorld,
     pub cells: Vec<(Position, CellKind)>,
+    /// Signal function (bit per input case) of every non-air cell, as the
+    /// solver assigned it; see `ExactPlacerConfig::given_signals`.
+    pub signals: Vec<(Position, u64)>,
     pub block_count: usize,
     pub rcell: PhysicalCellDocument,
 }
@@ -753,6 +762,20 @@ impl ExactLocalPlacer {
             .iter()
             .filter(|(_, kind)| !matches!(kind, CellKind::Switch(_)))
             .count();
+        let signals = decoded
+            .functions
+            .iter()
+            .enumerate()
+            .filter(|(cell, _)| decoded.kinds[*cell] != CellKind::Air)
+            .filter_map(|(cell, function)| {
+                function.map(|function| {
+                    (
+                        Position(cell % dim.0, (cell / dim.0) % dim.1, cell / (dim.0 * dim.1)),
+                        function,
+                    )
+                })
+            })
+            .collect();
         let rcell = verify::to_rcell(&self.name, dim, &self.netlist, decoded);
         // Store settled torch states, so pasting the cell starts stable.
         let world = verify::settled_world(&world, &config.tuning).unwrap_or(world);
@@ -771,6 +794,7 @@ impl ExactLocalPlacer {
                     .collect(),
             },
             cells,
+            signals,
             block_count,
             rcell,
         }

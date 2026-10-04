@@ -303,8 +303,29 @@ impl Prepared {
             "output_class",
             "driving",
             "fixed",
+            "given_sig",
         ] {
             instance.fact(fact);
+        }
+        for (&position, &function) in &config.given_signals {
+            ensure!(
+                config.fixed_cells.contains_key(&position),
+                "given signal at {position:?} needs a fixed cell"
+            );
+            let Some(class) = self
+                .classes
+                .iter()
+                .position(|class| class.function == function)
+            else {
+                bail!("given signal at {position:?} is not in the vocabulary");
+            };
+            instance.row(
+                "given_sig",
+                vec![
+                    cell_value(geometry, geometry.index(position)),
+                    IValue::sym(&names[class]),
+                ],
+            );
         }
         for (class, name) in self.classes.iter().zip(names).skip(1) {
             for case in 0..self.cases {

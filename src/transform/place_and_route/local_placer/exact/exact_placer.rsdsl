@@ -28,6 +28,11 @@ fact output_site(Output, Cell);
 fact output_class(Output, Class);
 fact driving(Output);                  // must drive the cell beyond the box
 fact fixed(Cell, Kind);                // fixed block kinds, as members of `Kind`
+// Signals taken from an earlier verified layout (construction's frozen
+// slices): the class is fixed, and the simulator already confirmed that the
+// cell is powered for real, so it needs no justification here.
+fact given_sig(Cell, Class);
+fact given(c: Cell) := any(given_sig(c, k) for k: Class);
 
 // A repeater may point out of the box only where something is observed or
 // where one is already fixed.
@@ -156,6 +161,12 @@ rule "입력마다 스위치는 정확히 하나" {
 rule "고정된 칸" {
     forall c: Cell, m: Kind where fixed(c, m) {
         require Kind[c] is m;
+    }
+}
+
+rule "주어진 신호" {
+    forall (c, k) in given_sig {
+        require Sig[c] is Carry(k);
     }
 }
 
@@ -311,7 +322,7 @@ rule "건전성: 원천이 켜지면 받는 쪽도 켜짐 (가루·리피터는 
 }
 
 rule "정당화: 기여 관계, 순위·단계 순서" {
-    forall (s, t, f, to) in Feeds {
+    forall (s, t, f, to) in Feeds where not given(t) {
         let used = Contrib(s, t, f, to);
         require used -> Feeds(s, t, f, to);
         // Zero levels select lazy acyclicity: the host adds loop nogoods.
@@ -336,7 +347,7 @@ rule "정당화: 기여 관계, 순위·단계 순서" {
 
 @guarded(per = c)
 rule "켜진 것은 켜진 원천이 있어야 함" {
-    forall c: Cell {
+    forall c: Cell where not given(c) {
         require Kind[c] is Dust | Repeater(_) and not Unpowered[c]
             -> any(Contrib(s, t, f, to) for (s, t, f, to) in Feeds where t == c and to != SolidSink);
         forall k: Case {
@@ -353,7 +364,7 @@ rule "토치는 받침 블록의 반대, 받침보다 높은 단계" {
         forall k: Case {
             require Kind[c] is Torch(a) -> (Powered[k, c] <-> not Powered[k, support]);
         }
-        if stage_levels > 0 {
+        if stage_levels > 0 and not given(c) {
             require Kind[c] is Torch(a) -> Stage[support] < Stage[c];
         }
     }

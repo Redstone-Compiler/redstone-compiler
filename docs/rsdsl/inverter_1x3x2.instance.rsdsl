@@ -19,6 +19,7 @@ fact output_site = [(out, c) for c: Cell];
 fact output_class = [(out, out)];
 fact driving = [];
 fact fixed = [];
+fact given_sig = [];
 
 param rank_levels = 8;
 param stage_levels = 8;
