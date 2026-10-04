@@ -34,10 +34,11 @@ fact fixed(Cell, Kind);                // fixed block kinds, as members of `Kind
 fact given_sig(Cell, Class);
 fact given(c: Cell) := any(given_sig(c, k) for k: Class);
 
-// A repeater may point out of the box only where something is observed or
-// where one is already fixed.
+// A repeater may point out of the box only where it drives an output into the
+// neighbor cell, or where one is already fixed. Elsewhere its output would
+// reach nothing.
 fact outward_ok(c: Cell) :=
-    any(output_site(o, c) for o: Output)
+    any(output_site(o, c) and driving(o) for o: Output)
     or any(fixed(c, m) and m is Repeater(_) for m: Kind);
 
 param rank_levels: int = 24;
@@ -59,6 +60,10 @@ param symmetry_breaking: bool = false;
 // NOR gate; the host computes it when optimizing). Implied, so it never
 // removes a layout; it only helps prove that cheaper layouts do not exist.
 param min_torches: int = 0;
+// Torches, repeaters and dust must feed something (a chosen contribution) or
+// be an output observation. Removes dead wires from the search space; not
+// strictly sound, since a dead wire can still shape a neighboring dust line.
+param require_useful: bool = false;
 
 fn dir(a: Attach) -> Dir6 = match a {
     Floor => Down, East => East, West => West, North => North, South => South,
@@ -407,6 +412,18 @@ rule "구조적 하한: 토치 수와 그 받침 블록 수" {
     if min_torches > 0 {
         require count(Kind[c] is Torch(_) for c: Cell) >= min_torches;
         require count(Kind[c] is Solid for c: Cell) >= min_torches;
+    }
+}
+
+// ===== usefulness ============================================================
+
+rule "쓸모: 토치·리피터·가루는 무언가에 기여하거나 출력으로 관측됨" {
+    if require_useful {
+        forall c: Cell where not given(c) {
+            require Kind[c] is Dust | Repeater(_) | Torch(_)
+                -> any(Contrib(s, t, f, to) for (s, t, f, to) in Feeds where s == c)
+                   or any(Observe[o, c] for o: Output where output_site(o, c));
+        }
     }
 }
 

@@ -41,6 +41,8 @@ pub struct CompactionConfig {
     /// layout's, so a window solve does not re-justify the rest of the box
     /// (see `ConstructionConfig::given_frozen_signals`).
     pub given_outside_signals: bool,
+    /// Model params for every window (see `ExactPlacerConfig::model_params`).
+    pub model_params: BTreeMap<String, rsdsl::IValue>,
     /// Simulator rejections each attempt's workers may hit before giving up.
     pub max_refinements: usize,
     /// Search and verification constants for every attempt.
@@ -71,6 +73,7 @@ impl Default for CompactionConfig {
             repeat_rounds: true,
             continue_after_gain: true,
             given_outside_signals: true,
+            model_params: BTreeMap::new(),
             max_refinements: 8,
             tuning: ExactTuning::default(),
             attempt_time_limit: Duration::from_secs(20),
@@ -379,6 +382,7 @@ impl ExactLocalPlacer {
         exact.time_limit = Some(config.attempt_time_limit);
         exact.max_refinements = config.max_refinements;
         exact.tuning = config.tuning.clone();
+        exact.model_params = config.model_params.clone();
         exact.max_blocks = max_blocks;
         for (name, position, attach) in &cut.inputs {
             exact = exact.with_input_site(name.clone(), *position, *attach);

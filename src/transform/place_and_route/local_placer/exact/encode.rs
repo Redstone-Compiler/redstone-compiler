@@ -447,10 +447,11 @@ impl Encoding {
             if raised {
                 for (slot, direction) in repeater.iter_mut().zip(CARDINALS) {
                     // A repeater must read from inside the box. One that emits
-                    // out of the box is only useful as an output observation.
+                    // out of the box is only useful where it drives an output
+                    // into the neighbor cell.
                     let reads_inside = geometry.step(cell, direction).is_some();
                     let emits_inside = geometry.step(cell, direction.inverse()).is_some();
-                    if reads_inside && (emits_inside || may_observe_output(config, position)) {
+                    if reads_inside && (emits_inside || may_drive_output(config, position)) {
                         *slot = self.cnf.new_var();
                     }
                 }
@@ -1220,26 +1221,25 @@ impl Encoding {
     }
 }
 
-fn may_observe_output(config: &ExactPlacerConfig, position: Position) -> bool {
+fn may_drive_output(config: &ExactPlacerConfig, position: Position) -> bool {
     if matches!(
         config.fixed_cells.get(&position),
         Some(CellKind::Repeater(_))
     ) {
         return true;
     }
-    match &config.observations {
-        Some(observations) => observations
-            .iter()
-            .any(|(_, sites)| sites.contains(&position)),
-        // Outputs without explicit sites may be observed anywhere.
-        None => {
-            config.output_sites.is_empty()
-                || config
-                    .output_sites
-                    .values()
-                    .any(|sites| sites.contains(&position))
-        }
+    // Observations replace the outputs and never drive.
+    if config.observations.is_some() {
+        return false;
     }
+    // Driving outputs without explicit sites may be observed anywhere.
+    config
+        .driving_outputs
+        .iter()
+        .any(|name| match config.output_sites.get(name) {
+            Some(sites) => sites.contains(&position),
+            None => true,
+        })
 }
 
 pub(super) fn default_input_sites(dim: DimSize) -> Vec<(Position, Direction)> {

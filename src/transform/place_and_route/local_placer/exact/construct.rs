@@ -132,6 +132,13 @@ pub struct ConstructionConfig {
     /// whole layout built so far; those variables were over 90% of a late
     /// step's encoding. The simulator still checks the whole layout.
     pub given_frozen_signals: bool,
+    /// After each step, spend up to this long minimizing the layout's block
+    /// count (the model's cost) with the same frozen cells, so dead wires do
+    /// not pile up. `None` keeps the first layout found. Five seconds halved
+    /// the full adder's constructed blocks (about 290 to 127-164).
+    pub step_optimize: Option<Duration>,
+    /// Model params for every step (see `ExactPlacerConfig::model_params`).
+    pub model_params: BTreeMap<String, rsdsl::IValue>,
     /// Diagnostic only: see `ExactPlacerConfig::legacy_encoder`.
     #[doc(hidden)]
     pub legacy_encoder: bool,
@@ -163,6 +170,8 @@ impl Default for ConstructionConfig {
             gate_order: GateOrder::SmallestConeFirst,
             early_outputs: true,
             given_frozen_signals: true,
+            step_optimize: Some(Duration::from_secs(5)),
+            model_params: BTreeMap::new(),
             legacy_encoder: false,
         }
     }
@@ -470,6 +479,7 @@ impl ExactLocalPlacer {
             }));
             exact.max_refinements = config.max_refinements;
             exact.tuning = config.tuning.clone();
+            exact.model_params = config.model_params.clone();
             exact.blocked = blocked.to_vec();
             for (position, kind) in &state.cells {
                 if position.1 < frozen {
@@ -566,12 +576,30 @@ impl ExactLocalPlacer {
                 }
                 continue;
             };
+            let mut placement = placement;
+            if let Some(budget) = config.step_optimize {
+                // Trade the window's dead wires away while it is small: ask
+                // for fewer blocks than the layout just found, minimizing.
+                let remaining =
+                    deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
+                let mut tighter = exact.clone();
+                tighter.optimize = true;
+                tighter.max_blocks = Some(placement.cells.len().saturating_sub(1));
+                tighter.time_limit =
+                    Some(remaining.map_or(budget, |remaining| remaining.min(budget)));
+                if let Ok((ExactOutcome::Placed(better), _)) = self.place(&tighter) {
+                    if better.cells.len() < placement.cells.len() {
+                        placement = better;
+                    }
+                }
+            }
             let seconds = step_started.elapsed().as_secs_f64();
             tracing::info!(
                 gate = netlist.nets[gate].name,
                 window,
                 overlap,
                 seconds,
+                cells = placement.cells.len(),
                 "construction step"
             );
             let cells = placement.cells.iter().copied().collect::<BTreeMap<_, _>>();

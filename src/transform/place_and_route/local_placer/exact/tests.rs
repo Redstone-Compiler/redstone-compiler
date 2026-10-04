@@ -202,6 +202,39 @@ fn exact_placer_builds_verified_and_and_or_gates() {
     }
 }
 
+/// Seconds of per-step minimization; `0` turns it off, unset keeps the
+/// default.
+fn step_optimize_from_env(name: &str) -> Option<Duration> {
+    match std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+    {
+        Some(0) => None,
+        Some(seconds) => Some(Duration::from_secs(seconds)),
+        None => ConstructionConfig::default().step_optimize,
+    }
+}
+
+/// `name=value,...` model params; values are `true`, `false` or integers.
+fn model_params_from_env(name: &str) -> BTreeMap<String, rsdsl::IValue> {
+    std::env::var(name)
+        .unwrap_or_default()
+        .split(',')
+        .filter(|pair| !pair.is_empty())
+        .map(|pair| {
+            let (key, value) = pair
+                .split_once('=')
+                .expect("model params look like name=value");
+            let value = match value {
+                "true" => rsdsl::IValue::Bool(true),
+                "false" => rsdsl::IValue::Bool(false),
+                number => rsdsl::IValue::Int(number.parse().expect("integer model param")),
+            };
+            (key.to_owned(), value)
+        })
+        .collect()
+}
+
 /// `index` selects `GateOrder::NetIndex`; anything else the default.
 fn gate_order_from_env(name: &str) -> GateOrder {
     match std::env::var(name).as_deref() {
@@ -400,6 +433,13 @@ fn assert_encoder_accepts_rcell(
             output.name.as_str()
         };
         config = config.with_output_sites(name, [output.position]);
+        // An output repeater that points out of the box drives the neighbor.
+        if let CellKind::Repeater(direction) = manual_kind(&build.world[output.position]) {
+            let out = output.position.walk(direction.inverse());
+            if out.is_none_or(|out| !config.dim.bound_on(out)) {
+                config.driving_outputs.insert(name.to_owned());
+            }
+        }
     }
     let encoding = Encoding::build(&netlist, &config).unwrap();
     let mut assumptions = Vec::new();
@@ -969,6 +1009,8 @@ fn diagnose_full_adder_construct_and_compact() -> eyre::Result<()> {
         gate_order: gate_order_from_env("PIPE_ORDER"),
         early_outputs: std::env::var("PIPE_EARLY_OUTPUTS").as_deref() != Ok("0"),
         given_frozen_signals: std::env::var("PIPE_GIVEN").as_deref() != Ok("0"),
+        step_optimize: step_optimize_from_env("PIPE_STEP_OPTIMIZE"),
+        model_params: model_params_from_env("PIPE_MODEL_PARAMS"),
         ..Default::default()
     };
     let (layout, placement, report) = placer.construct(&construction)?;
@@ -2044,6 +2086,8 @@ fn diagnose_construct_circuit() -> eyre::Result<()> {
         gate_order: gate_order_from_env("CIRCUIT_ORDER"),
         early_outputs: std::env::var("CIRCUIT_EARLY_OUTPUTS").as_deref() != Ok("0"),
         given_frozen_signals: std::env::var("CIRCUIT_GIVEN").as_deref() != Ok("0"),
+        step_optimize: step_optimize_from_env("CIRCUIT_STEP_OPTIMIZE"),
+        model_params: model_params_from_env("CIRCUIT_MODEL_PARAMS"),
         ..Default::default()
     };
     let (layout, placement, report) = placer.construct(&construction)?;

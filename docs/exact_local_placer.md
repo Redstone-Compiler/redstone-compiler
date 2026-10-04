@@ -327,6 +327,43 @@ on the first attempt in 146 s (2x52x10, 799 blocks). Its gate `g46` takes
 3.8 s. The 4:1 mux gets further (to g58 or the four-input `out_n`, gates 16
 and 19 of 20) but its first four attempts still timed out there.
 
+**Dead blocks (2026-10-04).** The 2-bit adder's cell above still had 90
+blocks that could each be removed alone without changing any case: 33
+repeaters, 31 torches and 26 dust. The model only requires that the blocks
+are consistent and that the observed nets appear. It never asks a block to be
+useful, and construction steps did not minimize, so whatever the solver set
+while searching stayed. Three changes:
+
+- *Outward repeaters.* `outward_ok` allowed a repeater to point out of the
+  box at any observation site. Construction's seam and early-output
+  observations made that most cells, so repeaters could emit into nothing (8
+  of the adder's dead repeaters did). Now only sites of driving outputs (and
+  fixed repeaters) qualify, in the model and the hand-written encoder alike.
+  The exact unit tests dropped from about 22 s to 1.8 s, since a single
+  solve with outputs observed anywhere no longer considers an outward
+  repeater on every cell.
+- *Per-step minimization.* `ConstructionConfig::step_optimize` (default
+  5 s) re-solves each finished step with the same frozen cells, asking for
+  fewer blocks under the model's cost. A dead block is legal but never
+  minimal, so this removes it while the window is small.
+- *Usefulness rule (opt-in).* `require_useful` makes torches, repeaters and
+  dust feed something or be an output observation. It is not strictly sound,
+  since a dead wire can shape a neighboring dust line, and local usefulness
+  misses pairs that justify each other, such as dust feeding the block
+  beneath it. It stays off.
+
+Full-adder construction with the outward fix (A), plus `require_useful` (B),
+or plus 5 s of step minimization (C), seeds 1..4:
+
+| Variant | Time | Blocks after construction |
+|---------|------|---------------------------|
+| A | 21-25 s | 284-295 |
+| B | 9-15 s (seed 2: 147 s) | 300-337 |
+| C | 60-65 s | 127-164 |
+
+The rule speeds most seeds up but removes no blocks, while minimization
+halves them.
+
 `ExactLocalPlacer::synthesize` runs construction followed by compaction.
 `ExactLayout::from_rcell` loads any RCELL so that existing cells can be
 compacted too (`recompact_full_adder_rcell`).
@@ -424,9 +461,14 @@ pipeline run from the `nor9` netlist (seed 1) builds 2x18x10 with 300 blocks
 in 14 s. Compaction then converges in 1190 s, well inside its 1800 s
 budget, at **2x11x6 with 78 blocks**. On the way it passed 2x12x7 with 71
 blocks: the compactor shrinks the box first and minimizes blocks second.
-The result is saved as `test/full-adder-exact-optimized-2x11x6.rcell`
-(replacing the 2x14x9 cell) and passes the same regression tests: all eight
-cases and every settled input transition.
+With the outward fix and per-step minimization (C above), the same run
+constructs 2x18x10 with 160 blocks in 60 s. Compaction then converges in
+1031 s at **2x11x6 with 65 blocks**, with no block removable on its own.
+Without per-step minimization (A), compaction ran out its 1800 s at 2x11x10
+with 85 blocks and removed no Z layer. The 65-block cell is saved as
+`test/full-adder-exact-optimized-2x11x6.rcell` (replacing the 2x14x9 cell)
+and passes the same regression tests: all eight cases and every settled
+input transition.
 
 | Cell | Box | Volume | Blocks |
 | --- | --- | ---: | ---: |
@@ -435,7 +477,8 @@ cases and every settled input transition.
 | Generated, pipeline (2026-10-03) | 2x14x9 | 252 | 153 |
 | Generated, recompacted twice (before the pass changes) | 2x12x8 | 192 | 84 |
 | Generated, recompacted twice (`continue_after_gain`, given signals) | 2x11x8 | 176 | 84 |
-| Generated, one pipeline run with everything (20 minutes) | 2x11x6 | 132 | 78 |
+| Generated, one pipeline run with given signals (20 minutes) | 2x11x6 | 132 | 78 |
+| Generated, one pipeline run with step minimization (18 minutes) | 2x11x6 | 132 | 65 |
 
 ### Larger circuits (2026-10-04)
 
