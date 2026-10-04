@@ -230,6 +230,32 @@ necessarily safe together.
 Use `--no-verify` for an incomplete layout without `expect` statements. The NBT
 is exported before verification so a failing circuit can still be inspected.
 
+## Input history and the viewer (2026-10-04)
+
+Verification settles each case from scratch and checks every single settled
+transition. `diagnose_cell_input_history` (in `physical_cell::verify` tests)
+also drives random toggle sequences through one simulator:
+
+```sh
+CELL_SOURCE=test/full-adder-exact-optimized-2x8x8.rcell \
+  cargo test --release --lib diagnose_cell_input_history -- --ignored --nocapture
+```
+
+With the cell settled between toggles (`CELL_DRIVE_CYCLES=256`, the
+default), 200 sequences of 12 toggles on the 2x8x8 full adder left every
+output correct, and every final state matched a fresh settle. When the next
+toggle arrives after only 1-3 cycles, cells end in wrong states, and every
+such final state has a burned-out torch. This happened for the hand-made
+2x14x10 and 2x10x10 cells as well. It is Minecraft's torch burnout under
+glitching inputs, not a latch in the cell.
+
+The viewer's WASM simulator (`tools/nbt-viewer/public/wasm`, built with
+`npm run build:wasm`) is a separate build of the same Rust simulator. A build
+older than commit `cf8ff4a` (2026-10-03) mistracks two switches on one block,
+which the 2x8x8 cell has (`a` and `b` on the block above dust `[1, 0, 1]`).
+Toggling them in such a viewer can leave that dust powered with every input
+off. Rebuild the WASM package after simulator changes.
+
 ## Manual design protocol
 
 Manual RCELL work must use the repository's simulator source, simulator tests,

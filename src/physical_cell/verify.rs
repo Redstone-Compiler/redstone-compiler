@@ -754,6 +754,153 @@ mod tests {
         Ok(())
     }
 
+    /// Toggles the inputs through many random sequences without settling from
+    /// scratch in between, then checks the outputs after every change and,
+    /// at the end of each sequence, that every block matches a fresh settle
+    /// of the same inputs. A cell with an unintended latch keeps state there.
+    /// `CELL_SOURCE=<rcell path> CELL_SEQUENCES=200 CELL_STEPS=12
+    /// CELL_DRIVE_CYCLES=256` (fewer cycles toggle again before the cell
+    /// settles; the last step always settles fully before comparing).
+    #[test]
+    #[ignore = "history diagnosis; run explicitly with --nocapture"]
+    fn diagnose_cell_input_history() -> eyre::Result<()> {
+        let path = std::env::var("CELL_SOURCE")?;
+        let sequences: usize = std::env::var("CELL_SEQUENCES")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(200);
+        let steps: usize = std::env::var("CELL_STEPS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(12);
+        let document: PhysicalCellDocument = std::fs::read_to_string(&path)?.parse()?;
+        let build = document.build()?;
+        let truth = document.verification_truth(&build)?;
+        let inputs = truth.input_names.len();
+        let fresh = |case: usize| -> eyre::Result<_> {
+            let assignment = truth
+                .input_names
+                .iter()
+                .enumerate()
+                .map(|(index, name)| (name.clone(), case & (1 << index) != 0))
+                .collect();
+            document.simulate_case(&build, assignment, 0)
+        };
+        let mut rng = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
+        let drive_cycles: usize = std::env::var("CELL_DRIVE_CYCLES")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(256);
+        let settles_each_step = drive_cycles >= 256;
+        let mut output_failures = 0;
+        let mut state_failures = 0;
+        // Differing final states with no burned-out torch point at a latch.
+        let mut unburned_failures = 0;
+        let mut burned_runs = 0;
+        for sequence in 0..sequences {
+            let mut case = (next() as usize) % (1 << inputs);
+            let mut run = fresh(case)?;
+            let mut history = vec![case];
+            for step in 0..steps {
+                let last = step + 1 == steps;
+                // Flip one input, or several at once now and then.
+                let flip = if next() % 4 == 0 {
+                    (next() as usize) % (1 << inputs)
+                } else {
+                    1 << ((next() as usize) % inputs)
+                };
+                case ^= flip;
+                history.push(case);
+                if settles_each_step {
+                    run.simulator
+                        .advance_idle_cycles(crate::world::simulator::MANUAL_INPUT_IDLE_CYCLES)?;
+                }
+                let contacts = truth
+                    .input_names
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(index, name)| {
+                        build.input_contacts[name]
+                            .iter()
+                            .map(move |position| (*position, case & (1 << index) != 0))
+                    })
+                    .collect();
+                let cycles = if last { 256 } else { drive_cycles };
+                if let Err(error) = run
+                    .simulator
+                    .drive_inputs_with_limits(contacts, cycles, 50_000)
+                {
+                    // An unsettled cut-off is expected when toggling fast.
+                    if settles_each_step || last {
+                        return Err(error);
+                    }
+                    continue;
+                }
+                if !settles_each_step && !last {
+                    continue;
+                }
+                for (name, position) in build.observations() {
+                    if run.simulator.world()[position].kind.is_powered()
+                        != truth.output_tables[name][case]
+                    {
+                        output_failures += 1;
+                        println!("HISTORY output {name} wrong after {history:?}");
+                    }
+                }
+            }
+            let settled = fresh(case)?;
+            let differing = run
+                .simulator
+                .world()
+                .iter_block()
+                .into_iter()
+                .filter(|(position, block)| {
+                    block.kind.is_powered()
+                        != settled.simulator.world()[*position].kind.is_powered()
+                })
+                .map(|(position, block)| (position, block.kind.name()))
+                .collect::<Vec<_>>();
+            let burned = run
+                .simulator
+                .world()
+                .iter_block()
+                .into_iter()
+                .filter(|(position, block)| {
+                    block.kind.is_torch() && run.simulator.is_torch_burned_out(*position)
+                })
+                .map(|(position, _)| position)
+                .collect::<Vec<_>>();
+            if !burned.is_empty() {
+                burned_runs += 1;
+            }
+            if !differing.is_empty() {
+                state_failures += 1;
+                if burned.is_empty() {
+                    unburned_failures += 1;
+                }
+                if state_failures <= 10 {
+                    println!(
+                        "HISTORY sequence {sequence} {history:?} differs at {differing:?}; \
+                         burned out {burned:?}"
+                    );
+                }
+            }
+        }
+        println!(
+            "HISTORY {path}: {sequences} sequences of {steps} steps, \
+             output failures {output_failures}, final states differing {state_failures} \
+             ({unburned_failures} without a burned-out torch), \
+             sequences ending with a burned-out torch {burned_runs}"
+        );
+        Ok(())
+    }
+
     #[test]
     fn archived_full_adder_preserves_signals_but_reports_disconnected_carry() -> eyre::Result<()> {
         let document: PhysicalCellDocument = DISCONNECTED_FULL_ADDER.parse()?;
