@@ -62,7 +62,7 @@ struct CombinationalClusterPlan {
     synthetic: RoutableDesign,
 }
 
-fn candidate_matches_truth_table_with_switch_inputs(
+pub(super) fn candidate_matches_truth_table_with_switch_inputs(
     graph: &Graph,
     candidate: &LayoutCandidate,
 ) -> bool {
