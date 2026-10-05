@@ -2439,6 +2439,30 @@ fn adder_carry() -> CarryTiling {
     }
 }
 
+/// Writes an RCELL file again with its settled world and interface, for
+/// fixtures and the viewer: `CELL_SOURCE=<rcell> CELL_OUT=<dir>/<name>`
+/// (`write_cell`), after checking every case.
+#[test]
+#[ignore = "export; run explicitly with --nocapture"]
+fn export_rcell_cell() -> eyre::Result<()> {
+    let source = std::fs::read_to_string(std::env::var("CELL_SOURCE")?)?;
+    let out = std::path::PathBuf::from(std::env::var("CELL_OUT")?);
+    let document: crate::physical_cell::PhysicalCellDocument = source.parse()?;
+    let build = document.build()?;
+    let verification = document.verify(&build)?;
+    eyre::ensure!(
+        verification.failures.is_empty(),
+        "{:?}",
+        verification.failures
+    );
+    let directory = out.parent().unwrap_or(std::path::Path::new("."));
+    let name = out
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| eyre::eyre!("CELL_OUT needs a file name"))?;
+    write_cell(directory, name, &document, &build)
+}
+
 /// Writes a cell to `directory` as `<name>.rcell`, its settled world as
 /// `<name>.nbt`, and its interface metadata (inputs and outputs, for the
 /// viewer) as `<name>.outputs.json`.

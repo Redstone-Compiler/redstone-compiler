@@ -25,6 +25,14 @@
   },
   {
     "kind": "nbt",
+    "name": "adder2-synth-exact-2x16x8.nbt",
+    "file": "adder2-synth-exact-2x16x8.nbt",
+    "path": "examples/adder2-synth-exact-2x16x8.nbt",
+    "size": 888,
+    "outputsPath": "examples/adder2-synth-exact-2x16x8.outputs.json"
+  },
+  {
+    "kind": "nbt",
     "name": "alu-export.nbt",
     "file": "alu-export.nbt",
     "path": "examples/alu-export.nbt",
@@ -137,7 +145,7 @@
     "name": "full-adder-exact-2x13x7.nbt",
     "file": "full-adder-exact-2x13x7.nbt",
     "path": "examples/full-adder-exact-2x13x7.nbt",
-    "size": 790,
+    "size": 786,
     "outputsPath": "examples/full-adder-exact-2x13x7.outputs.json"
   },
   {
@@ -145,7 +153,7 @@
     "name": "full-adder-exact-optimized-2x8x8.nbt",
     "file": "full-adder-exact-optimized-2x8x8.nbt",
     "path": "examples/full-adder-exact-optimized-2x8x8.nbt",
-    "size": 551,
+    "size": 590,
     "outputsPath": "examples/full-adder-exact-optimized-2x8x8.outputs.json"
   },
   {
@@ -176,7 +184,7 @@
     "name": "full-adder.nbt",
     "file": "full-adder.nbt",
     "path": "examples/full-adder.nbt",
-    "size": 635
+    "size": 508
   },
   {
     "kind": "snapshot",
@@ -220,6 +228,14 @@
     "file": "level.nbt",
     "path": "examples/level.nbt",
     "size": 1900
+  },
+  {
+    "kind": "nbt",
+    "name": "mux4-synth-exact-2x16x10.nbt",
+    "file": "mux4-synth-exact-2x16x10.nbt",
+    "path": "examples/mux4-synth-exact-2x16x10.nbt",
+    "size": 904,
+    "outputsPath": "examples/mux4-synth-exact-2x16x10.outputs.json"
   },
   {
     "kind": "nbt",

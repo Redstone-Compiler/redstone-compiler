@@ -128,7 +128,34 @@ height 12 gave anything from 90 to 237 blocks. With 1800 s of compaction
 - **The 2-bit adder** needs a torch less than the hand-written one, and is
   shallower. With 15 steps: c1 5, s0 4, s1 6, against `adder2-nor`'s
   7, 4, 8. Four inputs make the solves much slower: 13 steps took 257 s to
-  prove infeasible, and 14-16 steps did not finish within 30 minutes.
+  prove infeasible, and 14-16 steps did not finish within 30 minutes. The
+  15-step netlist:
+  `g4=NOR(a0); g5=NOR(b0,g4); g6=NOR(g4,g5); g7=NOR(b0,g5); s0=NOR(g6,g7);
+  g9=NOR(a1,b1); g10=NOR(a1,g9); g11=NOR(b1,g9); g12=NOR(g10,g11);
+  o13=OR(g6,g9); g14=NOR(g12,o13); g15=NOR(g12,g14); g16=NOR(g6,g14);
+  c1=NOR(g9,g14); s1=NOR(g15,g16)`.
+  Placed against `adder2-nor` (7 workers, 1800 s of compaction), it came
+  out about a fifth smaller and faster on both seeds:
+
+  | Netlist | Seed 1 | Seed 2 |
+  | --- | --- | --- |
+  | `adder2-nor`, 15 gates | 2x15x9, 160 blocks, c1/s0/s1 16/7/16 ticks | 2x21x10, 163 blocks, 21/10/22 |
+  | synthesized, 14 torches | 2x16x8, 122 blocks, 15/7/12 | 2x17x10, 134 blocks, 15/6/15 |
+
+  The fixture `test/adder2-exact-2x14x10.rcell` (137 blocks) took an hour
+  of compaction from `adder2-nor`.
+
+Two cells are kept as fixtures, with tests in `physical_cell/verify.rs`
+that check the arithmetic or the selection in every case and every settled
+input transition:
+
+- `test/adder2-synth-exact-2x16x8.rcell`: the synthesized 2-bit adder,
+  122 blocks;
+- `test/mux4-synth-exact-2x16x10.rcell`: the 4:1 mux, 142 blocks.
+
+Both are also in the viewer's examples. `export_rcell_cell`
+(`CELL_SOURCE=<rcell> CELL_OUT=<dir>/<name>`) writes a cell's `.nbt` and
+`.outputs.json`.
 
 ## Next
 

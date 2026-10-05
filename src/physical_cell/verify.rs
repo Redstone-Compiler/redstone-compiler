@@ -365,6 +365,8 @@ mod tests {
     const FULL_ADDER_RIGHT_INPUTS_COMPACTED: &str =
         include_str!("../../test/full-adder-right-inputs-compacted-2x10x10.rcell");
     const ADDER2_EXACT: &str = include_str!("../../test/adder2-exact-2x14x10.rcell");
+    const ADDER2_SYNTH: &str = include_str!("../../test/adder2-synth-exact-2x16x8.rcell");
+    const MUX4_SYNTH: &str = include_str!("../../test/mux4-synth-exact-2x16x10.rcell");
     const ADDER_CARRY_TILE: &str = include_str!("../../test/adder-carry-tile-2x16x10.rcell");
     const ADDER_CARRY_CHAIN4: &str = include_str!("../../test/adder-carry-chain4-13x16x10.rcell");
     const DISCONNECTED_FULL_ADDER: &str =
@@ -608,8 +610,51 @@ mod tests {
     /// cell's own `expect` lines.
     #[test]
     fn exact_two_bit_adder_adds_in_all_cases() -> eyre::Result<()> {
-        let document: PhysicalCellDocument = ADDER2_EXACT.parse()?;
-        assert_eq!(document.size, DimSize(2, 14, 10));
+        verify_two_bit_adder(ADDER2_EXACT, DimSize(2, 14, 10))
+    }
+
+    /// The same 2-bit adder from a synthesized netlist (`exact::synthesize`,
+    /// `docs/nor_synthesis.md`): 14 torches against the hand-written 15.
+    #[test]
+    fn synthesized_two_bit_adder_adds_in_all_cases() -> eyre::Result<()> {
+        verify_two_bit_adder(ADDER2_SYNTH, DimSize(2, 16, 8))?;
+        verify_settled_transitions(ADDER2_SYNTH)
+    }
+
+    /// A 4:1 multiplexer from a synthesized 8-torch netlist; the 20-gate
+    /// netlist from expressions never built. `out` is the data input that
+    /// `s1 s0` selects, in all 64 cases.
+    #[test]
+    fn synthesized_four_to_one_mux_selects_in_all_cases() -> eyre::Result<()> {
+        let document: PhysicalCellDocument = MUX4_SYNTH.parse()?;
+        assert_eq!(document.size, DimSize(2, 16, 10));
+        let build = document.build()?;
+        let verification = document.verify(&build)?;
+        assert_eq!(verification.cases, 64);
+        assert!(verification.failures.is_empty());
+        let bit = |case: usize, name: &str| {
+            let index = verification
+                .input_names
+                .iter()
+                .position(|input| input == name)
+                .unwrap();
+            (case >> index) & 1
+        };
+        for case in 0..64 {
+            let select = bit(case, "s0") + 2 * bit(case, "s1");
+            let data = ["a", "b", "c", "d"][select];
+            assert_eq!(
+                verification.signatures["out"].actual[case],
+                bit(case, data) == 1,
+                "out for case {case}"
+            );
+        }
+        verify_settled_transitions(MUX4_SYNTH)
+    }
+
+    fn verify_two_bit_adder(source: &str, size: DimSize) -> eyre::Result<()> {
+        let document: PhysicalCellDocument = source.parse()?;
+        assert_eq!(document.size, size);
         assert!(document.settled_start);
         let build = document.build()?;
         let verification = document.verify(&build)?;
