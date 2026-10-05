@@ -2036,7 +2036,7 @@ fn print_attempt_times(prefix: &str, report: &CompactionReport) {
 
 /// Construction plus compaction for small circuits:
 /// `CIRCUIT=mux2|half-adder|adder2|adder2-nor|mux4|full-adder|egraph-full-adder CIRCUIT_WIDTH=2
-/// CIRCUIT_HEIGHT=10 CIRCUIT_STEP_SECONDS=60 CIRCUIT_COMPACT_SECONDS=300
+/// CIRCUIT_HEIGHT=10 CIRCUIT_STEP_SECONDS=60 CIRCUIT_RESTART_SECONDS=600 CIRCUIT_COMPACT_SECONDS=300
 /// CIRCUIT_SEED=1 CIRCUIT_WORKERS=8 CIRCUIT_WRITE=<prefix>`; `CIRCUIT_NETLIST_ONLY=1` stops
 /// after printing the NOR netlist and its live-net counts;
 /// `CIRCUIT_PROGRESS=<directory>` records every accepted step as a frame for
@@ -2154,6 +2154,9 @@ fn diagnose_construct_circuit() -> eyre::Result<()> {
         width: env_usize("CIRCUIT_WIDTH", 2),
         height: env_usize("CIRCUIT_HEIGHT", 10),
         step_time_limit: Duration::from_secs(env_usize("CIRCUIT_STEP_SECONDS", 60) as u64),
+        restart_after: Some(Duration::from_secs(
+            env_usize("CIRCUIT_RESTART_SECONDS", 600) as u64,
+        )),
         window: 2,
         max_window: 4,
         seed,
