@@ -148,7 +148,7 @@ Fixtures (bounds 5 and 5):
 | Fixture | Delays |
 | --- | --- |
 | `full-adder-exact-optimized-2x8x8` | cout 10, s 8 |
-| `full-adder-exact-2x13x7` | cout 12, s 14 |
+| `full-adder-exact-2x13x7` (repaired 2026-10-05) | cout 13, s 14 |
 
 The carry tile (bounds: `ncout` 2, `s` 5). In a chain, only the path from
 the carry in matters bit after bit (`cout` of an n-bit chain is about n

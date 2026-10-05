@@ -188,6 +188,62 @@ impl PhysicalCellDocument {
         })
     }
 
+    /// Every transition between two input cases: settled in the first,
+    /// idle long enough that earlier torch toggles no longer count, then
+    /// switched to the second. Returns the first case whose outputs are
+    /// wrong, or whose change burned a torch out (a glitch the truth table
+    /// alone does not show).
+    pub fn settled_transition_failure(
+        &self,
+        build: &PhysicalCellBuild,
+    ) -> eyre::Result<Option<String>> {
+        let truth = self.verification_truth(build)?;
+        let cases = 1 << truth.input_names.len();
+        for from in 0..cases {
+            for to in 0..cases {
+                let inputs = truth
+                    .input_names
+                    .iter()
+                    .enumerate()
+                    .map(|(index, name)| (name.clone(), from & (1 << index) != 0))
+                    .collect();
+                let mut case = self.simulate_case(build, inputs, 0)?;
+                if case.actual != case.expected {
+                    return Ok(Some(format!("initial case {from}")));
+                }
+                case.simulator
+                    .advance_idle_cycles(crate::world::simulator::MANUAL_INPUT_IDLE_CYCLES)?;
+                let contacts = truth
+                    .input_names
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(index, name)| {
+                        build.input_contacts[name]
+                            .iter()
+                            .map(move |position| (*position, to & (1 << index) != 0))
+                    })
+                    .collect();
+                case.simulator
+                    .drive_inputs_with_limits(contacts, 256, 50_000)?;
+                for (name, position) in build.observations() {
+                    if case.simulator.world()[position].kind.is_powered()
+                        != truth.output_tables[name][to]
+                    {
+                        return Ok(Some(format!("{name} after transition {from} -> {to}")));
+                    }
+                }
+                for (position, block) in case.simulator.world().iter_block() {
+                    if block.kind.is_torch() && case.simulator.is_torch_burned_out(position) {
+                        return Ok(Some(format!(
+                            "torch {position:?} burned out after transition {from} -> {to}"
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+
     pub fn verify(&self, build: &PhysicalCellBuild) -> eyre::Result<PhysicalCellVerification> {
         let truth = self.verification_truth(build)?;
 
@@ -839,48 +895,8 @@ mod tests {
     fn verify_settled_transitions(source: &str) -> eyre::Result<()> {
         let document: PhysicalCellDocument = source.parse()?;
         let build = document.build()?;
-        let truth = document.verification_truth(&build)?;
-        let cases = 1 << truth.input_names.len();
-        for from in 0..cases {
-            for to in 0..cases {
-                let inputs = truth
-                    .input_names
-                    .iter()
-                    .enumerate()
-                    .map(|(index, name)| (name.clone(), from & (1 << index) != 0))
-                    .collect();
-                let mut case = document.simulate_case(&build, inputs, 0)?;
-                assert_eq!(case.actual, case.expected, "initial case {from}");
-                case.simulator
-                    .advance_idle_cycles(crate::world::simulator::MANUAL_INPUT_IDLE_CYCLES)?;
-                let contacts = truth
-                    .input_names
-                    .iter()
-                    .enumerate()
-                    .flat_map(|(index, name)| {
-                        build.input_contacts[name]
-                            .iter()
-                            .map(move |position| (*position, to & (1 << index) != 0))
-                    })
-                    .collect();
-                case.simulator
-                    .drive_inputs_with_limits(contacts, 256, 50_000)?;
-                for (name, position) in build.observations() {
-                    assert_eq!(
-                        case.simulator.world()[position].kind.is_powered(),
-                        truth.output_tables[name][to],
-                        "{name} after transition {from} -> {to}"
-                    );
-                }
-                for (position, block) in case.simulator.world().iter_block() {
-                    if block.kind.is_torch() {
-                        assert!(
-                            !case.simulator.is_torch_burned_out(position),
-                            "torch {position:?} burned out after transition {from} -> {to}"
-                        );
-                    }
-                }
-            }
+        if let Some(failure) = document.settled_transition_failure(&build)? {
+            panic!("{failure}");
         }
         Ok(())
     }

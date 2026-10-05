@@ -125,10 +125,14 @@ def Unpowered[c: Cell] := any(Sig[c] is Carry(u) for u: Class where unpowered(u)
 @internal
 def Stick[c: Cell] := Kind[c] is Dust | Torch(_) | Switch(_, _);
 
+// Dust connects to dust, torches, and switches beside it, to a repeater at
+// either end of the repeater's axis (its input or its output, never a side;
+// Java Edition connects to the output since 1.0.0), and to dust a step up or
+// down unless a block cuts the stair.
 @display("{c} 가루가 {d}쪽과 연결")
 def Conn[c: Cell, d: Dir4] := Kind[c] is Dust and (
        Stick[step(c, d)]
-    or Kind[step(c, d)] is Repeater(opposite(d))
+    or Kind[step(c, d)] is Repeater(d) | Repeater(opposite(d))
     or (not Kind[step(c, Up)] is Solid and Kind[step(step(c, d), Up)] is Dust)
     or (not Kind[step(c, d)] is Solid and Kind[step(step(c, d), Down)] is Dust));
 

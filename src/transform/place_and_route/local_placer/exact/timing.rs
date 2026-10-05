@@ -179,6 +179,7 @@ fn fanout(dim: DimSize, cells: &BTreeMap<Position, CellKind>) -> BTreeMap<Positi
         let c = Some(c);
         kind(c) == CellKind::Dust
             && (stick(step(c, d))
+                || kind(step(c, d)) == CellKind::Repeater(d)
                 || kind(step(c, d)) == CellKind::Repeater(d.inverse())
                 || (kind(step(c, Direction::Top)) != CellKind::Solid
                     && kind(step(step(c, d), Direction::Top)) == CellKind::Dust)

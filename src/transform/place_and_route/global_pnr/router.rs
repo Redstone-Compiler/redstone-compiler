@@ -4212,7 +4212,9 @@ fn route_bounds_for_mode(
     terminal_node: &PlacedNode,
 ) -> Vec<PlaceBound> {
     match mode {
-        BoundSearchMode::Propagation => terminal_node.propagation_bound(Some(world)),
+        BoundSearchMode::Propagation => {
+            search_shape(world, terminal_node).propagation_bound(Some(world))
+        }
         BoundSearchMode::Nearby
             if terminal_node.block.kind.is_repeater()
                 || terminal_node.block.kind.is_torch()
@@ -4222,6 +4224,26 @@ fn route_bounds_for_mode(
         }
         BoundSearchMode::Nearby => nearby_route_bounds(world, terminal_node.position),
     }
+}
+
+/// The terminal as the search extends it. Dust leading out of a repeater is
+/// a line along the repeater (`World3D::redstone_shape`), but a dust placed
+/// beside it reshapes it into a turn, so the search still offers every side
+/// to such dust, as it did when the simulator drew it as a cross; placing the
+/// next dust checks the real shapes.
+fn search_shape(world: &World3D, terminal_node: &PlacedNode) -> PlacedNode {
+    let mut node = *terminal_node;
+    if let BlockKind::Redstone {
+        on_count, strength, ..
+    } = node.block.kind
+    {
+        node.block.kind = BlockKind::Redstone {
+            on_count,
+            state: world.redstone_shape(node.position, false),
+            strength,
+        };
+    }
+    node
 }
 
 fn nearby_route_bounds(world: &World3D, position: Position) -> Vec<PlaceBound> {

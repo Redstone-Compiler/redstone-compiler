@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::ops::{Index, IndexMut};
 
-use block::{Block, BlockKind, Direction, RedstoneState};
+use block::{Block, BlockKind, Direction, RedstoneState, RedstoneStateType};
 use itertools::Itertools;
 use position::{DimSize, Position, PositionIndex};
 
@@ -79,6 +79,25 @@ impl World3D {
             return;
         };
 
+        let state = self.redstone_shape(pos, true);
+
+        self[pos].kind = BlockKind::Redstone {
+            on_count,
+            state,
+            strength,
+        };
+    }
+
+    /// The directions dust at `pos` connects to and so points into: dust,
+    /// torches, switches, and redstone blocks beside it, a repeater at either
+    /// end of its axis (never a side), and dust a step up or down unless a
+    /// block cuts the stair. One connection makes a line through the dust;
+    /// none makes a cross. Java Edition connects dust to a repeater's output
+    /// since 1.0.0, so such dust is a line along the repeater, not a cross:
+    /// it does not power the blocks beside it. `repeater_outputs` false
+    /// leaves those connections out, the shape this simulator used before it
+    /// followed that rule (the global router still searches with it).
+    pub fn redstone_shape(&self, pos: Position, repeater_outputs: bool) -> RedstoneStateType {
         let mut state = 0;
 
         let has_up_block = self.size.bound_on(pos.up()) && self[pos.up()].kind.is_cobble();
@@ -97,7 +116,9 @@ impl World3D {
                     .down()
                     .is_some_and(|pos| self[pos].kind.is_redstone());
             let flat_repeater_check = self[pos_src].kind.is_repeater()
-                && (pos_src.walk(self[pos_src].direction) == Some(pos));
+                && (pos_src.walk(self[pos_src].direction) == Some(pos)
+                    || (repeater_outputs
+                        && pos_src.walk(self[pos_src].direction.inverse()) == Some(pos)));
 
             if !(flat_check || flat_repeater_check || up_check || down_check) {
                 return;
@@ -121,12 +142,7 @@ impl World3D {
         } else if state == 0 {
             state |= RedstoneState::Cardinal as usize;
         }
-
-        self[pos].kind = BlockKind::Redstone {
-            on_count,
-            state,
-            strength,
-        };
+        state
     }
 
     pub fn concat(&self, other: &World3D, direction: Direction) -> Self {

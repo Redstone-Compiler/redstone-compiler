@@ -130,6 +130,58 @@ generated cell passes `rcell` verification. Seed 2 still fails to place gate
 `s` within four slices, now on search time alone (the hand-written encoder
 also failed that seed).
 
+### Dust beside a repeater (2026-10-05)
+
+Dust connects to a repeater at either end of the repeater's axis, its input
+or its output, and never at a side. The model's `Conn` and the simulator's
+dust shape (`World3D::redstone_shape`) both knew only the input end. So dust
+fed by a repeater's output, with nothing else beside it, came out as a cross.
+A cross points into all four sides and weakly powers any block there. In the
+game it is a line along the repeater and powers neither side block.
+
+Sources (minecraft.wiki):
+
+- Redstone components: dust points toward adjacent dust, "correctly-facing"
+  repeaters and comparators, and power components.
+- Redstone Repeater history: dust has connected to the repeater's input
+  since Beta 1.7, and to its output since Java Edition 1.0.0 RC1.
+- Redstone Dust: one connection makes a line through the dust; none makes a
+  cross (Java Edition; right-click makes a dot that powers no side).
+
+The other rules the model and simulator use match the same pages:
+
+- Dust weakly powers the block under it and the blocks it points into.
+- A weakly powered block powers repeaters reading it and turns off torches
+  attached to it, but not dust.
+- A torch strongly powers the block above it and powers the dust and
+  repeaters beside it.
+- A repeater strongly powers the block in front of it.
+- A conductive block above the lower of two dust cuts their stair.
+
+The fix connects both repeater ends in the model, in `timing.rs`, and in the
+simulator. What it changed:
+
+- **`test/full-adder-exact-2x13x7.rcell`** gave the wrong sum in 2 of 8
+  cases. It relied on such dust powering a block beside it.
+  `repair_full_adder_rcell` re-solved Y slices 7-9. The first window layout
+  passed every case but burned a torch out on the transition from a = b = 1
+  to 0, so it was blocked. The second passes both checks, at 130 blocks.
+- **`test/full-adder.nbt`** (the beam-search placer's full adder) stopped
+  settling to one state: toggled inputs and a fresh settle disagreed.
+  `test_generate_component_full_adder` regenerated it, and all 315 candidates
+  verify under the new shape.
+- **Fixture NBTs.** Two fixtures (`full-adder-2x20x20`,
+  `full-adder-exact-optimized-2x8x8`) store dust shapes that changed; they
+  are re-exported.
+- **Every grounded CNF** changed. XOR 2x6x4 stayed heavy-tailed: 2-44 s
+  over six seeds, against 2 s to over 60 s before (`compare_xor_models`).
+  Its test now allows 120 s.
+- **The global router** chose where to extend a route from the end dust's
+  current shape. Dust right after a repeater used to be a cross, so a route
+  could turn there. It is now a line, but placing the next dust beside it
+  reshapes it into a turn, so the router's search (`search_shape`) still
+  uses the old shape for its candidates. Placement checks the real one.
+
 ### Optimizing a cost (2026-10-03)
 
 `ExactPlacerConfig::optimize` keeps searching after the first verified layout

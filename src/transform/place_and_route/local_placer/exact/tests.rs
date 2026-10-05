@@ -187,9 +187,11 @@ fn exact_placer_builds_a_verified_xor() {
     let placer = ExactLocalPlacer::new(&graph(&[("out", "a^b")])).unwrap();
     let mut config = ExactPlacerConfig::new(DimSize(2, 6, 4));
     // Solve times are heavy-tailed (1-60 s across seeds, see
-    // compare_xor_folding); eight workers make a slow draw less likely.
+    // compare_xor_folding and compare_xor_models); eight workers make a slow
+    // draw less likely. Connecting dust to repeater outputs moved seed 1 from
+    // 2 s to 36 s alone, past 60 s with the whole suite running.
     config.workers = 8;
-    config.time_limit = Some(Duration::from_secs(60));
+    config.time_limit = Some(Duration::from_secs(120));
     expect_placed(&placer, &config);
 }
 
@@ -3294,4 +3296,155 @@ fn timing_compaction_keeps_and_shortens_delays() -> eyre::Result<()> {
     assert!(delays[0].1 < start.delays["out"]);
     assert_eq!(delays[0].1, 1, "dust both ways into the torch's block");
     Ok(())
+}
+
+/// `source` with its `plane` blocks replaced by those of `solved` (same box
+/// and glyph legend), keeping its name, comments, pins, and `expect` lines.
+fn splice_planes(source: &str, solved: &str) -> eyre::Result<String> {
+    let planes = |text: &str| {
+        let mut blocks = Vec::new();
+        let mut rest = text;
+        while let Some(start) = rest.find("  plane ") {
+            let end = start + rest[start..].find("\n  }\n").expect("closed plane") + 5;
+            blocks.push(rest[start..end].to_owned());
+            rest = &rest[end..];
+        }
+        blocks
+    };
+    let glyphs = |text: &str| {
+        text.lines()
+            .filter(|line| line.trim_start().starts_with("glyph "))
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    eyre::ensure!(glyphs(source) == glyphs(solved), "the glyph legends differ");
+    let (old, new) = (planes(source), planes(solved));
+    eyre::ensure!(old.len() == new.len(), "the plane counts differ");
+    let mut text = source.to_owned();
+    for (old, new) in old.iter().zip(&new) {
+        text = text.replacen(old.as_str(), new, 1);
+    }
+    Ok(text)
+}
+
+/// Repairs a full-adder `.rcell` that no longer verifies (after a physics
+/// fix, say) by re-solving Y windows of `REPAIR_SOURCE`, nearest
+/// `REPAIR_CENTER` (the middle) first and from 3 to 6 slices wide, keeping
+/// every other cell, the pins, and the box. The first window layout that
+/// passes every case and every settled transition, spliced into the source
+/// file (`splice_planes`), is written to `REPAIR_OUT`:
+/// `cargo test --release --lib repair_full_adder_rcell -- --ignored --nocapture`.
+#[test]
+#[ignore = "repair tool; run explicitly with --nocapture"]
+fn repair_full_adder_rcell() -> eyre::Result<()> {
+    let source_path = std::env::var("REPAIR_SOURCE")?;
+    let source = std::fs::read_to_string(&source_path)?;
+    let document: crate::physical_cell::PhysicalCellDocument = source.parse()?;
+    let mut layout = ExactLayout::from_rcell(&document)?;
+    for (output, _) in layout.outputs.iter_mut() {
+        if output == "sum" {
+            *output = "s".to_owned();
+        }
+    }
+    let placer = ExactLocalPlacer::new(&full_adder_graph("nor9"))?;
+    let compaction = CompactionConfig {
+        workers: env_usize("REPAIR_WORKERS", 8),
+        attempt_time_limit: Duration::from_secs(env_usize("REPAIR_SECONDS", 60) as u64),
+        output_policies: [("s".to_owned(), OutputPolicy::MaxYFace)]
+            .into_iter()
+            .collect(),
+        given_outside_signals: false,
+        ..Default::default()
+    };
+    let center = env_usize("REPAIR_CENTER", layout.dim.1 / 2);
+    let mut windows = (3..=6usize.min(layout.dim.1))
+        .flat_map(|size| (0..=layout.dim.1 - size).map(move |low| (size, low)))
+        .collect::<Vec<_>>();
+    windows.sort_by_key(|&(size, low)| (size, (low + size / 2).abs_diff(center)));
+    for (size, low) in windows {
+        let mut exact = placer.window_config(&layout, 1, (low, low + size), None, &compaction)?;
+        // A layout that passes every case may still burn a torch out while
+        // the inputs change; block it and ask the window for another.
+        for _ in 0..env_usize("REPAIR_TRIES", 8) {
+            let started = std::time::Instant::now();
+            let (outcome, _) = placer.place(&exact)?;
+            let ExactOutcome::Placed(placement) = outcome else {
+                println!(
+                    "REPAIR window y{low}..{} {} in {:?}",
+                    low + size,
+                    if matches!(outcome, ExactOutcome::Infeasible) {
+                        "infeasible"
+                    } else {
+                        "unknown"
+                    },
+                    started.elapsed()
+                );
+                break;
+            };
+            let text = splice_planes(&source, &placement.rcell.to_string())?;
+            let repaired: crate::physical_cell::PhysicalCellDocument = text.parse()?;
+            let build = repaired.build()?;
+            assert!(repaired.verify(&build)?.failures.is_empty());
+            if let Some(failure) = repaired.settled_transition_failure(&build)? {
+                println!("REPAIR window y{low}..{} placed but {failure}", low + size);
+                exact.blocked.push(
+                    placement
+                        .cells
+                        .iter()
+                        .copied()
+                        .filter(|(position, _)| position.1 >= low && position.1 < low + size)
+                        .collect(),
+                );
+                continue;
+            }
+            println!(
+                "REPAIR window y{low}..{} blocks {} -> {} delays {:?}",
+                low + size,
+                layout.block_count(),
+                placement.block_count,
+                placement.delays
+            );
+            std::fs::write(std::env::var("REPAIR_OUT")?, text)?;
+            return Ok(());
+        }
+    }
+    eyre::bail!("no window repaired {source_path}")
+}
+
+/// Placement time of XOR 2x6x4 (8 workers, 60 s, as in
+/// `exact_placer_builds_a_verified_xor`) over `XOR_SEEDS` (6) seeds with the
+/// built-in model and, given `XOR_MODEL=<path>`, with that model too:
+/// `cargo test --release --lib compare_xor_models -- --ignored --nocapture`.
+#[test]
+#[ignore = "measurement; run explicitly with --nocapture"]
+fn compare_xor_models() {
+    let placer = ExactLocalPlacer::new(&graph(&[("out", "a^b")])).unwrap();
+    let seeds = env_usize("XOR_SEEDS", 6) as u32;
+    let models = [None]
+        .into_iter()
+        .chain(std::env::var("XOR_MODEL").ok().map(Some))
+        .collect::<Vec<_>>();
+    for model in models {
+        let mut times = Vec::new();
+        for seed in 1..=seeds {
+            let mut config = ExactPlacerConfig::new(DimSize(2, 6, 4));
+            config.workers = 8;
+            config.seed = seed;
+            config.time_limit = Some(Duration::from_secs(60));
+            config.model_file = model.clone().map(Into::into);
+            let started = std::time::Instant::now();
+            let (outcome, _) = placer.place(&config).unwrap();
+            let ok = matches!(outcome, ExactOutcome::Placed(_));
+            times.push(format!(
+                "{}{:.1}",
+                if ok { "" } else { "!" },
+                started.elapsed().as_secs_f64()
+            ));
+        }
+        println!(
+            "XORMODEL {} {}",
+            model.as_deref().unwrap_or("built-in"),
+            times.join(" ")
+        );
+    }
 }

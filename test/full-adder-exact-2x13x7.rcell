@@ -5,6 +5,10 @@ rcell 1;
 // then sliding-window block minimization (docs/exact_local_placer.md).
 // Interface: both operands on the Y-min face, sum driving out of the Y-max
 // face; cin and cout were left free.
+// Repaired 2026-10-05: Y slices 7-9 re-solved (repair_full_adder_rcell)
+// once the simulator connected dust to a repeater's output. The layout
+// relied on such dust powering the blocks beside it, which the game does not
+// do (docs/exact_local_placer.md, "Dust beside a repeater").
 cell "full-adder-exact-2x13x7" size [2, 13, 7] {
   glyph "P" = torch on x-;
   glyph "T" = torch on x+;
@@ -21,23 +25,23 @@ cell "full-adder-exact-2x13x7" size [2, 13, 7] {
   output "sum" at [1, 12, 6];
 
   plane yz at x=0 {
-    z=6 ".#UU##...rTU#";
-    z=5 ".W##W.TU##W#W";
-    z=4 ".#W.#..#rr#U#";
-    z=3 ".W#XWT..##U#Y";
-    z=2 ".#V##r#V#r#W#";
-    z=1 ".T...#.rr#U#T";
-    z=0 ".......##.#.#";
+    z=6 ".#UU##..T.TU#";
+    z=5 ".W##W.TUU#W#W";
+    z=4 ".#W.#..##r#U#";
+    z=3 ".W#XWT..X#U#Y";
+    z=2 ".#V##r#V#.#W#";
+    z=1 ".T...#.r#UU#T";
+    z=0 ".......####.#";
   }
 
   plane yz at x=1 {
     z=6 "..#rP#rU#U##P";
     z=5 "..r#Vr##W##.#";
-    z=4 "..#..#Ur#Ur.P";
-    z=3 "..#VU###.##P#";
-    z=2 ".#V.#U#UUr.#W";
-    z=1 ".#U#V#.####r#";
-    z=0 "#V#.....####.";
+    z=4 "..#..#Ur#.r.P";
+    z=3 "..#VU###UU#P#";
+    z=2 ".#V.#U#U##.#W";
+    z=1 ".#U#V#.#r.#r#";
+    z=0 "#V#....#####.";
   }
 
   expect "cout" = a&b|a&cin|b&cin;
