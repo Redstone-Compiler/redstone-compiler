@@ -138,10 +138,48 @@ switch belongs to the input whose only site it is. With
 `EXACT_DIAGNOSE_INFEASIBLE`, an infeasible step is re-solved with one
 requirement dropped at a time, which is how it was found.
 
+## Building wide NORs in parts
+
+Netlists can hold OR nets (`NetDriver::Or`): nets that are the OR of their
+inputs, with no torch. Construction places each as a step of its own.
+`ExtractOptions::split_wide` (`EGRAPH_SPLIT=1`) builds every NOR of more
+than two signals from the two halves of its OR, each half an OR net when it
+is wider than one signal. OR nets are shared between gates through their
+e-class.
+
+Splitting makes every torch read at most two signals, but it does not
+narrow the cross-section. The OR nets are signals too, so the 8-gate full
+adder still keeps 6 nets alive at once. `GateOrder::MinLive` places the
+ready gate after which the fewest nets are still needed, and it finds no
+order better than 6 (or than 4 for `nor9` and the `or_cost` 1 netlist). The
+width comes from the netlist itself.
+
+Same settings as above:
+
+| Netlist | Seed | Construction | Compacted |
+| --- | --- | --- | --- |
+| 8 gates, split (5 OR nets) | 1 | no layout in 4 restarts | |
+| 8 gates, split | 2 | 589 s, 1 restart, 2x28x10, 402 blocks | 2x23x10, 327 blocks, cout 14, s 25 |
+| `or_cost` 1, split (2 OR nets) | 1 | 719 s, 3 restarts, 2x22x10, 212 blocks | 2x13x9, 138 blocks, cout 13, s 18 |
+
+Splitting made the 8-gate netlist placeable once, but large and slow. The
+`or_cost` 1 netlist came out about like `nor9` (146 blocks, 13/18 ticks on
+seed 1). The physical reason: an OR is free only where it is made, on the
+block a torch reads. An OR net is carried on to later steps, and dust
+cannot carry it there. Dust joining two lines powers both lines back, so a
+carried OR needs a block and a repeater (a diode) after the merge, which
+costs cells and a tick. In `nor9` every OR feeds a torch on the spot.
+
 ## Next
 
-- Let construction build a wide NOR in parts, its OR terms first, so
-  narrow windows can place the netlists with fewer gates.
+- Build a wide NOR around its support block: reserve the block in an early
+  step and bring the inputs to it over later steps, so the OR is never
+  carried. This is what splitting was meant to give.
+- Count crossing width in extraction. The nets alive at once depend on the
+  order, but a bound on them (or on how far each net reaches) could join
+  gates and fan-in in the cost.
+- Try a taller or wider box for the wider netlists, and compare the
+  volume.
 - Constrain extraction for carry tiles: the carry needs monotone signals
   (`carry_tiles.md`).
 
@@ -162,5 +200,5 @@ CIRCUIT=egraph-full-adder CIRCUIT_COMPACT_SECONDS=600 \
 - `EGRAPH_EXTRACT_SECONDS`;
 - `EGRAPH_GREEDY=1` also prints greedy extractions.
 
-The circuit harness takes `EGRAPH_DEPTH`, `EGRAPH_OR_COST`, and
-`EGRAPH_BINARY`.
+The circuit harness takes `EGRAPH_DEPTH`, `EGRAPH_OR_COST`,
+`EGRAPH_BINARY`, `EGRAPH_SPLIT`, and `CIRCUIT_ORDER=min-live`.
