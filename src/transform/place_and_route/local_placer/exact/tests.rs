@@ -3448,3 +3448,58 @@ fn compare_xor_models() {
         );
     }
 }
+
+/// Delays of any `.rcell` (`TIMING_SOURCE`), and the slowest path to each
+/// output with its torches and repeaters counted:
+/// `cargo test --release --lib report_rcell_timing -- --ignored --nocapture`.
+#[test]
+#[ignore = "report; run explicitly with --nocapture"]
+fn report_rcell_timing() -> eyre::Result<()> {
+    let source = std::fs::read_to_string(std::env::var("TIMING_SOURCE")?)?;
+    let document: crate::physical_cell::PhysicalCellDocument = source.parse()?;
+    let layout = ExactLayout::from_rcell(&document)?;
+    let timing = layout.timing()?;
+    let count = |predicate: fn(&CellKind) -> bool| {
+        layout.cells.values().filter(|kind| predicate(kind)).count()
+    };
+    println!(
+        "RCELLTIMING blocks={} torches={} repeaters={} dust={} outputs={:?}",
+        layout.block_count(),
+        count(|kind| matches!(kind, CellKind::Torch(_))),
+        count(|kind| matches!(kind, CellKind::Repeater(_))),
+        count(|kind| matches!(kind, CellKind::Dust)),
+        timing.outputs
+    );
+    for (output, position) in &layout.outputs {
+        let path = timing.path(*position);
+        let kinds = path
+            .iter()
+            .map(|position| layout.cells.get(position).copied().unwrap_or(CellKind::Air))
+            .collect::<Vec<_>>();
+        println!(
+            "RCELLTIMING path {output}: {} torches, {} repeaters, {} cells: {}",
+            kinds
+                .iter()
+                .filter(|kind| matches!(kind, CellKind::Torch(_)))
+                .count(),
+            kinds
+                .iter()
+                .filter(|kind| matches!(kind, CellKind::Repeater(_)))
+                .count(),
+            kinds.len(),
+            kinds
+                .iter()
+                .map(|kind| match kind {
+                    CellKind::Torch(_) => "T",
+                    CellKind::Repeater(_) => "R",
+                    CellKind::Dust => "d",
+                    CellKind::Solid => "b",
+                    CellKind::Switch(_) => "S",
+                    CellKind::Air => ".",
+                })
+                .collect::<Vec<_>>()
+                .join("")
+        );
+    }
+    Ok(())
+}
