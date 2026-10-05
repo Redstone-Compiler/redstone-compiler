@@ -156,6 +156,13 @@ export class StructureViewer {
     this.render();
   }
 
+  /** Points the camera at a box of `size` from the origin, as a new structure would. */
+  fitView(size: [number, number, number]): void {
+    vec3.set(this.cPos, -size[0] / 2, -size[1] / 2, -size[2] / 2);
+    this.cDist = Math.max(5, vec3.distance([0, 0, 0], this.cPos) * 1.7);
+    this.render();
+  }
+
   setPinsVisible(visible: boolean): void {
     this.pinsVisible = visible;
     this.pinLayer.classList.toggle('hidden', !visible);

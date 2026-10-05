@@ -73,6 +73,9 @@ pub struct CompactionConfig {
     /// Keep the layout a tile that repeats along X (see
     /// `ExactPlacerConfig::carry`).
     pub carry: Option<super::CarryTiling>,
+    /// Write the layout after every accepted change to this directory, for
+    /// watching compaction in the viewer (`progress.rs`).
+    pub progress: Option<std::path::PathBuf>,
 }
 
 impl Default for CompactionConfig {
@@ -102,6 +105,7 @@ impl Default for CompactionConfig {
             output_policies: BTreeMap::new(),
             no_fold: false,
             carry: None,
+            progress: None,
         }
     }
 }
@@ -116,6 +120,15 @@ pub struct CompactionReport {
     /// Rounds of slice removal followed by block reduction.
     pub rounds: usize,
     pub elapsed: Duration,
+}
+
+/// `y` or `z`, for progress frame labels.
+fn axis_name(axis: usize) -> &'static str {
+    if axis == 1 {
+        "y"
+    } else {
+        "z"
+    }
 }
 
 impl ExactLocalPlacer {
@@ -228,6 +241,13 @@ impl ExactLocalPlacer {
                             blocks = placement.block_count,
                             "compaction step"
                         );
+                        if let Some(directory) = &config.progress {
+                            super::progress::record_frame(
+                                directory,
+                                &format!("remove {}{index}", axis_name(axis)),
+                                &placement,
+                            );
+                        }
                         *layout = ExactLayout::from_placement(cut.dim, &placement);
                         *best = Some(placement);
                         report.removed.push((axis, index));
@@ -312,6 +332,17 @@ impl ExactLocalPlacer {
                 optimal,
                 "compaction block reduction"
             );
+            if let Some(directory) = &config.progress {
+                super::progress::record_frame(
+                    directory,
+                    &format!(
+                        "reduce {}{low}-{}",
+                        axis_name(axis),
+                        low + config.reduction_window - 1
+                    ),
+                    &placement,
+                );
+            }
             *layout = ExactLayout::from_placement(layout.dim, &placement);
             *best = Some(placement);
             report.block_reductions += 1;

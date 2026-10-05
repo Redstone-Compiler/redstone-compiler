@@ -24,6 +24,7 @@ mod dsl;
 mod encode;
 mod layout;
 mod netlist;
+mod progress;
 mod solver;
 #[cfg(test)]
 mod tests;

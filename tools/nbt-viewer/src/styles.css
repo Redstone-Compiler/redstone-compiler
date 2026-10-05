@@ -1661,3 +1661,38 @@ body.ir-pane-resizing {
 .pin-carry {
   background: rgb(89 166 255 / 92%);
 }
+
+.frames-bar {
+  bottom: 112px;
+  left: 50%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: min(560px, calc(100vw - 32px));
+  padding: 6px 10px;
+  transform: translateX(-50%);
+  color: #dce3e7;
+  font-size: 12px;
+}
+
+.frames-bar.hidden {
+  display: none;
+}
+
+.frames-bar button {
+  min-width: 34px;
+  padding: 4px 8px;
+}
+
+.frames-bar input[type="range"] {
+  flex: 1 1 auto;
+  min-width: 80px;
+}
+
+#frames-label {
+  overflow: hidden;
+  color: #9ea9b3;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

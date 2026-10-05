@@ -618,3 +618,22 @@ cargo test --release --lib measure_encoders -- --ignored --nocapture
 The harnesses print their knobs and write `.rcell`/`.nbt` files when given
 `PIPE_WRITE` or `EXACT_FA_WRITE`. Generated RCELL files can be re-verified
 with the `rcell` binary.
+
+**Watching construction and compaction.** `ConstructionConfig::progress` and
+`CompactionConfig::progress` write the layout after every accepted step
+(each construction step of the successful attempt, each slice removal and
+block reduction) as numbered frames: a settled `.nbt`, its
+`.outputs.json`, and an entry in `frames.json` (`exact/progress.rs`). The
+NBT viewer plays them back with `?frames=<path>/frames.json`: a frame list,
+previous/next and play buttons, a slider, and the arrow keys, with the
+camera fixed on the largest frame and inputs, outputs and the nets carried
+to the next step marked. `CIRCUIT_PROGRESS` and `TILE_PROGRESS` set the
+directory in the harnesses; frames written under
+`tools/nbt-viewer/public/progress/` (ignored by git) are served by the dev
+server:
+
+```sh
+CIRCUIT=full-adder CIRCUIT_COMPACT_SECONDS=600 CIRCUIT_PROGRESS=tools/nbt-viewer/public/progress/full-adder \
+  cargo test --release --lib diagnose_construct_circuit -- --ignored --nocapture
+# then open http://localhost:5173/?frames=progress/full-adder/frames.json
+```

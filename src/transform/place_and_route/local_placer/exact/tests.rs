@@ -1999,7 +1999,9 @@ fn circuit_graph(circuit: &str) -> eyre::Result<LogicGraph> {
 /// `CIRCUIT=mux2|half-adder|adder2|adder2-nor|mux4|full-adder CIRCUIT_WIDTH=2
 /// CIRCUIT_HEIGHT=10 CIRCUIT_STEP_SECONDS=60 CIRCUIT_COMPACT_SECONDS=300
 /// CIRCUIT_SEED=1 CIRCUIT_WRITE=<prefix>`; `CIRCUIT_NETLIST_ONLY=1` stops
-/// after printing the NOR netlist and its live-net counts.
+/// after printing the NOR netlist and its live-net counts;
+/// `CIRCUIT_PROGRESS=<directory>` records every accepted step as a frame for
+/// the viewer (`?frames=<directory>/frames.json`).
 #[test]
 #[ignore = "circuit pipeline measurement; run explicitly with --nocapture"]
 fn diagnose_construct_circuit() -> eyre::Result<()> {
@@ -2078,6 +2080,7 @@ fn diagnose_construct_circuit() -> eyre::Result<()> {
         given_frozen_signals: std::env::var("CIRCUIT_GIVEN").as_deref() != Ok("0"),
         step_optimize: step_optimize_from_env("CIRCUIT_STEP_OPTIMIZE"),
         model_params: model_params_from_env("CIRCUIT_MODEL_PARAMS"),
+        progress: std::env::var("CIRCUIT_PROGRESS").ok().map(Into::into),
         ..Default::default()
     };
     let (layout, placement, report) = placer.construct(&construction)?;
@@ -2100,6 +2103,7 @@ fn diagnose_construct_circuit() -> eyre::Result<()> {
         )),
         max_removals_per_round: removals_per_round_from_env("CIRCUIT_REMOVALS_PER_ROUND"),
         repair_optimize: repair_optimize_from_env("CIRCUIT_REPAIR_OPTIMIZE"),
+        progress: std::env::var("CIRCUIT_PROGRESS").ok().map(Into::into),
         ..Default::default()
     };
     let (compacted, best, report) = placer.compact(layout, &compaction)?;
@@ -2269,7 +2273,8 @@ fn chain_file_name(bits: usize, size: DimSize) -> String {
 /// `TILE_LONG_BITS` (`8,16`; empty for none), `TILE_WRITE_BITS` (`4`),
 /// `TILE_SAMPLES` (200), `TILE_WALK` (200), `TILE_COMPACT_SECONDS` (2400),
 /// `TILE_SOURCE=<tile .rcell>` (compact and check that tile instead of
-/// constructing one); construction: `TILE_WIDTH` (2), `TILE_HEIGHT` (10),
+/// constructing one), `TILE_PROGRESS=<directory>` (every accepted step as a
+/// frame for the viewer); construction: `TILE_WIDTH` (2), `TILE_HEIGHT` (10),
 /// `TILE_WINDOW`, `TILE_MAX_WINDOW`, `TILE_STEP_SECONDS`,
 /// `TILE_CARRY_SECONDS` (180, the carry-out step), `TILE_RESTART_SECONDS`
 /// (600), `TILE_RESTARTS` (7), `TILE_SEED`, `TILE_WORKERS`; experiments:
@@ -2344,9 +2349,11 @@ fn synthesize_carry_adder() -> eyre::Result<()> {
         input_policies,
         output_policies: output_policies.clone(),
         carry: Some(carry.clone()),
+        progress: std::env::var("TILE_PROGRESS").ok().map(Into::into),
         ..Default::default()
     };
     let compaction = CompactionConfig {
+        progress: std::env::var("TILE_PROGRESS").ok().map(Into::into),
         workers: env_usize("TILE_WORKERS", 8),
         seed: env_usize("TILE_SEED", 1) as u32,
         time_limit: Some(Duration::from_secs(

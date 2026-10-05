@@ -292,6 +292,9 @@ pub struct ConstructionConfig {
     /// Time limit of the step that places the carry-out block, which has to
     /// fit the whole carry logic around one cell (`step_time_limit` if unset).
     pub carry_step_time_limit: Option<Duration>,
+    /// Write the layout after every step of the successful attempt to this
+    /// directory, for watching construction in the viewer (`progress.rs`).
+    pub progress: Option<std::path::PathBuf>,
 }
 
 impl Default for ConstructionConfig {
@@ -325,6 +328,7 @@ impl Default for ConstructionConfig {
             no_fold: false,
             carry: None,
             carry_step_time_limit: None,
+            progress: None,
         }
     }
 }
@@ -370,6 +374,8 @@ fn sites_in(
 /// Layout state between construction steps.
 #[derive(Clone)]
 struct StepState {
+    /// The gates this step placed, for progress frames.
+    label: String,
     length: usize,
     cells: BTreeMap<Position, CellKind>,
     /// Signal function of every non-air cell in the latest solution.
@@ -430,6 +436,7 @@ impl ExactLocalPlacer {
         let mut report = ConstructionReport::default();
         // states[i] is the layout before step i.
         let mut states = vec![StepState {
+            label: String::new(),
             length: 0,
             cells: BTreeMap::new(),
             signals: BTreeMap::new(),
@@ -494,6 +501,17 @@ impl ExactLocalPlacer {
                     } else {
                         blocked[step].push(previous);
                     }
+                }
+            }
+        }
+        if let Some(directory) = &config.progress {
+            for state in &states[1..] {
+                if let Some((_, placement)) = &state.result {
+                    super::progress::record_frame(
+                        directory,
+                        &format!("construct {}", state.label),
+                        placement,
+                    );
                 }
             }
         }
@@ -849,6 +867,7 @@ impl ExactLocalPlacer {
             available.extend(needed_inputs.iter().copied());
             available.extend(gates.iter().copied());
             let next = StepState {
+                label: gate_name.clone(),
                 length: dim.1,
                 cells,
                 signals: placement.signals.iter().copied().collect(),

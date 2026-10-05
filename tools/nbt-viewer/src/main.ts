@@ -212,6 +212,13 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
           <button id="toggle-snapshot-routes" class="file-button graph-button snapshot-box-button hidden" type="button">Routes</button>
           <button id="open-graphs" class="file-button graph-button" type="button">Graphs</button>
         </div>
+        <div id="frames-bar" class="floating-panel frames-bar hidden">
+          <button id="frames-prev" type="button" title="Previous frame (Left arrow)">&#9664;</button>
+          <button id="frames-play" type="button" title="Play or pause">Play</button>
+          <button id="frames-next" type="button" title="Next frame (Right arrow)">&#9654;</button>
+          <input id="frames-slider" type="range" min="0" max="0" value="0" />
+          <span id="frames-label"></span>
+        </div>
         <details id="switches-panel" class="floating-panel switches-panel" open>
           <summary>
             <span>Switches</span>
@@ -439,6 +446,12 @@ const openGraphsButton = document.querySelector<HTMLButtonElement>('#open-graphs
 const toggleBlocksButton = document.querySelector<HTMLButtonElement>('#toggle-blocks')!;
 const toggleGridButton = document.querySelector<HTMLButtonElement>('#toggle-grid')!;
 const togglePinsButton = document.querySelector<HTMLButtonElement>('#toggle-pins')!;
+const framesBar = document.querySelector<HTMLElement>('#frames-bar')!;
+const framesPrevButton = document.querySelector<HTMLButtonElement>('#frames-prev')!;
+const framesPlayButton = document.querySelector<HTMLButtonElement>('#frames-play')!;
+const framesNextButton = document.querySelector<HTMLButtonElement>('#frames-next')!;
+const framesSlider = document.querySelector<HTMLInputElement>('#frames-slider')!;
+const framesLabel = document.querySelector<HTMLElement>('#frames-label')!;
 const toggleSnapshotBoxesButton = document.querySelector<HTMLButtonElement>('#toggle-snapshot-boxes')!;
 const toggleSnapshotRoutesButton = document.querySelector<HTMLButtonElement>('#toggle-snapshot-routes')!;
 const closeGraphsButton = document.querySelector<HTMLButtonElement>('#close-graphs')!;
@@ -3028,7 +3041,139 @@ function renderFileBrowser(files: File[]): void {
   void openFile(nbtFiles[0], filesList.querySelector('.file-entry'));
 }
 
+/** One recorded step of construction or compaction (`exact/progress.rs`). */
+type ProgressFrame = {
+  file: string;
+  outputs?: string;
+  label: string;
+  blocks: number;
+  size: [number, number, number];
+};
+
+let progressFrames: ProgressFrame[] = [];
+let progressBase = '';
+let progressIndex = -1;
+let progressTimer: number | undefined;
+let progressLoad = 0;
+
+/** Plays back a `frames.json` written by construction and compaction. */
+async function loadProgressFrames(indexPath: string): Promise<void> {
+  const response = await fetch(resolveAssetPath(indexPath));
+  if (!response.ok) throw new Error(`Failed to load ${indexPath}: ${response.status}`);
+  progressFrames = (await response.json()) as ProgressFrame[];
+  progressBase = indexPath.slice(0, indexPath.lastIndexOf('/') + 1);
+  filesList.replaceChildren();
+  filesTitle.textContent = 'Frames';
+  filesCount.textContent = `${progressFrames.length} frames`;
+  filesList.classList.toggle('empty', progressFrames.length === 0);
+  progressFrames.forEach((frame, index) => {
+    const button = document.createElement('button');
+    button.className = 'file-entry';
+    button.type = 'button';
+    button.dataset.frameIndex = String(index);
+    const name = document.createElement('span');
+    name.className = 'file-entry-name';
+    name.textContent = `${index + 1}. ${frame.label}`;
+    const blocks = document.createElement('span');
+    blocks.className = 'file-entry-size';
+    blocks.textContent = `${frame.blocks} blocks`;
+    button.append(name, blocks);
+    button.addEventListener('click', () => {
+      stopProgressPlayback();
+      void showProgressFrame(index);
+    });
+    filesList.append(button);
+  });
+  framesBar.classList.toggle('hidden', progressFrames.length === 0);
+  framesSlider.max = String(Math.max(0, progressFrames.length - 1));
+  if (progressFrames.length === 0) return;
+  await showProgressFrame(0);
+  // One camera for every frame, framing the largest layout (frame sizes are
+  // the compiler's x, y, z; the viewer's axes are y, z, x).
+  const largest = [0, 1, 2].map(axis => Math.max(...progressFrames.map(frame => frame.size[axis])));
+  viewer.fitView([largest[1], largest[2], largest[0]]);
+}
+
+async function showProgressFrame(index: number): Promise<void> {
+  const frame = progressFrames[index];
+  if (!frame) return;
+  const load = ++progressLoad;
+  const [nbtResponse, metadata] = await Promise.all([
+    fetch(resolveAssetPath(progressBase + frame.file)),
+    frame.outputs ? loadExampleMetadata(progressBase + frame.outputs) : Promise.resolve(undefined),
+  ]);
+  if (!nbtResponse.ok) throw new Error(`Failed to load ${frame.file}: ${nbtResponse.status}`);
+  const file = new File([await nbtResponse.arrayBuffer()], frame.file, { type: 'application/octet-stream' });
+  if (load !== progressLoad) return;
+  const entry = filesList.querySelector(`[data-frame-index="${index}"]`);
+  // Keep the camera, so the layout changes in place.
+  await openFile(file, entry, metadata, undefined, true);
+  progressIndex = index;
+  entry?.scrollIntoView({ block: 'nearest' });
+  framesSlider.value = String(index);
+  framesLabel.textContent = `${index + 1}/${progressFrames.length}  ${frame.label}  ${frame.blocks} blocks  ${frame.size.join('x')}`;
+}
+
+function stopProgressPlayback(): void {
+  if (progressTimer !== undefined) window.clearInterval(progressTimer);
+  progressTimer = undefined;
+  framesPlayButton.textContent = 'Play';
+}
+
+function stepProgress(delta: number): void {
+  if (progressFrames.length === 0) return;
+  const next = Math.min(progressFrames.length - 1, Math.max(0, progressIndex + delta));
+  if (next !== progressIndex) void showProgressFrame(next);
+}
+
+framesPrevButton.addEventListener('click', () => {
+  stopProgressPlayback();
+  stepProgress(-1);
+});
+framesNextButton.addEventListener('click', () => {
+  stopProgressPlayback();
+  stepProgress(1);
+});
+framesSlider.addEventListener('input', () => {
+  stopProgressPlayback();
+  void showProgressFrame(Number(framesSlider.value));
+});
+framesPlayButton.addEventListener('click', () => {
+  if (progressTimer !== undefined) {
+    stopProgressPlayback();
+    return;
+  }
+  if (progressIndex >= progressFrames.length - 1) void showProgressFrame(0);
+  framesPlayButton.textContent = 'Pause';
+  progressTimer = window.setInterval(() => {
+    if (progressIndex >= progressFrames.length - 1) {
+      stopProgressPlayback();
+      return;
+    }
+    stepProgress(1);
+  }, 700);
+});
+window.addEventListener('keydown', event => {
+  if (progressFrames.length === 0 || framesBar.classList.contains('hidden')) return;
+  if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) return;
+  if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+  event.preventDefault();
+  stopProgressPlayback();
+  stepProgress(event.key === 'ArrowLeft' ? -1 : 1);
+});
+
 async function loadExamples(): Promise<void> {
+  const framesPath = new URLSearchParams(window.location.search).get('frames');
+  if (framesPath) {
+    try {
+      await loadProgressFrames(framesPath);
+    } catch (error) {
+      filesList.classList.add('empty');
+      filesCount.textContent = 'No frames';
+      filesList.textContent = error instanceof Error ? error.message : String(error);
+    }
+    return;
+  }
   try {
     const response = await fetch(resolveAssetPath('examples/manifest.json'));
     if (!response.ok) throw new Error(`Failed to load examples: ${response.status}`);
@@ -3113,6 +3258,7 @@ async function openFile(
   selectedEntry?: Element | null,
   outputMetadataJson?: string,
   snapshotPath?: string,
+  preserveView = false,
 ): Promise<void> {
   try {
     const parsed = await loadNbtFile(file);
@@ -3136,7 +3282,7 @@ async function openFile(
     markSelectedFile(selectedEntry);
 
     if (structure) {
-      await viewer.setStructure(structure);
+      await viewer.setStructure(structure, { preserveView });
       viewer.setPins(structurePins(structure));
       renderSwitches(structure);
       viewerEmpty.classList.add('hidden');
