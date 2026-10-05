@@ -125,14 +125,18 @@ fn nor_netlist_keeps_every_operand_of_long_chains() {
     }
 }
 
-/// Both orders place every gate once, after its inputs; smallest-cone-first
+/// Every order places every gate once, after its inputs; smallest-cone-first
 /// finishes the small output before starting the larger one's private logic.
 #[test]
 fn gate_orders_are_topological_and_finish_small_cones_first() {
     let netlist =
         NorNetlist::from_logic_graph(&graph(&[("big", "a^b^c"), ("small", "~(a|b)")])).unwrap();
     let gates = netlist.gates().collect::<BTreeSet<_>>();
-    for order in [GateOrder::NetIndex, GateOrder::SmallestConeFirst] {
+    for order in [
+        GateOrder::NetIndex,
+        GateOrder::SmallestConeFirst,
+        GateOrder::MinLive,
+    ] {
         let placed = construct::gate_order(&netlist, order);
         assert_eq!(placed.iter().copied().collect::<BTreeSet<_>>(), gates);
         assert_eq!(placed.len(), gates.len());
@@ -269,6 +273,7 @@ fn model_params_from_env(name: &str) -> BTreeMap<String, rsdsl::IValue> {
 fn gate_order_from_env(name: &str) -> GateOrder {
     match std::env::var(name).as_deref() {
         Ok("index") => GateOrder::NetIndex,
+        Ok("min-live") => GateOrder::MinLive,
         _ => GateOrder::SmallestConeFirst,
     }
 }
@@ -2121,7 +2126,11 @@ fn diagnose_construct_circuit() -> eyre::Result<()> {
         .iter()
         .map(|(_, net)| *net)
         .collect::<BTreeSet<_>>();
-    for order in [GateOrder::NetIndex, GateOrder::SmallestConeFirst] {
+    for order in [
+        GateOrder::NetIndex,
+        GateOrder::SmallestConeFirst,
+        GateOrder::MinLive,
+    ] {
         let gates = construct::gate_order(netlist, order);
         for (label, kept) in [("kept", &all_outputs), ("early", &BTreeSet::new())] {
             let live = live_after_each_step(netlist, &gates, kept);
@@ -3648,6 +3657,15 @@ fn explore_egraph_netlists() -> eyre::Result<()> {
         started.elapsed()
     );
     let describe = |label: &str, netlist: &NorNetlist| {
+        let min_live = live_after_each_step(
+            netlist,
+            &construct::gate_order(netlist, GateOrder::MinLive),
+            &BTreeSet::new(),
+        );
+        println!(
+            "EGRAPH {label}: min-live order live_max={} live={min_live:?}",
+            min_live.iter().max().unwrap_or(&0)
+        );
         let gates = construct::gate_order(netlist, GateOrder::SmallestConeFirst);
         let live = live_after_each_step(netlist, &gates, &BTreeSet::new());
         let fan_in = netlist

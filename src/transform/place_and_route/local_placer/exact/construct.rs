@@ -34,10 +34,17 @@ pub enum GateOrder {
     /// cone, so an output and its private logic finish before the next one
     /// starts.
     SmallestConeFirst,
+    /// Greedily, the ready gate after which the fewest nets are still
+    /// needed (live), ties to the smaller fan-in cone: every live net
+    /// crosses the window's last slice, so fewer make narrower steps.
+    MinLive,
 }
 
 /// Gates in construction order.
 pub(super) fn gate_order(netlist: &NorNetlist, order: GateOrder) -> Vec<NetId> {
+    if order == GateOrder::MinLive {
+        return min_live_order(netlist);
+    }
     fn visit(netlist: &NorNetlist, net: NetId, done: &mut [bool], order: &mut Vec<NetId>) {
         if done[net] {
             return;
@@ -79,6 +86,59 @@ pub(super) fn gate_order(netlist: &NorNetlist, order: GateOrder) -> Vec<NetId> {
         visit(netlist, net, &mut done, &mut gates);
     }
     gates
+}
+
+/// `GateOrder::MinLive`.
+fn min_live_order(netlist: &NorNetlist) -> Vec<NetId> {
+    let is_input = |net: NetId| matches!(netlist.nets[net].driver, NetDriver::Input(_));
+    let cone = |root: NetId| {
+        let mut seen = BTreeSet::new();
+        let mut stack = vec![root];
+        while let Some(net) = stack.pop() {
+            if seen.insert(net) {
+                stack.extend(netlist.nets[net].gate_inputs.iter().copied());
+            }
+        }
+        seen.len()
+    };
+    let mut remaining = (0..netlist.nets.len())
+        .filter(|&net| !is_input(net))
+        .collect::<BTreeSet<_>>();
+    let mut placed = BTreeSet::new();
+    let mut order = Vec::new();
+    while !remaining.is_empty() {
+        let live_after = |gate: NetId| {
+            let mut placed = placed.clone();
+            placed.insert(gate);
+            placed.extend(netlist.nets[gate].gate_inputs.iter().copied());
+            placed
+                .iter()
+                .filter(|&&net| {
+                    remaining.iter().any(|&later| {
+                        later != gate && netlist.nets[later].gate_inputs.contains(&net)
+                    })
+                })
+                .count()
+        };
+        let Some(next) = remaining
+            .iter()
+            .copied()
+            .filter(|&gate| {
+                netlist.nets[gate]
+                    .gate_inputs
+                    .iter()
+                    .all(|&input| is_input(input) || placed.contains(&input))
+            })
+            .min_by_key(|&gate| (live_after(gate), cone(gate), gate))
+        else {
+            break;
+        };
+        placed.insert(next);
+        placed.extend(netlist.nets[next].gate_inputs.iter().copied());
+        remaining.remove(&next);
+        order.push(next);
+    }
+    order
 }
 
 /// Gates per construction step, in order: one gate each, except for a
