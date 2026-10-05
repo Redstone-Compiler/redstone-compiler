@@ -119,29 +119,32 @@ placed, is re-solved with its observed nets sooner.
 
 ## Results
 
-Full adder (`full_adder_graph("nor9")`, 2 wide, height 10, seed 1,
-`diagnose_construct_circuit`). The critical path is the slower of `cout` and
-`s`; the logic bound is 5 ticks for both. Construction is not deterministic
-with parallel workers, and `step_timing` solves were 10 s each under load
-from other runs.
+Full adder (`full_adder_graph("nor9")`, 2 wide, height 10, seed 1, 5
+workers, 1200 s of compaction, `diagnose_construct_circuit`). The critical
+path is the slower of `cout` and `s`; the logic bound is 5 ticks for both.
 
 | Run | Constructed | Compacted |
 | --- | --- | --- |
-| no timing, 5 workers, 1200 s | 2x18x10, 202 blocks, cout 18, s 23 (67 s) | 2x11x10, 83 blocks, cout 11, s 15 |
-| `step_timing` 10 s + `timing`, 5 workers, 1200 s | 2x18x10, 244 blocks, cout 11, s 17 (252 s) | 2x14x10, 113 blocks, cout 8, s 9 |
-| no timing, 8 workers, 600 s | 2x18x10, 140 blocks, cout 17, s 15 (63 s) | 2x11x10, 94 blocks, cout 11, s 14 |
-| `step_timing` 10 s + `timing`, 8 workers, 600 s | 2x18x10, 264 blocks, cout 10, s 11 (171 s) | 2x13x9, 162 blocks, cout 8, s 11 (still shrinking) |
-| no timing, construction only | 2x18x10, 187 blocks, cout 16, s 22 (63 s) | |
-| `step_timing` 10 s, construction only | 2x18x10, 211 blocks, cout 6, s 8 (146 s) | |
+| no timing | 2x18x10, 179 blocks, cout 15, s 16 (66 s) | 2x13x10, 86 blocks, cout 15, s 16 |
+| `step_timing` 10 s + `timing` | 2x18x10, 228 blocks, cout 8, s 9 (168 s) | 2x12x9, 88 blocks, cout 7, s 8 |
 
-With the full 1200 s, timing-first placement settles 40% sooner (9 ticks
-against 15) with 36% more blocks.
+Timing-first placement settles in half the ticks (8 against 16) with 2 more
+blocks, in a smaller box. Both cells pass every case.
 
-None of these compactions shortened a path in its shortening phase. The
+These runs follow the dust fix of the same day (`exact_local_placer.md`,
+"Dust beside a repeater"). The runs before it are not comparable:
+
+- Their timing cell came out at 9 ticks with 113 blocks.
+- Their baseline (15 ticks, 83 blocks) turned out to compute both outputs
+  wrong once dust connects to repeater outputs.
+- Construction is not deterministic with parallel workers. Four earlier
+  `step_timing` constructions gave critical paths of 8, 10, 11, and 17 ticks
+  under load from other runs.
+
+None of the compactions shortened a path in its shortening phase. The
 delays fell during slice removal and block reduction instead: each change
 may keep or lower every delay, and each accepted layout lowers the bounds
-for the next. A removed slice takes its repeaters with it (`s` went from 17
-to 9).
+for the next. A removed slice takes its repeaters with it.
 
 Fixtures (bounds 5 and 5):
 
@@ -162,7 +165,9 @@ times it), so the table gives that path per tile, and the chains' `cout`:
 | constructed with `step_timing` 10 s, no compaction: 2x27x10, 363 blocks | 14 / 21 | 14 | 62 / 118 / 230 |
 
 Every chain passed the checks of `synthesize_carry_adder`: every case up to
-4 bits; sampled cases and a 200-step random walk at 8 and 16 bits.
+4 bits; sampled cases and a 200-step random walk at 8 and 16 bits. These
+tiles were built before the dust fix. Every tile and its 4-bit chain still
+pass every case after it.
 
 The model bounds an output over all inputs at once. In the tile, the
 operand path to `ncout` (13 ticks) was longer than the carry path (11). The
