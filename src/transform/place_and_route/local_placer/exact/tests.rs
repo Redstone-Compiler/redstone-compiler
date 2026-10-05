@@ -1943,6 +1943,30 @@ fn live_after_each_step(
         .collect()
 }
 
+/// For each step of `order`, how many of its gate's inputs are still needed
+/// afterwards. Each such input must both reach the gate's block and get past
+/// it, so it branches right where the new torch's output has to leave.
+fn continuing_inputs_each_step(
+    netlist: &NorNetlist,
+    order: &[NetId],
+    kept: &BTreeSet<NetId>,
+) -> Vec<usize> {
+    (0..order.len())
+        .map(|step| {
+            netlist.nets[order[step]]
+                .gate_inputs
+                .iter()
+                .filter(|&net| {
+                    kept.contains(net)
+                        || order[step + 1..]
+                            .iter()
+                            .any(|&gate| netlist.nets[gate].gate_inputs.contains(net))
+                })
+                .count()
+        })
+        .collect()
+}
+
 /// The small circuits the construction harnesses measure, by name.
 fn circuit_graph(circuit: &str) -> eyre::Result<LogicGraph> {
     let (assignments, internal): (Vec<(&str, &str)>, Vec<&str>) = match circuit {
@@ -2144,6 +2168,11 @@ fn diagnose_construct_circuit() -> eyre::Result<()> {
             println!(
                 "CIRCUIT live nets {order:?} outputs {label} {live:?} max={}",
                 live.iter().max().unwrap_or(&0)
+            );
+            let continuing = continuing_inputs_each_step(netlist, &gates, kept);
+            println!(
+                "CIRCUIT continuing inputs {order:?} outputs {label} {continuing:?} max={}",
+                continuing.iter().max().unwrap_or(&0)
             );
         }
     }

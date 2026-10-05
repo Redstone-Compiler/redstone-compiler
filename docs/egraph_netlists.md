@@ -251,8 +251,8 @@ So a taller box does not by itself make steps too hard for the solver:
     OR(a, cin)`, then `g4 = NOR(g4_or1, g3)`. Each takes 14-21 s.
   - The flat netlist cannot build the same `g4` in one step.
   - After `g4` the same five nets stay alive in both (`a`, `b`, `cin`,
-    `g3`, `g4`), so the cross-section is not the obstacle there. Placing a
-    new input and merging three signals onto one block in one step is.
+    `g3`, `g4`), so the cross-section is not the obstacle there. The next
+    section finds what is.
 - None of the timeouts was proven infeasible. Whether the 8-gate netlist
   has a layout at all is still open; only a solve of the whole box without
   windows would settle it.
@@ -261,20 +261,85 @@ So a taller box does not by itself make steps too hard for the solver:
   did not converge in 600 s of compaction, so it is a lead rather than a
   rule.
 
+## Why the steps fail
+
+`EXACT_DIAGNOSE_UNKNOWN` re-solves the first step that times out with one
+requirement dropped at a time (180 s each with
+`EXACT_DIAGNOSE_VARIANT_SECONDS=180`). In a 2x10 box, seed 1, both runs
+stopped at `g5` this time:
+
+| Dropped | flat `g5 = NOR(b, cin, g3)` | chained `g5 = NOR(g5_or1, g3)` |
+| --- | --- | --- |
+| nothing (the step itself, 60 s) | unknown | unknown |
+| signals given by earlier steps | unknown | placed, 59 s |
+| observing `a` / `b` / `g3` | unknown | unknown |
+| observing `cin` | unknown | placed, 10 s |
+| observing `g4` | unknown | placed, 159 s |
+| **observing `g5`** (the new gate) | **placed, 4.8 s** | **placed, 1.1 s** |
+
+- **The new gate's output is what cannot get out.** The gate itself is
+  placed within seconds. What takes the time is carrying its output to the
+  window's last slice past everything else.
+- **Every input that is used again later makes that harder.** Such an
+  input has to reach the gate's block and also go on past it. Its branch
+  then sits right next to the new torch.
+  - A torch powers every dust next to it and the block above it, so its
+    way out needs room that no other signal touches.
+  - In the flat 8-gate netlist, every input of `g4` and `g5` is used
+    again later.
+- **The steps are hard, not impossible.** In one run the flat `g4` step was
+  placed in 54 s, after an earlier step had left a different frontier. In
+  another run it was written out (24,512 variables, 163,975 clauses) and
+  given 30 minutes, and it stayed unknown. Whether a step can be solved
+  depends on the frontier, and no step was ever proven infeasible.
+
+The harness now also prints, for each step, how many of the gate's inputs
+are used again later (`CIRCUIT continuing inputs`). Together with the
+largest number of live nets, it separates the netlists that built from
+those that did not (smallest cone first, outputs early):
+
+| Netlist | Max live nets | Max continuing inputs | Construction |
+| --- | --- | --- | --- |
+| `nor9` | 4 | 2 | first try, 1-2.5 min |
+| `or_cost` 1, flat | 4 | 3 | 3-4 restarts, stuck at the step with 3 (`g7`) |
+| `or_cost` 1, chained | 4 | 2 | first try, see below |
+| 8 gates, flat | 6 | 3 | none |
+| 8 gates, chained | 7 | 2 | none |
+| depth 3, flat | 7 | 3 | none |
+
+`or_cost` 1, chained, was the one netlist not yet run that has `nor9`'s
+numbers, so it was predicted to build easily. It did, on both seeds (2x10
+box, 60 s steps, 600 s compaction):
+
+| Seed | Construction | Compacted |
+| --- | --- | --- |
+| 1 | 119 s, no restarts, every step in window 2 (6-23 s) | 2x11x9, 115 blocks, cout 18, s 17 |
+| 2 | 110 s, no restarts, every step in window 2 (5-27 s) | 2x13x10, 116 blocks, cout 11, s 16 |
+
+That is about 30 blocks fewer than `nor9` in the same box (146-148
+blocks), at about the same ticks. The flat `or_cost` 1 netlist once
+reached 88 blocks, but only after four restarts.
+
+A netlist can therefore be screened before placement, cheaply: at most 4
+live nets and at most 2 continuing inputs on every step. Proving that a
+step has no layout is a different matter. One step was still undecided
+after 30 minutes, and a failed window says nothing about a different
+frontier.
+
 ## Conclusion
 
-For the full adder in a box 2 wide and 10-14 high, nothing the e-graph
-finds beats `nor9` in practice:
+For the full adder in a 2-wide box:
 
 - Under two-input NORs, `nor9` is the proven minimum.
-- The netlists with fewer gates or less depth need wider NORs. Wider NORs
-  keep more nets alive at once, and windowed construction cannot place
-  them, flat, split into OR nets, or chained on a support block, with 60 s
-  or 240 s steps, or in a box 12-14 high with windows up to 6 slices.
-
-The search and the exact extraction still hold their value. They prove
-when a hand-written netlist is optimal, and for other circuits they may
-find better netlists that stay within two-input NORs.
+- Netlists with fewer gates or less depth need wider NORs. Their steps
+  either keep 6-7 nets alive or branch 3 continuing inputs around one
+  gate. Windowed construction does not place them in any form tried:
+  - flat, split into OR nets, or chained on a support block;
+  - with 60 s or 240 s steps;
+  - in a box 12-14 high with windows up to 6 slices.
+- The `or_cost` 1 netlist chained on a support block has `nor9`'s
+  numbers (4 live nets, 2 continuing inputs). It builds as reliably as
+  `nor9` and compacts about 30 blocks smaller.
 
 ## Next
 
@@ -283,9 +348,12 @@ find better netlists that stay within two-input NORs.
   `binary`, and place what it finds against the current netlists.
 - Solve the 8-gate netlist in one piece (no windows) to settle whether it
   has a layout in a 2-wide box at all.
-- Count crossing width in extraction (a bound on nets alive at once along
-  the construction order), so it only proposes netlists construction can
-  place.
+- Screen extractions by live nets and continuing inputs along the
+  construction order (at most 4 and 2), or put both bounds into extraction,
+  so it only proposes netlists construction can place.
+- In construction, a step that fails could first place the gate without
+  observing its output (seconds), then route the output out in a second
+  solve.
 - Constrain extraction for carry tiles: the carry needs monotone signals
   (`carry_tiles.md`).
 
@@ -310,4 +378,10 @@ The circuit harness takes `EGRAPH_DEPTH`, `EGRAPH_OR_COST`,
 `EGRAPH_BINARY`, `EGRAPH_SPLIT`, `EGRAPH_CHAIN`, and
 `CIRCUIT_ORDER=min-live`, besides the box and step knobs
 (`CIRCUIT_HEIGHT`, `CIRCUIT_MAX_WINDOW`, `CIRCUIT_STEP_SECONDS`,
-`CIRCUIT_RESTART_SECONDS`).
+`CIRCUIT_RESTART_SECONDS`). `CIRCUIT_NETLIST_ONLY=1` prints the netlist,
+its live nets and its continuing inputs, and stops.
+
+To see why a step times out, set `EXACT_DIAGNOSE_UNKNOWN=1` (with
+`EXACT_DIAGNOSE_VARIANT_SECONDS`, default 20). To solve that step again
+for longer and write it as DIMACS, set
+`EXACT_DIAGNOSE_FAILED_STEP=<prefix>` (with `EXACT_DIAGNOSE_SECONDS`).

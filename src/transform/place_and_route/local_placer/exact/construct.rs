@@ -823,7 +823,9 @@ impl ExactLocalPlacer {
     /// Diagnostic hook: with `EXACT_DIAGNOSE_INFEASIBLE`, a step proven
     /// infeasible is solved again with one requirement dropped at a time,
     /// and each outcome is logged, so the requirement that makes it
-    /// impossible shows.
+    /// impossible shows. `EXACT_DIAGNOSE_UNKNOWN` does the same for the first
+    /// step that times out, which shows the requirement that makes it hard.
+    /// Each variant gets `EXACT_DIAGNOSE_VARIANT_SECONDS` (20).
     fn diagnose_infeasible_step(&self, exact: &ExactPlacerConfig, gate: &str, window: usize) {
         for (name, sites) in &exact.input_sites {
             if let [(position, attach)] = sites[..] {
@@ -879,8 +881,13 @@ impl ExactLocalPlacer {
             .fixed_cells
             .retain(|_, kind| !matches!(kind, CellKind::Air));
         variants.push(("frozen air free".to_owned(), unfrozen));
+        let seconds = std::env::var("EXACT_DIAGNOSE_VARIANT_SECONDS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(20);
         for (label, mut variant) in variants {
-            variant.time_limit = Some(Duration::from_secs(20));
+            variant.time_limit = Some(Duration::from_secs(seconds));
+            let started = Instant::now();
             let outcome = self.place(&variant).map(|(outcome, _)| match outcome {
                 ExactOutcome::Placed(_) => "placed",
                 ExactOutcome::Infeasible => "infeasible",
@@ -891,7 +898,8 @@ impl ExactLocalPlacer {
                 window,
                 variant = label.as_str(),
                 ?outcome,
-                "infeasible step diagnosed"
+                seconds = started.elapsed().as_secs_f64(),
+                "step diagnosed"
             );
         }
     }
@@ -1186,6 +1194,13 @@ impl ExactLocalPlacer {
                 );
                 if matches!(outcome, ExactOutcome::Unknown { .. }) {
                     self.diagnose_failed_step(&exact, &gate_name, window)?;
+                    static DIAGNOSED: std::sync::atomic::AtomicBool =
+                        std::sync::atomic::AtomicBool::new(false);
+                    if std::env::var("EXACT_DIAGNOSE_UNKNOWN").is_ok()
+                        && !DIAGNOSED.swap(true, std::sync::atomic::Ordering::SeqCst)
+                    {
+                        self.diagnose_infeasible_step(&exact, &gate_name, window);
+                    }
                 }
                 if matches!(outcome, ExactOutcome::Infeasible)
                     && std::env::var("EXACT_DIAGNOSE_INFEASIBLE").is_ok()
