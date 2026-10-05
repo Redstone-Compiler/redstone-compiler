@@ -2016,11 +2016,13 @@ fn with_snapshot(
 /// Construction plus compaction for small circuits:
 /// `CIRCUIT=mux2|half-adder|adder2|adder2-nor|mux4|full-adder CIRCUIT_WIDTH=2
 /// CIRCUIT_HEIGHT=10 CIRCUIT_STEP_SECONDS=60 CIRCUIT_COMPACT_SECONDS=300
-/// CIRCUIT_SEED=1 CIRCUIT_WRITE=<prefix>`; `CIRCUIT_NETLIST_ONLY=1` stops
+/// CIRCUIT_SEED=1 CIRCUIT_WORKERS=8 CIRCUIT_WRITE=<prefix>`; `CIRCUIT_NETLIST_ONLY=1` stops
 /// after printing the NOR netlist and its live-net counts;
 /// `CIRCUIT_PROGRESS=<directory>` records every accepted step as a frame for
 /// the viewer (`?frames=<directory>/frames.json`); `CIRCUIT_SNAPSHOT=<dir>.snapshot`
-/// runs inside a compilation snapshot, whose `.rsnap` holds the frames.
+/// runs inside a compilation snapshot, whose `.rsnap` holds the frames;
+/// `CIRCUIT_TIMING=1` compacts timing first (`CompactionConfig::timing`) and
+/// `CIRCUIT_STEP_TIMING=<seconds>` builds it so (`ConstructionConfig::step_timing`).
 #[test]
 #[ignore = "circuit pipeline measurement; run explicitly with --nocapture"]
 fn diagnose_construct_circuit() -> eyre::Result<()> {
@@ -2100,14 +2102,19 @@ fn diagnose_construct_circuit() -> eyre::Result<()> {
         step_optimize: step_optimize_from_env("CIRCUIT_STEP_OPTIMIZE"),
         model_params: model_params_from_env("CIRCUIT_MODEL_PARAMS"),
         progress: std::env::var("CIRCUIT_PROGRESS").ok().map(Into::into),
+        step_timing: std::env::var("CIRCUIT_STEP_TIMING").ok().map(|seconds| {
+            Duration::from_secs(seconds.parse().expect("CIRCUIT_STEP_TIMING seconds"))
+        }),
+        workers: env_usize("CIRCUIT_WORKERS", 8),
         ..Default::default()
     };
     with_snapshot("CIRCUIT_SNAPSHOT", &circuit, || {
         let (layout, placement, report) = placer.construct(&construction)?;
         println!(
-            "CIRCUIT constructed dim={:?} blocks={} seed={} restarts={:?} elapsed={:?}",
+            "CIRCUIT constructed dim={:?} blocks={} delays={:?} seed={} restarts={:?} elapsed={:?}",
             layout.dim,
             placement.block_count,
+            placement.delays,
             report.seed,
             report
                 .restarts
@@ -2124,6 +2131,8 @@ fn diagnose_construct_circuit() -> eyre::Result<()> {
             max_removals_per_round: removals_per_round_from_env("CIRCUIT_REMOVALS_PER_ROUND"),
             repair_optimize: repair_optimize_from_env("CIRCUIT_REPAIR_OPTIMIZE"),
             progress: std::env::var("CIRCUIT_PROGRESS").ok().map(Into::into),
+            timing: std::env::var("CIRCUIT_TIMING").as_deref() == Ok("1"),
+            workers: env_usize("CIRCUIT_WORKERS", 8),
             ..Default::default()
         };
         let (compacted, best, report) = placer.compact(layout, &compaction)?;
@@ -2133,10 +2142,13 @@ fn diagnose_construct_circuit() -> eyre::Result<()> {
         let build = reparsed.build()?;
         let verification = reparsed.verify(&build)?;
         println!(
-            "CIRCUIT compacted dim={:?} blocks={} removed={:?} elapsed={:?} rcell_failures={}",
+            "CIRCUIT compacted dim={:?} blocks={} delays={:?} bounds={:?} removed={:?} delay_reductions={} elapsed={:?} rcell_failures={}",
             compacted.dim,
             result.block_count,
+            result.delays,
+            depth_bounds(placer.netlist()),
             report.removed,
+            report.delay_reductions,
             report.elapsed,
             verification.failures.len()
         );
@@ -2294,6 +2306,10 @@ fn chain_file_name(bits: usize, size: DimSize) -> String {
 /// Knobs: `TILE_OUT` (`target/carry-adder`), `TILE_BITS` (4),
 /// `TILE_LONG_BITS` (`8,16`; empty for none), `TILE_WRITE_BITS` (`4`),
 /// `TILE_SAMPLES` (200), `TILE_WALK` (200), `TILE_COMPACT_SECONDS` (2400),
+/// `TILE_TIMING=1` (timing-first compaction, `CompactionConfig::timing`)
+/// with `TILE_DELAY_OUTPUTS` (`ncout,s`), `TILE_DELAY_WINDOW` (3) and
+/// `TILE_MAX_DELAY_WINDOW` (5), `TILE_STEP_TIMING=<seconds>`
+/// (`ConstructionConfig::step_timing`),
 /// `TILE_SOURCE=<tile .rcell>` (compact and check that tile instead of
 /// constructing one), `TILE_PROGRESS=<directory>` (every accepted step as a
 /// frame for the viewer), `TILE_SNAPSHOT=<dir>.snapshot` (run inside a
@@ -2373,6 +2389,9 @@ fn synthesize_carry_adder() -> eyre::Result<()> {
         output_policies: output_policies.clone(),
         carry: Some(carry.clone()),
         progress: std::env::var("TILE_PROGRESS").ok().map(Into::into),
+        step_timing: std::env::var("TILE_STEP_TIMING")
+            .ok()
+            .map(|seconds| Duration::from_secs(seconds.parse().expect("TILE_STEP_TIMING seconds"))),
         ..Default::default()
     };
     let compaction = CompactionConfig {
@@ -2385,6 +2404,15 @@ fn synthesize_carry_adder() -> eyre::Result<()> {
         output_policies,
         carry: Some(carry.clone()),
         model_params,
+        timing: std::env::var("TILE_TIMING").as_deref() == Ok("1"),
+        delay_outputs: std::env::var("TILE_DELAY_OUTPUTS")
+            .unwrap_or_else(|_| "ncout,s".to_owned())
+            .split(',')
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .collect(),
+        delay_window: env_usize("TILE_DELAY_WINDOW", 3),
+        max_delay_window: env_usize("TILE_MAX_DELAY_WINDOW", 5),
         ..Default::default()
     };
     with_snapshot("TILE_SNAPSHOT", "adder-carry-tile", || {
@@ -2412,14 +2440,22 @@ fn synthesize_carry_adder() -> eyre::Result<()> {
             );
             (layout, placement)
         };
+        println!(
+            "TILE start dim={:?} blocks={} delays={:?}",
+            layout.dim,
+            placement.block_count,
+            layout.timing()?.outputs
+        );
         let (compacted, best, report) = placer.compact(layout, &compaction)?;
         let tile = best.unwrap_or(placement);
         println!(
-            "TILE compacted dim={:?} blocks={} removed={:?} reductions={} elapsed={:?}",
+            "TILE compacted dim={:?} blocks={} delays={:?} removed={:?} reductions={} delay_reductions={} elapsed={:?}",
             compacted.dim,
             tile.block_count,
+            compacted.timing()?.outputs,
             report.removed,
             report.block_reductions,
+            report.delay_reductions,
             report.elapsed
         );
         println!("{}", tile.rcell);
@@ -2460,6 +2496,12 @@ fn synthesize_carry_adder() -> eyre::Result<()> {
                 &format!("exact-adder-carry-chain{bits}"),
             )?;
             let build = chain.build()?;
+            let timing = ExactLayout::from_rcell(&chain)?.timing()?;
+            println!(
+                "TILE chain bits={bits} ticks cout={:?} slowest={:?}",
+                timing.output("cout"),
+                timing.critical()
+            );
             if bits <= exhaustive_bits {
                 let verification = chain.verify(&build)?;
                 println!(
@@ -3169,5 +3211,87 @@ fn diagnose_delay_bound() -> eyre::Result<()> {
     if let ExactOutcome::Placed(placement) = outcome {
         println!("{}", placement.rcell);
     }
+    Ok(())
+}
+
+/// One timing-first compaction window of `WINDOW_SOURCE` (a full adder
+/// `.rcell`), Y slices `WINDOW_LOW..WINDOW_LOW+3`, printing the outcome:
+/// `cargo test --release --lib diagnose_timing_window -- --ignored --nocapture`.
+#[test]
+#[ignore = "diagnostic; run explicitly with --nocapture"]
+fn diagnose_timing_window() -> eyre::Result<()> {
+    let source = std::fs::read_to_string(std::env::var("WINDOW_SOURCE")?)?;
+    let document: crate::physical_cell::PhysicalCellDocument = source.parse()?;
+    let mut layout = ExactLayout::from_rcell(&document)?;
+    let placer = ExactLocalPlacer::new(&full_adder_graph("nor9"))?;
+    let compaction = CompactionConfig {
+        timing: std::env::var("WINDOW_TIMING").as_deref() != Ok("0"),
+        ..Default::default()
+    };
+    layout.delays = layout.timing()?.outputs.into_iter().collect();
+    if std::env::var("WINDOW_GIVEN").as_deref() == Ok("1") {
+        placer.read_signals(&mut layout, &CompactionConfig::default());
+    }
+    println!(
+        "WINDOW delays={:?} outputs={:?} signals={}",
+        layout.delays,
+        layout.outputs,
+        layout.signals.len()
+    );
+    let low = env_usize("WINDOW_LOW", 3);
+    let size = env_usize("WINDOW_SIZE", 3);
+    let exact = placer.window_config(&layout, 1, (low, low + size), None, &compaction)?;
+    println!(
+        "WINDOW timing={} stage_levels={} budgets={:?}",
+        exact.timing, exact.stage_levels, exact.output_delays
+    );
+    let (outcome, stats) = placer.place(&exact)?;
+    match outcome {
+        ExactOutcome::Placed(placement) => println!("WINDOW placed {:?}", placement.delays),
+        other => println!("WINDOW {other:?} {:?}", stats.solve_time),
+    }
+    Ok(())
+}
+
+/// Timing-first compaction never lets an output settle later, and shortens
+/// a path that runs through repeaters when a window can.
+#[test]
+fn timing_compaction_keeps_and_shortens_delays() -> eyre::Result<()> {
+    let placer = ExactLocalPlacer::new(&graph(&[("out", "~(a|b)")]))?;
+    let dim = DimSize(1, 9, 3);
+    let mut config = ExactPlacerConfig::new(dim)
+        .with_input_site("a", Position(0, 0, 1), Direction::Bottom)
+        .with_input_site("b", Position(0, 8, 1), Direction::Bottom)
+        .with_output_sites("out", (0..dim.2).map(|z| Position(0, 4, z)));
+    config.workers = 2;
+    // A slow start: the first seed whose layout routes through repeaters.
+    let mut start = None;
+    for seed in 1..20 {
+        config.seed = seed;
+        let placement = expect_placed(&placer, &config);
+        if placement.delays["out"] >= 3 {
+            start = Some(placement);
+            break;
+        }
+    }
+    let start = start.expect("a layout with repeaters on the path");
+    let layout = ExactLayout::from_placement(dim, &start);
+    let compaction = CompactionConfig {
+        workers: 2,
+        timing: true,
+        axes: Vec::new(),
+        minimize_blocks: false,
+        time_limit: Some(Duration::from_secs(60)),
+        ..Default::default()
+    };
+    let (compacted, best, report) = placer.compact(layout, &compaction)?;
+    let delays = compacted.timing()?.outputs;
+    println!(
+        "TIMINGCOMPACT start={:?} end={delays:?} reductions={}",
+        start.delays, report.delay_reductions
+    );
+    assert!(best.is_some());
+    assert!(delays[0].1 < start.delays["out"]);
+    assert_eq!(delays[0].1, 1, "dust both ways into the torch's block");
     Ok(())
 }

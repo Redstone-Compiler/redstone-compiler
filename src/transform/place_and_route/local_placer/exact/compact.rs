@@ -76,6 +76,19 @@ pub struct CompactionConfig {
     /// Write the layout after every accepted change to this directory, for
     /// watching compaction in the viewer (`progress.rs`).
     pub progress: Option<std::path::PathBuf>,
+    /// Timing first: no change may make an output settle later (redstone
+    /// ticks, `timing.rs`), and each round ends by shortening the outputs'
+    /// paths window by window (`ExactPlacerConfig::timing`).
+    pub timing: bool,
+    /// With `timing`: the outputs whose paths to shorten, most important
+    /// first (a tile's carry before its sum, say). Empty: every output,
+    /// slowest first.
+    pub delay_outputs: Vec<String>,
+    /// Slices re-solved together in each delay window.
+    pub delay_window: usize,
+    /// Wider delay windows tried once a full pass at the current width
+    /// shortens nothing.
+    pub max_delay_window: usize,
 }
 
 impl Default for CompactionConfig {
@@ -106,6 +119,10 @@ impl Default for CompactionConfig {
             no_fold: false,
             carry: None,
             progress: None,
+            timing: false,
+            delay_outputs: Vec::new(),
+            delay_window: 3,
+            max_delay_window: 5,
         }
     }
 }
@@ -117,6 +134,8 @@ pub struct CompactionReport {
     pub attempts: usize,
     /// Accepted window re-solves that saved at least one block.
     pub block_reductions: usize,
+    /// Accepted window re-solves that made an output settle sooner.
+    pub delay_reductions: usize,
     /// Rounds of slice removal followed by block reduction.
     pub rounds: usize,
     pub elapsed: Duration,
@@ -149,6 +168,13 @@ impl ExactLocalPlacer {
                 .time_limit
                 .is_some_and(|limit| started.elapsed() >= limit)
         };
+        if config.timing {
+            // A layout with feedback has no delays to keep.
+            layout.delays = layout
+                .timing()
+                .map(|timing| timing.outputs.into_iter().collect())
+                .unwrap_or_default();
+        }
         if config.given_outside_signals && layout.signals.is_empty() {
             self.read_signals(&mut layout, config);
         }
@@ -160,13 +186,24 @@ impl ExactLocalPlacer {
             let capped = config
                 .max_removals_per_round
                 .is_some_and(|cap| report.removed.len() - removed >= cap);
-            if !config.minimize_blocks || expired() {
+            if !(config.minimize_blocks || config.timing) || expired() {
                 break;
             }
             let reductions = report.block_reductions;
-            self.reduce_blocks(&mut layout, &mut best, &mut report, config, &expired);
+            if config.minimize_blocks {
+                self.reduce_blocks(&mut layout, &mut best, &mut report, config, &expired);
+            }
             let reduced = report.block_reductions > reductions;
-            if !config.repeat_rounds || !(reduced || capped) || expired() {
+            // Paths last: removal and reduction already keep every delay,
+            // and a path window that cannot shorten costs a whole attempt.
+            // Shortening first, a constructed full adder spent its 600 s on
+            // such windows and was not compacted at all.
+            let shortenings = report.delay_reductions;
+            if config.timing && !expired() {
+                self.reduce_delays(&mut layout, &mut best, &mut report, config, &expired);
+            }
+            let shortened = report.delay_reductions > shortenings;
+            if !config.repeat_rounds || !(reduced || capped || shortened) || expired() {
                 break;
             }
         }
@@ -229,7 +266,7 @@ impl ExactLocalPlacer {
                             };
                             let limit = repaired.cells.len().saturating_sub(1);
                             if let (Some(better), _) =
-                                self.optimize_window(&repaired, axis, window, limit, &quick)
+                                self.optimize_window(&repaired, axis, window, Some(limit), &quick)
                             {
                                 placement = better;
                             }
@@ -311,7 +348,7 @@ impl ExactLocalPlacer {
             report.attempts += 1;
             let window = (low, low + config.reduction_window);
             let (placement, optimal) = if optimize {
-                self.optimize_window(layout, axis, window, limit, config)
+                self.optimize_window(layout, axis, window, Some(limit), config)
             } else {
                 (
                     self.resolve_window(layout, axis, window, Some(limit), config),
@@ -357,6 +394,128 @@ impl ExactLocalPlacer {
         }
     }
 
+    /// Shortens the outputs' paths, one output at a time in priority order:
+    /// slides a `delay_window`-slice window along each reduction axis, asking
+    /// for the output a tick sooner and every other output no later, and
+    /// widens the window after a full pass that gains nothing, until
+    /// `max_delay_window` gains nothing either or the output reaches its
+    /// logic depth.
+    fn reduce_delays(
+        &self,
+        layout: &mut ExactLayout,
+        best: &mut Option<ExactPlacement>,
+        report: &mut CompactionReport,
+        config: &CompactionConfig,
+        expired: &impl Fn() -> bool,
+    ) {
+        let bounds = super::timing::depth_bounds(&self.netlist);
+        let targets = if config.delay_outputs.is_empty() {
+            let mut outputs = layout.delays.clone().into_iter().collect::<Vec<_>>();
+            outputs.sort_by_key(|(name, ticks)| (std::cmp::Reverse(*ticks), name.clone()));
+            outputs.into_iter().map(|(name, _)| name).collect()
+        } else {
+            config.delay_outputs.clone()
+        };
+        let windows_of = |layout: &ExactLayout, size: usize| {
+            config
+                .reduction_axes
+                .iter()
+                .flat_map(|&axis| {
+                    let length = if axis == 1 {
+                        layout.dim.1
+                    } else {
+                        layout.dim.2
+                    };
+                    (0..length.saturating_sub(size.saturating_sub(1)).max(1))
+                        .map(move |low| (axis, low))
+                })
+                .collect::<Vec<_>>()
+        };
+        for target in targets {
+            let mut size = config.delay_window;
+            let mut windows = windows_of(layout, size);
+            let mut next = 0;
+            let mut idle = 0;
+            loop {
+                if expired() {
+                    return;
+                }
+                let Some(&ticks) = layout.delays.get(&target) else {
+                    break;
+                };
+                if bounds.get(&target).is_some_and(|&bound| ticks <= bound) {
+                    break;
+                }
+                if idle >= windows.len() {
+                    if size >= config.max_delay_window {
+                        break;
+                    }
+                    size += 1;
+                    windows = windows_of(layout, size);
+                    next = 0;
+                    idle = 0;
+                }
+                let (axis, low) = windows[next];
+                next = (next + 1) % windows.len();
+                idle += 1;
+                let window = (low, low + size);
+                // A window off the slowest path cannot shorten it.
+                let on_path = critical_path(layout, &target).iter().any(|position| {
+                    let value = if axis == 1 { position.1 } else { position.2 };
+                    value >= window.0 && value < window.1
+                });
+                if !on_path {
+                    continue;
+                }
+                let mut sooner = layout.clone();
+                sooner.delays.insert(target.clone(), ticks - 1);
+                report.attempts += 1;
+                let Some(mut placement) = self.resolve_window(&sooner, axis, window, None, config)
+                else {
+                    continue;
+                };
+                if let Some(budget) = config.repair_optimize {
+                    // Keep the shorter path, then trade dead blocks away.
+                    let found = ExactLayout::from_placement(layout.dim, &placement);
+                    let quick = CompactionConfig {
+                        attempt_time_limit: budget,
+                        ..config.clone()
+                    };
+                    let limit = found.cells.len().saturating_sub(1);
+                    if let (Some(better), _) =
+                        self.optimize_window(&found, axis, window, Some(limit), &quick)
+                    {
+                        placement = better;
+                    }
+                }
+                let now = placement.delays.get(&target).copied().unwrap_or(ticks);
+                tracing::info!(
+                    axis,
+                    low,
+                    size,
+                    output = target.as_str(),
+                    ticks = now,
+                    blocks = placement.block_count,
+                    "compaction delay reduction"
+                );
+                super::progress::record_frame(
+                    config.progress.as_deref(),
+                    &self.name,
+                    &format!(
+                        "delay {target} {now} {}{low}-{}",
+                        axis_name(axis),
+                        low + size - 1
+                    ),
+                    &placement,
+                );
+                *layout = ExactLayout::from_placement(layout.dim, &placement);
+                *best = Some(placement);
+                report.delay_reductions += 1;
+                idle = 0;
+            }
+        }
+    }
+
     /// Minimizes the block count inside a window along `axis` (at most
     /// `limit` blocks overall). Returns the improved placement, if any, and
     /// whether the window is proven optimal (no layout with fewer blocks
@@ -366,10 +525,10 @@ impl ExactLocalPlacer {
         layout: &ExactLayout,
         axis: usize,
         window: (usize, usize),
-        limit: usize,
+        limit: Option<usize>,
         config: &CompactionConfig,
     ) -> (Option<ExactPlacement>, bool) {
-        match self.window_config(layout, axis, window, Some(limit), config) {
+        match self.window_config(layout, axis, window, limit, config) {
             Ok(mut exact) => {
                 exact.optimize = true;
                 match self.place(&exact) {
@@ -466,6 +625,23 @@ impl ExactLocalPlacer {
         exact.tuning = config.tuning.clone();
         exact.model_params = config.model_params.clone();
         exact.max_blocks = max_blocks;
+        if config.timing {
+            // `Stage` only has to hold arrival times: the longest path in
+            // the box, with room for a window's dead ends to run a little
+            // longer (a cut may not be analyzable; its parent's delays still
+            // bound the outputs). Fewer levels than the default also solve
+            // faster (XOR 2x6x4 in 5 ticks: 3 s with 6 levels, no answer in
+            // 90 s with 24).
+            let longest = cut
+                .timing()
+                .ok()
+                .and_then(|timing| timing.arrival.values().copied().max())
+                .unwrap_or(0);
+            let slowest = cut.delays.values().copied().max().unwrap_or(0);
+            exact.timing = true;
+            exact.stage_levels = longest.max(slowest) + 2;
+            exact.output_delays = cut.delays.clone();
+        }
         for (name, position, attach) in &cut.inputs {
             exact = exact.with_input_site(name.clone(), *position, *attach);
         }
@@ -497,6 +673,17 @@ impl ExactLocalPlacer {
         }
         Ok(exact)
     }
+}
+
+/// The cells of the slowest path to `output` (empty without one).
+fn critical_path(layout: &ExactLayout, output: &str) -> Vec<Position> {
+    let Some(&(_, position)) = layout.outputs.iter().find(|(name, _)| name == output) else {
+        return Vec::new();
+    };
+    layout
+        .timing()
+        .map(|timing| timing.path(position))
+        .unwrap_or_default()
 }
 
 impl ExactLocalPlacer {

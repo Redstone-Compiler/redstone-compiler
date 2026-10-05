@@ -295,6 +295,13 @@ pub struct ConstructionConfig {
     /// Write the layout after every step of the successful attempt to this
     /// directory, for watching construction in the viewer (`progress.rs`).
     pub progress: Option<std::path::PathBuf>,
+    /// After each step, ask for its nets sooner (`ExactPlacerConfig::timing`):
+    /// each observed net at most its lower bound (the latest of its inputs'
+    /// arrivals, plus a tick unless it is an OR a block can carry) plus a
+    /// slack of 0, 1, 2, 4, ... ticks, each solve this long, until one
+    /// succeeds or no net could gain; `step_optimize` then keeps the delays
+    /// reached. `None` builds without regard to timing.
+    pub step_timing: Option<Duration>,
 }
 
 impl Default for ConstructionConfig {
@@ -329,6 +336,7 @@ impl Default for ConstructionConfig {
             carry: None,
             carry_step_time_limit: None,
             progress: None,
+            step_timing: None,
         }
     }
 }
@@ -383,6 +391,19 @@ struct StepState {
     placed_inputs: BTreeMap<String, (Position, Direction)>,
     available: BTreeSet<NetId>,
     result: Option<(DimSize, ExactPlacement)>,
+}
+
+/// Bounds every output of `exact` by its delay in `placement`, with `Stage`
+/// sized to the placement's longest path (see `CompactionConfig::timing`).
+fn keep_delays(exact: &mut ExactPlacerConfig, placement: &ExactPlacement) {
+    let cells = placement.cells.iter().copied().collect();
+    let longest = super::timing::analyze(exact.dim, &cells, &[])
+        .ok()
+        .and_then(|timing| timing.arrival.values().copied().max())
+        .unwrap_or(exact.stage_levels);
+    exact.timing = true;
+    exact.stage_levels = longest + 2;
+    exact.output_delays = placement.delays.clone();
 }
 
 impl ExactLocalPlacer {
@@ -566,6 +587,105 @@ impl ExactLocalPlacer {
             "construction step diagnosed"
         );
         Ok(())
+    }
+
+    /// The fewest ticks each net a step observes could take: nets placed
+    /// before arrive as they did on the previous step's last slice, inputs
+    /// placed now at once, and each new gate a tick after its latest input,
+    /// or with its inner gate's inputs if it is an OR over a NOR of the same
+    /// step (a block carries it). Keyed by net name and by output name.
+    fn step_lower_bounds(&self, gates: &[NetId], state: &StepState) -> BTreeMap<String, usize> {
+        let netlist = &self.netlist;
+        let previous = state
+            .result
+            .as_ref()
+            .map(|(_, placement)| &placement.delays);
+        let mut lower = BTreeMap::<NetId, usize>::new();
+        for &net in &state.available {
+            let ticks = previous
+                .and_then(|delays| delays.get(&netlist.nets[net].name))
+                .copied()
+                .unwrap_or(0);
+            lower.insert(net, ticks);
+        }
+        for &gate in gates {
+            let arrival =
+                |net: NetId, lower: &BTreeMap<NetId, usize>| lower.get(&net).copied().unwrap_or(0);
+            let inputs = &netlist.nets[gate].gate_inputs;
+            let nor = inputs
+                .iter()
+                .map(|&net| arrival(net, &lower))
+                .max()
+                .unwrap_or(0)
+                + 1;
+            let or = match inputs[..] {
+                [inner] if gates.contains(&inner) => netlist.nets[inner]
+                    .gate_inputs
+                    .iter()
+                    .map(|&net| arrival(net, &lower))
+                    .max(),
+                _ => None,
+            };
+            lower.insert(gate, or.map_or(nor, |or| or.min(nor)));
+        }
+        let mut named = lower
+            .iter()
+            .map(|(&net, &ticks)| (netlist.nets[net].name.clone(), ticks))
+            .collect::<BTreeMap<_, _>>();
+        for (name, net) in &netlist.outputs {
+            if let Some(&ticks) = lower.get(net) {
+                named.insert(name.clone(), ticks);
+            }
+        }
+        named
+    }
+
+    /// Re-solves a step with its observed nets sooner (see
+    /// `ConstructionConfig::step_timing`); returns the step's layout as found
+    /// when no slack below its own delays succeeds.
+    fn shorten_step(
+        &self,
+        exact: &ExactPlacerConfig,
+        placement: ExactPlacement,
+        lower: &BTreeMap<String, usize>,
+        budget: Duration,
+        deadline: Option<Instant>,
+    ) -> ExactPlacement {
+        let found = placement.delays.clone();
+        let mut slack = 0;
+        loop {
+            let budgets = found
+                .iter()
+                .map(|(name, &ticks)| {
+                    let bound = lower
+                        .get(name)
+                        .map_or(ticks, |&bound| ticks.min(bound + slack));
+                    (name.clone(), bound)
+                })
+                .collect::<BTreeMap<_, _>>();
+            if budgets == found {
+                return placement;
+            }
+            let remaining =
+                deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
+            if remaining.is_some_and(|remaining| remaining.is_zero()) {
+                return placement;
+            }
+            let mut sooner = exact.clone();
+            keep_delays(&mut sooner, &placement);
+            sooner.output_delays = budgets;
+            sooner.time_limit = Some(remaining.map_or(budget, |remaining| remaining.min(budget)));
+            if let Ok((ExactOutcome::Placed(better), _)) = self.place(&sooner) {
+                tracing::info!(
+                    slack,
+                    before = ?found,
+                    after = ?better.delays,
+                    "construction step shortened"
+                );
+                return *better;
+            }
+            slack = if slack == 0 { 1 } else { slack * 2 };
+        }
     }
 
     /// The gates of a construction step, as one name.
@@ -817,6 +937,11 @@ impl ExactLocalPlacer {
                 continue;
             };
             let mut placement = placement;
+            if let Some(budget) = config.step_timing {
+                let lower = self.step_lower_bounds(gates, state);
+                placement =
+                    Box::new(self.shorten_step(&exact, *placement, &lower, budget, deadline));
+            }
             if let Some(budget) = config.step_optimize {
                 // Trade the window's dead wires away while it is small: ask
                 // for fewer blocks than the layout just found, minimizing.
@@ -825,6 +950,9 @@ impl ExactLocalPlacer {
                 let mut tighter = exact.clone();
                 tighter.optimize = true;
                 tighter.max_blocks = Some(placement.cells.len().saturating_sub(1));
+                if config.step_timing.is_some() {
+                    keep_delays(&mut tighter, &placement);
+                }
                 tighter.time_limit =
                     Some(remaining.map_or(budget, |remaining| remaining.min(budget)));
                 if let Ok((ExactOutcome::Placed(better), _)) = self.place(&tighter) {
