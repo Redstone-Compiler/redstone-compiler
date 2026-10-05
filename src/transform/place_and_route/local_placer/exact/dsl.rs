@@ -488,12 +488,30 @@ impl Prepared {
                     IValue::member("Repeater", vec![IValue::sym(direction_name(direction))])
                 }
                 CellKind::Switch(attach) => {
-                    let Some(&(_, _, net)) = self
+                    // The input whose switch this is: the one with a site
+                    // here, and of several, the one with no other site (a
+                    // placed switch kept fixed while another input is new).
+                    let owners = self
                         .sites
                         .iter()
-                        .find(|&&(c, a, _)| c == cell && a == attach)
-                    else {
-                        bail!("fixed cell {position:?} cannot hold {kind:?}");
+                        .filter(|&&(c, a, _)| c == cell && a == attach)
+                        .map(|&(_, _, net)| net)
+                        .collect::<Vec<_>>();
+                    let only_here =
+                        |net: NetId| self.sites.iter().filter(|site| site.2 == net).count() == 1;
+                    let net = match owners[..] {
+                        [] => bail!("fixed cell {position:?} cannot hold {kind:?}"),
+                        [net] => net,
+                        _ => match owners
+                            .iter()
+                            .filter(|&&net| only_here(net))
+                            .collect::<Vec<_>>()[..]
+                        {
+                            [&net] => net,
+                            _ => {
+                                bail!("fixed switch at {position:?} could belong to several inputs")
+                            }
+                        },
                     };
                     IValue::member(
                         "Switch",

@@ -688,6 +688,82 @@ impl ExactLocalPlacer {
         }
     }
 
+    /// Diagnostic hook: with `EXACT_DIAGNOSE_INFEASIBLE`, a step proven
+    /// infeasible is solved again with one requirement dropped at a time,
+    /// and each outcome is logged, so the requirement that makes it
+    /// impossible shows.
+    fn diagnose_infeasible_step(&self, exact: &ExactPlacerConfig, gate: &str, window: usize) {
+        for (name, sites) in &exact.input_sites {
+            if let [(position, attach)] = sites[..] {
+                let around = [
+                    Direction::East,
+                    Direction::West,
+                    Direction::North,
+                    Direction::South,
+                    Direction::Top,
+                    Direction::Bottom,
+                ]
+                .map(|direction| {
+                    let neighbor = position.walk(direction).filter(|p| exact.dim.bound_on(*p));
+                    (
+                        direction,
+                        neighbor.map(|p| exact.fixed_cells.get(&p).copied()),
+                    )
+                });
+                tracing::info!(
+                    gate,
+                    window,
+                    input = name.as_str(),
+                    ?position,
+                    ?attach,
+                    dim = ?exact.dim,
+                    ?around,
+                    "infeasible step input"
+                );
+            }
+        }
+        let mut variants = Vec::<(String, ExactPlacerConfig)>::new();
+        let mut given = exact.clone();
+        given.given_signals.clear();
+        variants.push(("no given signals".to_owned(), given));
+        if let Some(observations) = &exact.observations {
+            for (index, (net, _)) in observations.iter().enumerate() {
+                let mut fewer = exact.clone();
+                fewer.observations.as_mut().unwrap().remove(index);
+                let name = self.netlist.nets[*net].name.clone();
+                variants.push((format!("without observing {name}"), fewer));
+            }
+        }
+        for (name, sites) in &exact.input_sites {
+            if sites.len() > 1 {
+                continue;
+            }
+            let mut free = exact.clone();
+            free.input_sites.remove(name);
+            variants.push((format!("input {name} anywhere"), free));
+        }
+        let mut unfrozen = exact.clone();
+        unfrozen
+            .fixed_cells
+            .retain(|_, kind| !matches!(kind, CellKind::Air));
+        variants.push(("frozen air free".to_owned(), unfrozen));
+        for (label, mut variant) in variants {
+            variant.time_limit = Some(Duration::from_secs(20));
+            let outcome = self.place(&variant).map(|(outcome, _)| match outcome {
+                ExactOutcome::Placed(_) => "placed",
+                ExactOutcome::Infeasible => "infeasible",
+                ExactOutcome::Unknown { .. } => "unknown",
+            });
+            tracing::info!(
+                gate,
+                window,
+                variant = label.as_str(),
+                ?outcome,
+                "infeasible step diagnosed"
+            );
+        }
+    }
+
     /// The gates of a construction step, as one name.
     fn step_name(&self, gates: &[NetId]) -> String {
         gates
@@ -877,6 +953,18 @@ impl ExactLocalPlacer {
                             .collect(),
                         None => sites_in(dim, frozen..dim.1, policy),
                     };
+                    // A cell holds one switch: leave out the ones placed
+                    // before (a kept switch in the overlap is a fixed cell
+                    // the new input must not claim).
+                    let sites = sites
+                        .into_iter()
+                        .filter(|(position, _)| {
+                            !state
+                                .placed_inputs
+                                .values()
+                                .any(|(placed, _)| placed == position)
+                        })
+                        .collect();
                     exact.input_sites.insert(name.clone(), sites);
                 } else {
                     exact.absent_inputs.insert(name.clone());
@@ -933,6 +1021,11 @@ impl ExactLocalPlacer {
                 );
                 if matches!(outcome, ExactOutcome::Unknown { .. }) {
                     self.diagnose_failed_step(&exact, &gate_name, window)?;
+                }
+                if matches!(outcome, ExactOutcome::Infeasible)
+                    && std::env::var("EXACT_DIAGNOSE_INFEASIBLE").is_ok()
+                {
+                    self.diagnose_infeasible_step(&exact, &gate_name, window);
                 }
                 continue;
             };
