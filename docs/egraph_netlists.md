@@ -379,7 +379,9 @@ The circuit harness takes `EGRAPH_DEPTH`, `EGRAPH_OR_COST`,
 `CIRCUIT_ORDER=min-live`, besides the box and step knobs
 (`CIRCUIT_HEIGHT`, `CIRCUIT_MAX_WINDOW`, `CIRCUIT_STEP_SECONDS`,
 `CIRCUIT_RESTART_SECONDS`). `CIRCUIT_NETLIST_ONLY=1` prints the netlist,
-its live nets and its continuing inputs, and stops.
+its live nets and its continuing inputs, and stops. The harness also prints
+each construction step: the gate, the input cases it is on in, its
+continuing inputs, and the nets alive after it.
 
 To see why a step times out, set `EXACT_DIAGNOSE_UNKNOWN=1` (with
 `EXACT_DIAGNOSE_VARIANT_SECONDS`, default 20). To solve that step again

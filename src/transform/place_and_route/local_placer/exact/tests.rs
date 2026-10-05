@@ -1967,6 +1967,75 @@ fn continuing_inputs_each_step(
         .collect()
 }
 
+/// The netlist in construction order, one step per line: the gate, the
+/// input cases it is on in (bits in input order), its inputs that later
+/// steps use again, and the nets alive after the step.
+fn print_construction_steps(netlist: &NorNetlist, order: GateOrder, early_outputs: bool) {
+    let names = netlist.input_names();
+    let values = netlist.net_values();
+    let gates = construct::gate_order(netlist, order);
+    let kept = if early_outputs {
+        BTreeSet::new()
+    } else {
+        netlist.outputs.iter().map(|(_, net)| *net).collect()
+    };
+    let name = |net: NetId| netlist.nets[net].name.as_str();
+    let used_after = |net: NetId, step: usize| {
+        kept.contains(&net)
+            || gates[step + 1..]
+                .iter()
+                .any(|&gate| netlist.nets[gate].gate_inputs.contains(&net))
+    };
+    println!("CIRCUIT steps {order:?}, cases as {}:", names.join(" "));
+    let mut placed = BTreeSet::new();
+    for (step, &gate) in gates.iter().enumerate() {
+        let net = &netlist.nets[gate];
+        let kind = if net.driver == NetDriver::Or {
+            "OR"
+        } else {
+            "NOR"
+        };
+        let inputs = net.gate_inputs.iter().map(|&input| name(input));
+        let continuing = net
+            .gate_inputs
+            .iter()
+            .filter(|&&input| used_after(input, step))
+            .map(|&input| name(input));
+        let on = (0..1usize << names.len())
+            .filter(|&case| values[gate][case])
+            .map(|case| {
+                (0..names.len())
+                    .map(|bit| if case >> bit & 1 == 1 { '1' } else { '0' })
+                    .collect::<String>()
+            });
+        placed.insert(gate);
+        placed.extend(net.gate_inputs.iter().copied());
+        let live = placed
+            .iter()
+            .filter(|&&net| used_after(net, step))
+            .map(|&net| name(net));
+        let output = netlist.outputs.iter().find(|(_, net)| *net == gate).map_or(
+            String::new(),
+            |(output, _)| {
+                if output == name(gate) {
+                    " (output)".to_owned()
+                } else {
+                    format!(" (output {output})")
+                }
+            },
+        );
+        println!(
+            "CIRCUIT step {:>2}: {} = {kind}({}){output}\n    on [{}]\n    continuing [{}]\n    live after [{}]",
+            step + 1,
+            name(gate),
+            inputs.collect::<Vec<_>>().join(", "),
+            on.collect::<Vec<_>>().join(" "),
+            continuing.collect::<Vec<_>>().join(", "),
+            live.collect::<Vec<_>>().join(", "),
+        );
+    }
+}
+
 /// The small circuits the construction harnesses measure, by name.
 fn circuit_graph(circuit: &str) -> eyre::Result<LogicGraph> {
     let (assignments, internal): (Vec<(&str, &str)>, Vec<&str>) = match circuit {
@@ -2176,6 +2245,11 @@ fn diagnose_construct_circuit() -> eyre::Result<()> {
             );
         }
     }
+    print_construction_steps(
+        netlist,
+        gate_order_from_env("CIRCUIT_ORDER"),
+        std::env::var("CIRCUIT_EARLY_OUTPUTS").as_deref() != Ok("0"),
+    );
     if std::env::var("CIRCUIT_NETLIST_ONLY").as_deref() == Ok("1") {
         return Ok(());
     }
