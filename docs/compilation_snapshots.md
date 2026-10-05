@@ -97,6 +97,13 @@ and frame count. The viewer shows the sequences under Frames and plays them
 with previous/next/play controls, a slider and the arrow keys, keeping one
 camera so the layout changes in place.
 
+The viewer's address names what is open, so links and the back and forward
+buttons work: `?example=<name>` opens an NBT or `.rsnap` from its example
+list (`?snapshot=<path>` a served `.rsnap`, `?frames=<path>/frames.json` a
+plain frame directory); inside a snapshot `&nbt=<artifact>` opens one of its
+NBTs and `&sequence=<name>&frame=<n>` one frame of a recording. Stepping
+through frames updates `frame` without adding history entries.
+
 `summary.json` records status, total elapsed time, selected placement and route
 metrics, and typed compilation events. Failed compilation scopes still write a
 summary and manifest with `status: "failed"`.

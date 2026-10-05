@@ -541,6 +541,13 @@ let traceAnimationToken = 0;
 let waveformResizeFrame: number | undefined;
 let graphDot: GraphDotInfo | undefined;
 let currentOutputMetadataJson: string | undefined;
+// What the file panel lists, so going back can restore the example list.
+let browserMode: 'examples' | 'snapshot' | 'frames' | 'folder' = 'examples';
+let exampleCache: ExampleFile[] | undefined;
+let openedExampleName: string | undefined;
+// While the page follows its address (load, back, forward), opening things
+// must not write new history entries.
+let applyingUrl = false;
 let graphTab: GraphTab = 'world';
 let graphWorldModeValue: GraphWorldMode = 'raw';
 let graphLogicModeValue: GraphLogicMode = 'raw';
@@ -2100,6 +2107,7 @@ function parseSnapshotConstraints(reportValue: unknown, resolvedValue: unknown):
 }
 
 function renderSnapshotBrowser(snapshot: LoadedSnapshot): void {
+  browserMode = 'snapshot';
   filesList.replaceChildren();
   filesList.className = 'files-list snapshot-files-list';
   filesTitle.textContent = 'Snapshot';
@@ -2136,6 +2144,7 @@ function renderSnapshotBrowser(snapshot: LoadedSnapshot): void {
       button.addEventListener('click', () => {
         filesList.querySelectorAll('.file-entry.selected').forEach(entry => entry.classList.remove('selected'));
         button.classList.add('selected');
+        updateUrl({ nbt: null, sequence: sequence.sequence, frame: null });
         void playSnapshotFrames(snapshot, sequence.path).catch(error => {
           inspector.textContent = error instanceof Error ? error.message : String(error);
         });
@@ -2232,7 +2241,9 @@ function appendSnapshotNbtEntry(
   if (!file || target !== 'main') return;
   const button = createFileEntry(label, 'NBT', file.size);
   button.dataset.snapshotPath = path;
-  button.addEventListener('click', () => void openSnapshotNbt(path, button));
+  button.addEventListener('click', () => {
+    void openSnapshotNbt(path, button).then(() => updateUrl({ nbt: path, sequence: null, frame: null }));
+  });
   parent.append(button);
 }
 
@@ -3028,6 +3039,7 @@ function compilerPositionToNbt(position: [number, number, number]): [number, num
 }
 
 function renderFileBrowser(files: File[]): void {
+  browserMode = 'folder';
   leaveSnapshotMode();
   clearProgressFrames();
   const nbtFiles = files
@@ -3151,6 +3163,7 @@ async function startProgressFrames(
 }
 
 function renderProgressFrameList(): void {
+  browserMode = 'frames';
   filesList.replaceChildren();
   filesTitle.textContent = 'Frames';
   filesCount.textContent = `${progressFrames.length} frames`;
@@ -3192,6 +3205,7 @@ async function showProgressFrame(index: number): Promise<void> {
   entry?.scrollIntoView({ block: 'nearest' });
   framesSlider.value = String(index);
   framesLabel.textContent = `${index + 1}/${progressFrames.length}  ${frame.label}  ${frame.blocks} blocks  ${frame.size.join('x')}`;
+  updateUrl({ frame: String(index + 1) }, true);
 }
 
 function stopProgressPlayback(): void {
@@ -3242,50 +3256,120 @@ window.addEventListener('keydown', event => {
   stepProgress(event.key === 'ArrowLeft' ? -1 : 1);
 });
 
-async function loadExamples(): Promise<void> {
-  const snapshotPath = new URLSearchParams(window.location.search).get('snapshot');
-  if (snapshotPath) {
-    try {
+
+async function exampleList(): Promise<ExampleFile[]> {
+  if (!exampleCache) {
+    const response = await fetch(resolveAssetPath('examples/manifest.json'));
+    if (!response.ok) throw new Error(`Failed to load examples: ${response.status}`);
+    exampleCache = (await response.json()) as ExampleFile[];
+  }
+  return exampleCache;
+}
+
+/** Makes `params` the page's address: a new history entry, or with `replace` the current one. */
+function setUrl(params: URLSearchParams, replace = false): void {
+  if (applyingUrl) return;
+  const search = params.toString();
+  const url = `${window.location.pathname}${search ? `?${search}` : ''}`;
+  if (url === `${window.location.pathname}${window.location.search}`) return;
+  if (replace) window.history.replaceState(null, '', url);
+  else window.history.pushState(null, '', url);
+}
+
+/** Sets (or, with `null`, removes) parameters on top of the current address. */
+function updateUrl(changes: Record<string, string | null>, replace = false): void {
+  const params = new URLSearchParams(window.location.search);
+  for (const [key, value] of Object.entries(changes)) {
+    if (value === null) params.delete(key);
+    else params.set(key, value);
+  }
+  setUrl(params, replace);
+}
+
+/**
+ * Opens what the address names: `example=<name>` (an NBT or an `.rsnap` from
+ * the example list), `snapshot=<path>` (a served `.rsnap`), or
+ * `frames=<path>/frames.json`; inside a snapshot `nbt=<artifact>` or
+ * `sequence=<name>`, and `frame=<n>` for a recording. Runs on load and on
+ * back and forward.
+ */
+async function applyUrl(): Promise<void> {
+  applyingUrl = true;
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const framesPath = params.get('frames');
+    if (framesPath) {
+      await loadProgressFrames(framesPath);
+      await showUrlFrame(params);
+      return;
+    }
+    const snapshotPath = params.get('snapshot');
+    if (snapshotPath) {
       const response = await fetch(resolveAssetPath(snapshotPath));
       if (!response.ok) throw new Error(`Failed to load ${snapshotPath}: ${response.status}`);
       const name = snapshotPath.split('/').pop() ?? 'snapshot.rsnap';
+      openedExampleName = undefined;
       await openSnapshot([new File([await response.arrayBuffer()], name, { type: 'application/octet-stream' })]);
-    } catch (error) {
-      inspector.textContent = error instanceof Error ? error.message : String(error);
+    } else {
+      const examples = await exampleList();
+      const requested = params.get('example');
+      const example = examples.find(candidate => candidate.path === requested || candidate.name === requested)
+        ?? examples.find(candidate => candidate.kind === 'nbt');
+      if (!example) return;
+      if (example.kind === 'snapshot' && openedExampleName === example.name && currentSnapshot) {
+        // Same snapshot, another view of it: no need to unpack it again.
+        clearProgressFrames();
+      } else {
+        if (example.kind === 'nbt' && browserMode !== 'examples') renderExampleBrowser(examples);
+        await openExample(example, findExampleEntry(example.path));
+      }
+      if (example.kind === 'nbt') return;
     }
-    return;
-  }
-  const framesPath = new URLSearchParams(window.location.search).get('frames');
-  if (framesPath) {
-    try {
-      await loadProgressFrames(framesPath);
-    } catch (error) {
-      filesList.classList.add('empty');
-      filesCount.textContent = 'No frames';
-      filesList.textContent = error instanceof Error ? error.message : String(error);
+    const snapshot = currentSnapshot;
+    if (!snapshot) return;
+    const nbt = params.get('nbt');
+    const sequence = (snapshot.manifest.frames ?? []).find(candidate => candidate.sequence === params.get('sequence'));
+    if (nbt && snapshot.filesByPath.has(nbt)) {
+      await openSnapshotNbt(nbt, findSnapshotEntry(nbt));
+    } else if (sequence) {
+      await playSnapshotFrames(snapshot, sequence.path);
+      await showUrlFrame(params);
+    } else if (snapshot.manifest.final_nbt && snapshot.filesByPath.has(snapshot.manifest.final_nbt)) {
+      await openSnapshotNbt(snapshot.manifest.final_nbt, findSnapshotEntry(snapshot.manifest.final_nbt));
     }
-    return;
+  } catch (error) {
+    inspector.textContent = error instanceof Error ? error.message : String(error);
+  } finally {
+    applyingUrl = false;
   }
+}
+
+async function showUrlFrame(params: URLSearchParams): Promise<void> {
+  const frame = Number(params.get('frame'));
+  if (Number.isInteger(frame) && frame >= 1 && frame <= progressFrames.length) {
+    await showProgressFrame(frame - 1);
+  }
+}
+
+async function loadExamples(): Promise<void> {
   try {
-    const response = await fetch(resolveAssetPath('examples/manifest.json'));
-    if (!response.ok) throw new Error(`Failed to load examples: ${response.status}`);
-    const examples = (await response.json()) as ExampleFile[];
-    renderExampleBrowser(examples);
-    const requestedExample = new URLSearchParams(window.location.search).get('example');
-    const initialExample = examples.find(example =>
-      example.path === requestedExample || example.name === requestedExample,
-    ) ?? examples.find(example => example.kind === 'nbt');
-    if (initialExample) {
-      await openExample(initialExample, findExampleEntry(initialExample.path));
-    }
+    renderExampleBrowser(await exampleList());
   } catch (error) {
     filesList.classList.add('empty');
     filesCount.textContent = 'No examples';
     filesList.textContent = error instanceof Error ? error.message : String(error);
+    return;
   }
+  await applyUrl();
 }
 
+window.addEventListener('popstate', () => {
+  stopProgressPlayback();
+  void applyUrl();
+});
+
 function renderExampleBrowser(examples: ExampleFile[]): void {
+  browserMode = 'examples';
   filesList.replaceChildren();
   filesTitle.textContent = 'Files';
   filesList.classList.toggle('empty', examples.length === 0);
@@ -3316,7 +3400,12 @@ function appendExampleEntry(example: ExampleFile): void {
   size.className = 'file-entry-size';
   size.textContent = formatBytes(example.size);
   button.append(name, size);
-  button.addEventListener('click', () => void openExample(example, button));
+  button.addEventListener('click', () => {
+    setUrl(new URLSearchParams({ example: example.name }));
+    void openExample(example, button).catch(error => {
+      inspector.textContent = error instanceof Error ? error.message : String(error);
+    });
+  });
   filesList.append(button);
 }
 
@@ -3328,6 +3417,7 @@ function findExampleEntry(path: string): Element | null {
 
 async function openExample(example: ExampleFile, selectedEntry?: Element | null): Promise<void> {
   clearProgressFrames();
+  openedExampleName = example.name;
   const response = await fetch(resolveAssetPath(example.path));
   if (!response.ok) throw new Error(`Failed to load ${example.path}: ${response.status}`);
   const file = new File([await response.arrayBuffer()], example.name, { type: 'application/octet-stream' });
