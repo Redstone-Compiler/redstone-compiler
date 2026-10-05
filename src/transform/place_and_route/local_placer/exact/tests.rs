@@ -2049,8 +2049,9 @@ fn diagnose_construct_circuit() -> eyre::Result<()> {
     let circuit = std::env::var("CIRCUIT").unwrap_or_else(|_| "mux2".to_owned());
     // `egraph-full-adder`: the cheapest netlist the e-graph holds
     // (`Exploration::extract_exact`) within `EGRAPH_DEPTH` (any), with
-    // `EGRAPH_OR_COST` (0) per OR node, and only 2-input NORs with
-    // `EGRAPH_BINARY=1`.
+    // `EGRAPH_OR_COST` (0) per OR node, only 2-input NORs with
+    // `EGRAPH_BINARY=1`, and wide NORs built from OR nets with
+    // `EGRAPH_SPLIT=1`.
     let placer = match circuit.as_str() {
         "egraph-full-adder" => {
             let (inputs, outputs) = full_adder_functions();
@@ -2062,6 +2063,7 @@ fn diagnose_construct_circuit() -> eyre::Result<()> {
                     .transpose()?,
                 or_cost: env_usize("EGRAPH_OR_COST", 0),
                 binary: std::env::var("EGRAPH_BINARY").as_deref() == Ok("1"),
+                split_wide: std::env::var("EGRAPH_SPLIT").as_deref() == Ok("1"),
                 ..Default::default()
             };
             let extraction = exploration
@@ -2101,13 +2103,18 @@ fn diagnose_construct_circuit() -> eyre::Result<()> {
             .collect::<Vec<_>>(),
         netlist.gates().count()
     );
-    for gate in netlist.gates() {
-        let inputs = netlist.nets[gate]
+    for (net, driver) in netlist.nets.iter().enumerate().map(|(i, n)| (i, &n.driver)) {
+        let kind = match driver {
+            NetDriver::Input(_) => continue,
+            NetDriver::Gate => "NOR",
+            NetDriver::Or => "OR",
+        };
+        let inputs = netlist.nets[net]
             .gate_inputs
             .iter()
             .map(|&input| netlist.nets[input].name.as_str())
             .collect::<Vec<_>>();
-        println!("CIRCUIT gate {} = NOR{inputs:?}", netlist.nets[gate].name);
+        println!("CIRCUIT gate {} = {kind}{inputs:?}", netlist.nets[net].name);
     }
     let all_outputs = netlist
         .outputs
@@ -3595,6 +3602,25 @@ fn egraph_netlists_compute_the_full_adder() -> eyre::Result<()> {
         .values()
         .all(|&depth| depth <= 3));
     assert!(exploration.extract_exact(&within(2))?.is_none());
+    // Split, the 8 gates read at most two signals each, OR nets included.
+    let split = exploration
+        .extract_exact(&ExtractOptions {
+            split_wide: true,
+            ..Default::default()
+        })?
+        .expect("a netlist");
+    assert_eq!(output_functions(&split.netlist), expected);
+    assert_eq!(split.netlist.gates().count(), fewest.cost);
+    assert!(split
+        .netlist
+        .nets
+        .iter()
+        .all(|net| net.gate_inputs.len() <= 2));
+    assert!(split
+        .netlist
+        .nets
+        .iter()
+        .any(|net| net.driver == NetDriver::Or));
     Ok(())
 }
 
@@ -3629,19 +3655,29 @@ fn explore_egraph_netlists() -> eyre::Result<()> {
             .map(|gate| netlist.nets[gate].gate_inputs.len())
             .max()
             .unwrap_or(0);
+        let ors = netlist
+            .nets
+            .iter()
+            .filter(|net| net.driver == NetDriver::Or)
+            .count();
         println!(
-            "EGRAPH {label}: gates={} depths={:?} max_fan_in={fan_in} live_max={} live={live:?}",
+            "EGRAPH {label}: gates={} or_nets={ors} depths={:?} max_fan_in={fan_in} live_max={} live={live:?}",
             netlist.gates().count(),
             netlist_depths(netlist),
             live.iter().max().unwrap_or(&0)
         );
-        for gate in netlist.gates() {
-            let inputs = netlist.nets[gate]
+        for net in gates {
+            let inputs = netlist.nets[net]
                 .gate_inputs
                 .iter()
                 .map(|&input| netlist.nets[input].name.as_str())
                 .collect::<Vec<_>>();
-            println!("EGRAPH     {} = NOR{inputs:?}", netlist.nets[gate].name);
+            let kind = if netlist.nets[net].driver == NetDriver::Or {
+                "OR"
+            } else {
+                "NOR"
+            };
+            println!("EGRAPH     {} = {kind}{inputs:?}", netlist.nets[net].name);
         }
     };
     describe(
@@ -3672,6 +3708,7 @@ fn explore_egraph_netlists() -> eyre::Result<()> {
                 max_depth: depth,
                 or_cost,
                 binary: std::env::var("EGRAPH_BINARY").as_deref() == Ok("1"),
+                split_wide: std::env::var("EGRAPH_SPLIT").as_deref() == Ok("1"),
                 time_limit: seconds,
             };
             match exploration.extract_exact(&options)? {

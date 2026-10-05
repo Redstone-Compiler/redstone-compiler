@@ -18,7 +18,12 @@ pub type NetId = usize;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NetDriver {
     Input(String),
+    /// A torch: NOR of its inputs.
     Gate,
+    /// Dust and blocks: OR of its inputs, no torch. Netlists from a logic
+    /// graph fold ORs into the gates that read them; a wide NOR can instead
+    /// read OR nets, which construction places as steps of their own.
+    Or,
 }
 
 #[derive(Debug, Clone)]
@@ -26,7 +31,8 @@ pub struct Net {
     pub name: String,
     pub node_id: GraphNodeId,
     pub driver: NetDriver,
-    /// Nets whose OR powers this gate's torch support. Empty for inputs.
+    /// Nets whose OR powers this gate's torch support (or that an OR net
+    /// joins). Empty for inputs.
     pub gate_inputs: Vec<NetId>,
 }
 
@@ -56,7 +62,7 @@ impl NorNetlist {
             };
             let name = match &driver {
                 NetDriver::Input(name) => name.clone(),
-                NetDriver::Gate => format!("g{node_id}"),
+                NetDriver::Gate | NetDriver::Or => format!("g{node_id}"),
             };
             net_of_node.insert(node_id, nets.len());
             nets.push(Net {
@@ -178,7 +184,7 @@ impl NorNetlist {
             .iter()
             .filter_map(|net| match &net.driver {
                 NetDriver::Input(name) => Some(name.clone()),
-                NetDriver::Gate => None,
+                NetDriver::Gate | NetDriver::Or => None,
             })
             .collect::<Vec<_>>();
         names.sort();
@@ -220,6 +226,10 @@ impl NorNetlist {
                         case & (1 << index) != 0
                     }
                     NetDriver::Gate => !self.nets[net]
+                        .gate_inputs
+                        .iter()
+                        .any(|&input| values[input][case]),
+                    NetDriver::Or => self.nets[net]
                         .gate_inputs
                         .iter()
                         .any(|&input| values[input][case]),

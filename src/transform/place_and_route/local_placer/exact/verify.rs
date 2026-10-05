@@ -428,6 +428,15 @@ pub(super) fn net_expression_with(
                 .collect::<Vec<_>>()
                 .join("|")
         ),
+        NetDriver::Or => format!(
+            "({})",
+            netlist.nets[net]
+                .gate_inputs
+                .iter()
+                .map(|&gate_input| net_expression_with(netlist, gate_input, input))
+                .collect::<Vec<_>>()
+                .join("|")
+        ),
     }
 }
 

@@ -46,7 +46,8 @@ pub(super) fn gate_order(netlist: &NorNetlist, order: GateOrder) -> Vec<NetId> {
         for &input in &netlist.nets[net].gate_inputs {
             visit(netlist, input, done, order);
         }
-        if netlist.nets[net].driver == NetDriver::Gate {
+        // Torches and OR nets are each a step.
+        if !matches!(netlist.nets[net].driver, NetDriver::Input(_)) {
             order.push(net);
         }
     }
@@ -591,9 +592,10 @@ impl ExactLocalPlacer {
 
     /// The fewest ticks each net a step observes could take: nets placed
     /// before arrive as they did on the previous step's last slice, inputs
-    /// placed now at once, and each new gate a tick after its latest input,
-    /// or with its inner gate's inputs if it is an OR over a NOR of the same
-    /// step (a block carries it). Keyed by net name and by output name.
+    /// placed now at once, an OR net with its latest input, and each new
+    /// gate a tick after its latest input, or with its inner gate's inputs if
+    /// it is an OR over a NOR of the same step (a block carries it). Keyed by
+    /// net name and by output name.
     fn step_lower_bounds(&self, gates: &[NetId], state: &StepState) -> BTreeMap<String, usize> {
         let netlist = &self.netlist;
         let previous = state
@@ -612,12 +614,17 @@ impl ExactLocalPlacer {
             let arrival =
                 |net: NetId, lower: &BTreeMap<NetId, usize>| lower.get(&net).copied().unwrap_or(0);
             let inputs = &netlist.nets[gate].gate_inputs;
-            let nor = inputs
+            let latest = inputs
                 .iter()
                 .map(|&net| arrival(net, &lower))
                 .max()
-                .unwrap_or(0)
-                + 1;
+                .unwrap_or(0);
+            if netlist.nets[gate].driver == NetDriver::Or {
+                // Dust and blocks: no tick.
+                lower.insert(gate, latest);
+                continue;
+            }
+            let nor = latest + 1;
             let or = match inputs[..] {
                 [inner] if gates.contains(&inner) => netlist.nets[inner]
                     .gate_inputs

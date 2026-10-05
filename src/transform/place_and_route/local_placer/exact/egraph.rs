@@ -47,6 +47,10 @@ pub struct ExtractOptions {
     pub or_cost: usize,
     /// Only NORs of at most two signals.
     pub binary: bool,
+    /// Build a NOR of more than two signals from OR nets: the two halves of
+    /// its OR, each an OR net if wider than one signal, so construction
+    /// places the merges as steps of their own before the torch.
+    pub split_wide: bool,
     pub time_limit: Duration,
 }
 
@@ -56,6 +60,7 @@ impl Default for ExtractOptions {
             max_depth: None,
             or_cost: 0,
             binary: false,
+            split_wide: false,
             time_limit: Duration::from_secs(60),
         }
     }
@@ -294,7 +299,7 @@ impl Exploration {
                 break;
             }
         }
-        self.netlist(&best)
+        self.netlist(&best, false)
     }
 
     /// The netlist with the fewest NOT gates (plus `or_cost` per OR node)
@@ -307,6 +312,7 @@ impl Exploration {
             max_depth,
             or_cost,
             binary,
+            split_wide,
             time_limit,
         } = *options;
         let egraph = &self.egraph;
@@ -440,7 +446,7 @@ impl Exploration {
             return Ok(None);
         };
         Ok(Some(Extraction {
-            netlist: self.netlist(&chosen)?,
+            netlist: self.netlist(&chosen, split_wide)?,
             cost: cost as usize,
             proven,
         }))
@@ -480,120 +486,41 @@ impl Exploration {
         }
     }
 
-    fn netlist(&self, best: &HashMap<Id, Choice>) -> eyre::Result<NorNetlist> {
-        let egraph = &self.egraph;
-        let mut nets = self
-            .inputs
-            .iter()
-            .enumerate()
-            .map(|(index, name)| Net {
-                name: name.clone(),
-                node_id: index,
-                driver: NetDriver::Input(name.clone()),
-                gate_inputs: Vec::new(),
-            })
-            .collect::<Vec<_>>();
-        let mut net_of_class = HashMap::<Id, NetId>::new();
-
-        // The nets whose OR a class is (one net unless it chose an OR).
-        fn sources(
-            exploration: &Exploration,
-            best: &HashMap<Id, Choice>,
-            nets: &mut Vec<Net>,
-            net_of_class: &mut HashMap<Id, NetId>,
-            class: Id,
-            depth: usize,
-        ) -> eyre::Result<BTreeSet<NetId>> {
-            ensure!(depth < 256, "extraction recursed too deep");
-            let class = exploration.egraph.find(class);
-            let choice = best
-                .get(&class)
-                .ok_or_else(|| eyre!("class {class} has no buildable form"))?;
-            match &choice.node {
-                Bool::Or([a, b]) => {
-                    let mut set = sources(exploration, best, nets, net_of_class, *a, depth + 1)?;
-                    set.extend(sources(
-                        exploration,
-                        best,
-                        nets,
-                        net_of_class,
-                        *b,
-                        depth + 1,
-                    )?);
-                    Ok(set)
-                }
-                _ => Ok(BTreeSet::from([net(
-                    exploration,
-                    best,
-                    nets,
-                    net_of_class,
-                    class,
-                    depth + 1,
-                )?])),
-            }
-        }
-
-        fn net(
-            exploration: &Exploration,
-            best: &HashMap<Id, Choice>,
-            nets: &mut Vec<Net>,
-            net_of_class: &mut HashMap<Id, NetId>,
-            class: Id,
-            depth: usize,
-        ) -> eyre::Result<NetId> {
-            if let Some(&net) = net_of_class.get(&class) {
-                return Ok(net);
-            }
-            let net = match &best[&class].node {
-                Bool::Var(symbol) => nets
-                    .iter()
-                    .position(|net| net.driver == NetDriver::Input(symbol.to_string()))
-                    .ok_or_else(|| eyre!("unknown input {symbol}"))?,
-                Bool::Not(a) => {
-                    let inputs = sources(exploration, best, nets, net_of_class, *a, depth + 1)?;
-                    nets.push(Net {
-                        name: format!("g{}", nets.len()),
-                        node_id: nets.len(),
-                        driver: NetDriver::Gate,
-                        gate_inputs: inputs.into_iter().collect(),
-                    });
-                    nets.len() - 1
-                }
-                other => bail!("class {class} chose {other} as a net"),
-            };
-            net_of_class.insert(class, net);
-            Ok(net)
-        }
-
+    fn netlist(&self, best: &HashMap<Id, Choice>, split: bool) -> eyre::Result<NorNetlist> {
+        let mut builder = Builder {
+            exploration: self,
+            best,
+            split,
+            nets: self
+                .inputs
+                .iter()
+                .enumerate()
+                .map(|(index, name)| Net {
+                    name: name.clone(),
+                    node_id: index,
+                    driver: NetDriver::Input(name.clone()),
+                    gate_inputs: Vec::new(),
+                })
+                .collect(),
+            net_of_class: HashMap::new(),
+        };
         let mut outputs = Vec::new();
         for (name, root) in &self.outputs {
-            let root = egraph.find(*root);
-            let choice = best
-                .get(&root)
-                .ok_or_else(|| eyre!("output `{name}` has no buildable form"))?;
-            let output = match choice.node {
+            let (root, node) = builder.choice(*root)?;
+            let output = match node {
                 Bool::Var(_) => bail!("output `{name}` is an input"),
-                Bool::Not(_) => net(self, best, &mut nets, &mut net_of_class, root, 0)?,
+                Bool::Not(_) => builder.net(root, 0)?,
                 // An OR output needs a driver: a NOT over the NOR of its terms.
                 _ => {
-                    let inputs = sources(self, best, &mut nets, &mut net_of_class, root, 0)?;
-                    nets.push(Net {
-                        name: format!("{name}_n"),
-                        node_id: nets.len(),
-                        driver: NetDriver::Gate,
-                        gate_inputs: inputs.into_iter().collect(),
-                    });
-                    nets.push(Net {
-                        name: format!("g{}", nets.len()),
-                        node_id: nets.len(),
-                        driver: NetDriver::Gate,
-                        gate_inputs: vec![nets.len() - 1],
-                    });
-                    nets.len() - 1
+                    let inputs = builder.sources(root, 0)?;
+                    let nor = builder.push(NetDriver::Gate, inputs);
+                    builder.nets[nor].name = format!("{name}_n");
+                    builder.push(NetDriver::Gate, BTreeSet::from([nor]))
                 }
             };
             outputs.push((name.clone(), output));
         }
+        let mut nets = builder.nets;
         for (name, output) in &outputs {
             if nets[*output].driver == NetDriver::Gate {
                 nets[*output].name = name.clone();
@@ -606,18 +533,123 @@ impl Exploration {
     }
 }
 
-/// Gates on the slowest path to each output (OR free, NOT one).
+/// Turns one chosen node per class into nets.
+struct Builder<'a> {
+    exploration: &'a Exploration,
+    best: &'a HashMap<Id, Choice>,
+    /// NORs of more than two signals read OR nets instead (see `ExtractOptions::split_wide`).
+    split: bool,
+    nets: Vec<Net>,
+    net_of_class: HashMap<Id, NetId>,
+}
+
+impl Builder<'_> {
+    fn choice(&self, class: Id) -> eyre::Result<(Id, Bool)> {
+        let class = self.exploration.egraph.find(class);
+        let choice = self
+            .best
+            .get(&class)
+            .ok_or_else(|| eyre!("class {class} has no buildable form"))?;
+        Ok((class, choice.node.clone()))
+    }
+
+    fn push(&mut self, driver: NetDriver, inputs: BTreeSet<NetId>) -> NetId {
+        let index = self.nets.len();
+        let prefix = if driver == NetDriver::Or { "o" } else { "g" };
+        self.nets.push(Net {
+            name: format!("{prefix}{index}"),
+            node_id: index,
+            driver,
+            gate_inputs: inputs.into_iter().collect(),
+        });
+        index
+    }
+
+    /// The nets whose OR a class is (one net unless it chose an OR).
+    fn sources(&mut self, class: Id, depth: usize) -> eyre::Result<BTreeSet<NetId>> {
+        ensure!(depth < 256, "extraction recursed too deep");
+        let (class, node) = self.choice(class)?;
+        match node {
+            Bool::Or([a, b]) => {
+                let mut set = self.sources(a, depth + 1)?;
+                set.extend(self.sources(b, depth + 1)?);
+                Ok(set)
+            }
+            _ => Ok(BTreeSet::from([self.net(class, depth + 1)?])),
+        }
+    }
+
+    /// The net of a class that chose an input or a NOT.
+    fn net(&mut self, class: Id, depth: usize) -> eyre::Result<NetId> {
+        ensure!(depth < 256, "extraction recursed too deep");
+        if let Some(&net) = self.net_of_class.get(&class) {
+            return Ok(net);
+        }
+        let net = match self.choice(class)?.1 {
+            Bool::Var(symbol) => self
+                .nets
+                .iter()
+                .position(|net| net.driver == NetDriver::Input(symbol.to_string()))
+                .ok_or_else(|| eyre!("unknown input {symbol}"))?,
+            Bool::Not(a) => {
+                let inputs = self.gate_inputs(a, depth + 1)?;
+                self.push(NetDriver::Gate, inputs)
+            }
+            other => bail!("class {class} chose {other} as a net"),
+        };
+        self.net_of_class.insert(class, net);
+        Ok(net)
+    }
+
+    /// What a NOT of `class` reads: the leaves of its OR, or, with `split`
+    /// and more than two leaves, the OR's two halves, each an OR net if it
+    /// is an OR itself.
+    fn gate_inputs(&mut self, class: Id, depth: usize) -> eyre::Result<BTreeSet<NetId>> {
+        let leaves = self.sources(class, depth)?;
+        if !self.split || leaves.len() <= 2 {
+            return Ok(leaves);
+        }
+        match self.choice(class)?.1 {
+            Bool::Or([a, b]) => Ok(BTreeSet::from([
+                self.term(a, depth + 1)?,
+                self.term(b, depth + 1)?,
+            ])),
+            _ => Ok(leaves),
+        }
+    }
+
+    /// The net of a class, an OR net if it chose an OR.
+    fn term(&mut self, class: Id, depth: usize) -> eyre::Result<NetId> {
+        ensure!(depth < 256, "extraction recursed too deep");
+        let (class, node) = self.choice(class)?;
+        let Bool::Or([a, b]) = node else {
+            return self.net(class, depth + 1);
+        };
+        if let Some(&net) = self.net_of_class.get(&class) {
+            return Ok(net);
+        }
+        let inputs = BTreeSet::from([self.term(a, depth + 1)?, self.term(b, depth + 1)?]);
+        let net = self.push(NetDriver::Or, inputs);
+        self.net_of_class.insert(class, net);
+        Ok(net)
+    }
+}
+
+/// Gates on the slowest path to each output (OR nets free, NOT one).
 pub fn netlist_depths(netlist: &NorNetlist) -> BTreeMap<String, usize> {
     let mut depth = vec![0usize; netlist.nets.len()];
     for net in netlist.topological_order() {
-        if netlist.nets[net].driver == NetDriver::Gate {
-            depth[net] = 1 + netlist.nets[net]
-                .gate_inputs
-                .iter()
-                .map(|&input| depth[input])
-                .max()
-                .unwrap_or(0);
-        }
+        let latest = netlist.nets[net]
+            .gate_inputs
+            .iter()
+            .map(|&input| depth[input])
+            .max()
+            .unwrap_or(0);
+        depth[net] = match netlist.nets[net].driver {
+            NetDriver::Input(_) => 0,
+            NetDriver::Gate => latest + 1,
+            NetDriver::Or => latest,
+        };
     }
     netlist
         .outputs
