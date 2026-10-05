@@ -2187,6 +2187,8 @@ function renderSnapshotBrowser(snapshot: LoadedSnapshot): void {
       artifact.kind !== 'nbt' &&
       !isSnapshotIrArtifact(artifact.path) &&
       !/^instances\/[^/]+\/instance\.json$/i.test(artifact.path) &&
+      // Frame files are played from the Frames section.
+      !/^frames\//i.test(artifact.path) &&
       snapshot.filesByPath.has(artifact.path),
   );
   if (metadata.length > 0) {
