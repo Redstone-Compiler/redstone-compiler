@@ -2437,6 +2437,99 @@ mod tests {
         Ok(())
     }
 
+    /// Composites of combinational children, each compiled end to end and its
+    /// final world simulated in every input case against its function. With
+    /// child inputs rewritten from switches into ports, none of these
+    /// compiled (a top-level input lever could not be placed, or a route
+    /// found no way into a child's input diode); with inputs placed as ports
+    /// all do (docs/child_input_ports.md).
+    #[test]
+    fn small_combinational_composites_compile_and_compute_their_functions() -> eyre::Result<()> {
+        init_tracing_from_env();
+        let cells = r#"
+            module inv(a, y); input a; output y; assign y = ~a; endmodule
+            module nor2(a, b, y); input a, b; output y; assign y = ~(a | b); endmodule
+            module and2(a, b, y); input a, b; output y; assign y = a & b; endmodule
+        "#;
+        type Expected = fn(&[bool]) -> Vec<bool>;
+        let designs: [(&str, &[&str], &[&str], Expected); 3] = [
+            (
+                "module top(a, b, y); input a, b; output y; wire n; inv u0(.a(a), .y(n)); nor2 u1(.a(n), .b(b), .y(y)); endmodule",
+                &["a", "b"],
+                &["y"],
+                |x| vec![x[0] && !x[1]],
+            ),
+            (
+                "module top(a, y); input a; output y; wire n, m; inv u0(.a(a), .y(n)); inv u1(.a(n), .y(m)); inv u2(.a(m), .y(y)); endmodule",
+                &["a"],
+                &["y"],
+                |x| vec![!x[0]],
+            ),
+            (
+                "module top(a, b, c, y); input a, b, c; output y; wire n; and2 u0(.a(a), .b(b), .y(n)); nor2 u1(.a(n), .b(c), .y(y)); endmodule",
+                &["a", "b", "c"],
+                &["y"],
+                |x| vec![!((x[0] && x[1]) || x[2])],
+            ),
+        ];
+        for (index, (top, inputs, outputs, expected)) in designs.into_iter().enumerate() {
+            let source = format!("{cells}\n{top}");
+            let logical = LogicalDesign::from_verilog_source_named(&source, "small.v")?;
+            let mut local_config = sequential_local_config();
+            local_config.random_seed = 6;
+            let config = GlobalPnrConfig {
+                candidate: UnitCandidateConfig {
+                    dim: DimSize(10, 10, 5),
+                    max_candidates: 2,
+                    combinational_sampling_limit: Some(32),
+                    local_config,
+                    ..Default::default()
+                }
+                .into(),
+                ..Default::default()
+            };
+            let placed = place_and_route_logical_design_with_visualization(&logical, &config)
+                .map_err(|error| eyre::eyre!("design {index}: {error}"))?
+                .placed_world;
+            let world = World::from(&placed.world);
+            let mut wrong = Vec::new();
+            for mask in 0..(1usize << inputs.len()) {
+                let values = (0..inputs.len())
+                    .map(|bit| mask & (1 << bit) != 0)
+                    .collect::<Vec<_>>();
+                // Settle first: with every input off, changing nothing would
+                // read the world as exported, before any torch updated.
+                let mut sim = Simulator::from_settled_with_limits_and_trace(&world, 256, 50_000, 0)
+                    .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
+                let switches = inputs
+                    .iter()
+                    .zip(&values)
+                    .map(|(name, value)| {
+                        input_endpoint_position(&placed, name).map(|p| (p, *value))
+                    })
+                    .collect::<eyre::Result<Vec<_>>>()?;
+                sim.change_state_with_limits(switches, 256, 50_000)?;
+                let actual = outputs
+                    .iter()
+                    .map(|name| {
+                        let position = placed
+                            .outputs
+                            .iter()
+                            .find(|output| output.name == *name)
+                            .expect("output")
+                            .position();
+                        block_power(sim.world(), position)
+                    })
+                    .collect::<Vec<_>>();
+                if actual != expected(&values) {
+                    wrong.push(mask);
+                }
+            }
+            assert!(wrong.is_empty(), "design {index}: wrong in cases {wrong:?}");
+        }
+        Ok(())
+    }
+
     fn assert_two_bit_counter_behavior(placed: &PlacedWorld) -> eyre::Result<()> {
         let clock = input_endpoint_position(placed, "clk")?;
         let output_q0 = placed

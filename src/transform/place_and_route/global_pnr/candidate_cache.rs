@@ -10,7 +10,9 @@ use crate::nbt::{NBTRoot, ToNBT};
 use crate::world::position::Position;
 use crate::world::World3D;
 
-const CACHE_FORMAT: &str = "redstone-compiler.local-candidate-cache.v1";
+// v2: combinational children place their inputs as ports (PlacedPorts), so
+// v1 entries hold switch-rewritten layouts the generator no longer produces.
+const CACHE_FORMAT: &str = "redstone-compiler.local-candidate-cache.v2";
 
 #[derive(Serialize, Deserialize)]
 struct CacheManifest {

@@ -976,6 +976,8 @@ fn compose_candidate(
                     candidate_ports.clone(),
                     &variant_config,
                     progress_label,
+                    // Cluster composition restores switches at the old
+                    // switch sites, so cluster cells keep switch inputs.
                     CandidateInputMode::ExternalPorts,
                 )
             };

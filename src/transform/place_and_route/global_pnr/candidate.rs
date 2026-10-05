@@ -196,7 +196,16 @@ pub fn generate_routable_top_leaf_candidates_with_progress_label(
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CandidateInputMode {
+    /// A child cell: the local placer drives its inputs with switches, and
+    /// `candidate_layout` rewrites them into ports for the global router.
     ExternalPorts,
+    /// A child cell whose inputs the local placer places as ports
+    /// (`LocalPlacer::with_port_inputs`): the layout checked against the
+    /// truth table is the one routed, kept as Direct ports. Combinational
+    /// monolithic children use this; clustered and sequential ones still
+    /// rewrite switches.
+    PlacedPorts,
+    /// A top-level leaf: its switches are the design's inputs and stay.
     MaterializedSwitches,
 }
 
@@ -246,13 +255,24 @@ fn generate_routable_module_candidates(
         // both ignores the profile and can dominate a failed compact search.
         return Ok(clustered.unwrap_or_default());
     }
+    let contains_sequential = graph
+        .nodes
+        .iter()
+        .any(|node| matches!(node.kind, GraphNodeKind::Sequential(_)));
+    // Sequential cells are not truth-table checked, so they keep switches.
+    let monolithic_input_mode =
+        if input_mode == CandidateInputMode::ExternalPorts && !contains_sequential {
+            CandidateInputMode::PlacedPorts
+        } else {
+            input_mode
+        };
     let mut candidates = generate_unit_candidates(
         &module.name,
         graph,
         ports,
         config,
         progress_label,
-        input_mode,
+        monolithic_input_mode,
     )?;
     if let Some(clustered) = clustered {
         candidates.extend(clustered);
@@ -350,15 +370,18 @@ fn generate_unit_candidates(
         let mut local_config = config.local_config;
         let mut adaptive_attempt = 0usize;
         let placed = loop {
-            let placer = LocalPlacer::new_with_visit_order_and_cost(
+            let mut placer = LocalPlacer::new_with_visit_order_and_cost(
                 graph.clone(),
                 local_config,
                 schedule.order.clone(),
                 config.local_objective,
             )?;
+            if input_mode == CandidateInputMode::PlacedPorts {
+                placer = placer.with_port_inputs();
+            }
             let mut debug = LocalPlacerDebug::default();
             let mut placed = match input_mode {
-                CandidateInputMode::ExternalPorts => placer
+                CandidateInputMode::ExternalPorts | CandidateInputMode::PlacedPorts => placer
                     .generate_with_outputs_and_planned_inputs_debug_progress(
                         config.dim,
                         None,
@@ -375,7 +398,7 @@ fn generate_unit_candidates(
                         progress_label,
                     ),
             };
-            if input_mode == CandidateInputMode::ExternalPorts && placed.is_empty() {
+            if input_mode != CandidateInputMode::MaterializedSwitches && placed.is_empty() {
                 tracing::info!(
                     module = module_name,
                     "planned child inputs produced no candidates; retrying incremental input placement"
@@ -986,11 +1009,12 @@ fn candidate_matches_truth_table(
     Ok(true)
 }
 
-// LocalPlacer는 아직 standalone 회로를 기준으로 switch/output layout을 만든다.
+// LocalPlacer는 standalone 회로를 기준으로 switch/output layout을 만든다.
 // Global PnR child layout에서는 switch를 제거하고 외부 route가 물릴 수 있는
-// module port metadata로 다시 노출한다.
-// TODO(high-level): make LocalPlacer produce either standalone layouts with switches
-// or child-module layouts with PhysicalPort metadata, instead of rewriting switches here.
+// module port metadata로 다시 노출한다. Combinational monolithic children skip
+// the rewrite: the local placer places their inputs as ports (PlacedPorts).
+// TODO(high-level): do the same for clustered and sequential children, then
+// remove the switch rewrite (docs/child_input_ports.md).
 fn candidate_layout(
     module_ports: &[CandidatePort],
     contains_sequential: bool,
@@ -1026,6 +1050,20 @@ fn candidate_layout(
                             .and_then(|positions| positions.into_iter().next())
                     });
                 if let Some(input_position) = position {
+                    if input_mode == CandidateInputMode::PlacedPorts {
+                        // Already the port the router connects to: dust
+                        // feeding the cell's own input repeater, which
+                        // isolates the cell from the route.
+                        ports.push(PhysicalPort {
+                            name: port.name.clone(),
+                            direction: PhysicalPortDirection::Input,
+                            position: input_position,
+                            route_position: Some(input_position),
+                            access_points: vec![input_position],
+                            connection: PortConnection::Direct,
+                        });
+                        continue;
+                    }
                     if input_mode == CandidateInputMode::MaterializedSwitches {
                         ports.push(PhysicalPort {
                             name: port.name.clone(),
@@ -1105,6 +1143,19 @@ fn candidate_layout(
     ports.sort_by(|a, b| a.name.cmp(&b.name));
     world.initialize_redstone_states();
     (world, ports)
+}
+
+/// Dust that a repeater beside it reads: the shape of an input placed as a
+/// port by `LocalPlacer::with_port_inputs`.
+#[cfg(test)]
+fn is_input_port_terminal(world: &World3D, position: Position) -> bool {
+    world.size.bound_on(position)
+        && world[position].kind.is_redstone()
+        && position.cardinal().into_iter().any(|neighbor| {
+            world.size.bound_on(neighbor)
+                && world[neighbor].kind.is_repeater()
+                && neighbor.walk(world[neighbor].direction) == Some(position)
+        })
 }
 
 fn remove_local_input_switches(world: &mut World3D) {
@@ -1829,11 +1880,12 @@ mod tests {
         assert!(!matches);
     }
 
-    /// The 2-bit counter's next-state cell for bit 1. Its input switches face
-    /// blocks that carry NOT gates, so its ports are those blocks. The check
-    /// after the switch rewrite drives them as external terminals; when the
-    /// simulator dropped that drive on settling, it rejected every candidate
-    /// of this cell (32 of 32).
+    /// The 2-bit counter's next-state cell for bit 1, with switch inputs (the
+    /// path clustered cells still take). Its input switches face blocks that
+    /// carry NOT gates, so its ports are those blocks. The check after the
+    /// switch rewrite drives them as external terminals; when the simulator
+    /// dropped that drive on settling, it rejected every candidate of this
+    /// cell (32 of 32).
     #[test]
     fn counter_next_state_cell_keeps_candidates_after_its_switches_become_ports() {
         let source = "module counter(clk, q); input clk; output reg [1:0] q; always @(posedge clk) begin q <= q + 1; end endmodule";
@@ -1863,9 +1915,177 @@ mod tests {
             },
             ..d_latch_child_candidate_config(local_config)
         };
-        let candidates =
-            generate_routable_module_candidates_with_progress_label(module, &config, None)
-                .expect("candidates");
+        let graph = graph_from_routable_leaf(module).expect("graph");
+        let ports = module
+            .ports
+            .iter()
+            .map(|port| {
+                CandidatePort::new(
+                    &port.name,
+                    &port.name,
+                    match port.direction {
+                        RoutablePortDirection::Input => PhysicalPortDirection::Input,
+                        RoutablePortDirection::Output => PhysicalPortDirection::Output,
+                    },
+                )
+            })
+            .collect();
+        let candidates = generate_unit_candidates(
+            "q_1_next",
+            graph,
+            ports,
+            &config,
+            None,
+            CandidateInputMode::ExternalPorts,
+        )
+        .expect("candidates");
         assert!(!candidates.is_empty());
+    }
+
+    fn child_module(source: &str, name: &str) -> RoutableModule {
+        let design = crate::ir::LogicalDesign::from_verilog_source(source)
+            .and_then(|design| design.lower_to_routable())
+            .expect("design");
+        design.module(name).expect("module").clone()
+    }
+
+    fn child_candidate_config() -> UnitCandidateConfig {
+        UnitCandidateConfig {
+            dim: DimSize(10, 10, 5),
+            local_config: LocalPlacerConfig {
+                greedy_input_generation: true,
+                step_sampling_policy: SamplingPolicy::Random(256),
+                placement_sampling_policy:
+                    crate::transform::place_and_route::local_placer::PlacementSamplingPolicy::StepPolicy,
+                not_route_strategy:
+                    crate::transform::place_and_route::local_placer::NotRouteStrategy::DirectAndRedstone,
+                max_not_route_step: 4,
+                not_route_step_sampling_policy: SamplingPolicy::Random(256),
+                max_route_step: 4,
+                route_step_sampling_policy: SamplingPolicy::Random(256),
+                ..Default::default()
+            },
+            max_candidates: 4,
+            ..Default::default()
+        }
+    }
+
+    /// A combinational child's inputs come out of the local placer as ports:
+    /// dust feeding the cell's own input repeater, kept as Direct ports. The
+    /// layout the truth table was checked on is the one routed: no switch is
+    /// left to rewrite, and the cell still computes its function when the
+    /// router drives the terminals.
+    #[test]
+    fn combinational_child_inputs_are_placed_as_ports() {
+        for (source, name) in [
+            (
+                "module nor2(a, b, y); input a, b; output y; assign y = ~(a | b); endmodule",
+                "nor2",
+            ),
+            (
+                "module and2(a, b, y); input a, b; output y; assign y = a & b; endmodule",
+                "and2",
+            ),
+        ] {
+            let module = child_module(source, name);
+            let candidates = generate_routable_module_candidates_with_progress_label(
+                &module,
+                &child_candidate_config(),
+                None,
+            )
+            .expect("candidates");
+            assert!(!candidates.is_empty(), "{name}: no candidates");
+            let graph = graph_from_routable_leaf(&module).expect("graph");
+            for candidate in &candidates {
+                assert!(
+                    candidate
+                        .world
+                        .iter_block()
+                        .iter()
+                        .all(|(_, block)| !block.kind.is_switch()),
+                    "{name}: a switch is left in the child"
+                );
+                for port in candidate
+                    .ports
+                    .iter()
+                    .filter(|port| port.direction == PhysicalPortDirection::Input)
+                {
+                    assert_eq!(port.connection, PortConnection::Direct, "{name}: {port:?}");
+                    assert_eq!(port.access_points, vec![port.position]);
+                    assert!(is_input_port_terminal(&candidate.world, port.position));
+                }
+                assert!(
+                    clustering::candidate_matches_truth_table_with_switch_inputs(&graph, candidate)
+                );
+            }
+        }
+    }
+
+    /// Child cells generated with switch inputs (rewritten into ports) and
+    /// with port inputs, side by side:
+    /// `cargo test --release --lib compare_child_input_forms -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "measurement; run explicitly with --nocapture"]
+    fn compare_child_input_forms() {
+        let counter = "module counter(clk, q); input clk; output reg [1:0] q; always @(posedge clk) begin q <= q + 1; end endmodule";
+        let cases = [
+            ("module not1(a, y); input a; output y; assign y = ~a; endmodule", "not1"),
+            ("module nor2(a, b, y); input a, b; output y; assign y = ~(a | b); endmodule", "nor2"),
+            ("module or2(a, b, y); input a, b; output y; assign y = a | b; endmodule", "or2"),
+            ("module and2(a, b, y); input a, b; output y; assign y = a & b; endmodule", "and2"),
+            ("module xor2(a, b, y); input a, b; output y; assign y = a ^ b; endmodule", "xor2"),
+            ("module mux2(a, b, s, y); input a, b, s; output y; assign y = (s & b) | (~s & a); endmodule", "mux2"),
+            (counter, "q_0_next"),
+            (counter, "q_1_next"),
+        ];
+        let mut config = child_candidate_config();
+        config.max_candidates = 8;
+        config.clustering.enabled = false;
+        for (source, name) in cases {
+            let module = child_module(source, name);
+            let graph = graph_from_routable_leaf(&module).expect("graph");
+            let ports: Vec<_> = module
+                .ports
+                .iter()
+                .map(|port| {
+                    CandidatePort::new(
+                        &port.name,
+                        &port.name,
+                        match port.direction {
+                            RoutablePortDirection::Input => PhysicalPortDirection::Input,
+                            RoutablePortDirection::Output => PhysicalPortDirection::Output,
+                        },
+                    )
+                })
+                .collect();
+            for port_inputs in [false, true] {
+                let started = std::time::Instant::now();
+                let candidates = generate_unit_candidates(
+                    name,
+                    graph.clone(),
+                    ports.clone(),
+                    &config,
+                    None,
+                    if port_inputs {
+                        CandidateInputMode::PlacedPorts
+                    } else {
+                        CandidateInputMode::ExternalPorts
+                    },
+                );
+                let elapsed = started.elapsed();
+                let (count, blocks, volume) = match &candidates {
+                    Ok(candidates) => (
+                        candidates.len(),
+                        candidates.iter().map(|c| c.cost.block_count).min(),
+                        candidates.iter().map(|c| c.cost.bbox_volume).min(),
+                    ),
+                    Err(_) => (0, None, None),
+                };
+                println!(
+                    "FORMS {name:<9} {:<8} candidates={count} min_blocks={blocks:?} min_volume={volume:?} elapsed={elapsed:.2?}",
+                    if port_inputs { "ports" } else { "switches" },
+                );
+            }
+        }
     }
 }
