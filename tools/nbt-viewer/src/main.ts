@@ -86,6 +86,8 @@ type SnapshotManifest = {
   top_module?: string;
   final_nbt?: string;
   artifacts: SnapshotArtifact[];
+  /** Step-by-step recordings (`snapshot::emit_frame`), one index per sequence. */
+  frames?: Array<{ sequence: string; path: string; count: number }>;
 };
 type SnapshotInstance = {
   instanceId?: number;
@@ -2126,6 +2128,22 @@ function renderSnapshotBrowser(snapshot: LoadedSnapshot): void {
     }
   }
 
+  const sequences = (snapshot.manifest.frames ?? []).filter(sequence => snapshot.filesByPath.has(sequence.path));
+  if (sequences.length > 0) {
+    appendSnapshotSection('Frames');
+    for (const sequence of sequences) {
+      const button = createFileEntry(sequence.sequence, `${sequence.count} frames`);
+      button.addEventListener('click', () => {
+        filesList.querySelectorAll('.file-entry.selected').forEach(entry => entry.classList.remove('selected'));
+        button.classList.add('selected');
+        void playSnapshotFrames(snapshot, sequence.path).catch(error => {
+          inspector.textContent = error instanceof Error ? error.message : String(error);
+        });
+      });
+      filesList.append(button);
+    }
+  }
+
   const irArtifacts = snapshot.manifest.artifacts.filter(artifact =>
     isSnapshotIrArtifact(artifact.path) && snapshot.filesByPath.has(artifact.path));
   if (irArtifacts.length > 0) {
@@ -2292,6 +2310,7 @@ function focusSnapshotConstraint(constraint: SnapshotConstraint): void {
 }
 
 async function openSnapshotNbt(path: string, selectedEntry?: Element | null): Promise<void> {
+  clearProgressFrames();
   const snapshot = currentSnapshot;
   const file = snapshot?.filesByPath.get(path);
   if (!snapshot || !file) throw new Error(`Snapshot artifact is missing: ${path}`);
@@ -3008,6 +3027,7 @@ function compilerPositionToNbt(position: [number, number, number]): [number, num
 
 function renderFileBrowser(files: File[]): void {
   leaveSnapshotMode();
+  clearProgressFrames();
   const nbtFiles = files
     .filter(isSupportedFile)
     .sort((a, b) => getDisplayPath(a).localeCompare(getDisplayPath(b)));
@@ -3050,18 +3070,85 @@ type ProgressFrame = {
   size: [number, number, number];
 };
 
+/** Where the frames' files come from: the dev server or an open snapshot. */
+type ProgressFrameSource = {
+  nbt(file: string): Promise<File>;
+  metadata(file: string): Promise<string | undefined>;
+};
+
 let progressFrames: ProgressFrame[] = [];
-let progressBase = '';
+let progressSource: ProgressFrameSource | undefined;
 let progressIndex = -1;
 let progressTimer: number | undefined;
 let progressLoad = 0;
+
+function urlFrameSource(base: string): ProgressFrameSource {
+  return {
+    async nbt(file) {
+      const response = await fetch(resolveAssetPath(base + file));
+      if (!response.ok) throw new Error(`Failed to load ${file}: ${response.status}`);
+      return new File([await response.arrayBuffer()], file, { type: 'application/octet-stream' });
+    },
+    metadata: file => loadExampleMetadata(base + file),
+  };
+}
+
+function snapshotFrameSource(snapshot: LoadedSnapshot, base: string): ProgressFrameSource {
+  return {
+    async nbt(file) {
+      const found = snapshot.filesByPath.get(base + file);
+      if (!found) throw new Error(`Snapshot frame is missing: ${base + file}`);
+      return found;
+    },
+    metadata: async file => snapshot.filesByPath.get(base + file)?.text(),
+  };
+}
+
+/** Hides the frame player when something else is opened. */
+function clearProgressFrames(): void {
+  stopProgressPlayback();
+  progressFrames = [];
+  progressSource = undefined;
+  progressIndex = -1;
+  framesBar.classList.add('hidden');
+}
 
 /** Plays back a `frames.json` written by construction and compaction. */
 async function loadProgressFrames(indexPath: string): Promise<void> {
   const response = await fetch(resolveAssetPath(indexPath));
   if (!response.ok) throw new Error(`Failed to load ${indexPath}: ${response.status}`);
-  progressFrames = (await response.json()) as ProgressFrame[];
-  progressBase = indexPath.slice(0, indexPath.lastIndexOf('/') + 1);
+  const frames = (await response.json()) as ProgressFrame[];
+  await startProgressFrames(frames, urlFrameSource(indexPath.slice(0, indexPath.lastIndexOf('/') + 1)), true);
+}
+
+/** Plays a recorded sequence of an open snapshot, keeping its file list. */
+async function playSnapshotFrames(snapshot: LoadedSnapshot, indexPath: string): Promise<void> {
+  const index = snapshot.filesByPath.get(indexPath);
+  if (!index) throw new Error(`Snapshot frame index is missing: ${indexPath}`);
+  const frames = JSON.parse(await index.text()) as ProgressFrame[];
+  await startProgressFrames(frames, snapshotFrameSource(snapshot, indexPath.slice(0, indexPath.lastIndexOf('/') + 1)), false);
+}
+
+async function startProgressFrames(
+  frames: ProgressFrame[],
+  source: ProgressFrameSource,
+  listFrames: boolean,
+): Promise<void> {
+  clearProgressFrames();
+  progressFrames = frames;
+  progressSource = source;
+  framesBar.classList.toggle('hidden', progressFrames.length === 0);
+  framesSlider.max = String(Math.max(0, progressFrames.length - 1));
+  if (listFrames) renderProgressFrameList();
+  if (progressFrames.length === 0) return;
+  await showProgressFrame(0);
+  // One camera for every frame, framing the largest layout (frame sizes are
+  // the compiler's x, y, z; the viewer's axes are y, z, x).
+  const largest = [0, 1, 2].map(axis => Math.max(...progressFrames.map(frame => frame.size[axis])));
+  viewer.fitView([largest[1], largest[2], largest[0]]);
+}
+
+function renderProgressFrameList(): void {
   filesList.replaceChildren();
   filesTitle.textContent = 'Frames';
   filesCount.textContent = `${progressFrames.length} frames`;
@@ -3084,26 +3171,17 @@ async function loadProgressFrames(indexPath: string): Promise<void> {
     });
     filesList.append(button);
   });
-  framesBar.classList.toggle('hidden', progressFrames.length === 0);
-  framesSlider.max = String(Math.max(0, progressFrames.length - 1));
-  if (progressFrames.length === 0) return;
-  await showProgressFrame(0);
-  // One camera for every frame, framing the largest layout (frame sizes are
-  // the compiler's x, y, z; the viewer's axes are y, z, x).
-  const largest = [0, 1, 2].map(axis => Math.max(...progressFrames.map(frame => frame.size[axis])));
-  viewer.fitView([largest[1], largest[2], largest[0]]);
 }
 
 async function showProgressFrame(index: number): Promise<void> {
   const frame = progressFrames[index];
-  if (!frame) return;
+  const source = progressSource;
+  if (!frame || !source) return;
   const load = ++progressLoad;
-  const [nbtResponse, metadata] = await Promise.all([
-    fetch(resolveAssetPath(progressBase + frame.file)),
-    frame.outputs ? loadExampleMetadata(progressBase + frame.outputs) : Promise.resolve(undefined),
+  const [file, metadata] = await Promise.all([
+    source.nbt(frame.file),
+    frame.outputs ? source.metadata(frame.outputs) : Promise.resolve(undefined),
   ]);
-  if (!nbtResponse.ok) throw new Error(`Failed to load ${frame.file}: ${nbtResponse.status}`);
-  const file = new File([await nbtResponse.arrayBuffer()], frame.file, { type: 'application/octet-stream' });
   if (load !== progressLoad) return;
   const entry = filesList.querySelector(`[data-frame-index="${index}"]`);
   // Keep the camera, so the layout changes in place.
@@ -3163,6 +3241,18 @@ window.addEventListener('keydown', event => {
 });
 
 async function loadExamples(): Promise<void> {
+  const snapshotPath = new URLSearchParams(window.location.search).get('snapshot');
+  if (snapshotPath) {
+    try {
+      const response = await fetch(resolveAssetPath(snapshotPath));
+      if (!response.ok) throw new Error(`Failed to load ${snapshotPath}: ${response.status}`);
+      const name = snapshotPath.split('/').pop() ?? 'snapshot.rsnap';
+      await openSnapshot([new File([await response.arrayBuffer()], name, { type: 'application/octet-stream' })]);
+    } catch (error) {
+      inspector.textContent = error instanceof Error ? error.message : String(error);
+    }
+    return;
+  }
   const framesPath = new URLSearchParams(window.location.search).get('frames');
   if (framesPath) {
     try {
@@ -3235,6 +3325,7 @@ function findExampleEntry(path: string): Element | null {
 }
 
 async function openExample(example: ExampleFile, selectedEntry?: Element | null): Promise<void> {
+  clearProgressFrames();
   const response = await fetch(resolveAssetPath(example.path));
   if (!response.ok) throw new Error(`Failed to load ${example.path}: ${response.status}`);
   const file = new File([await response.arrayBuffer()], example.name, { type: 'application/octet-stream' });

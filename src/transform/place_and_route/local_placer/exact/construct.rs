@@ -504,15 +504,14 @@ impl ExactLocalPlacer {
                 }
             }
         }
-        if let Some(directory) = &config.progress {
-            for state in &states[1..] {
-                if let Some((_, placement)) = &state.result {
-                    super::progress::record_frame(
-                        directory,
-                        &format!("construct {}", state.label),
-                        placement,
-                    );
-                }
+        for state in &states[1..] {
+            if let Some((_, placement)) = &state.result {
+                super::progress::record_frame(
+                    config.progress.as_deref(),
+                    &self.name,
+                    &format!("construct {}", state.label),
+                    placement,
+                );
             }
         }
         let (dim, placement) = states

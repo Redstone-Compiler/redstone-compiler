@@ -1,10 +1,11 @@
-//! Frames of construction and compaction, for watching a layout being built
-//! (`ConstructionConfig::progress`, `CompactionConfig::progress`).
+//! Frames of construction and compaction, for watching a layout being built.
 //!
-//! Each accepted step writes `NNN-<label>.nbt` (the settled world) and
-//! `NNN-<label>.outputs.json` (its inputs and outputs) to the directory and
-//! appends the frame to `frames.json`, which the NBT viewer plays back
-//! (`?frames=<path to frames.json>`).
+//! Inside a compilation snapshot every accepted step is always recorded as a
+//! frame of the placer's sequence (`snapshot::emit_frame`), so the `.rsnap`
+//! plays the run back in the viewer. `ConstructionConfig::progress` and
+//! `CompactionConfig::progress` also write the frames to a plain directory:
+//! `NNN-<label>.nbt` (the settled world), `NNN-<label>.outputs.json` (its
+//! inputs and outputs), and `frames.json` (`?frames=<path to frames.json>`).
 
 use std::path::Path;
 
@@ -12,11 +13,34 @@ use serde_json::{json, Value};
 
 use super::ExactPlacement;
 
-/// Records one frame; a failure is logged and otherwise ignored, so watching
-/// never breaks a run.
-pub(super) fn record_frame(directory: &Path, label: &str, placement: &ExactPlacement) {
-    if let Err(error) = try_record_frame(directory, label, placement) {
-        tracing::warn!(%error, directory = %directory.display(), "could not record a frame");
+/// Records one frame of `sequence` into the active snapshot, if any, and into
+/// `directory`, if given; a failure is logged and otherwise ignored, so
+/// watching never breaks a run.
+pub(super) fn record_frame(
+    directory: Option<&Path>,
+    sequence: &str,
+    label: &str,
+    placement: &ExactPlacement,
+) {
+    if crate::snapshot::is_active() {
+        let size = placement.rcell.size;
+        crate::snapshot::emit_frame(
+            sequence,
+            crate::snapshot::SnapshotFrame {
+                label: label.to_owned(),
+                nbt: crate::nbt::NBTRoot::from(&placement.placed.world),
+                interface: Some(placement.rcell.interface_json()),
+                details: json!({
+                    "blocks": placement.block_count,
+                    "size": [size.0, size.1, size.2],
+                }),
+            },
+        );
+    }
+    if let Some(directory) = directory {
+        if let Err(error) = try_record_frame(directory, label, placement) {
+            tracing::warn!(%error, directory = %directory.display(), "could not record a frame");
+        }
     }
 }
 

@@ -1995,13 +1995,32 @@ fn circuit_graph(circuit: &str) -> eyre::Result<LogicGraph> {
     Ok(graph)
 }
 
+/// Runs `run` inside a compilation snapshot when the environment variable
+/// `variable` names a `.snapshot` directory (its `.rsnap` archive is written
+/// beside it), so the placer's frames and the final layout can be played
+/// back in the viewer.
+fn with_snapshot(
+    variable: &str,
+    design: &str,
+    run: impl FnOnce() -> eyre::Result<crate::output::PlacedWorld>,
+) -> eyre::Result<crate::output::PlacedWorld> {
+    match std::env::var(variable) {
+        Ok(directory) => crate::snapshot::compile_with_snapshot(
+            crate::snapshot::SnapshotOptions::new(directory, design),
+            run,
+        ),
+        Err(_) => run(),
+    }
+}
+
 /// Construction plus compaction for small circuits:
 /// `CIRCUIT=mux2|half-adder|adder2|adder2-nor|mux4|full-adder CIRCUIT_WIDTH=2
 /// CIRCUIT_HEIGHT=10 CIRCUIT_STEP_SECONDS=60 CIRCUIT_COMPACT_SECONDS=300
 /// CIRCUIT_SEED=1 CIRCUIT_WRITE=<prefix>`; `CIRCUIT_NETLIST_ONLY=1` stops
 /// after printing the NOR netlist and its live-net counts;
 /// `CIRCUIT_PROGRESS=<directory>` records every accepted step as a frame for
-/// the viewer (`?frames=<directory>/frames.json`).
+/// the viewer (`?frames=<directory>/frames.json`); `CIRCUIT_SNAPSHOT=<dir>.snapshot`
+/// runs inside a compilation snapshot, whose `.rsnap` holds the frames.
 #[test]
 #[ignore = "circuit pipeline measurement; run explicitly with --nocapture"]
 fn diagnose_construct_circuit() -> eyre::Result<()> {
@@ -2083,48 +2102,51 @@ fn diagnose_construct_circuit() -> eyre::Result<()> {
         progress: std::env::var("CIRCUIT_PROGRESS").ok().map(Into::into),
         ..Default::default()
     };
-    let (layout, placement, report) = placer.construct(&construction)?;
-    println!(
-        "CIRCUIT constructed dim={:?} blocks={} seed={} restarts={:?} elapsed={:?}",
-        layout.dim,
-        placement.block_count,
-        report.seed,
-        report
-            .restarts
-            .iter()
-            .map(|(seed, _)| *seed)
-            .collect::<Vec<_>>(),
-        report.elapsed
-    );
-    let compaction = CompactionConfig {
-        seed,
-        time_limit: Some(Duration::from_secs(
-            env_usize("CIRCUIT_COMPACT_SECONDS", 300) as u64,
-        )),
-        max_removals_per_round: removals_per_round_from_env("CIRCUIT_REMOVALS_PER_ROUND"),
-        repair_optimize: repair_optimize_from_env("CIRCUIT_REPAIR_OPTIMIZE"),
-        progress: std::env::var("CIRCUIT_PROGRESS").ok().map(Into::into),
-        ..Default::default()
-    };
-    let (compacted, best, report) = placer.compact(layout, &compaction)?;
-    let result = best.unwrap_or(placement);
-    let document = result.rcell.to_string();
-    let reparsed: crate::physical_cell::PhysicalCellDocument = document.parse()?;
-    let build = reparsed.build()?;
-    let verification = reparsed.verify(&build)?;
-    println!(
-        "CIRCUIT compacted dim={:?} blocks={} removed={:?} elapsed={:?} rcell_failures={}",
-        compacted.dim,
-        result.block_count,
-        report.removed,
-        report.elapsed,
-        verification.failures.len()
-    );
-    if let Ok(prefix) = std::env::var("CIRCUIT_WRITE") {
-        std::fs::write(format!("{prefix}.rcell"), document)?;
-        crate::nbt::NBTRoot::from(&result.placed.world).save(format!("{prefix}.nbt"));
-    }
-    assert!(verification.failures.is_empty());
+    with_snapshot("CIRCUIT_SNAPSHOT", &circuit, || {
+        let (layout, placement, report) = placer.construct(&construction)?;
+        println!(
+            "CIRCUIT constructed dim={:?} blocks={} seed={} restarts={:?} elapsed={:?}",
+            layout.dim,
+            placement.block_count,
+            report.seed,
+            report
+                .restarts
+                .iter()
+                .map(|(seed, _)| *seed)
+                .collect::<Vec<_>>(),
+            report.elapsed
+        );
+        let compaction = CompactionConfig {
+            seed,
+            time_limit: Some(Duration::from_secs(
+                env_usize("CIRCUIT_COMPACT_SECONDS", 300) as u64,
+            )),
+            max_removals_per_round: removals_per_round_from_env("CIRCUIT_REMOVALS_PER_ROUND"),
+            repair_optimize: repair_optimize_from_env("CIRCUIT_REPAIR_OPTIMIZE"),
+            progress: std::env::var("CIRCUIT_PROGRESS").ok().map(Into::into),
+            ..Default::default()
+        };
+        let (compacted, best, report) = placer.compact(layout, &compaction)?;
+        let result = best.unwrap_or(placement);
+        let document = result.rcell.to_string();
+        let reparsed: crate::physical_cell::PhysicalCellDocument = document.parse()?;
+        let build = reparsed.build()?;
+        let verification = reparsed.verify(&build)?;
+        println!(
+            "CIRCUIT compacted dim={:?} blocks={} removed={:?} elapsed={:?} rcell_failures={}",
+            compacted.dim,
+            result.block_count,
+            report.removed,
+            report.elapsed,
+            verification.failures.len()
+        );
+        if let Ok(prefix) = std::env::var("CIRCUIT_WRITE") {
+            std::fs::write(format!("{prefix}.rcell"), document)?;
+            crate::nbt::NBTRoot::from(&result.placed.world).save(format!("{prefix}.nbt"));
+        }
+        assert!(verification.failures.is_empty());
+        Ok(result.placed.clone())
+    })?;
     Ok(())
 }
 
@@ -2274,7 +2296,8 @@ fn chain_file_name(bits: usize, size: DimSize) -> String {
 /// `TILE_SAMPLES` (200), `TILE_WALK` (200), `TILE_COMPACT_SECONDS` (2400),
 /// `TILE_SOURCE=<tile .rcell>` (compact and check that tile instead of
 /// constructing one), `TILE_PROGRESS=<directory>` (every accepted step as a
-/// frame for the viewer); construction: `TILE_WIDTH` (2), `TILE_HEIGHT` (10),
+/// frame for the viewer), `TILE_SNAPSHOT=<dir>.snapshot` (run inside a
+/// compilation snapshot, whose `.rsnap` holds the frames); construction: `TILE_WIDTH` (2), `TILE_HEIGHT` (10),
 /// `TILE_WINDOW`, `TILE_MAX_WINDOW`, `TILE_STEP_SECONDS`,
 /// `TILE_CARRY_SECONDS` (180, the carry-out step), `TILE_RESTART_SECONDS`
 /// (600), `TILE_RESTARTS` (7), `TILE_SEED`, `TILE_WORKERS`; experiments:
@@ -2364,112 +2387,119 @@ fn synthesize_carry_adder() -> eyre::Result<()> {
         model_params,
         ..Default::default()
     };
-    let started = std::time::Instant::now();
-    let (layout, placement) = if let Ok(source) = std::env::var("TILE_SOURCE") {
-        // Compact an earlier tile further instead of constructing one.
-        let document: crate::physical_cell::PhysicalCellDocument =
-            std::fs::read_to_string(source)?.parse()?;
-        let layout = ExactLayout::from_rcell(&document)?;
-        let exact = placer.window_config(&layout, 1, (0, 0), None, &compaction)?;
-        let ExactOutcome::Placed(placement) = placer.place(&exact)?.0 else {
-            eyre::bail!("the source tile does not verify under the model");
+    with_snapshot("TILE_SNAPSHOT", "adder-carry-tile", || {
+        let started = std::time::Instant::now();
+        let (layout, placement) = if let Ok(source) = std::env::var("TILE_SOURCE") {
+            // Compact an earlier tile further instead of constructing one.
+            let document: crate::physical_cell::PhysicalCellDocument =
+                std::fs::read_to_string(source)?.parse()?;
+            let layout = ExactLayout::from_rcell(&document)?;
+            let exact = placer.window_config(&layout, 1, (0, 0), None, &compaction)?;
+            let ExactOutcome::Placed(placement) = placer.place(&exact)?.0 else {
+                eyre::bail!("the source tile does not verify under the model");
+            };
+            (layout, *placement)
+        } else {
+            let (layout, placement, report) = placer.construct(&construction)?;
+            println!(
+                "TILE constructed dim={:?} blocks={} seed={} restarts={} steps={:?} elapsed={:?}",
+                layout.dim,
+                placement.block_count,
+                report.seed,
+                report.restarts.len(),
+                report.steps,
+                report.elapsed
+            );
+            (layout, placement)
         };
-        (layout, *placement)
-    } else {
-        let (layout, placement, report) = placer.construct(&construction)?;
+        let (compacted, best, report) = placer.compact(layout, &compaction)?;
+        let tile = best.unwrap_or(placement);
         println!(
-            "TILE constructed dim={:?} blocks={} seed={} restarts={} steps={:?} elapsed={:?}",
-            layout.dim,
-            placement.block_count,
-            report.seed,
-            report.restarts.len(),
-            report.steps,
+            "TILE compacted dim={:?} blocks={} removed={:?} reductions={} elapsed={:?}",
+            compacted.dim,
+            tile.block_count,
+            report.removed,
+            report.block_reductions,
             report.elapsed
         );
-        (layout, placement)
-    };
-    let (compacted, best, report) = placer.compact(layout, &compaction)?;
-    let tile = best.unwrap_or(placement);
-    println!(
-        "TILE compacted dim={:?} blocks={} removed={:?} reductions={} elapsed={:?}",
-        compacted.dim, tile.block_count, report.removed, report.block_reductions, report.elapsed
-    );
-    println!("{}", tile.rcell);
-    let tile_build = tile.rcell.build()?;
-    write_cell(
-        &out,
-        &tile_file_name(tile.rcell.size),
-        &tile.rcell,
-        &tile_build,
-    )?;
-
-    let bit_list = |name: &str, default: &str| {
-        std::env::var(name)
-            .unwrap_or_else(|_| default.to_owned())
-            .split(',')
-            .filter(|bits| !bits.is_empty())
-            .map(|bits| bits.parse::<usize>())
-            .collect::<Result<Vec<_>, _>>()
-    };
-    let write_bits = bit_list("TILE_WRITE_BITS", "4")?;
-    let long_bits = if carry_only {
-        Vec::new()
-    } else {
-        bit_list("TILE_LONG_BITS", "8,16")?
-    };
-    let exhaustive_bits = env_usize("TILE_BITS", 4);
-    let mut failures = Vec::new();
-    let all_bits = (1..=exhaustive_bits)
-        .chain(long_bits.iter().copied())
-        .chain(write_bits.iter().copied())
-        .collect::<BTreeSet<_>>();
-    for bits in all_bits {
-        let chain = assemble_chain(
-            placer.netlist(),
-            &carry,
-            &compacted,
-            bits,
-            &format!("exact-adder-carry-chain{bits}"),
+        println!("{}", tile.rcell);
+        let tile_build = tile.rcell.build()?;
+        write_cell(
+            &out,
+            &tile_file_name(tile.rcell.size),
+            &tile.rcell,
+            &tile_build,
         )?;
-        let build = chain.build()?;
-        if bits <= exhaustive_bits {
-            let verification = chain.verify(&build)?;
-            println!(
-                "TILE chain bits={bits} dim={:?} cases={} failures={}",
-                chain.size,
-                verification.cases,
-                verification.failures.len()
-            );
-            if let Some(failure) = verification.failures.first() {
-                failures.push(format!("{bits} bits: {:?}", failure.inputs));
-            }
-        }
-        if long_bits.contains(&bits) {
-            for failure in sample_adder_chain(
-                &build,
+
+        let bit_list = |name: &str, default: &str| {
+            std::env::var(name)
+                .unwrap_or_else(|_| default.to_owned())
+                .split(',')
+                .filter(|bits| !bits.is_empty())
+                .map(|bits| bits.parse::<usize>())
+                .collect::<Result<Vec<_>, _>>()
+        };
+        let write_bits = bit_list("TILE_WRITE_BITS", "4")?;
+        let long_bits = if carry_only {
+            Vec::new()
+        } else {
+            bit_list("TILE_LONG_BITS", "8,16")?
+        };
+        let exhaustive_bits = env_usize("TILE_BITS", 4);
+        let mut failures = Vec::new();
+        let all_bits = (1..=exhaustive_bits)
+            .chain(long_bits.iter().copied())
+            .chain(write_bits.iter().copied())
+            .collect::<BTreeSet<_>>();
+        for bits in all_bits {
+            let chain = assemble_chain(
+                placer.netlist(),
+                &carry,
+                &compacted,
                 bits,
-                env_usize("TILE_SAMPLES", 200),
-                env_usize("TILE_WALK", 200),
-                env_usize("TILE_SEED", 1) as u64,
-            )? {
-                failures.push(format!("{bits} bits: {failure}"));
+                &format!("exact-adder-carry-chain{bits}"),
+            )?;
+            let build = chain.build()?;
+            if bits <= exhaustive_bits {
+                let verification = chain.verify(&build)?;
+                println!(
+                    "TILE chain bits={bits} dim={:?} cases={} failures={}",
+                    chain.size,
+                    verification.cases,
+                    verification.failures.len()
+                );
+                if let Some(failure) = verification.failures.first() {
+                    failures.push(format!("{bits} bits: {:?}", failure.inputs));
+                }
+            }
+            if long_bits.contains(&bits) {
+                for failure in sample_adder_chain(
+                    &build,
+                    bits,
+                    env_usize("TILE_SAMPLES", 200),
+                    env_usize("TILE_WALK", 200),
+                    env_usize("TILE_SEED", 1) as u64,
+                )? {
+                    failures.push(format!("{bits} bits: {failure}"));
+                }
+            }
+            if write_bits.contains(&bits) {
+                write_cell(&out, &chain_file_name(bits, chain.size), &chain, &build)?;
             }
         }
-        if write_bits.contains(&bits) {
-            write_cell(&out, &chain_file_name(bits, chain.size), &chain, &build)?;
+        println!(
+            "TILE done in {:?}: tile {:?} with {} blocks, {} failures",
+            started.elapsed(),
+            compacted.dim,
+            tile.block_count,
+            failures.len()
+        );
+        for failure in failures.iter().take(5) {
+            println!("  {failure}");
         }
-    }
-    println!(
-        "TILE done in {:?}: tile {:?} with {} blocks, {} failures",
-        started.elapsed(),
-        compacted.dim,
-        tile.block_count,
-        failures.len()
-    );
-    for failure in failures.iter().take(5) {
-        println!("  {failure}");
-    }
-    eyre::ensure!(failures.is_empty(), "a chain fails");
+        eyre::ensure!(failures.is_empty(), "a chain fails");
+        Ok(tile.placed.clone())
+    })?;
     Ok(())
 }
 

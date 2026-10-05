@@ -241,13 +241,12 @@ impl ExactLocalPlacer {
                             blocks = placement.block_count,
                             "compaction step"
                         );
-                        if let Some(directory) = &config.progress {
-                            super::progress::record_frame(
-                                directory,
-                                &format!("remove {}{index}", axis_name(axis)),
-                                &placement,
-                            );
-                        }
+                        super::progress::record_frame(
+                            config.progress.as_deref(),
+                            &self.name,
+                            &format!("remove {}{index}", axis_name(axis)),
+                            &placement,
+                        );
                         *layout = ExactLayout::from_placement(cut.dim, &placement);
                         *best = Some(placement);
                         report.removed.push((axis, index));
@@ -332,17 +331,16 @@ impl ExactLocalPlacer {
                 optimal,
                 "compaction block reduction"
             );
-            if let Some(directory) = &config.progress {
-                super::progress::record_frame(
-                    directory,
-                    &format!(
-                        "reduce {}{low}-{}",
-                        axis_name(axis),
-                        low + config.reduction_window - 1
-                    ),
-                    &placement,
-                );
-            }
+            super::progress::record_frame(
+                config.progress.as_deref(),
+                &self.name,
+                &format!(
+                    "reduce {}{low}-{}",
+                    axis_name(axis),
+                    low + config.reduction_window - 1
+                ),
+                &placement,
+            );
             *layout = ExactLayout::from_placement(layout.dim, &placement);
             *best = Some(placement);
             report.block_reductions += 1;

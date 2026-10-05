@@ -619,21 +619,24 @@ The harnesses print their knobs and write `.rcell`/`.nbt` files when given
 `PIPE_WRITE` or `EXACT_FA_WRITE`. Generated RCELL files can be re-verified
 with the `rcell` binary.
 
-**Watching construction and compaction.** `ConstructionConfig::progress` and
-`CompactionConfig::progress` write the layout after every accepted step
-(each construction step of the successful attempt, each slice removal and
-block reduction) as numbered frames: a settled `.nbt`, its
-`.outputs.json`, and an entry in `frames.json` (`exact/progress.rs`). The
-NBT viewer plays them back with `?frames=<path>/frames.json`: a frame list,
-previous/next and play buttons, a slider, and the arrow keys, with the
-camera fixed on the largest frame and inputs, outputs and the nets carried
-to the next step marked. `CIRCUIT_PROGRESS` and `TILE_PROGRESS` set the
-directory in the harnesses; frames written under
+**Watching construction and compaction.** Every accepted step (each
+construction step of the successful attempt, each slice removal and block
+reduction) is a frame: the settled layout, its inputs and outputs, and an
+entry with the step's label, block count and size (`exact/progress.rs`).
+Inside a compilation snapshot the frames are always recorded, as the
+placer's sequence under `frames/` (`compilation_snapshots.md`), so the
+`.rsnap` replays the run. `ConstructionConfig::progress` and
+`CompactionConfig::progress` also write them to a plain directory with a
+`frames.json`. The NBT viewer plays a snapshot's sequences from its Frames
+section, and a plain directory with `?frames=<path>/frames.json`; files under
 `tools/nbt-viewer/public/progress/` (ignored by git) are served by the dev
-server:
+server, and `?snapshot=<path>.rsnap` opens a served snapshot. The harnesses
+take `CIRCUIT_SNAPSHOT`/`TILE_SNAPSHOT` (a `.snapshot` directory; the
+`.rsnap` is written beside it) and `CIRCUIT_PROGRESS`/`TILE_PROGRESS`:
 
 ```sh
-CIRCUIT=full-adder CIRCUIT_COMPACT_SECONDS=600 CIRCUIT_PROGRESS=tools/nbt-viewer/public/progress/full-adder \
+CIRCUIT=full-adder CIRCUIT_COMPACT_SECONDS=600 CIRCUIT_SNAPSHOT=target/full-adder.snapshot \
   cargo test --release --lib diagnose_construct_circuit -- --ignored --nocapture
-# then open http://localhost:5173/?frames=progress/full-adder/frames.json
+# copy target/full-adder.rsnap to tools/nbt-viewer/public/progress/ and open
+# http://localhost:5173/?snapshot=progress/full-adder.rsnap
 ```

@@ -220,6 +220,32 @@ pub fn emit_text(path: impl Into<PathBuf>, text: impl Into<String>) -> eyre::Res
     emit_bytes(path, text.into().into_bytes())
 }
 
+/// One step of a process that builds a world step by step (a placer growing
+/// and shrinking a layout, say), for playing the process back in the viewer.
+#[derive(Debug)]
+pub struct SnapshotFrame {
+    /// What the step did, for example `construct g9` or `remove y4`.
+    pub label: String,
+    pub nbt: NBTRoot,
+    /// Interface metadata (`redstone-compiler.outputs.v1`, with inputs) so
+    /// the viewer can name the world's inputs and outputs.
+    pub interface: Option<Value>,
+    /// Extra fields for the frame's index entry, such as the block count.
+    pub details: Value,
+}
+
+/// Records `frame` as the next frame of `sequence`, under
+/// `frames/<sequence>/`: `NNN-<label>.nbt`, its interface metadata, and an
+/// entry in `frames.json`, which is rewritten with every frame so an
+/// unfinished run can still be played back. The manifest lists every
+/// sequence. A no-op outside a snapshot scope.
+pub fn emit_frame(sequence: &str, frame: SnapshotFrame) {
+    let _ = send(WriterMessage::Frame {
+        sequence: sequence.to_owned(),
+        frame,
+    });
+}
+
 pub fn is_active() -> bool {
     CURRENT_RUN.get().is_some()
 }
@@ -377,9 +403,22 @@ impl Drop for SnapshotSession {
 
 enum WriterMessage {
     Event(SnapshotEvent),
-    Nbt { path: PathBuf, nbt: NBTRoot },
-    Json { path: PathBuf, value: Value },
-    Bytes { path: PathBuf, bytes: Vec<u8> },
+    Nbt {
+        path: PathBuf,
+        nbt: NBTRoot,
+    },
+    Json {
+        path: PathBuf,
+        value: Value,
+    },
+    Bytes {
+        path: PathBuf,
+        bytes: Vec<u8>,
+    },
+    Frame {
+        sequence: String,
+        frame: SnapshotFrame,
+    },
     Finish(FinishMessage),
 }
 
@@ -401,8 +440,51 @@ struct ArtifactEntry {
 fn writer_loop(output_dir: &Path, receiver: Receiver<WriterMessage>) -> eyre::Result<()> {
     let mut events = Vec::new();
     let mut artifacts = Vec::new();
+    // Frame sequences in the order they started, with their index entries.
+    let mut sequences: Vec<(String, PathBuf, Vec<Value>)> = Vec::new();
     while let Ok(message) = receiver.recv() {
         match message {
+            WriterMessage::Frame { sequence, frame } => {
+                let position = match sequences.iter().position(|(name, ..)| *name == sequence) {
+                    Some(position) => position,
+                    None => {
+                        let directory = PathBuf::from("frames").join(path_slug(&sequence));
+                        artifacts.push(artifact_entry(&directory.join("frames.json"), "frames"));
+                        sequences.push((sequence, directory, Vec::new()));
+                        sequences.len() - 1
+                    }
+                };
+                let (_, directory, entries) = &mut sequences[position];
+                let stem = format!("{:03}-{}", entries.len(), path_slug(&frame.label));
+                let nbt_path = directory.join(format!("{stem}.nbt"));
+                write_file(output_dir, &nbt_path, &frame.nbt.to_gzip_bytes()?)?;
+                artifacts.push(artifact_entry(&nbt_path, "frame"));
+                let mut entry = json!({
+                    "file": format!("{stem}.nbt"),
+                    "label": frame.label,
+                });
+                if let Some(interface) = &frame.interface {
+                    let interface_path = directory.join(format!("{stem}.outputs.json"));
+                    write_file(
+                        output_dir,
+                        &interface_path,
+                        &serde_json::to_vec_pretty(interface)?,
+                    )?;
+                    artifacts.push(artifact_entry(&interface_path, "json"));
+                    entry["outputs"] = json!(format!("{stem}.outputs.json"));
+                }
+                if let Value::Object(details) = frame.details {
+                    for (key, value) in details {
+                        entry[key] = value;
+                    }
+                }
+                entries.push(entry);
+                write_file(
+                    output_dir,
+                    &directory.join("frames.json"),
+                    &serde_json::to_vec_pretty(entries)?,
+                )?;
+            }
             WriterMessage::Event(event) => events.push(event),
             WriterMessage::Nbt { path, nbt } => {
                 write_file(output_dir, &path, &nbt.to_gzip_bytes()?)?;
@@ -434,12 +516,23 @@ fn writer_loop(output_dir: &Path, receiver: Receiver<WriterMessage>) -> eyre::Re
                     &serde_json::to_vec_pretty(&summary)?,
                 )?;
                 artifacts.push(artifact_entry(&summary_path, "summary"));
+                let frames = sequences
+                    .iter()
+                    .map(|(name, directory, entries)| {
+                        json!({
+                            "sequence": name,
+                            "path": directory.join("frames.json").to_string_lossy().replace('\\', "/"),
+                            "count": entries.len(),
+                        })
+                    })
+                    .collect::<Vec<_>>();
                 let manifest = json!({
                     "format": SNAPSHOT_FORMAT,
                     "status": finish.status,
                     "top_module": finish.top_module,
                     "final_nbt": finish.final_nbt,
                     "artifacts": artifacts,
+                    "frames": frames,
                 });
                 write_file(
                     output_dir,
@@ -451,6 +544,19 @@ fn writer_loop(output_dir: &Path, receiver: Receiver<WriterMessage>) -> eyre::Re
         }
     }
     Err(eyre::eyre!("snapshot session ended without finalization"))
+}
+
+/// A file-name-safe form of a sequence or frame label.
+fn path_slug(text: &str) -> String {
+    text.chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect()
 }
 
 fn write_file(output_dir: &Path, relative: &Path, bytes: &[u8]) -> eyre::Result<()> {
@@ -610,6 +716,57 @@ mod tests {
         let first_archive = fs::read(&archive)?;
         write_snapshot_archive(&output, &archive)?;
         assert_eq!(fs::read(&archive)?, first_archive);
+        fs::remove_dir_all(output)?;
+        fs::remove_file(archive)?;
+        Ok(())
+    }
+
+    /// Frames land under `frames/<sequence>/`, numbered, with their index and
+    /// interface files, are listed in the manifest, and travel in the archive.
+    #[test]
+    fn frames_are_indexed_listed_and_archived() -> eyre::Result<()> {
+        let output = unique_test_directory("frames");
+        let world = crate::world::World3D::new(crate::world::position::DimSize(1, 1, 1));
+        compile_with_snapshot(
+            SnapshotOptions::new(&output, "dummy"),
+            || -> eyre::Result<DummyProduct> {
+                for (label, blocks) in [("construct g1", 3), ("remove y0", 2)] {
+                    emit_frame(
+                        "placer run",
+                        SnapshotFrame {
+                            label: label.to_owned(),
+                            nbt: NBTRoot::from(&world),
+                            interface: Some(json!({ "outputs": [] })),
+                            details: json!({ "blocks": blocks }),
+                        },
+                    );
+                }
+                Ok(DummyProduct)
+            },
+        )?;
+
+        let manifest: Value = serde_json::from_slice(&fs::read(output.join("manifest.json"))?)?;
+        assert_eq!(manifest["frames"][0]["sequence"], "placer run");
+        assert_eq!(manifest["frames"][0]["count"], 2);
+        let index_path = manifest["frames"][0]["path"].as_str().unwrap().to_owned();
+        assert_eq!(index_path, "frames/placer-run/frames.json");
+        let index: Value = serde_json::from_slice(&fs::read(output.join(&index_path))?)?;
+        assert_eq!(index[1]["file"], "001-remove-y0.nbt");
+        assert_eq!(index[1]["outputs"], "001-remove-y0.outputs.json");
+        assert_eq!(index[1]["blocks"], 2);
+
+        let archive = output.with_extension("rsnap");
+        let mut zip = zip::ZipArchive::new(fs::File::open(&archive)?)?;
+        for name in [
+            index_path.as_str(),
+            "frames/placer-run/000-construct-g1.nbt",
+            "frames/placer-run/001-remove-y0.outputs.json",
+        ] {
+            assert!(
+                zip.by_name(name).is_ok(),
+                "{name} is missing from the archive"
+            );
+        }
         fs::remove_dir_all(output)?;
         fs::remove_file(archive)?;
         Ok(())
