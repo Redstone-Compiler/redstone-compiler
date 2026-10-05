@@ -211,13 +211,43 @@ crossing net in every step. Each gain the e-graph finds over `nor9` either
 needs wider NORs or more nets alive at once, and at the box size that
 makes `nor9` work, construction cannot place either within its limits.
 
+Longer steps do not place them either. With 240 s per step and an hour
+per attempt (`CIRCUIT_STEP_SECONDS=240 CIRCUIT_RESTART_SECONDS=3600`),
+seed 1, all three ended their first attempt stuck:
+
+| Netlist | Steps placed / timed out | Stuck at |
+| --- | --- | --- |
+| 8 gates, flat | 1 / 5 | `g4 = NOR(a, cin, g3)`: windows 2, 3 and 4 at 240 s each |
+| 8 gates, chained | 9 / 4 | `cout = NOR(cout_or1, g5)` |
+| depth 3, chained | 4 / 4 | `cout` |
+
+Chaining gets further than the flat netlist (it places `g5` in a 3-slice
+window after 240 s failed in 2), but a step with 6-7 nets crossing it is
+not solved in four minutes either.
+
+## Conclusion
+
+For the full adder in a box 2 wide and 10 high, nothing the e-graph finds
+beats `nor9` in practice:
+
+- Under two-input NORs, `nor9` is the proven minimum.
+- The netlists with fewer gates or less depth need wider NORs. Wider NORs
+  keep more nets alive at once, and windowed construction cannot place
+  them, flat, split into OR nets, or chained on a support block, with 60 s
+  or 240 s steps.
+
+The search and the exact extraction still hold their value. They prove
+when a hand-written netlist is optimal, and for other circuits they may
+find better netlists that stay within two-input NORs.
+
 ## Next
 
-- Longer steps for these netlists (the timeouts were never proofs), to
-  see whether they place at all and how they compact once placed.
+- Run the e-graph on circuits whose netlists were written by hand or
+  decomposed mechanically (the 2-bit adder, the 4:1 multiplexer) with
+  `binary`, and place what it finds against the current netlists.
 - Count crossing width in extraction (a bound on nets alive at once along
-  the construction order), so the e-graph proposes netlists construction
-  can place: with `binary` the answer was `nor9` itself.
+  the construction order), so it only proposes netlists construction can
+  place.
 - Constrain extraction for carry tiles: the carry needs monotone signals
   (`carry_tiles.md`).
 
