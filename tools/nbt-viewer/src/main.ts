@@ -3,7 +3,7 @@ import type { Viz } from '@viz-js/viz';
 import { unzipSync } from 'fflate';
 import { loadNbtFile, stringifyNbt } from './nbt/loadNbt';
 import { toStructureModel } from './nbt/toStructure';
-import { StructureViewer } from './render/StructureViewer';
+import { StructureViewer, type ViewerPin } from './render/StructureViewer';
 import { highlightRcir } from './syntax/rcir';
 import { highlightVerilog, type VerilogHighlightState } from './syntax/verilog';
 import {
@@ -86,6 +86,8 @@ type SnapshotManifest = {
   top_module?: string;
   final_nbt?: string;
   artifacts: SnapshotArtifact[];
+  /** Step-by-step recordings (`snapshot::emit_frame`), one index per sequence. */
+  frames?: Array<{ sequence: string; path: string; count: number }>;
 };
 type SnapshotInstance = {
   instanceId?: number;
@@ -207,9 +209,17 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
           </div>
           <button id="toggle-blocks" class="file-button graph-button snapshot-box-button active" type="button" aria-pressed="true">Blocks</button>
           <button id="toggle-grid" class="file-button graph-button snapshot-box-button active" type="button" aria-pressed="true">Grid</button>
+          <button id="toggle-pins" class="file-button graph-button snapshot-box-button active" type="button" aria-pressed="true" title="Mark inputs (green), outputs (orange) and carry blocks (blue)">I/O</button>
           <button id="toggle-snapshot-boxes" class="file-button graph-button snapshot-box-button hidden" type="button">Boxes</button>
           <button id="toggle-snapshot-routes" class="file-button graph-button snapshot-box-button hidden" type="button">Routes</button>
           <button id="open-graphs" class="file-button graph-button" type="button">Graphs</button>
+        </div>
+        <div id="frames-bar" class="floating-panel frames-bar hidden">
+          <button id="frames-prev" type="button" title="Previous frame (Left arrow)">&#9664;</button>
+          <button id="frames-play" type="button" title="Play or pause">Play</button>
+          <button id="frames-next" type="button" title="Next frame (Right arrow)">&#9654;</button>
+          <input id="frames-slider" type="range" min="0" max="0" value="0" />
+          <span id="frames-label"></span>
         </div>
         <details id="switches-panel" class="floating-panel switches-panel" open>
           <summary>
@@ -437,6 +447,13 @@ const traceSimulationState = document.querySelector<HTMLElement>('#trace-simulat
 const openGraphsButton = document.querySelector<HTMLButtonElement>('#open-graphs')!;
 const toggleBlocksButton = document.querySelector<HTMLButtonElement>('#toggle-blocks')!;
 const toggleGridButton = document.querySelector<HTMLButtonElement>('#toggle-grid')!;
+const togglePinsButton = document.querySelector<HTMLButtonElement>('#toggle-pins')!;
+const framesBar = document.querySelector<HTMLElement>('#frames-bar')!;
+const framesPrevButton = document.querySelector<HTMLButtonElement>('#frames-prev')!;
+const framesPlayButton = document.querySelector<HTMLButtonElement>('#frames-play')!;
+const framesNextButton = document.querySelector<HTMLButtonElement>('#frames-next')!;
+const framesSlider = document.querySelector<HTMLInputElement>('#frames-slider')!;
+const framesLabel = document.querySelector<HTMLElement>('#frames-label')!;
 const toggleSnapshotBoxesButton = document.querySelector<HTMLButtonElement>('#toggle-snapshot-boxes')!;
 const toggleSnapshotRoutesButton = document.querySelector<HTMLButtonElement>('#toggle-snapshot-routes')!;
 const closeGraphsButton = document.querySelector<HTMLButtonElement>('#close-graphs')!;
@@ -524,6 +541,13 @@ let traceAnimationToken = 0;
 let waveformResizeFrame: number | undefined;
 let graphDot: GraphDotInfo | undefined;
 let currentOutputMetadataJson: string | undefined;
+// What the file panel lists, so going back can restore the example list.
+let browserMode: 'examples' | 'snapshot' | 'frames' | 'folder' = 'examples';
+let exampleCache: ExampleFile[] | undefined;
+let openedExampleName: string | undefined;
+// While the page follows its address (load, back, forward), opening things
+// must not write new history entries.
+let applyingUrl = false;
 let graphTab: GraphTab = 'world';
 let graphWorldModeValue: GraphWorldMode = 'raw';
 let graphLogicModeValue: GraphLogicMode = 'raw';
@@ -597,6 +621,13 @@ toggleGridButton.addEventListener('click', () => {
   viewer.setGridVisible(gridVisible);
   toggleGridButton.classList.toggle('active', gridVisible);
   toggleGridButton.setAttribute('aria-pressed', String(gridVisible));
+});
+
+togglePinsButton.addEventListener('click', () => {
+  const visible = !togglePinsButton.classList.contains('active');
+  viewer.setPinsVisible(visible);
+  togglePinsButton.classList.toggle('active', visible);
+  togglePinsButton.setAttribute('aria-pressed', String(visible));
 });
 
 window.addEventListener('keydown', event => {
@@ -2076,6 +2107,7 @@ function parseSnapshotConstraints(reportValue: unknown, resolvedValue: unknown):
 }
 
 function renderSnapshotBrowser(snapshot: LoadedSnapshot): void {
+  browserMode = 'snapshot';
   filesList.replaceChildren();
   filesList.className = 'files-list snapshot-files-list';
   filesTitle.textContent = 'Snapshot';
@@ -2101,6 +2133,23 @@ function renderSnapshotBrowser(snapshot: LoadedSnapshot): void {
     const body = appendSnapshotCollapsibleSection('Candidates', candidateNbt.length);
     for (const artifact of candidateNbt) {
       appendSnapshotNbtEntry(artifact.path.replace(/^candidates\//i, ''), artifact.path, 'main', body);
+    }
+  }
+
+  const sequences = (snapshot.manifest.frames ?? []).filter(sequence => snapshot.filesByPath.has(sequence.path));
+  if (sequences.length > 0) {
+    appendSnapshotSection('Frames');
+    for (const sequence of sequences) {
+      const button = createFileEntry(sequence.sequence, `${sequence.count} frames`);
+      button.addEventListener('click', () => {
+        filesList.querySelectorAll('.file-entry.selected').forEach(entry => entry.classList.remove('selected'));
+        button.classList.add('selected');
+        updateUrl({ nbt: null, sequence: sequence.sequence, frame: null });
+        void playSnapshotFrames(snapshot, sequence.path).catch(error => {
+          inspector.textContent = error instanceof Error ? error.message : String(error);
+        });
+      });
+      filesList.append(button);
     }
   }
 
@@ -2147,6 +2196,8 @@ function renderSnapshotBrowser(snapshot: LoadedSnapshot): void {
       artifact.kind !== 'nbt' &&
       !isSnapshotIrArtifact(artifact.path) &&
       !/^instances\/[^/]+\/instance\.json$/i.test(artifact.path) &&
+      // Frame files are played from the Frames section.
+      !/^frames\//i.test(artifact.path) &&
       snapshot.filesByPath.has(artifact.path),
   );
   if (metadata.length > 0) {
@@ -2190,7 +2241,9 @@ function appendSnapshotNbtEntry(
   if (!file || target !== 'main') return;
   const button = createFileEntry(label, 'NBT', file.size);
   button.dataset.snapshotPath = path;
-  button.addEventListener('click', () => void openSnapshotNbt(path, button));
+  button.addEventListener('click', () => {
+    void openSnapshotNbt(path, button).then(() => updateUrl({ nbt: path, sequence: null, frame: null }));
+  });
   parent.append(button);
 }
 
@@ -2270,6 +2323,7 @@ function focusSnapshotConstraint(constraint: SnapshotConstraint): void {
 }
 
 async function openSnapshotNbt(path: string, selectedEntry?: Element | null): Promise<void> {
+  clearProgressFrames();
   const snapshot = currentSnapshot;
   const file = snapshot?.filesByPath.get(path);
   if (!snapshot || !file) throw new Error(`Snapshot artifact is missing: ${path}`);
@@ -2985,7 +3039,9 @@ function compilerPositionToNbt(position: [number, number, number]): [number, num
 }
 
 function renderFileBrowser(files: File[]): void {
+  browserMode = 'folder';
   leaveSnapshotMode();
+  clearProgressFrames();
   const nbtFiles = files
     .filter(isSupportedFile)
     .sort((a, b) => getDisplayPath(a).localeCompare(getDisplayPath(b)));
@@ -3019,27 +3075,301 @@ function renderFileBrowser(files: File[]): void {
   void openFile(nbtFiles[0], filesList.querySelector('.file-entry'));
 }
 
-async function loadExamples(): Promise<void> {
-  try {
+/** One recorded step of construction or compaction (`exact/progress.rs`). */
+type ProgressFrame = {
+  file: string;
+  outputs?: string;
+  label: string;
+  blocks: number;
+  size: [number, number, number];
+};
+
+/** Where the frames' files come from: the dev server or an open snapshot. */
+type ProgressFrameSource = {
+  nbt(file: string): Promise<File>;
+  metadata(file: string): Promise<string | undefined>;
+};
+
+let progressFrames: ProgressFrame[] = [];
+let progressSource: ProgressFrameSource | undefined;
+let progressIndex = -1;
+let progressTimer: number | undefined;
+let progressLoad = 0;
+
+function urlFrameSource(base: string): ProgressFrameSource {
+  return {
+    async nbt(file) {
+      const response = await fetch(resolveAssetPath(base + file));
+      if (!response.ok) throw new Error(`Failed to load ${file}: ${response.status}`);
+      return new File([await response.arrayBuffer()], file, { type: 'application/octet-stream' });
+    },
+    metadata: file => loadExampleMetadata(base + file),
+  };
+}
+
+function snapshotFrameSource(snapshot: LoadedSnapshot, base: string): ProgressFrameSource {
+  return {
+    async nbt(file) {
+      const found = snapshot.filesByPath.get(base + file);
+      if (!found) throw new Error(`Snapshot frame is missing: ${base + file}`);
+      return found;
+    },
+    metadata: async file => snapshot.filesByPath.get(base + file)?.text(),
+  };
+}
+
+/** Hides the frame player when something else is opened. */
+function clearProgressFrames(): void {
+  stopProgressPlayback();
+  progressFrames = [];
+  progressSource = undefined;
+  progressIndex = -1;
+  framesBar.classList.add('hidden');
+}
+
+/** Plays back a `frames.json` written by construction and compaction. */
+async function loadProgressFrames(indexPath: string): Promise<void> {
+  const response = await fetch(resolveAssetPath(indexPath));
+  if (!response.ok) throw new Error(`Failed to load ${indexPath}: ${response.status}`);
+  const frames = (await response.json()) as ProgressFrame[];
+  await startProgressFrames(frames, urlFrameSource(indexPath.slice(0, indexPath.lastIndexOf('/') + 1)), true);
+}
+
+/** Plays a recorded sequence of an open snapshot, keeping its file list. */
+async function playSnapshotFrames(snapshot: LoadedSnapshot, indexPath: string): Promise<void> {
+  const index = snapshot.filesByPath.get(indexPath);
+  if (!index) throw new Error(`Snapshot frame index is missing: ${indexPath}`);
+  const frames = JSON.parse(await index.text()) as ProgressFrame[];
+  await startProgressFrames(frames, snapshotFrameSource(snapshot, indexPath.slice(0, indexPath.lastIndexOf('/') + 1)), false);
+}
+
+async function startProgressFrames(
+  frames: ProgressFrame[],
+  source: ProgressFrameSource,
+  listFrames: boolean,
+): Promise<void> {
+  clearProgressFrames();
+  progressFrames = frames;
+  progressSource = source;
+  framesBar.classList.toggle('hidden', progressFrames.length === 0);
+  framesSlider.max = String(Math.max(0, progressFrames.length - 1));
+  if (listFrames) renderProgressFrameList();
+  if (progressFrames.length === 0) return;
+  await showProgressFrame(0);
+  // One camera for every frame, framing the largest layout (frame sizes are
+  // the compiler's x, y, z; the viewer's axes are y, z, x).
+  const largest = [0, 1, 2].map(axis => Math.max(...progressFrames.map(frame => frame.size[axis])));
+  viewer.fitView([largest[1], largest[2], largest[0]]);
+}
+
+function renderProgressFrameList(): void {
+  browserMode = 'frames';
+  filesList.replaceChildren();
+  filesTitle.textContent = 'Frames';
+  filesCount.textContent = `${progressFrames.length} frames`;
+  filesList.classList.toggle('empty', progressFrames.length === 0);
+  progressFrames.forEach((frame, index) => {
+    const button = document.createElement('button');
+    button.className = 'file-entry';
+    button.type = 'button';
+    button.dataset.frameIndex = String(index);
+    const name = document.createElement('span');
+    name.className = 'file-entry-name';
+    name.textContent = `${index + 1}. ${frame.label}`;
+    const blocks = document.createElement('span');
+    blocks.className = 'file-entry-size';
+    blocks.textContent = `${frame.blocks} blocks`;
+    button.append(name, blocks);
+    button.addEventListener('click', () => {
+      stopProgressPlayback();
+      void showProgressFrame(index);
+    });
+    filesList.append(button);
+  });
+}
+
+async function showProgressFrame(index: number): Promise<void> {
+  const frame = progressFrames[index];
+  const source = progressSource;
+  if (!frame || !source) return;
+  const load = ++progressLoad;
+  const [file, metadata] = await Promise.all([
+    source.nbt(frame.file),
+    frame.outputs ? source.metadata(frame.outputs) : Promise.resolve(undefined),
+  ]);
+  if (load !== progressLoad) return;
+  const entry = filesList.querySelector(`[data-frame-index="${index}"]`);
+  // Keep the camera, so the layout changes in place.
+  await openFile(file, entry, metadata, undefined, true);
+  progressIndex = index;
+  entry?.scrollIntoView({ block: 'nearest' });
+  framesSlider.value = String(index);
+  framesLabel.textContent = `${index + 1}/${progressFrames.length}  ${frame.label}  ${frame.blocks} blocks  ${frame.size.join('x')}`;
+  updateUrl({ frame: String(index + 1) }, true);
+}
+
+function stopProgressPlayback(): void {
+  if (progressTimer !== undefined) window.clearInterval(progressTimer);
+  progressTimer = undefined;
+  framesPlayButton.textContent = 'Play';
+}
+
+function stepProgress(delta: number): void {
+  if (progressFrames.length === 0) return;
+  const next = Math.min(progressFrames.length - 1, Math.max(0, progressIndex + delta));
+  if (next !== progressIndex) void showProgressFrame(next);
+}
+
+framesPrevButton.addEventListener('click', () => {
+  stopProgressPlayback();
+  stepProgress(-1);
+});
+framesNextButton.addEventListener('click', () => {
+  stopProgressPlayback();
+  stepProgress(1);
+});
+framesSlider.addEventListener('input', () => {
+  stopProgressPlayback();
+  void showProgressFrame(Number(framesSlider.value));
+});
+framesPlayButton.addEventListener('click', () => {
+  if (progressTimer !== undefined) {
+    stopProgressPlayback();
+    return;
+  }
+  if (progressIndex >= progressFrames.length - 1) void showProgressFrame(0);
+  framesPlayButton.textContent = 'Pause';
+  progressTimer = window.setInterval(() => {
+    if (progressIndex >= progressFrames.length - 1) {
+      stopProgressPlayback();
+      return;
+    }
+    stepProgress(1);
+  }, 700);
+});
+window.addEventListener('keydown', event => {
+  if (progressFrames.length === 0 || framesBar.classList.contains('hidden')) return;
+  if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) return;
+  if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+  event.preventDefault();
+  stopProgressPlayback();
+  stepProgress(event.key === 'ArrowLeft' ? -1 : 1);
+});
+
+
+async function exampleList(): Promise<ExampleFile[]> {
+  if (!exampleCache) {
     const response = await fetch(resolveAssetPath('examples/manifest.json'));
     if (!response.ok) throw new Error(`Failed to load examples: ${response.status}`);
-    const examples = (await response.json()) as ExampleFile[];
-    renderExampleBrowser(examples);
-    const requestedExample = new URLSearchParams(window.location.search).get('example');
-    const initialExample = examples.find(example =>
-      example.path === requestedExample || example.name === requestedExample,
-    ) ?? examples.find(example => example.kind === 'nbt');
-    if (initialExample) {
-      await openExample(initialExample, findExampleEntry(initialExample.path));
+    exampleCache = (await response.json()) as ExampleFile[];
+  }
+  return exampleCache;
+}
+
+/** Makes `params` the page's address: a new history entry, or with `replace` the current one. */
+function setUrl(params: URLSearchParams, replace = false): void {
+  if (applyingUrl) return;
+  const search = params.toString();
+  const url = `${window.location.pathname}${search ? `?${search}` : ''}`;
+  if (url === `${window.location.pathname}${window.location.search}`) return;
+  if (replace) window.history.replaceState(null, '', url);
+  else window.history.pushState(null, '', url);
+}
+
+/** Sets (or, with `null`, removes) parameters on top of the current address. */
+function updateUrl(changes: Record<string, string | null>, replace = false): void {
+  const params = new URLSearchParams(window.location.search);
+  for (const [key, value] of Object.entries(changes)) {
+    if (value === null) params.delete(key);
+    else params.set(key, value);
+  }
+  setUrl(params, replace);
+}
+
+/**
+ * Opens what the address names: `example=<name>` (an NBT or an `.rsnap` from
+ * the example list), `snapshot=<path>` (a served `.rsnap`), or
+ * `frames=<path>/frames.json`; inside a snapshot `nbt=<artifact>` or
+ * `sequence=<name>`, and `frame=<n>` for a recording. Runs on load and on
+ * back and forward.
+ */
+async function applyUrl(): Promise<void> {
+  applyingUrl = true;
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const framesPath = params.get('frames');
+    if (framesPath) {
+      await loadProgressFrames(framesPath);
+      await showUrlFrame(params);
+      return;
     }
+    const snapshotPath = params.get('snapshot');
+    if (snapshotPath) {
+      const response = await fetch(resolveAssetPath(snapshotPath));
+      if (!response.ok) throw new Error(`Failed to load ${snapshotPath}: ${response.status}`);
+      const name = snapshotPath.split('/').pop() ?? 'snapshot.rsnap';
+      openedExampleName = undefined;
+      await openSnapshot([new File([await response.arrayBuffer()], name, { type: 'application/octet-stream' })]);
+    } else {
+      const examples = await exampleList();
+      const requested = params.get('example');
+      const example = examples.find(candidate => candidate.path === requested || candidate.name === requested)
+        ?? examples.find(candidate => candidate.kind === 'nbt');
+      if (!example) return;
+      if (example.kind === 'snapshot' && openedExampleName === example.name && currentSnapshot) {
+        // Same snapshot, another view of it: no need to unpack it again.
+        clearProgressFrames();
+      } else {
+        if (example.kind === 'nbt' && browserMode !== 'examples') renderExampleBrowser(examples);
+        await openExample(example, findExampleEntry(example.path));
+      }
+      if (example.kind === 'nbt') return;
+    }
+    const snapshot = currentSnapshot;
+    if (!snapshot) return;
+    const nbt = params.get('nbt');
+    const sequence = (snapshot.manifest.frames ?? []).find(candidate => candidate.sequence === params.get('sequence'));
+    if (nbt && snapshot.filesByPath.has(nbt)) {
+      await openSnapshotNbt(nbt, findSnapshotEntry(nbt));
+    } else if (sequence) {
+      await playSnapshotFrames(snapshot, sequence.path);
+      await showUrlFrame(params);
+    } else if (snapshot.manifest.final_nbt && snapshot.filesByPath.has(snapshot.manifest.final_nbt)) {
+      await openSnapshotNbt(snapshot.manifest.final_nbt, findSnapshotEntry(snapshot.manifest.final_nbt));
+    }
+  } catch (error) {
+    inspector.textContent = error instanceof Error ? error.message : String(error);
+  } finally {
+    applyingUrl = false;
+  }
+}
+
+async function showUrlFrame(params: URLSearchParams): Promise<void> {
+  const frame = Number(params.get('frame'));
+  if (Number.isInteger(frame) && frame >= 1 && frame <= progressFrames.length) {
+    await showProgressFrame(frame - 1);
+  }
+}
+
+async function loadExamples(): Promise<void> {
+  try {
+    renderExampleBrowser(await exampleList());
   } catch (error) {
     filesList.classList.add('empty');
     filesCount.textContent = 'No examples';
     filesList.textContent = error instanceof Error ? error.message : String(error);
+    return;
   }
+  await applyUrl();
 }
 
+window.addEventListener('popstate', () => {
+  stopProgressPlayback();
+  void applyUrl();
+});
+
 function renderExampleBrowser(examples: ExampleFile[]): void {
+  browserMode = 'examples';
   filesList.replaceChildren();
   filesTitle.textContent = 'Files';
   filesList.classList.toggle('empty', examples.length === 0);
@@ -3070,7 +3400,12 @@ function appendExampleEntry(example: ExampleFile): void {
   size.className = 'file-entry-size';
   size.textContent = formatBytes(example.size);
   button.append(name, size);
-  button.addEventListener('click', () => void openExample(example, button));
+  button.addEventListener('click', () => {
+    setUrl(new URLSearchParams({ example: example.name }));
+    void openExample(example, button).catch(error => {
+      inspector.textContent = error instanceof Error ? error.message : String(error);
+    });
+  });
   filesList.append(button);
 }
 
@@ -3081,6 +3416,8 @@ function findExampleEntry(path: string): Element | null {
 }
 
 async function openExample(example: ExampleFile, selectedEntry?: Element | null): Promise<void> {
+  clearProgressFrames();
+  openedExampleName = example.name;
   const response = await fetch(resolveAssetPath(example.path));
   if (!response.ok) throw new Error(`Failed to load ${example.path}: ${response.status}`);
   const file = new File([await response.arrayBuffer()], example.name, { type: 'application/octet-stream' });
@@ -3104,6 +3441,7 @@ async function openFile(
   selectedEntry?: Element | null,
   outputMetadataJson?: string,
   snapshotPath?: string,
+  preserveView = false,
 ): Promise<void> {
   try {
     const parsed = await loadNbtFile(file);
@@ -3127,7 +3465,8 @@ async function openFile(
     markSelectedFile(selectedEntry);
 
     if (structure) {
-      await viewer.setStructure(structure);
+      await viewer.setStructure(structure, { preserveView });
+      viewer.setPins(structurePins(structure));
       renderSwitches(structure);
       viewerEmpty.classList.add('hidden');
       inspector.textContent = [
@@ -3159,6 +3498,7 @@ async function openFile(
     toggleSwitchButton.classList.add('hidden');
     viewerEmpty.classList.remove('hidden');
     inspector.textContent = error instanceof Error ? error.message : String(error);
+    viewer.setPins([]);
     renderSwitches();
     renderTrace([], [], emptyWaveform, undefined);
     updateSnapshotBoxes();
@@ -3197,7 +3537,11 @@ function renderSelection(block: StructureBlock | undefined): void {
 function renderSwitches(structure?: StructureModel): void {
   switchesList.replaceChildren();
   const switches = structure?.blocks.filter(block => block.palette.name === 'minecraft:lever') ?? [];
-  switchesCount.textContent = switches.length === 0 ? 'No switches' : `${switches.length} switches`;
+  const outputs = structure ? outputBlocks(structure) : [];
+  switchesCount.textContent = [
+    switches.length === 0 ? 'No switches' : `${switches.length} switches`,
+    ...(outputs.length === 0 ? [] : [`${outputs.length} outputs`]),
+  ].join(' · ');
   switchesActions.classList.toggle('hidden', switches.length === 0);
 
   if (switches.length === 0) {
@@ -3209,6 +3553,7 @@ function renderSwitches(structure?: StructureModel): void {
 
   switchesPanel.open = true;
   switchesList.className = 'switches-list';
+  const inputs = structure ? metadataBlocks(structure, 'inputs') : [];
   switches.forEach((block, index) => {
     const row = document.createElement('button');
     row.className = 'switch-entry';
@@ -3217,7 +3562,8 @@ function renderSwitches(structure?: StructureModel): void {
 
     const label = document.createElement('span');
     label.className = 'switch-entry-label';
-    label.textContent = `#${index + 1}  ${block.pos.join(',')}`;
+    const name = inputs.find(input => samePos(input.pos, block.pos))?.name;
+    label.textContent = `#${index + 1}  ${name ? `${name}  ` : ''}${block.pos.join(',')}`;
 
     const state = document.createElement('span');
     state.className = 'switch-entry-state';
@@ -3231,6 +3577,104 @@ function renderSwitches(structure?: StructureModel): void {
     });
     switchesList.append(row);
   });
+  renderOutputs(outputs);
+}
+
+type MetadataEndpoint = { name: string; position: [number, number, number] };
+
+/** Named endpoints (`inputs` or `outputs`) from the loaded metadata, with their blocks. */
+function metadataBlocks(
+  structure: StructureModel,
+  key: 'inputs' | 'outputs',
+): Array<{ name: string; pos: [number, number, number]; block?: StructureBlock }> {
+  if (!currentOutputMetadataJson) return [];
+  let endpoints: MetadataEndpoint[];
+  try {
+    endpoints = JSON.parse(currentOutputMetadataJson)[key] ?? [];
+  } catch {
+    return [];
+  }
+  return endpoints.map(endpoint => {
+    // Metadata uses the compiler's (x, y, z) with z up; NBT positions are (y, z, x).
+    const [x, y, z] = endpoint.position;
+    const pos: [number, number, number] = [y, z, x];
+    return { name: endpoint.name, pos, block: structure.blocks.find(block => samePos(block.pos, pos)) };
+  });
+}
+
+function outputBlocks(structure: StructureModel): ReturnType<typeof metadataBlocks> {
+  return metadataBlocks(structure, 'outputs');
+}
+
+/**
+ * Marks for the 3D view: every switch (named from the metadata's inputs when
+ * it has them, else by its number in the switch list) and every named output;
+ * an output on a plain block is a carry block between cells.
+ */
+function structurePins(structure: StructureModel): ViewerPin[] {
+  const inputs = metadataBlocks(structure, 'inputs');
+  const switches = structure.blocks.filter(block => block.palette.name === 'minecraft:lever');
+  const pins: ViewerPin[] = switches.map((block, index) => ({
+    label: inputs.find(input => samePos(input.pos, block.pos))?.name ?? `#${index + 1}`,
+    pos: block.pos,
+    kind: 'input',
+  }));
+  for (const output of outputBlocks(structure)) {
+    pins.push({
+      label: output.name,
+      pos: output.pos,
+      kind: blockPowered(output.block) === undefined ? 'carry' : 'output',
+    });
+  }
+  return pins;
+}
+
+/** Lists the outputs below the switches; a row selects its block. */
+function renderOutputs(outputs: ReturnType<typeof outputBlocks>): void {
+  if (outputs.length === 0) return;
+  const title = document.createElement('div');
+  title.className = 'switch-section-title';
+  title.textContent = 'Outputs';
+  switchesList.append(title);
+  outputs.forEach(output => {
+    const row = document.createElement('button');
+    row.className = 'switch-entry';
+    row.type = 'button';
+    if (selectedBlock && samePos(output.pos, selectedBlock.pos)) row.classList.add('selected');
+
+    const label = document.createElement('span');
+    label.className = 'switch-entry-label';
+    label.textContent = `${output.name}  ${output.pos.join(',')}`;
+
+    const state = document.createElement('span');
+    state.className = 'switch-entry-state';
+    const powered = blockPowered(output.block);
+    state.textContent = powered === undefined ? '-' : powered ? 'On' : 'Off';
+
+    row.append(label, state);
+    row.addEventListener('click', () => {
+      viewer.setSelectedBlock(output.block);
+      renderSelection(output.block);
+    });
+    switchesList.append(row);
+  });
+}
+
+/** Whether a redstone component is powered, from its block state (blocks keep none). */
+function blockPowered(block: StructureBlock | undefined): boolean | undefined {
+  const properties = block?.palette.properties;
+  switch (block?.palette.name) {
+    case 'minecraft:redstone_torch':
+    case 'minecraft:redstone_wall_torch':
+      return properties?.lit === 'true';
+    case 'minecraft:repeater':
+    case 'minecraft:lever':
+      return properties?.powered === 'true';
+    case 'minecraft:redstone_wire':
+      return Number(properties?.power ?? 0) > 0;
+    default:
+      return undefined;
+  }
 }
 
 function getLeverPowered(block: StructureBlock | undefined): boolean {

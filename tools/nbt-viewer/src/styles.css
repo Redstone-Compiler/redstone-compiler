@@ -408,6 +408,12 @@ input {
 }
 
 .file-entry-name,
+.switch-section-title {
+  margin: 8px 7px 4px;
+  color: #9ea9b3;
+  font-size: 12px;
+}
+
 .switch-entry-label {
   min-width: 0;
   overflow: hidden;
@@ -1619,4 +1625,74 @@ body.ir-pane-resizing {
     right: 10px;
     bottom: 10px;
   }
+}
+
+.pin-layer {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.pin-layer.hidden,
+.pin-label.hidden {
+  display: none;
+}
+
+.pin-label {
+  position: absolute;
+  top: 0;
+  left: 0;
+  padding: 1px 6px;
+  border-radius: 4px;
+  color: #101316;
+  font: 600 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: nowrap;
+}
+
+.pin-input {
+  background: rgb(77 230 115 / 92%);
+}
+
+.pin-output {
+  background: rgb(255 140 51 / 92%);
+}
+
+.pin-carry {
+  background: rgb(89 166 255 / 92%);
+}
+
+.frames-bar {
+  bottom: 112px;
+  left: 50%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: min(560px, calc(100vw - 32px));
+  padding: 6px 10px;
+  transform: translateX(-50%);
+  color: #dce3e7;
+  font-size: 12px;
+}
+
+.frames-bar.hidden {
+  display: none;
+}
+
+.frames-bar button {
+  min-width: 34px;
+  padding: 4px 8px;
+}
+
+.frames-bar input[type="range"] {
+  flex: 1 1 auto;
+  min-width: 80px;
+}
+
+#frames-label {
+  overflow: hidden;
+  color: #9ea9b3;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

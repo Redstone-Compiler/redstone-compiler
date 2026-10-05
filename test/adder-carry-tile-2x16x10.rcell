@@ -1,0 +1,52 @@
+rcell 1;
+cell "exact-adder-carry-tile" size [4, 16, 10] {
+  start settled;
+  glyph "P" = torch on x-;
+  glyph "T" = torch on y-;
+  glyph "U" = repeater toward y- delay 1;
+  glyph "V" = torch on z-;
+  glyph "W" = repeater toward y+ delay 1;
+  glyph "X" = torch on x+;
+  glyph "Y" = torch on y+;
+
+  input "a" at [2, 0, 7] on y+;
+  input "b" at [3, 0, 2] on y+;
+  input "ncin" at [0, 2, 7] on x+;
+  output "ncout" at [3, 2, 7];
+  output "s" at [2, 15, 5];
+
+  plane yz at x=0 {
+  }
+
+  plane yz at x=1 {
+    z=7 "..#.............";
+  }
+
+  plane yz at x=2 {
+    z=9 "...........XUr..";
+    z=8 "..XU#TU#r#..##r.";
+    z=7 ".#P#Y##T#r##Tr#.";
+    z=6 "..rU#TY#.##T.#..";
+    z=5 "..##r..V#TX.XU#T";
+    z=4 "....#rU#X....#V.";
+    z=3 "...#W##X....XU#.";
+    z=2 "...r#U#Tr...##V.";
+    z=1 "...#.#..#TU#TU#.";
+    z=0 "..........#..#..";
+  }
+
+  plane yz at x=3 {
+    z=9 ".rrU#r#U#TU#....";
+    z=8 ".###.#.#..#T....";
+    z=7 ".P#WY#WWP.P...P.";
+    z=6 ".r.#..##......r.";
+    z=5 "Y#......PU#.#W#T";
+    z=4 "r#U#TU#U##V.V#.r";
+    z=3 "#.#TU#.#UU#.#WY#";
+    z=2 ".#T.#r#T##..P#..";
+    z=1 ".....#..........";
+  }
+
+  expect "ncout" = ~(~(~(a|b)|~(~(~(~(ncin)|a)|~(~(ncin)|b)))));
+  expect "s" = ~(~(~(~(a|~(a|b))|~(b|~(a|b)))|~(~(ncin)|~(~(a|~(a|b))|~(b|~(a|b)))))|~(~(ncin)|~(~(ncin)|~(~(a|~(a|b))|~(b|~(a|b))))));
+}

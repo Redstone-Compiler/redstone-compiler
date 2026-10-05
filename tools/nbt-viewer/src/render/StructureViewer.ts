@@ -49,11 +49,28 @@ function createDeepslateStructure(model: StructureModel): Structure {
   );
 }
 
+/** A named block to mark: an input switch, an output, or a carry block. */
+export type ViewerPin = {
+  label: string;
+  pos: [number, number, number];
+  kind: 'input' | 'output' | 'carry';
+};
+
+const PIN_COLORS: Record<ViewerPin['kind'], [number, number, number]> = {
+  input: [0.3, 0.9, 0.45],
+  output: [1, 0.55, 0.2],
+  carry: [0.35, 0.65, 1],
+};
+
 export class StructureViewer {
   private readonly gl: WebGLRenderingContext;
   private readonly resourcesPromise = MinecraftResources.load();
   private readonly boundingBoxRenderer: BoundingBoxRenderer;
   private readonly routeRenderer: RouteRenderer;
+  private readonly pinRenderer: BoundingBoxRenderer;
+  private readonly pinLayer: HTMLDivElement;
+  private pins: Array<{ pin: ViewerPin; label: HTMLElement }> = [];
+  private pinsVisible = true;
   private renderer?: StructureRenderer;
   private structure = Structure.EMPTY;
   private model?: StructureModel;
@@ -91,6 +108,10 @@ export class StructureViewer {
     this.gl = gl;
     this.boundingBoxRenderer = new BoundingBoxRenderer(gl);
     this.routeRenderer = new RouteRenderer(gl);
+    this.pinRenderer = new BoundingBoxRenderer(gl);
+    this.pinLayer = document.createElement('div');
+    this.pinLayer.className = 'pin-layer';
+    canvas.insertAdjacentElement('afterend', this.pinLayer);
 
     canvas.addEventListener('contextmenu', event => event.preventDefault());
     canvas.addEventListener('pointerdown', event => this.onPointerDown(event));
@@ -111,6 +132,41 @@ export class StructureViewer {
 
   setSelectionHandler(handler: SelectionHandler): void {
     this.onSelect = handler;
+  }
+
+  /** Marks named blocks (inputs, outputs) with a colored box and a label. */
+  setPins(pins: ViewerPin[]): void {
+    this.pinRenderer.setBoxes(
+      pins.map((pin, index) => ({
+        id: `pin-${index}`,
+        label: pin.label,
+        min: [pin.pos[0] - 0.04, pin.pos[1] - 0.04, pin.pos[2] - 0.04],
+        max: [pin.pos[0] + 1.04, pin.pos[1] + 1.04, pin.pos[2] + 1.04],
+        color: PIN_COLORS[pin.kind],
+      })),
+    );
+    this.pinLayer.replaceChildren();
+    this.pins = pins.map(pin => {
+      const label = document.createElement('span');
+      label.className = `pin-label pin-${pin.kind}`;
+      label.textContent = pin.label;
+      this.pinLayer.append(label);
+      return { pin, label };
+    });
+    this.render();
+  }
+
+  /** Points the camera at a box of `size` from the origin, as a new structure would. */
+  fitView(size: [number, number, number]): void {
+    vec3.set(this.cPos, -size[0] / 2, -size[1] / 2, -size[2] / 2);
+    this.cDist = Math.max(5, vec3.distance([0, 0, 0], this.cPos) * 1.7);
+    this.render();
+  }
+
+  setPinsVisible(visible: boolean): void {
+    this.pinsVisible = visible;
+    this.pinLayer.classList.toggle('hidden', !visible);
+    this.render();
   }
 
   setBoundingBoxes(
@@ -546,6 +602,7 @@ export class StructureViewer {
     this.renderer.setViewport(0, 0, this.canvas.width, this.canvas.height);
     this.boundingBoxRenderer.setViewport(0, 0, this.canvas.width, this.canvas.height);
     this.routeRenderer.setViewport(0, 0, this.canvas.width, this.canvas.height);
+    this.pinRenderer.setViewport(0, 0, this.canvas.width, this.canvas.height);
   }
 
   private render(): void {
@@ -571,11 +628,31 @@ export class StructureViewer {
           this.renderer.drawOutline(viewMatrix, this.selectedBlock);
         }
       }
+      if (this.pinsVisible) {
+        this.pinRenderer.draw(viewMatrix);
+        this.placePinLabels(viewMatrix);
+      }
 
       if (this.movement.size > 0) {
         this.render();
       }
     });
+  }
+
+  /** Keeps each pin's label just above its block on screen. */
+  private placePinLabels(viewMatrix: mat4): void {
+    const width = this.canvas.clientWidth;
+    const height = this.canvas.clientHeight;
+    for (const { pin, label } of this.pins) {
+      const point = this.pinRenderer.projectPoint(
+        [pin.pos[0] + 0.5, pin.pos[1] + 1.1, pin.pos[2] + 0.5],
+        viewMatrix,
+        width,
+        height,
+      );
+      label.classList.toggle('hidden', !point);
+      if (point) label.style.transform = `translate(${point[0]}px, ${point[1]}px) translate(-50%, -100%)`;
+    }
   }
 
   dispose(): void {

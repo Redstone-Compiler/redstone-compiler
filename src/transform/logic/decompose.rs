@@ -4,13 +4,52 @@ use itertools::Itertools;
 
 use super::LogicGraphTransformer;
 use crate::graph::logic::LogicGraphBuilder;
-use crate::graph::{Graph, GraphNodeId, GraphNodeKind};
+use crate::graph::{Graph, GraphNode, GraphNodeId, GraphNodeKind};
 use crate::logic::{Logic, LogicType};
 
 impl LogicGraphTransformer {
-    // |(a, b, c) => (a | b) | c
+    // &(a, b, c) => (a & b) & c, and likewise for ^
+    //
+    // The parser builds one n-ary node per operator chain, while the AND and
+    // XOR templates below have exactly two inputs. ORs stay n-ary: their
+    // inputs fold into a single NOR gate.
     pub fn decompose_binops(&mut self) {
-        todo!()
+        let g = &mut self.graph.graph;
+        let target_nodes = g
+            .nodes
+            .iter()
+            .filter(|node| {
+                node.inputs.len() > 2
+                    && matches!(&node.kind,
+                        GraphNodeKind::Logic(logic)
+                            if matches!(logic.logic_type, LogicType::And | LogicType::Xor),
+                    )
+            })
+            .map(|node| node.id)
+            .collect_vec();
+        if target_nodes.is_empty() {
+            return;
+        }
+
+        for node_id in target_nodes {
+            let node = g.find_node_by_id(node_id).unwrap();
+            let (kind, inputs, tag) = (node.kind.clone(), node.inputs.clone(), node.tag.clone());
+            // The original node becomes the last link, so its consumers stay.
+            let mut left = inputs[0];
+            for &right in &inputs[1..inputs.len() - 1] {
+                left = g.add_node(GraphNode {
+                    kind: kind.clone(),
+                    inputs: vec![left, right],
+                    tag: tag.clone(),
+                    ..Default::default()
+                });
+            }
+            g.find_node_by_id_mut(node_id).unwrap().inputs = vec![left, inputs[inputs.len() - 1]];
+        }
+
+        g.build_outputs();
+        g.build_producers();
+        g.build_consumers();
     }
 
     // a & b => ~(a | b)
@@ -18,7 +57,7 @@ impl LogicGraphTransformer {
         // check decomposable
         if self.graph.graph.nodes.iter().any(|node| match &node.kind {
             GraphNodeKind::Logic(logic) => match logic.logic_type {
-                LogicType::And if node.inputs.len() != 2 => false,
+                LogicType::And => node.inputs.len() != 2,
                 _ => false,
             },
             _ => false,
@@ -65,7 +104,7 @@ impl LogicGraphTransformer {
         // check decomposable
         if self.graph.graph.nodes.iter().any(|node| match &node.kind {
             GraphNodeKind::Logic(logic) => match logic.logic_type {
-                LogicType::Xor if node.inputs.len() != 2 => false,
+                LogicType::Xor => node.inputs.len() != 2,
                 _ => false,
             },
             _ => false,

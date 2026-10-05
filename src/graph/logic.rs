@@ -41,6 +41,7 @@ impl LogicGraph {
 
     pub fn prepare_place(self) -> eyre::Result<Self> {
         let mut transform = LogicGraphTransformer::new(self);
+        transform.decompose_binops();
         transform.decompose_xor()?;
         transform.decompose_and()?;
         transform.remove_double_neg_expression();

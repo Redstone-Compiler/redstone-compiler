@@ -7,6 +7,9 @@
 //! slice so the next window can pick it up. Each step is a small exact
 //! problem, and the final step checks the whole circuit's outputs. The result
 //! is long but valid; `compact` then shortens it.
+//!
+//! Every live net crosses every seam, so the gate order and how long outputs
+//! are carried decide how crowded the cross-section gets.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
@@ -15,13 +18,213 @@ use eyre::bail;
 
 use super::encode::{CellKind, TORCH_ATTACH};
 use super::layout::{ExactLayout, InputPolicy, OutputPolicy};
-use super::netlist::{NetDriver, NetId};
-use super::{ExactLocalPlacer, ExactOutcome, ExactPlacement, ExactPlacerConfig};
+use super::netlist::{NetDriver, NetId, NorNetlist};
+use super::{
+    CarryTiling, ExactLocalPlacer, ExactOutcome, ExactPlacement, ExactPlacerConfig, ExactTuning,
+};
 use crate::world::block::Direction;
 use crate::world::position::{DimSize, Position};
 
+/// The order in which construction places gates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateOrder {
+    /// Depth-first from net 0 upward (the original order).
+    NetIndex,
+    /// Output by output, smallest fan-in cone first, depth-first inside each
+    /// cone, so an output and its private logic finish before the next one
+    /// starts.
+    SmallestConeFirst,
+}
+
+/// Gates in construction order.
+pub(super) fn gate_order(netlist: &NorNetlist, order: GateOrder) -> Vec<NetId> {
+    fn visit(netlist: &NorNetlist, net: NetId, done: &mut [bool], order: &mut Vec<NetId>) {
+        if done[net] {
+            return;
+        }
+        done[net] = true;
+        for &input in &netlist.nets[net].gate_inputs {
+            visit(netlist, input, done, order);
+        }
+        if netlist.nets[net].driver == NetDriver::Gate {
+            order.push(net);
+        }
+    }
+    let mut roots = (0..netlist.nets.len()).collect::<Vec<_>>();
+    if order == GateOrder::SmallestConeFirst {
+        let cone = |root: NetId| {
+            let mut seen = BTreeSet::new();
+            let mut stack = vec![root];
+            while let Some(net) = stack.pop() {
+                if seen.insert(net) {
+                    stack.extend(netlist.nets[net].gate_inputs.iter().copied());
+                }
+            }
+            seen.len()
+        };
+        let mut outputs = netlist
+            .outputs
+            .iter()
+            .map(|(_, net)| *net)
+            .collect::<Vec<_>>();
+        outputs.sort_by_key(|&net| (cone(net), net));
+        // Gates outside every output cone still come last, in index order.
+        outputs.extend(roots);
+        roots = outputs;
+    }
+    let mut done = vec![false; netlist.nets.len()];
+    let mut gates = Vec::new();
+    for net in roots {
+        visit(netlist, net, &mut done, &mut gates);
+    }
+    gates
+}
+
+/// Gates per construction step, in order: one gate each, except for a
+/// `CarryTiling`'s carry output.
+///
+/// The carry switch and the carry-out block share a column, so the carry
+/// path leaves that column and must come back to it. Solving the whole way
+/// in one window failed (`docs/carry_tiles.md`). Instead the gate that reads
+/// the carry input gets its own step, with the switch on the window's last
+/// slice; construction then keeps a corridor clear from the carry-out cell
+/// along +Y (see `construct_step`); the rest of the carry path follows gate
+/// by gate (an OR and the NOR the netlist realizes it with as one step); and
+/// the carry output, an OR, is one last step that ORs the carry onto a block
+/// and runs it back down the corridor. The carry comes as early as it can, right after the
+/// gates it needs, so the corridor is short and few other nets cross the
+/// seams beside it.
+pub(super) fn construction_steps(
+    netlist: &NorNetlist,
+    order: GateOrder,
+    carry: Option<&CarryTiling>,
+) -> Vec<Vec<NetId>> {
+    let order = gate_order(netlist, order);
+    let path = carry.map_or_else(BTreeSet::new, |carry| carry_path(netlist, carry));
+    let (Some(carry), Some(input)) = (
+        carry,
+        carry.and_then(|carry| netlist.input_net(&carry.input)),
+    ) else {
+        return order.into_iter().map(|gate| vec![gate]).collect();
+    };
+    let Some(&(_, output)) = netlist
+        .outputs
+        .iter()
+        .find(|(name, _)| *name == carry.output)
+    else {
+        return order.into_iter().map(|gate| vec![gate]).collect();
+    };
+    if path.is_empty() {
+        return order.into_iter().map(|gate| vec![gate]).collect();
+    }
+    // An OR is a NOT over the NOR of its terms. A block carries the OR
+    // itself (and a repeater reading it passes it on), so the pair is one
+    // step and neither gate needs a torch.
+    let or_inner = |outer: NetId| match netlist.nets[outer].gate_inputs[..] {
+        [inner]
+            if path.contains(&inner)
+                && netlist
+                    .gates()
+                    .filter(|&gate| netlist.nets[gate].gate_inputs.contains(&inner))
+                    .count()
+                    == 1 =>
+        {
+            Some(inner)
+        }
+        _ => None,
+    };
+    let mut out = vec![output];
+    if let Some(inner) = or_inner(output) {
+        out.insert(0, inner);
+    }
+    let path_order = order
+        .iter()
+        .copied()
+        .filter(|gate| path.contains(gate) && !out.contains(gate))
+        .collect::<Vec<_>>();
+    let (entry, middle): (Vec<NetId>, Vec<NetId>) = path_order
+        .into_iter()
+        .partition(|&gate| netlist.nets[gate].gate_inputs.contains(&input));
+    // Gates the carry path reads that do not depend on the carry input.
+    let mut needed = BTreeSet::new();
+    let mut stack = path.iter().copied().collect::<Vec<_>>();
+    while let Some(net) = stack.pop() {
+        for &input in &netlist.nets[net].gate_inputs {
+            if netlist.nets[input].driver == NetDriver::Gate
+                && !path.contains(&input)
+                && needed.insert(input)
+            {
+                stack.push(input);
+            }
+        }
+    }
+    let mut steps = order
+        .iter()
+        .filter(|gate| needed.contains(gate))
+        .map(|&gate| vec![gate])
+        .collect::<Vec<_>>();
+    if !entry.is_empty() {
+        steps.push(entry);
+    }
+    let inners = middle
+        .iter()
+        .filter_map(|&gate| or_inner(gate))
+        .collect::<BTreeSet<_>>();
+    for &gate in &middle {
+        if inners.contains(&gate) {
+            continue;
+        }
+        steps.push(or_inner(gate).into_iter().chain([gate]).collect());
+    }
+    steps.push(out);
+    steps.extend(
+        order
+            .iter()
+            .filter(|gate| !path.contains(gate) && !needed.contains(gate))
+            .map(|&gate| vec![gate]),
+    );
+    steps
+}
+
+/// Gates that depend on the carry input and feed the carry output.
+fn carry_path(netlist: &NorNetlist, carry: &CarryTiling) -> BTreeSet<NetId> {
+    let (Some(input), Some(&(_, output))) = (
+        netlist.input_net(&carry.input),
+        netlist
+            .outputs
+            .iter()
+            .find(|(name, _)| *name == carry.output),
+    ) else {
+        return BTreeSet::new();
+    };
+    let depends = |net: NetId| {
+        let mut stack = vec![net];
+        let mut seen = BTreeSet::new();
+        while let Some(net) = stack.pop() {
+            if net == input {
+                return true;
+            }
+            if seen.insert(net) {
+                stack.extend(netlist.nets[net].gate_inputs.iter().copied());
+            }
+        }
+        false
+    };
+    let mut cone = BTreeSet::new();
+    let mut stack = vec![output];
+    while let Some(net) = stack.pop() {
+        if cone.insert(net) {
+            stack.extend(netlist.nets[net].gate_inputs.iter().copied());
+        }
+    }
+    cone.into_iter()
+        .filter(|&net| netlist.nets[net].driver == NetDriver::Gate && depends(net))
+        .collect()
+}
+
 #[derive(Debug, Clone)]
 pub struct ConstructionConfig {
+    /// Box width along X (with a `carry`, the two ghost slices included).
     pub width: usize,
     pub height: usize,
     /// First window length tried for each gate, in Y slices.
@@ -31,6 +234,23 @@ pub struct ConstructionConfig {
     /// Slices of the previous step that are re-solved with each new window,
     /// so the interface between steps can be reshaped.
     pub overlap: usize,
+    /// When no window fits, re-solve more of the previous layout (overlap up
+    /// to this) before backtracking. Off by default (= `overlap`): on the
+    /// seed-2 full adder none of the wider attempts helped and each failed
+    /// attempt costs a full `step_time_limit`.
+    pub max_overlap: usize,
+    /// On backtracking, block only the previous step's seam slice (the one
+    /// the failed step had to build on) instead of its whole window. Off by
+    /// default; it did not rescue the seed-2 full adder either.
+    pub block_seam: bool,
+    /// Construction attempts after the first, each from scratch with a new
+    /// seed. A seed that paints itself into a corner can burn many minutes
+    /// of failed steps, while another seed often finishes in seconds.
+    pub max_restarts: usize,
+    /// Time budget of one construction attempt before restarting.
+    pub restart_after: Option<Duration>,
+    /// Seed spacing between construction attempts.
+    pub restart_seed_stride: u32,
     pub step_time_limit: Duration,
     pub workers: usize,
     pub seed: u32,
@@ -38,8 +258,50 @@ pub struct ConstructionConfig {
     pub stage_levels: usize,
     pub input_policies: BTreeMap<String, InputPolicy>,
     pub output_policies: BTreeMap<String, OutputPolicy>,
-    /// Times an earlier step may be re-solved after a later step fails.
+    /// Times an earlier step may be re-solved after a later step fails,
+    /// per attempt. Off by default: on the full adder (seeds 2 and 4) six
+    /// backtracks each cost three failed steps and none let the stuck gate
+    /// fit, while a restart reaches the same gate again in about 30 s.
     pub max_backtracks: usize,
+    /// Simulator rejections each step's workers may hit before giving up.
+    pub max_refinements: usize,
+    /// Search and verification constants for every step.
+    pub tuning: ExactTuning,
+    pub gate_order: GateOrder,
+    /// Outputs without a face policy stop crossing seams once no later gate
+    /// reads them; they only need to stay observable somewhere in the box.
+    /// Off, every output is carried to the last slice.
+    pub early_outputs: bool,
+    /// Fix the signals of frozen cells to the previous step's solution, so a
+    /// step no longer re-justifies (ranks, stages, contributing sources) the
+    /// whole layout built so far; those variables were over 90% of a late
+    /// step's encoding. The simulator still checks the whole layout.
+    pub given_frozen_signals: bool,
+    /// After each step, spend up to this long minimizing the layout's block
+    /// count (the model's cost) with the same frozen cells, so dead wires do
+    /// not pile up. `None` keeps the first layout found. Five seconds halved
+    /// the full adder's constructed blocks (about 290 to 127-164).
+    pub step_optimize: Option<Duration>,
+    /// Model params for every step (see `ExactPlacerConfig::model_params`).
+    pub model_params: BTreeMap<String, rsdsl::IValue>,
+    /// Diagnostic only: see `ExactPlacerConfig::no_fold`.
+    #[doc(hidden)]
+    pub no_fold: bool,
+    /// Build a tile that repeats along X (see `ExactPlacerConfig::carry`).
+    pub carry: Option<CarryTiling>,
+    /// Time limit of the step that places the carry-out block, which has to
+    /// fit the whole carry logic around one cell (`step_time_limit` if unset).
+    pub carry_step_time_limit: Option<Duration>,
+    /// Write the layout after every step of the successful attempt to this
+    /// directory, for watching construction in the viewer (`progress.rs`).
+    pub progress: Option<std::path::PathBuf>,
+    /// After each step, ask for its nets sooner (`ExactPlacerConfig::timing`):
+    /// each observed net at most its lower bound (the latest of its inputs'
+    /// arrivals, plus a tick unless it is an OR a block can carry) plus a
+    /// slack of 0, 1, 2, 4, ... ticks, each solve this long, until one
+    /// succeeds or no net could gain; `step_optimize` then keeps the delays
+    /// reached. `None` builds without regard to timing.
+    pub step_timing: Option<Duration>,
 }
 
 impl Default for ConstructionConfig {
@@ -50,6 +312,11 @@ impl Default for ConstructionConfig {
             window: 3,
             max_window: 6,
             overlap: 1,
+            max_overlap: 1,
+            block_seam: false,
+            max_restarts: 7,
+            restart_after: Some(Duration::from_secs(600)),
+            restart_seed_stride: 104_729,
             step_time_limit: Duration::from_secs(60),
             workers: 8,
             seed: 1,
@@ -57,16 +324,33 @@ impl Default for ConstructionConfig {
             stage_levels: 24,
             input_policies: BTreeMap::new(),
             output_policies: BTreeMap::new(),
-            max_backtracks: 6,
+            max_backtracks: 0,
+            max_refinements: 8,
+            tuning: ExactTuning::default(),
+            gate_order: GateOrder::SmallestConeFirst,
+            early_outputs: true,
+            given_frozen_signals: true,
+            step_optimize: Some(Duration::from_secs(5)),
+            model_params: BTreeMap::new(),
+            no_fold: false,
+            carry: None,
+            carry_step_time_limit: None,
+            progress: None,
+            step_timing: None,
         }
     }
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct ConstructionReport {
-    /// `(gate net name, window length, seconds)` per accepted step.
+    /// `(gate net name, window length, seconds)` per accepted step of the
+    /// successful attempt.
     pub steps: Vec<(String, usize, f64)>,
     pub backtracks: usize,
+    /// Attempts abandoned before the successful one, with their seeds.
+    pub restarts: Vec<(u32, String)>,
+    /// The seed of the successful attempt.
+    pub seed: u32,
     pub elapsed: Duration,
 }
 
@@ -98,33 +382,85 @@ fn sites_in(
 /// Layout state between construction steps.
 #[derive(Clone)]
 struct StepState {
+    /// The gates this step placed, for progress frames.
+    label: String,
     length: usize,
     cells: BTreeMap<Position, CellKind>,
+    /// Signal function of every non-air cell in the latest solution.
+    signals: BTreeMap<Position, u64>,
     placed_inputs: BTreeMap<String, (Position, Direction)>,
     available: BTreeSet<NetId>,
     result: Option<(DimSize, ExactPlacement)>,
 }
 
+/// Bounds every output of `exact` by its delay in `placement`, with `Stage`
+/// sized to the placement's longest path (see `CompactionConfig::timing`).
+fn keep_delays(exact: &mut ExactPlacerConfig, placement: &ExactPlacement) {
+    let cells = placement.cells.iter().copied().collect();
+    let longest = super::timing::analyze(exact.dim, &cells, &[])
+        .ok()
+        .and_then(|timing| timing.arrival.values().copied().max())
+        .unwrap_or(exact.stage_levels);
+    exact.timing = true;
+    exact.stage_levels = longest + 2;
+    exact.output_delays = placement.delays.clone();
+}
+
 impl ExactLocalPlacer {
+    /// Builds the layout gate by gate. When an attempt fails or exceeds
+    /// `restart_after`, it starts over with the next seed, up to
+    /// `max_restarts` times.
     pub fn construct(
         &self,
         config: &ConstructionConfig,
     ) -> eyre::Result<(ExactLayout, ExactPlacement, ConstructionReport)> {
         let started = Instant::now();
+        let mut restarts = Vec::new();
+        let mut attempt = 0u32;
+        loop {
+            let seed = config
+                .seed
+                .wrapping_add(attempt.wrapping_mul(config.restart_seed_stride));
+            let attempt_config = ConstructionConfig {
+                seed,
+                ..config.clone()
+            };
+            let deadline = config.restart_after.map(|budget| Instant::now() + budget);
+            match self.construct_once(&attempt_config, deadline) {
+                Ok((layout, placement, mut report)) => {
+                    report.restarts = restarts;
+                    report.seed = seed;
+                    report.elapsed = started.elapsed();
+                    return Ok((layout, placement, report));
+                }
+                Err(error) if (attempt as usize) < config.max_restarts => {
+                    tracing::info!(seed, %error, "construction restarts with a new seed");
+                    restarts.push((seed, error.to_string()));
+                    attempt += 1;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    fn construct_once(
+        &self,
+        config: &ConstructionConfig,
+        deadline: Option<Instant>,
+    ) -> eyre::Result<(ExactLayout, ExactPlacement, ConstructionReport)> {
+        let started = Instant::now();
         let netlist = &self.netlist;
-        let order = netlist
-            .topological_order()
-            .into_iter()
-            .filter(|&net| netlist.nets[net].driver == NetDriver::Gate)
-            .collect::<Vec<_>>();
+        let order = construction_steps(netlist, config.gate_order, config.carry.as_ref());
         if order.is_empty() {
             bail!("netlist has no gates to construct");
         }
         let mut report = ConstructionReport::default();
         // states[i] is the layout before step i.
         let mut states = vec![StepState {
+            label: String::new(),
             length: 0,
             cells: BTreeMap::new(),
+            signals: BTreeMap::new(),
             placed_inputs: BTreeMap::new(),
             available: BTreeSet::new(),
             result: None,
@@ -133,7 +469,21 @@ impl ExactLocalPlacer {
         let mut windows = vec![Vec::new(); order.len()];
         let mut step = 0;
         while step < order.len() {
-            match self.construct_step(&order, step, &states[step], &blocked[step], config)? {
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                bail!(
+                    "construction attempt with seed {} ran out of time at gate {}",
+                    config.seed,
+                    self.step_name(&order[step])
+                );
+            }
+            match self.construct_step(
+                &order,
+                step,
+                &states[step],
+                &blocked[step],
+                config,
+                deadline,
+            )? {
                 Some((state, window_cells, entry)) => {
                     report.steps.push(entry);
                     states.truncate(step + 1);
@@ -145,20 +495,44 @@ impl ExactLocalPlacer {
                     if step == 0 || report.backtracks >= config.max_backtracks {
                         bail!(
                             "construction could not place gate {} within {} slices",
-                            netlist.nets[order[step]].name,
+                            self.step_name(&order[step]),
                             config.max_window
                         );
                     }
                     report.backtracks += 1;
                     tracing::info!(
-                        gate = netlist.nets[order[step]].name,
+                        gate = self.step_name(&order[step]),
                         "construction backtracks"
                     );
                     blocked[step].clear();
                     step -= 1;
                     let previous = windows[step].clone();
-                    blocked[step].push(previous);
+                    // The failed step could unfreeze up to `max_overlap`
+                    // slices, so it built on the slice just before those.
+                    let seam = states[step + 1]
+                        .length
+                        .checked_sub(config.max_overlap.max(config.overlap) + 1);
+                    let seam_cells = previous
+                        .iter()
+                        .filter(|(position, _)| Some(position.1) == seam)
+                        .copied()
+                        .collect::<Vec<_>>();
+                    if config.block_seam && !seam_cells.is_empty() {
+                        blocked[step].push(seam_cells);
+                    } else {
+                        blocked[step].push(previous);
+                    }
                 }
+            }
+        }
+        for state in &states[1..] {
+            if let Some((_, placement)) = &state.result {
+                super::progress::record_frame(
+                    config.progress.as_deref(),
+                    &self.name,
+                    &format!("construct {}", state.label),
+                    placement,
+                );
             }
         }
         let (dim, placement) = states
@@ -166,35 +540,198 @@ impl ExactLocalPlacer {
             .and_then(|state| state.result)
             .expect("the last step produced a layout");
         report.elapsed = started.elapsed();
-        Ok((ExactLayout::from_placement(dim, &placement), placement, report))
+        Ok((
+            ExactLayout::from_placement(dim, &placement),
+            placement,
+            report,
+        ))
+    }
+
+    /// Diagnostic hook: with `EXACT_DIAGNOSE_FAILED_STEP=<path prefix>`, the
+    /// first step in the process that times out is written as DIMACS and
+    /// solved again for `EXACT_DIAGNOSE_SECONDS` (600). It tells a step that
+    /// is merely slow from one the solver cannot decide. Construction then
+    /// carries on as if the step had failed normally.
+    fn diagnose_failed_step(
+        &self,
+        exact: &ExactPlacerConfig,
+        gate: &str,
+        window: usize,
+    ) -> eyre::Result<()> {
+        static DIAGNOSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        let Ok(prefix) = std::env::var("EXACT_DIAGNOSE_FAILED_STEP") else {
+            return Ok(());
+        };
+        if DIAGNOSED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return Ok(());
+        }
+        let seconds = std::env::var("EXACT_DIAGNOSE_SECONDS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(600);
+        let path = format!("{prefix}-{gate}-w{window}.cnf");
+        self.write_dimacs(exact, &path, super::DimacsComments::Legend)?;
+        let mut longer = exact.clone();
+        longer.time_limit = Some(Duration::from_secs(seconds));
+        let started = Instant::now();
+        let (outcome, stats) = self.place(&longer)?;
+        tracing::info!(
+            gate,
+            window,
+            path,
+            seconds = started.elapsed().as_secs_f64(),
+            variables = stats.variables,
+            clauses = stats.clauses,
+            refinements = stats.refinements,
+            outcome = ?outcome,
+            "construction step diagnosed"
+        );
+        Ok(())
+    }
+
+    /// The fewest ticks each net a step observes could take: nets placed
+    /// before arrive as they did on the previous step's last slice, inputs
+    /// placed now at once, and each new gate a tick after its latest input,
+    /// or with its inner gate's inputs if it is an OR over a NOR of the same
+    /// step (a block carries it). Keyed by net name and by output name.
+    fn step_lower_bounds(&self, gates: &[NetId], state: &StepState) -> BTreeMap<String, usize> {
+        let netlist = &self.netlist;
+        let previous = state
+            .result
+            .as_ref()
+            .map(|(_, placement)| &placement.delays);
+        let mut lower = BTreeMap::<NetId, usize>::new();
+        for &net in &state.available {
+            let ticks = previous
+                .and_then(|delays| delays.get(&netlist.nets[net].name))
+                .copied()
+                .unwrap_or(0);
+            lower.insert(net, ticks);
+        }
+        for &gate in gates {
+            let arrival =
+                |net: NetId, lower: &BTreeMap<NetId, usize>| lower.get(&net).copied().unwrap_or(0);
+            let inputs = &netlist.nets[gate].gate_inputs;
+            let nor = inputs
+                .iter()
+                .map(|&net| arrival(net, &lower))
+                .max()
+                .unwrap_or(0)
+                + 1;
+            let or = match inputs[..] {
+                [inner] if gates.contains(&inner) => netlist.nets[inner]
+                    .gate_inputs
+                    .iter()
+                    .map(|&net| arrival(net, &lower))
+                    .max(),
+                _ => None,
+            };
+            lower.insert(gate, or.map_or(nor, |or| or.min(nor)));
+        }
+        let mut named = lower
+            .iter()
+            .map(|(&net, &ticks)| (netlist.nets[net].name.clone(), ticks))
+            .collect::<BTreeMap<_, _>>();
+        for (name, net) in &netlist.outputs {
+            if let Some(&ticks) = lower.get(net) {
+                named.insert(name.clone(), ticks);
+            }
+        }
+        named
+    }
+
+    /// Re-solves a step with its observed nets sooner (see
+    /// `ConstructionConfig::step_timing`); returns the step's layout as found
+    /// when no slack below its own delays succeeds.
+    fn shorten_step(
+        &self,
+        exact: &ExactPlacerConfig,
+        placement: ExactPlacement,
+        lower: &BTreeMap<String, usize>,
+        budget: Duration,
+        deadline: Option<Instant>,
+    ) -> ExactPlacement {
+        let found = placement.delays.clone();
+        let mut slack = 0;
+        loop {
+            let budgets = found
+                .iter()
+                .map(|(name, &ticks)| {
+                    let bound = lower
+                        .get(name)
+                        .map_or(ticks, |&bound| ticks.min(bound + slack));
+                    (name.clone(), bound)
+                })
+                .collect::<BTreeMap<_, _>>();
+            if budgets == found {
+                return placement;
+            }
+            let remaining =
+                deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
+            if remaining.is_some_and(|remaining| remaining.is_zero()) {
+                return placement;
+            }
+            let mut sooner = exact.clone();
+            keep_delays(&mut sooner, &placement);
+            sooner.output_delays = budgets;
+            sooner.time_limit = Some(remaining.map_or(budget, |remaining| remaining.min(budget)));
+            if let Ok((ExactOutcome::Placed(better), _)) = self.place(&sooner) {
+                tracing::info!(
+                    slack,
+                    before = ?found,
+                    after = ?better.delays,
+                    "construction step shortened"
+                );
+                return *better;
+            }
+            slack = if slack == 0 { 1 } else { slack * 2 };
+        }
+    }
+
+    /// The gates of a construction step, as one name.
+    fn step_name(&self, gates: &[NetId]) -> String {
+        gates
+            .iter()
+            .map(|&gate| self.netlist.nets[gate].name.as_str())
+            .collect::<Vec<_>>()
+            .join("+")
     }
 
     #[allow(clippy::type_complexity)]
     fn construct_step(
         &self,
-        order: &[NetId],
+        order: &[Vec<NetId>],
         step: usize,
         state: &StepState,
         blocked: &[Vec<(Position, CellKind)>],
         config: &ConstructionConfig,
+        deadline: Option<Instant>,
     ) -> eyre::Result<Option<(StepState, Vec<(Position, CellKind)>, (String, usize, f64))>> {
         let netlist = &self.netlist;
-        let gate = order[step];
+        let gates = &order[step];
+        let gate_name = self.step_name(gates);
         let is_last = step + 1 == order.len();
-        let output_nets = netlist
+        // Outputs that must reach the last slice: face-bound ones, or all of
+        // them without `early_outputs`.
+        let carried_outputs = netlist
             .outputs
             .iter()
+            .filter(|(name, _)| {
+                !config.early_outputs
+                    || config.output_policies.get(name) == Some(&OutputPolicy::MaxYFace)
+            })
             .map(|(_, net)| *net)
             .collect::<BTreeSet<_>>();
         let consumers = |net: NetId, after: usize| {
-            output_nets.contains(&net)
+            carried_outputs.contains(&net)
                 || order[after..]
                     .iter()
+                    .flatten()
                     .any(|&gate| netlist.nets[gate].gate_inputs.contains(&net))
         };
-        let mut needed_inputs = netlist.nets[gate]
-            .gate_inputs
+        let mut needed_inputs = gates
             .iter()
+            .flat_map(|&gate| netlist.nets[gate].gate_inputs.iter())
             .filter(|&&input| matches!(netlist.nets[input].driver, NetDriver::Input(_)))
             .filter(|&&input| !state.available.contains(&input))
             .copied()
@@ -210,20 +747,75 @@ impl ExactLocalPlacer {
             }
         }
         let length = state.length;
-        let frozen = length.saturating_sub(config.overlap);
-        for window in config.window..=config.max_window {
+        // The carry column, once the carry switch is placed, and whether
+        // this step places the carry output. Until then the carry-out cell
+        // is an unpowered block and a corridor from it along +Y stays clear,
+        // with blocks under it, so the carry output can come back to the
+        // column on a line of repeaters.
+        let carry_output = config.carry.as_ref().and_then(|carry| {
+            netlist
+                .outputs
+                .iter()
+                .find(|(name, _)| *name == carry.output)
+                .map(|&(_, net)| net)
+        });
+        let carry_out = carry_output.is_some_and(|net| gates.contains(&net));
+        let corridor = config
+            .carry
+            .as_ref()
+            .and_then(|carry| state.placed_inputs.get(&carry.input))
+            .filter(|_| carry_output.is_some_and(|net| !state.available.contains(&net)))
+            .map(|(position, _)| (position.1, position.2));
+        let min_overlap = config.overlap;
+        // Cheapest re-solve first: fewest slices (overlap + window), then the
+        // smaller overlap.
+        let mut attempts = (min_overlap..=config.max_overlap.max(min_overlap))
+            .flat_map(|overlap| {
+                (config.window..=config.max_window).map(move |window| (overlap, window))
+            })
+            .collect::<Vec<_>>();
+        attempts.sort_by_key(|&(overlap, window)| (overlap + window, overlap));
+        for (overlap, window) in attempts {
+            let frozen = length.saturating_sub(overlap);
+            if overlap > min_overlap && frozen == length.saturating_sub(overlap - 1) {
+                // Nothing more to unfreeze (the layout is shorter).
+                continue;
+            }
             let dim = DimSize(config.width, length + window, config.height);
             let mut exact = ExactPlacerConfig::new(dim);
             exact.workers = config.workers;
             exact.seed = config.seed;
             exact.rank_levels = config.rank_levels;
             exact.stage_levels = config.stage_levels;
-            exact.time_limit = Some(config.step_time_limit);
-            exact.max_refinements = 8;
+            exact.no_fold = config.no_fold;
+            exact.carry = config.carry.clone();
+            // Stop at the attempt's deadline too, so a restart starts on time.
+            let remaining =
+                deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
+            if remaining.is_some_and(|remaining| remaining.is_zero()) {
+                return Ok(None);
+            }
+            let step_time_limit = if carry_out {
+                config
+                    .carry_step_time_limit
+                    .unwrap_or(config.step_time_limit)
+            } else {
+                config.step_time_limit
+            };
+            exact.time_limit =
+                Some(remaining.map_or(step_time_limit, |remaining| remaining.min(step_time_limit)));
+            exact.max_refinements = config.max_refinements;
+            exact.tuning = config.tuning.clone();
+            exact.model_params = config.model_params.clone();
             exact.blocked = blocked.to_vec();
             for (position, kind) in &state.cells {
                 if position.1 < frozen {
                     exact.fixed_cells.insert(*position, *kind);
+                    if config.given_frozen_signals {
+                        if let Some(&function) = state.signals.get(position) {
+                            exact.given_signals.insert(*position, function);
+                        }
+                    }
                 }
             }
             for x in 0..dim.0 {
@@ -236,11 +828,35 @@ impl ExactLocalPlacer {
                     }
                 }
             }
+            if let Some((y0, z0)) = corridor {
+                let x = dim.0 - 1;
+                for y in y0..dim.1 {
+                    let cell = Position(x, y, z0);
+                    exact.given_signals.remove(&cell);
+                    if carry_out {
+                        exact.fixed_cells.remove(&cell);
+                    } else if y == y0 {
+                        // The carry-out block, kept unpowered: nothing may
+                        // power it but the carry output.
+                        exact.fixed_cells.insert(cell, CellKind::Solid);
+                        exact.given_signals.insert(cell, 0);
+                    } else {
+                        exact.fixed_cells.insert(cell, CellKind::Air);
+                        if z0 > 0 {
+                            exact
+                                .fixed_cells
+                                .insert(Position(x, y, z0 - 1), CellKind::Solid);
+                        }
+                    }
+                }
+            }
             for name in netlist.input_names() {
                 let net = netlist.input_net(&name).unwrap();
                 if let Some((position, attach)) = state.placed_inputs.get(&name) {
                     // Keep placed switches even inside the overlap.
-                    exact.fixed_cells.insert(*position, CellKind::Switch(*attach));
+                    exact
+                        .fixed_cells
+                        .insert(*position, CellKind::Switch(*attach));
                     exact = exact.with_input_site(name.clone(), *position, *attach);
                 } else if needed_inputs.contains(&net) {
                     let policy = config
@@ -248,9 +864,20 @@ impl ExactLocalPlacer {
                         .get(&name)
                         .copied()
                         .unwrap_or(InputPolicy::Anywhere);
-                    exact
-                        .input_sites
-                        .insert(name.clone(), sites_in(dim, frozen..dim.1, policy));
+                    let sites = match &config.carry {
+                        // The carry switch: the ghost slice's last column, so
+                        // the corridor starts beyond the window, and above the
+                        // floor, so the corridor has blocks under it.
+                        Some(carry) if carry.input == name => (1..dim.2)
+                            .map(|z| (Position(0, dim.1 - 1, z), Direction::East))
+                            .collect(),
+                        Some(_) => sites_in(dim, frozen..dim.1, policy)
+                            .into_iter()
+                            .filter(|(position, _)| position.0 >= CarryTiling::GHOST)
+                            .collect(),
+                        None => sites_in(dim, frozen..dim.1, policy),
+                    };
+                    exact.input_sites.insert(name.clone(), sites);
                 } else {
                     exact.absent_inputs.insert(name.clone());
                 }
@@ -266,29 +893,81 @@ impl ExactLocalPlacer {
                     }
                 }
             } else {
-                let live = state
+                let placed = state
                     .available
                     .iter()
                     .chain(needed_inputs.iter())
-                    .chain(std::iter::once(&gate))
+                    .chain(gates.iter())
+                    .copied()
+                    .collect::<BTreeSet<_>>();
+                let mut observations = placed
+                    .iter()
                     .copied()
                     .filter(|&net| consumers(net, step + 1))
-                    .collect::<BTreeSet<_>>()
-                    .into_iter()
                     .map(|net| (net, last_slice.clone()))
                     .collect::<Vec<_>>();
-                exact.observations = Some(live);
+                // Finished outputs stay observable but may sit anywhere.
+                let everywhere = (0..dim.0)
+                    .flat_map(|x| {
+                        (0..dim.1).flat_map(move |y| (0..dim.2).map(move |z| Position(x, y, z)))
+                    })
+                    .collect::<Vec<_>>();
+                for (_, net) in &netlist.outputs {
+                    if placed.contains(net) && !consumers(*net, step + 1) {
+                        observations.push((*net, everywhere.clone()));
+                    }
+                }
+                exact.observations = Some(observations);
             }
             let step_started = Instant::now();
-            let (outcome, _) = self.place(&exact)?;
+            let (outcome, stats) = self.place(&exact)?;
             let ExactOutcome::Placed(placement) = outcome else {
+                tracing::info!(
+                    gate = gate_name,
+                    window,
+                    overlap,
+                    seconds = step_started.elapsed().as_secs_f64(),
+                    refinements = stats.refinements,
+                    outcome = ?outcome,
+                    "construction step failed"
+                );
+                if matches!(outcome, ExactOutcome::Unknown { .. }) {
+                    self.diagnose_failed_step(&exact, &gate_name, window)?;
+                }
                 continue;
             };
+            let mut placement = placement;
+            if let Some(budget) = config.step_timing {
+                let lower = self.step_lower_bounds(gates, state);
+                placement =
+                    Box::new(self.shorten_step(&exact, *placement, &lower, budget, deadline));
+            }
+            if let Some(budget) = config.step_optimize {
+                // Trade the window's dead wires away while it is small: ask
+                // for fewer blocks than the layout just found, minimizing.
+                let remaining =
+                    deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
+                let mut tighter = exact.clone();
+                tighter.optimize = true;
+                tighter.max_blocks = Some(placement.cells.len().saturating_sub(1));
+                if config.step_timing.is_some() {
+                    keep_delays(&mut tighter, &placement);
+                }
+                tighter.time_limit =
+                    Some(remaining.map_or(budget, |remaining| remaining.min(budget)));
+                if let Ok((ExactOutcome::Placed(better), _)) = self.place(&tighter) {
+                    if better.cells.len() < placement.cells.len() {
+                        placement = better;
+                    }
+                }
+            }
             let seconds = step_started.elapsed().as_secs_f64();
             tracing::info!(
-                gate = netlist.nets[gate].name,
+                gate = gate_name,
                 window,
+                overlap,
                 seconds,
+                cells = placement.cells.len(),
                 "construction step"
             );
             let cells = placement.cells.iter().copied().collect::<BTreeMap<_, _>>();
@@ -301,20 +980,29 @@ impl ExactLocalPlacer {
                 placed_inputs.insert(input.name.clone(), (position, attach));
             }
             let window_cells = (0..dim.0)
-                .flat_map(|x| (frozen..dim.1).flat_map(move |y| (0..dim.2).map(move |z| Position(x, y, z))))
-                .map(|position| (position, cells.get(&position).copied().unwrap_or(CellKind::Air)))
+                .flat_map(|x| {
+                    (frozen..dim.1).flat_map(move |y| (0..dim.2).map(move |z| Position(x, y, z)))
+                })
+                .map(|position| {
+                    (
+                        position,
+                        cells.get(&position).copied().unwrap_or(CellKind::Air),
+                    )
+                })
                 .collect();
             let mut available = state.available.clone();
             available.extend(needed_inputs.iter().copied());
-            available.insert(gate);
+            available.extend(gates.iter().copied());
             let next = StepState {
+                label: gate_name.clone(),
                 length: dim.1,
                 cells,
+                signals: placement.signals.iter().copied().collect(),
                 placed_inputs,
                 available,
                 result: Some((dim, *placement)),
             };
-            return Ok(Some((next, window_cells, (netlist.nets[gate].name.clone(), window, seconds))));
+            return Ok(Some((next, window_cells, (gate_name, window, seconds))));
         }
         Ok(None)
     }

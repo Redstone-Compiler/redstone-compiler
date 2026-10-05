@@ -1,0 +1,597 @@
+rsdsl 2;
+model exact_placer;
+
+// The exact local placer's constraint model (grounded by exact/dsl.rs).
+// Language: docs/solver_dsl_grammar.md.
+
+// ===== compile-time world ====================================================
+
+grid Cell(x, y, z) dirs Dir6 {
+    East = +x, West = -x, North = +y, South = -y, Up = +z, Down = -z,
+}
+subset Dir4 of Dir6 = [East, West, North, South];
+enum Attach { Floor, East, West, North, South }
+enum Source { FromDust, FromTorch, FromRepeater, FromSolid, FromSwitch }
+enum Sink { DustSink, RepeaterSink, SolidSink }
+
+domain Case: int;      // input cases; bit i of a case is input i
+domain Class;          // signal vocabulary, one class per Boolean function
+domain Output;
+domain Tick: int;      // arrival times in redstone ticks (0..=stage_levels)
+
+fact on(Class, Case);                  // class is powered in that case
+fact unpowered(Class);                 // the constant-off class
+fact input_class(Class);               // classes a switch may carry
+fact present(Class);                   // inputs that need a switch in this layout
+fact switch_site(Cell, Attach, Class);
+fact switch_attach(c: Cell, a: Attach) := any(switch_site(c, a, k) for k: Class);
+fact output_site(Output, Cell);
+fact output_class(Output, Class);
+fact driving(Output);                  // must drive the cell beyond the box
+fact fixed(Cell, Kind);                // fixed block kinds, as members of `Kind`
+// Signals taken from an earlier verified layout (construction's frozen
+// slices): the class is fixed, and the simulator already confirmed that the
+// cell is powered for real, so it needs no justification here.
+fact given_sig(Cell, Class);
+fact given(c: Cell) := any(given_sig(c, k) for k: Class);
+
+// Tiling along X with a ripple carry (`CarryTiling` in mod.rs; see the
+// tiling rules below). Ghost cells stand for the previous tile.
+fact ghost(Cell);
+// Beyond the box face at `c`, toward `d`, lies a copy of `n` (a neighbor tile).
+fact seam(c: Cell, d: Dir4, n: Cell);
+// One candidate carry column: switch `l` and block `s` in the ghost slices,
+// the tile's carry-in torch `t`, and its carry-out block `p`.
+fact carry_site(l: Cell, s: Cell, t: Cell, p: Cell);
+fact solid_output(Output);             // observed on a block (the carry out)
+// Classes that only rise (fall) while every input moves its tile's way: the
+// operands and the carry in rise, so the carry input's complement falls.
+fact increasing(Class);
+fact decreasing(Class);
+// With `timing`, an observed output settles at most this many redstone ticks
+// after the inputs change (see the timing rules).
+fact output_delay(Output, Tick);
+
+// A repeater may point out of the box only where it drives an output into the
+// neighbor cell, or where one is already fixed. Elsewhere its output would
+// reach nothing.
+fact outward_ok(c: Cell) :=
+    any(output_site(o, c) and driving(o) for o: Output)
+    or any(fixed(c, m) and m is Repeater(_) for m: Kind);
+
+param rank_levels: int = 24;
+param stage_levels: int = 24;
+param max_blocks: int? = none;
+param max_repeaters: int? = none;      // e.g. 0 forbids repeaters
+param allow_unpowered_wires: bool = false;
+// Cost weights for `optimize` (see the objective at the end).
+param block_cost: int = 1;
+param repeater_cost: int = 0;
+param torch_cost: int = 0;
+// Rules that remove equivalent duplicates of a layout (sound: every layout
+// keeps at least one representative); they speed up proofs.
+param symmetry_breaking: bool = false;
+// Lower bound on torches needed for the observed functions (each torch is a
+// NOR gate; the host computes it when optimizing). Implied, so it never
+// removes a layout; it only helps prove that cheaper layouts do not exist.
+param min_torches: int = 0;
+// Torches, repeaters and dust must feed something (a chosen contribution) or
+// be an output observation. Removes dead wires from the search space; not
+// strictly sound, since a dead wire can still shape a neighboring dust line.
+param require_useful: bool = false;
+// Diagnostic: drop the tiling seam rules to measure what they cost (the
+// layouts are then not safe to tile).
+param seam_isolation: bool = true;
+// Monotone signals stay monotone in a carry tile (see the tiling rules);
+// off, a tile may glitch its carry.
+param monotone_signals: bool = true;
+// `Stage` is an arrival time in redstone ticks, bounded by `output_delay`.
+param timing: bool = false;
+
+fn dir(a: Attach) -> Dir6 = match a {
+    Floor => Down, East => East, West => West, North => North, South => South,
+};
+
+fn perp(d: Dir4) -> set<Dir4> = match d {
+    East | West => [North, South],
+    North | South => [East, West],
+};
+
+// ===== solver variables ======================================================
+
+@prefer(Air) @outside(Air) @display("{c} {member}")
+choice Kind[c: Cell] {
+    Air,
+    Solid,
+    Dust if has(step(c, Down)),
+    Torch(a: Attach) if has(step(c, dir(a))),
+    Repeater(d: Dir4) if has(step(c, Down)) and has(step(c, d))
+                         and (has(step(c, opposite(d))) or outward_ok(c)),
+    Switch(a: Attach, k: Class) if switch_site(c, a, k),
+}
+
+@prefer(Empty) @display("{c} 신호={member}")
+choice Sig[c: Cell] {
+    Empty,
+    Carry(k: Class),
+}
+
+@display("{c} 경우{k}에 켜짐")
+def Powered[k: Case, c: Cell] := any(Sig[c] is Carry(j) for j: Class where on(j, k));
+
+@display("{c} 꺼짐 신호")
+def Unpowered[c: Cell] := any(Sig[c] is Carry(u) for u: Class where unpowered(u));
+
+@internal
+def Stick[c: Cell] := Kind[c] is Dust | Torch(_) | Switch(_, _);
+
+// Dust connects to dust, torches, and switches beside it, to a repeater at
+// either end of the repeater's axis (its input or its output, never a side;
+// Java Edition connects to the output since 1.0.0), and to dust a step up or
+// down unless a block cuts the stair.
+@display("{c} 가루가 {d}쪽과 연결")
+def Conn[c: Cell, d: Dir4] := Kind[c] is Dust and (
+       Stick[step(c, d)]
+    or Kind[step(c, d)] is Repeater(d) | Repeater(opposite(d))
+    or (not Kind[step(c, Up)] is Solid and Kind[step(step(c, d), Up)] is Dust)
+    or (not Kind[step(c, d)] is Solid and Kind[step(step(c, d), Down)] is Dust));
+
+@display("{c} 가루가 {d}쪽을 가리킴")
+def Points[c: Cell, d: Dir4] :=
+    Kind[c] is Dust and (Conn[c, d] or all(not Conn[c, p] for p in perp(d)));
+
+@internal
+// A block powers adjacent dust only while a strong source of it is on: the
+// torch below, a repeater facing it, or a switch attached to it.
+def Strong[k: Case, c: Cell] := Kind[c] is Solid and (
+       (Kind[step(c, Down)] is Torch(_) and Powered[k, step(c, Down)])
+    or any(Kind[step(c, d)] is Repeater(d) and Powered[k, step(c, d)] for d: Dir4)
+    or any(Kind[step(c, opposite(dir(a)))] is Switch(a, _) and Powered[k, step(c, opposite(dir(a)))]
+           for a: Attach));
+
+@display("{c} 강전원 받는 블록")
+def Hard[c: Cell] := Kind[c] is Solid and (
+       Kind[step(c, Down)] is Torch(_)
+    or any(Kind[step(c, d)] is Repeater(d) for d: Dir4)
+    or any(Kind[step(c, opposite(dir(a)))] is Switch(a, _) for a: Attach));
+
+@display("전원관계[{src} {from} → {dst} {to}]")
+relation Feeds(src: Cell, dst: Cell, from: Source, to: Sink);
+
+@display("기여[{src} → {dst}]")
+var Contrib over Feeds;
+
+@encoding(order) @display("{c} 순위")
+int Rank[c: Cell] in 0..=rank_levels;
+
+@encoding(order) @display("{c} 단계")
+int Stage[c: Cell] in 0..=stage_levels;
+
+// ===== blocks ================================================================
+
+rule "가루·리피터·바닥 토치는 아래 칸이 블록이어야 함" {
+    forall c: Cell {
+        require Kind[c] is Dust | Repeater(_) | Torch(Floor) -> Kind[step(c, Down)] is Solid;
+    }
+}
+
+rule "벽 토치·스위치는 붙은 쪽 칸이 블록이어야 함" {
+    forall c: Cell, a: Attach {
+        if a != Floor {
+            require Kind[c] is Torch(a) -> Kind[step(c, dir(a))] is Solid;
+        }
+        require Kind[c] is Switch(a, _) -> Kind[step(c, dir(a))] is Solid;
+    }
+}
+
+rule "입력마다 스위치는 정확히 하나" {
+    forall k: Class where input_class(k) and present(k) {
+        require exactly_one(Kind[c] is Switch(a, k) for (c, a, j) in switch_site where j == k);
+    }
+}
+
+// Fixed and given cells: these requires are unit clauses. The grounder runs
+// rules that use no relation first and folds such units into everything after,
+// so constraints among fixed cells never reach the solver.
+rule "고정된 칸" {
+    forall c: Cell, m: Kind where fixed(c, m) {
+        require Kind[c] is m;
+    }
+}
+
+rule "주어진 신호" {
+    forall (c, k) in given_sig {
+        require Sig[c] is Carry(k);
+    }
+}
+
+rule "블록 개수 상한" {
+    if has(max_blocks) {
+        @encoding(seqcounter)
+        require count(not Kind[c] is Air for c: Cell) <= max_blocks;
+    }
+}
+
+rule "리피터 개수 상한" {
+    if has(max_repeaters) {
+        require count(Kind[c] is Repeater(_) for c: Cell) <= max_repeaters;
+    }
+}
+
+// ===== signals ===============================================================
+
+rule "차 있는 칸만 신호를 실음" {
+    forall c: Cell {
+        require Kind[c] is Air <-> Sig[c] is Empty;
+    }
+}
+
+rule "'꺼짐' 신호는 블록만 (허용 시 죽은 가루/리피터도)" {
+    forall c: Cell {
+        require Unpowered[c] -> Kind[c] is Solid
+            or (allow_unpowered_wires and Kind[c] is Dust | Repeater(_));
+    }
+}
+
+rule "스위치는 자기 입력 신호만 실음" {
+    forall (c, a, k) in switch_site {
+        require Kind[c] is Switch(a, k) -> Sig[c] is Carry(k);
+    }
+}
+
+rule "토치는 반드시 꺼짐이 아닌 신호를 실음" {
+    forall c: Cell {
+        require Kind[c] is Torch(_) -> Sig[c] is Carry(_) and not Unpowered[c];
+    }
+}
+
+// ===== power relations =======================================================
+
+rule "전원 관계: 가루 ↔ 옆 가루 / 계단 가루" {
+    forall c: Cell, d: Dir4 {
+        Feeds(c, step(c, d), FromDust, DustSink) |= Kind[c] is Dust and Kind[step(c, d)] is Dust;
+        let up = step(step(c, d), Up);
+        let stair = Kind[c] is Dust and Kind[up] is Dust and not Kind[step(c, Up)] is Solid;
+        Feeds(c, up, FromDust, DustSink) |= stair;
+        Feeds(up, c, FromDust, DustSink) |= stair;
+    }
+}
+
+rule "전원 관계: 가루 → 받침·가리키는 블록(약전원), 뒤에서 읽는 리피터" {
+    forall c: Cell {
+        Feeds(c, step(c, Down), FromDust, SolidSink) |= Kind[c] is Dust;
+        forall d: Dir4 {
+            Feeds(c, step(c, d), FromDust, SolidSink) |= Points[c, d] and Kind[step(c, d)] is Solid;
+            Feeds(c, step(c, d), FromDust, RepeaterSink)
+                |= Kind[c] is Dust and Kind[step(c, d)] is Repeater(opposite(d));
+        }
+    }
+}
+
+rule "전원 관계: 토치 → 주변 가루·리피터, 위 블록(강전원)" {
+    forall c: Cell, d: Dir6 {
+        if d == Up {
+            Feeds(c, step(c, d), FromTorch, SolidSink)
+                |= Kind[c] is Torch(_) and Kind[step(c, d)] is Solid;
+        } else {
+            Feeds(c, step(c, d), FromTorch, DustSink)
+                |= Kind[c] is Torch(_) and Kind[step(c, d)] is Dust;
+        }
+        if d in Dir4 {
+            Feeds(c, step(c, d), FromTorch, RepeaterSink)
+                |= Kind[c] is Torch(_) and Kind[step(c, d)] is Repeater(opposite(d));
+        }
+    }
+}
+
+rule "전원 관계: 리피터 → 앞쪽 블록/가루/같은 방향 리피터" {
+    forall c: Cell, d: Dir4 {
+        let out = step(c, opposite(d));
+        Feeds(c, out, FromRepeater, SolidSink) |= Kind[c] is Repeater(d) and Kind[out] is Solid;
+        Feeds(c, out, FromRepeater, DustSink) |= Kind[c] is Repeater(d) and Kind[out] is Dust;
+        Feeds(c, out, FromRepeater, RepeaterSink) |= Kind[c] is Repeater(d) and Kind[out] is Repeater(d);
+    }
+}
+
+rule "리피터가 다른 리피터 옆구리를 치면 잠김 → 금지" {
+    forall c: Cell, d: Dir4, p in perp(d) {
+        require not (Kind[c] is Repeater(d) and Kind[step(c, opposite(d))] is Repeater(p));
+    }
+}
+
+rule "전원 관계: 블록 → 읽는 리피터; 강전원 블록 → 주변 가루" {
+    forall c: Cell {
+        forall d: Dir4 {
+            Feeds(c, step(c, d), FromSolid, RepeaterSink)
+                |= Kind[c] is Solid and Kind[step(c, d)] is Repeater(opposite(d));
+        }
+        forall d: Dir6 {
+            Feeds(c, step(c, d), FromSolid, DustSink) |= Hard[c] and Kind[step(c, d)] is Dust;
+        }
+    }
+}
+
+rule "전원 관계: 스위치 → 붙은 블록(강전원), 주변 가루·리피터" {
+    forall (c, a, k) in switch_site {
+        let sw = Kind[c] is Switch(a, k);
+        Feeds(c, step(c, dir(a)), FromSwitch, SolidSink) |= sw;
+        forall d: Dir6 where d != dir(a) {
+            let t = step(c, d);
+            Feeds(c, t, FromSwitch, DustSink) |= sw and Kind[t] is Dust;
+            if d in Dir4 {
+                Feeds(c, t, FromSwitch, RepeaterSink) |= sw and Kind[t] is Repeater(opposite(d));
+            }
+        }
+    }
+}
+
+rule "스위치 옆 블록의 약전원은 토치는 무시하고 리피터는 받음 → 그런 배치 금지" {
+    forall (c, a) in switch_attach, d: Dir6 where d != dir(a) {
+        let t = step(c, d);
+        forall b: Attach {
+            require not (Kind[c] is Switch(a, _) and Kind[step(t, opposite(dir(b)))] is Torch(b));
+        }
+        forall e: Dir4 {
+            require not (Kind[c] is Switch(a, _) and Kind[t] is Solid
+                         and Kind[step(t, e)] is Repeater(opposite(e)));
+        }
+    }
+}
+
+// ===== behavior ==============================================================
+
+@guarded(per = (s, t, f, to))
+rule "건전성: 원천이 켜지면 받는 쪽도 켜짐 (가루·리피터는 원천과 똑같은 신호)" {
+    forall (s, t, f, to) in Feeds {
+        let feeds = Feeds(s, t, f, to);
+        // Dust next to a block follows only the block's strong power.
+        let strong = f == FromSolid and to == DustSink;
+        forall k: Case {
+            let source = if strong { Strong[k, s] } else { Powered[k, s] };
+            require feeds and source -> Powered[k, t];
+            if to != SolidSink {
+                require feeds and Powered[k, t] -> source;
+            }
+        }
+    }
+}
+
+rule "정당화: 기여 관계, 순위·단계 순서" {
+    forall (s, t, f, to) in Feeds where not given(t) {
+        let used = Contrib(s, t, f, to);
+        require used -> Feeds(s, t, f, to);
+        // Zero levels select lazy acyclicity: the host adds loop nogoods.
+        if to == RepeaterSink {
+            // Repeaters restart the rank and advance the stage instead.
+            if stage_levels > 0 {
+                require used -> Stage[s] < Stage[t];
+            }
+        } else {
+            if rank_levels > 0 {
+                require used -> Rank[s] < Rank[t];
+            }
+            if stage_levels > 0 {
+                require used -> Stage[s] <= Stage[t];
+            }
+        }
+        if to != SolidSink {
+            require used -> not Unpowered[s];
+        }
+    }
+}
+
+@guarded(per = c)
+rule "켜진 것은 켜진 원천이 있어야 함" {
+    forall c: Cell where not given(c) {
+        require Kind[c] is Dust | Repeater(_) and not Unpowered[c]
+            -> any(Contrib(s, t, f, to) for (s, t, f, to) in Feeds where t == c and to != SolidSink);
+        forall k: Case {
+            require Powered[k, c] and Kind[c] is Solid
+                -> any(Contrib(s, t, f, to) and Powered[k, s]
+                       for (s, t, f, to) in Feeds where t == c and to == SolidSink);
+        }
+    }
+}
+
+rule "토치는 받침 블록의 반대, 받침보다 높은 단계" {
+    forall c: Cell, a: Attach {
+        let support = step(c, dir(a));
+        forall k: Case {
+            require Kind[c] is Torch(a) -> (Powered[k, c] <-> not Powered[k, support]);
+        }
+        if stage_levels > 0 and not given(c) {
+            require Kind[c] is Torch(a) -> Stage[support] < Stage[c];
+        }
+    }
+}
+
+// ===== symmetry breaking =====================================================
+
+rule "대칭 제거: 가루·리피터는 기여 원천을 하나만 고름" {
+    // Coverage needs one contributor; more only add order constraints, so
+    // a layout justified by several is also justified by one of them.
+    if symmetry_breaking {
+        forall c: Cell {
+            require at_most_one(Contrib(s, t, f, to)
+                                for (s, t, f, to) in Feeds where t == c and to != SolidSink);
+        }
+    }
+}
+
+rule "대칭 제거: 받는 기여가 없으면 순위·단계는 0 (토치 단계는 예외)" {
+    // Lowering such a cell to 0 keeps every order constraint satisfied; this
+    // also fixes the otherwise free integers of air cells.
+    if symmetry_breaking {
+        forall c: Cell {
+            let fed = any(Contrib(s, t, f, to) for (s, t, f, to) in Feeds where t == c);
+            if rank_levels > 0 {
+                require Rank[c] >= 1 -> fed;
+            }
+            if stage_levels > 0 {
+                require Stage[c] >= 1 -> fed or Kind[c] is Torch(_);
+            }
+        }
+    }
+}
+
+// ===== implied lower bounds ==================================================
+
+rule "구조적 하한: 토치 수와 그 받침 블록 수" {
+    // Torches with different signals need supports with different signals,
+    // so a NOR network of n gates needs n torches on n distinct solids.
+    if min_torches > 0 {
+        require count(Kind[c] is Torch(_) for c: Cell) >= min_torches;
+        require count(Kind[c] is Solid for c: Cell) >= min_torches;
+    }
+}
+
+// ===== usefulness ============================================================
+
+rule "쓸모: 토치·리피터·가루는 무언가에 기여하거나 출력으로 관측됨" {
+    if require_useful {
+        forall c: Cell where not given(c) {
+            require Kind[c] is Dust | Repeater(_) | Torch(_)
+                -> any(Contrib(s, t, f, to) for (s, t, f, to) in Feeds where s == c)
+                   or any(Observe[o, c] for o: Output where output_site(o, c));
+        }
+    }
+}
+
+// ===== interface =============================================================
+
+@display("출력 {o}을 {c}에서 관측")
+def Observe[o: Output, c: Cell] :=
+    output_site(o, c)
+    and (if driving(o) {
+            Kind[c] is Torch(_)
+            or any(Kind[c] is Repeater(d) for d: Dir4 where not has(step(c, opposite(d))))
+         } else if solid_output(o) {
+            Kind[c] is Solid
+         } else {
+            Kind[c] is Dust | Repeater(_) | Torch(_)
+         })
+    and any(Sig[c] is Carry(j) for j: Class where output_class(o, j));
+
+rule "출력: 허용된 위치에서 관측" {
+    forall o: Output {
+        require any(Observe[o, c] for c: Cell where output_site(o, c));
+    }
+}
+
+// ===== tiling ================================================================
+//
+// The tile repeats along X, and each copy passes a carry to the next. The
+// next tile's torch, attached across the seam, reads this tile's carry-out
+// block `p` (so the block carries the complement of the carry). In the box,
+// two ghost slices stand for the previous tile: a switch at x = 0 drives the
+// block at x = 1 that the carry-in torch `t` reads. Beyond the seam lies a
+// copy of the tile with another bit's signals, so nothing else may interact
+// across it.
+
+rule "유령 칸: 앞 타일의 캐리 스위치와 그것이 켜는 블록만" {
+    forall c: Cell where ghost(c) {
+        require not Kind[c] is Air ->
+               any(Kind[l] is Switch(_, _) for (l, s, t, p) in carry_site where l == c)
+            or any(Kind[l] is Switch(_, _) and Kind[c] is Solid
+                   for (l, s, t, p) in carry_site where s == c);
+    }
+}
+
+rule "캐리: 스위치 열의 토치가 앞 타일을 읽고, 같은 열의 끝 블록이 다음 타일로" {
+    forall (l, s, t, p) in carry_site {
+        require Kind[l] is Switch(_, _) -> Kind[t] is Torch(West);
+        // Once the carry out is required (construction places the carry in
+        // a step earlier), it is observed in the switch's column.
+        forall o: Output where solid_output(o) {
+            require Kind[l] is Switch(_, _) -> Observe[o, p];
+        }
+    }
+}
+
+// Classes are functions, so a block that must carry the carry out (an OR of
+// falling signals) may also be powered by a signal with the same steady
+// values that rises and falls on the way, through the XOR of the sum. Such a
+// block glitches while the operands change; the next tile's carry repeats
+// the glitch and adds its own, until a torch down the chain burns out. With
+// every input moving one way, a signal that may only move one way is fed
+// only by signals that move the same way, so by induction it changes once.
+rule "단조: 단조 신호는 같은 방향의 단조 신호에서만 전원을 받음" {
+    forall (s, t, f, to) in Feeds where monotone_signals {
+        forall k: Class where increasing(k) {
+            require Feeds(s, t, f, to) and Sig[t] is Carry(k)
+                -> any(Sig[s] is Carry(j) for j: Class where increasing(j));
+        }
+        forall k: Class where decreasing(k) {
+            require Feeds(s, t, f, to) and Sig[t] is Carry(k)
+                -> any(Sig[s] is Carry(j) for j: Class where decreasing(j));
+        }
+    }
+}
+
+rule "이음면: 이웃 타일과는 캐리 말고 상호작용 없음" {
+    forall (c, d, n) in seam where seam_isolation {
+        // Dust connects to, and trades power with, dust, torches, switches,
+        // and repeaters on its axis.
+        require not (Kind[c] is Dust and Kind[n] is Dust | Torch(_) | Switch(_, _));
+        require not (Kind[c] is Dust and Kind[n] is Repeater(d) | Repeater(opposite(d)));
+        // A dust staircase up to the neighbor's dust.
+        require not (Kind[c] is Dust and Kind[step(n, Up)] is Dust
+                     and not Kind[step(c, Up)] is Solid);
+        // Dust powers the block it points at.
+        require not (Points[c, d] and Kind[n] is Solid);
+        // Torches power dust and the repeaters that read them.
+        require not (Kind[c] is Torch(_) and Kind[n] is Dust | Repeater(opposite(d)));
+        // A repeater on the seam axis reads from or writes into the neighbor.
+        require Kind[c] is Repeater(d) | Repeater(opposite(d)) -> Kind[n] is Air;
+        // Strongly powered blocks power dust; any powered block, a repeater
+        // reading it.
+        require not (Hard[c] and Kind[n] is Dust);
+        require not (Kind[c] is Solid and Kind[n] is Repeater(opposite(d)));
+        // Switches power dust and repeaters, and readers of a block beside a
+        // switch see it powered; keep the neighbor empty.
+        require Kind[c] is Switch(_, _) -> Kind[n] is Air;
+    }
+}
+
+// ===== timing ================================================================
+//
+// With `timing`, `Stage` is an arrival time in redstone ticks: a torch or a
+// repeater takes one tick, dust and blocks none, and the inputs start at 0.
+// Justification orders only the relations a layout chose to explain its
+// values. Here every relation orders its ends, since a cell fed by several
+// sources settles only after the slowest one, so `Stage` bounds the
+// worst-case delay to every cell (static timing: every path counts, even one
+// that no input case exercises). Given cells are included, so arrival times
+// run through frozen slices too. `timing.rs` computes the same bound for a
+// finished layout.
+
+rule "타이밍: 모든 전원 관계가 도착 시각 순서를 지킴" {
+    if timing {
+        forall (s, t, f, to) in Feeds {
+            if to == RepeaterSink {
+                require Feeds(s, t, f, to) -> Stage[s] < Stage[t];
+            } else {
+                require Feeds(s, t, f, to) -> Stage[s] <= Stage[t];
+            }
+        }
+        forall c: Cell, a: Attach where given(c) {
+            require Kind[c] is Torch(a) -> Stage[step(c, dir(a))] < Stage[c];
+        }
+    }
+}
+
+rule "타이밍: 출력은 정해진 틱 안에 도착" {
+    if timing {
+        forall (o, d) in output_delay, c: Cell where output_site(o, c) {
+            require Observe[o, c] -> Stage[c] <= d;
+        }
+    }
+}
+
+// ===== cost ==================================================================
+
+// What `optimize` minimizes: non-air blocks (switches included), plus extra
+// weight per repeater and torch when the weights are set.
+minimize block_cost * count(not Kind[c] is Air for c: Cell)
+       + repeater_cost * count(Kind[c] is Repeater(_) for c: Cell)
+       + torch_cost * count(Kind[c] is Torch(_) for c: Cell);

@@ -51,6 +51,41 @@ pub struct PhysicalCellDivergence {
 }
 
 impl PhysicalCellDocument {
+    /// The world to save: settled with every input off when the cell
+    /// declares `start settled;`, so a paste or a viewer shows real torch
+    /// states instead of every torch lit; otherwise as built.
+    pub fn export_world(&self, build: &PhysicalCellBuild) -> crate::world::World3D {
+        if self.settled_start {
+            if let Ok(simulator) =
+                Simulator::from_settled_with_limits_and_trace(&World::from(&build.world), 256, 50_000, 0)
+            {
+                return simulator.world().clone();
+            }
+        }
+        build.world.clone()
+    }
+
+    /// The cell's interface as `redstone-compiler.outputs.v1` metadata: the
+    /// outputs, and the inputs' names for viewers.
+    pub fn interface_json(&self) -> serde_json::Value {
+        let endpoints = |items: Vec<(&str, Position)>| {
+            items
+                .into_iter()
+                .map(|(name, position)| {
+                    serde_json::json!({
+                        "name": name,
+                        "position": [position.0, position.1, position.2],
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+        serde_json::json!({
+            "format": "redstone-compiler.outputs.v1",
+            "inputs": endpoints(self.inputs.iter().map(|input| (input.name.as_str(), input.position)).collect()),
+            "outputs": endpoints(self.outputs.iter().map(|output| (output.name.as_str(), output.position)).collect()),
+        })
+    }
+
     fn verification_truth(
         &self,
         build: &PhysicalCellBuild,
@@ -116,7 +151,12 @@ impl PhysicalCellDocument {
             .collect::<BTreeMap<_, _>>();
 
         let world = World::from(&build.world);
-        let mut simulator = Simulator::from_with_limits_and_trace(&world, 256, 50_000, trace_limit)
+        let simulator = if self.settled_start {
+            Simulator::from_settled_with_limits_and_trace(&world, 256, 50_000, trace_limit)
+        } else {
+            Simulator::from_with_limits_and_trace(&world, 256, 50_000, trace_limit)
+        };
+        let mut simulator = simulator
             .map_err(|error| eyre::eyre!(error.message().to_owned()))
             .context("failed to initialize physical cell simulation")?;
         simulator.drive_inputs_with_limits(
@@ -146,6 +186,62 @@ impl PhysicalCellDocument {
             actual,
             simulator,
         })
+    }
+
+    /// Every transition between two input cases: settled in the first,
+    /// idle long enough that earlier torch toggles no longer count, then
+    /// switched to the second. Returns the first case whose outputs are
+    /// wrong, or whose change burned a torch out (a glitch the truth table
+    /// alone does not show).
+    pub fn settled_transition_failure(
+        &self,
+        build: &PhysicalCellBuild,
+    ) -> eyre::Result<Option<String>> {
+        let truth = self.verification_truth(build)?;
+        let cases = 1 << truth.input_names.len();
+        for from in 0..cases {
+            for to in 0..cases {
+                let inputs = truth
+                    .input_names
+                    .iter()
+                    .enumerate()
+                    .map(|(index, name)| (name.clone(), from & (1 << index) != 0))
+                    .collect();
+                let mut case = self.simulate_case(build, inputs, 0)?;
+                if case.actual != case.expected {
+                    return Ok(Some(format!("initial case {from}")));
+                }
+                case.simulator
+                    .advance_idle_cycles(crate::world::simulator::MANUAL_INPUT_IDLE_CYCLES)?;
+                let contacts = truth
+                    .input_names
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(index, name)| {
+                        build.input_contacts[name]
+                            .iter()
+                            .map(move |position| (*position, to & (1 << index) != 0))
+                    })
+                    .collect();
+                case.simulator
+                    .drive_inputs_with_limits(contacts, 256, 50_000)?;
+                for (name, position) in build.observations() {
+                    if case.simulator.world()[position].kind.is_powered()
+                        != truth.output_tables[name][to]
+                    {
+                        return Ok(Some(format!("{name} after transition {from} -> {to}")));
+                    }
+                }
+                for (position, block) in case.simulator.world().iter_block() {
+                    if block.kind.is_torch() && case.simulator.is_torch_burned_out(position) {
+                        return Ok(Some(format!(
+                            "torch {position:?} burned out after transition {from} -> {to}"
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(None)
     }
 
     pub fn verify(&self, build: &PhysicalCellBuild) -> eyre::Result<PhysicalCellVerification> {
@@ -264,8 +360,13 @@ mod tests {
     const FULL_ADDER_RIGHT_INPUTS: &str =
         include_str!("../../test/full-adder-right-inputs-2x14x10.rcell");
     const FULL_ADDER_EXACT: &str = include_str!("../../test/full-adder-exact-2x13x7.rcell");
+    const FULL_ADDER_EXACT_OPTIMIZED: &str =
+        include_str!("../../test/full-adder-exact-optimized-2x8x8.rcell");
     const FULL_ADDER_RIGHT_INPUTS_COMPACTED: &str =
         include_str!("../../test/full-adder-right-inputs-compacted-2x10x10.rcell");
+    const ADDER2_EXACT: &str = include_str!("../../test/adder2-exact-2x14x10.rcell");
+    const ADDER_CARRY_TILE: &str = include_str!("../../test/adder-carry-tile-2x16x10.rcell");
+    const ADDER_CARRY_CHAIN4: &str = include_str!("../../test/adder-carry-chain4-13x16x10.rcell");
     const DISCONNECTED_FULL_ADDER: &str =
         include_str!("../../test/rcell/archive/full-adder-2x20x20-disconnected.rcell");
 
@@ -479,7 +580,118 @@ mod tests {
 
     #[test]
     fn generated_exact_full_adder_passes_all_settled_input_transitions() -> eyre::Result<()> {
-        verify_full_adder_transitions(FULL_ADDER_EXACT)
+        verify_settled_transitions(FULL_ADDER_EXACT)
+    }
+
+    /// The rsdsl-model pipeline's cell: settled start, operands on the Y-min
+    /// face, sum on the Y-max face.
+    #[test]
+    fn optimized_exact_full_adder_keeps_interface_and_passes_all_cases() -> eyre::Result<()> {
+        verify_full_adder(FULL_ADDER_EXACT_OPTIMIZED, DimSize(2, 8, 8))?;
+        let document: PhysicalCellDocument = FULL_ADDER_EXACT_OPTIMIZED.parse()?;
+        assert!(document.settled_start);
+        let build = document.build()?;
+        assert_eq!(build.inputs["a"].1, 0);
+        assert_eq!(build.inputs["b"].1, 0);
+        assert_eq!(build.outputs["sum"].1, document.size.1 - 1);
+        Ok(())
+    }
+
+    #[test]
+    fn optimized_exact_full_adder_passes_all_settled_input_transitions() -> eyre::Result<()> {
+        verify_settled_transitions(FULL_ADDER_EXACT_OPTIMIZED)
+    }
+
+    /// The rsdsl-model pipeline's 2-bit ripple-carry adder, built flat from a
+    /// hand-written NOR netlist: bit 0 is a half adder (no carry in) and `c1`
+    /// is the carry out of bit 1. Checks the arithmetic, not only the
+    /// cell's own `expect` lines.
+    #[test]
+    fn exact_two_bit_adder_adds_in_all_cases() -> eyre::Result<()> {
+        let document: PhysicalCellDocument = ADDER2_EXACT.parse()?;
+        assert_eq!(document.size, DimSize(2, 14, 10));
+        assert!(document.settled_start);
+        let build = document.build()?;
+        let verification = document.verify(&build)?;
+        assert_eq!(verification.cases, 16);
+        assert!(verification.failures.is_empty());
+        let bit = |case: usize, name: &str| {
+            let index = verification
+                .input_names
+                .iter()
+                .position(|input| input == name)
+                .unwrap();
+            (case >> index) & 1
+        };
+        for case in 0..16 {
+            let a = bit(case, "a0") + 2 * bit(case, "a1");
+            let b = bit(case, "b0") + 2 * bit(case, "b1");
+            let sum = a + b;
+            for (output, expected) in [("s0", sum & 1), ("s1", (sum >> 1) & 1), ("c1", sum >> 2)] {
+                assert_eq!(
+                    verification.signatures[output].actual[case],
+                    expected == 1,
+                    "{output} for {a} + {b}"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Four copies of the exact placer's full-adder carry tile side by side
+    /// (`docs/carry_tiles.md`), with a `cin` driver in front and a `cout`
+    /// torch behind. Checks `a + b + cin` in all 512 cases, independent of
+    /// the chain's own `expect` lines.
+    #[test]
+    fn exact_carry_tile_chain_adds_four_bits_in_all_cases() -> eyre::Result<()> {
+        let document: PhysicalCellDocument = ADDER_CARRY_CHAIN4.parse()?;
+        let build = document.build()?;
+        let verification = document.verify(&build)?;
+        assert_eq!(verification.cases, 512);
+        assert!(verification.failures.is_empty());
+        let bit = |case: usize, name: &str| {
+            let index = verification
+                .input_names
+                .iter()
+                .position(|input| input == name)
+                .unwrap();
+            (case >> index) & 1
+        };
+        for case in 0..512 {
+            let (mut a, mut b) = (0, 0);
+            for i in 0..4 {
+                a |= bit(case, &format!("a{i}")) << i;
+                b |= bit(case, &format!("b{i}")) << i;
+            }
+            let sum = a + b + bit(case, "cin");
+            for i in 0..4 {
+                assert_eq!(
+                    verification.signatures[&format!("s{i}")].actual[case],
+                    (sum >> i) & 1 == 1,
+                    "s{i} for {a} + {b}"
+                );
+            }
+            assert_eq!(verification.signatures["cout"].actual[case], sum >= 16);
+        }
+        Ok(())
+    }
+
+    /// The tile alone, with the ghost switch and block that stand for the
+    /// previous tile's carry out.
+    #[test]
+    fn exact_carry_tile_passes_all_cases_with_its_ghost_carry() -> eyre::Result<()> {
+        let document: PhysicalCellDocument = ADDER_CARRY_TILE.parse()?;
+        assert_eq!(document.size, DimSize(4, 16, 10));
+        let build = document.build()?;
+        let verification = document.verify(&build)?;
+        assert_eq!(verification.cases, 8);
+        assert!(verification.failures.is_empty());
+        verify_settled_transitions(ADDER_CARRY_TILE)
+    }
+
+    #[test]
+    fn exact_two_bit_adder_passes_all_settled_input_transitions() -> eyre::Result<()> {
+        verify_settled_transitions(ADDER2_EXACT)
     }
 
     #[test]
@@ -492,7 +704,7 @@ mod tests {
     #[test]
     fn compacted_right_inputs_full_adder_passes_all_settled_input_transitions(
     ) -> eyre::Result<()> {
-        verify_full_adder_transitions(FULL_ADDER_RIGHT_INPUTS_COMPACTED)
+        verify_settled_transitions(FULL_ADDER_RIGHT_INPUTS_COMPACTED)
     }
 
     fn verify_full_adder(source: &str, size: DimSize) -> eyre::Result<()> {
@@ -534,27 +746,27 @@ mod tests {
 
     #[test]
     fn full_adder_baseline_passes_all_settled_input_transitions() -> eyre::Result<()> {
-        verify_full_adder_transitions(FULL_ADDER_BASELINE)
+        verify_settled_transitions(FULL_ADDER_BASELINE)
     }
 
     #[test]
     fn full_adder_compact_passes_all_settled_input_transitions() -> eyre::Result<()> {
-        verify_full_adder_transitions(FULL_ADDER_COMPACT)
+        verify_settled_transitions(FULL_ADDER_COMPACT)
     }
 
     #[test]
     fn full_adder_low_passes_all_settled_input_transitions() -> eyre::Result<()> {
-        verify_full_adder_transitions(FULL_ADDER_LOW)
+        verify_settled_transitions(FULL_ADDER_LOW)
     }
 
     #[test]
     fn full_adder_small_passes_all_settled_input_transitions() -> eyre::Result<()> {
-        verify_full_adder_transitions(FULL_ADDER_SMALL)
+        verify_settled_transitions(FULL_ADDER_SMALL)
     }
 
     #[test]
     fn full_adder_right_inputs_pass_all_settled_input_transitions() -> eyre::Result<()> {
-        verify_full_adder_transitions(FULL_ADDER_RIGHT_INPUTS)
+        verify_settled_transitions(FULL_ADDER_RIGHT_INPUTS)
     }
 
     #[test]
@@ -680,22 +892,82 @@ mod tests {
         Ok(())
     }
 
-    fn verify_full_adder_transitions(source: &str) -> eyre::Result<()> {
+    fn verify_settled_transitions(source: &str) -> eyre::Result<()> {
         let document: PhysicalCellDocument = source.parse()?;
         let build = document.build()?;
+        if let Some(failure) = document.settled_transition_failure(&build)? {
+            panic!("{failure}");
+        }
+        Ok(())
+    }
+
+    /// Toggles the inputs through many random sequences without settling from
+    /// scratch in between, then checks the outputs after every change and,
+    /// at the end of each sequence, that every block matches a fresh settle
+    /// of the same inputs. A cell with an unintended latch keeps state there.
+    /// `CELL_SOURCE=<rcell path> CELL_SEQUENCES=200 CELL_STEPS=12
+    /// CELL_DRIVE_CYCLES=256` (fewer cycles toggle again before the cell
+    /// settles; the last step always settles fully before comparing).
+    #[test]
+    #[ignore = "history diagnosis; run explicitly with --nocapture"]
+    fn diagnose_cell_input_history() -> eyre::Result<()> {
+        let path = std::env::var("CELL_SOURCE")?;
+        let sequences: usize = std::env::var("CELL_SEQUENCES")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(200);
+        let steps: usize = std::env::var("CELL_STEPS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(12);
+        let document: PhysicalCellDocument = std::fs::read_to_string(&path)?.parse()?;
+        let build = document.build()?;
         let truth = document.verification_truth(&build)?;
-        for from in 0..8 {
-            for to in 0..8 {
-                let inputs = truth
-                    .input_names
-                    .iter()
-                    .enumerate()
-                    .map(|(index, name)| (name.clone(), from & (1 << index) != 0))
-                    .collect();
-                let mut case = document.simulate_case(&build, inputs, 0)?;
-                assert_eq!(case.actual, case.expected, "initial case {from}");
-                case.simulator
-                    .advance_idle_cycles(crate::world::simulator::MANUAL_INPUT_IDLE_CYCLES)?;
+        let inputs = truth.input_names.len();
+        let fresh = |case: usize| -> eyre::Result<_> {
+            let assignment = truth
+                .input_names
+                .iter()
+                .enumerate()
+                .map(|(index, name)| (name.clone(), case & (1 << index) != 0))
+                .collect();
+            document.simulate_case(&build, assignment, 0)
+        };
+        let mut rng = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
+        let drive_cycles: usize = std::env::var("CELL_DRIVE_CYCLES")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(256);
+        let settles_each_step = drive_cycles >= 256;
+        let mut output_failures = 0;
+        let mut state_failures = 0;
+        // Differing final states with no burned-out torch point at a latch.
+        let mut unburned_failures = 0;
+        let mut burned_runs = 0;
+        for sequence in 0..sequences {
+            let mut case = (next() as usize) % (1 << inputs);
+            let mut run = fresh(case)?;
+            let mut history = vec![case];
+            for step in 0..steps {
+                let last = step + 1 == steps;
+                // Flip one input, or several at once now and then.
+                let flip = if next() % 4 == 0 {
+                    (next() as usize) % (1 << inputs)
+                } else {
+                    1 << ((next() as usize) % inputs)
+                };
+                case ^= flip;
+                history.push(case);
+                if settles_each_step {
+                    run.simulator
+                        .advance_idle_cycles(crate::world::simulator::MANUAL_INPUT_IDLE_CYCLES)?;
+                }
                 let contacts = truth
                     .input_names
                     .iter()
@@ -703,28 +975,76 @@ mod tests {
                     .flat_map(|(index, name)| {
                         build.input_contacts[name]
                             .iter()
-                            .map(move |position| (*position, to & (1 << index) != 0))
+                            .map(move |position| (*position, case & (1 << index) != 0))
                     })
                     .collect();
-                case.simulator
-                    .drive_inputs_with_limits(contacts, 256, 50_000)?;
-                for (name, position) in build.observations() {
-                    assert_eq!(
-                        case.simulator.world()[position].kind.is_powered(),
-                        truth.output_tables[name][to],
-                        "{name} after transition {from} -> {to}"
-                    );
+                let cycles = if last { 256 } else { drive_cycles };
+                if let Err(error) = run
+                    .simulator
+                    .drive_inputs_with_limits(contacts, cycles, 50_000)
+                {
+                    // An unsettled cut-off is expected when toggling fast.
+                    if settles_each_step || last {
+                        return Err(error);
+                    }
+                    continue;
                 }
-                for (position, block) in case.simulator.world().iter_block() {
-                    if block.kind.is_torch() {
-                        assert!(
-                            !case.simulator.is_torch_burned_out(position),
-                            "torch {position:?} burned out after transition {from} -> {to}"
-                        );
+                if !settles_each_step && !last {
+                    continue;
+                }
+                for (name, position) in build.observations() {
+                    if run.simulator.world()[position].kind.is_powered()
+                        != truth.output_tables[name][case]
+                    {
+                        output_failures += 1;
+                        println!("HISTORY output {name} wrong after {history:?}");
                     }
                 }
             }
+            let settled = fresh(case)?;
+            let differing = run
+                .simulator
+                .world()
+                .iter_block()
+                .into_iter()
+                .filter(|(position, block)| {
+                    block.kind.is_powered()
+                        != settled.simulator.world()[*position].kind.is_powered()
+                })
+                .map(|(position, block)| (position, block.kind.name()))
+                .collect::<Vec<_>>();
+            let burned = run
+                .simulator
+                .world()
+                .iter_block()
+                .into_iter()
+                .filter(|(position, block)| {
+                    block.kind.is_torch() && run.simulator.is_torch_burned_out(*position)
+                })
+                .map(|(position, _)| position)
+                .collect::<Vec<_>>();
+            if !burned.is_empty() {
+                burned_runs += 1;
+            }
+            if !differing.is_empty() {
+                state_failures += 1;
+                if burned.is_empty() {
+                    unburned_failures += 1;
+                }
+                if state_failures <= 10 {
+                    println!(
+                        "HISTORY sequence {sequence} {history:?} differs at {differing:?}; \
+                         burned out {burned:?}"
+                    );
+                }
+            }
         }
+        println!(
+            "HISTORY {path}: {sequences} sequences of {steps} steps, \
+             output failures {output_failures}, final states differing {state_failures} \
+             ({unburned_failures} without a burned-out torch), \
+             sequences ending with a burned-out torch {burned_runs}"
+        );
         Ok(())
     }
 

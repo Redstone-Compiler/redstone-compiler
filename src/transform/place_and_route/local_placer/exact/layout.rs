@@ -32,6 +32,14 @@ pub struct ExactLayout {
     pub cells: BTreeMap<Position, CellKind>,
     pub inputs: Vec<(String, Position, Direction)>,
     pub outputs: Vec<(String, Position)>,
+    /// Signal function of every non-air cell when the layout came from a
+    /// solve (empty for a layout read from RCELL).
+    pub signals: BTreeMap<Position, u64>,
+    /// Redstone ticks from the inputs to each output (`timing.rs`) when the
+    /// layout came from a solve. A layout with a slice removed keeps its
+    /// parent's: with `CompactionConfig::timing` they are the delays a repair
+    /// must meet.
+    pub delays: BTreeMap<String, usize>,
 }
 
 impl ExactLayout {
@@ -60,6 +68,8 @@ impl ExactLayout {
             cells,
             inputs,
             outputs,
+            signals: placement.signals.iter().copied().collect(),
+            delays: placement.delays.clone(),
         }
     }
 
@@ -95,7 +105,14 @@ impl ExactLayout {
             cells,
             inputs,
             outputs,
+            signals: BTreeMap::new(),
+            delays: BTreeMap::new(),
         })
+    }
+
+    /// Static timing of the layout as it is (`timing.rs`).
+    pub fn timing(&self) -> eyre::Result<super::Timing> {
+        super::timing::analyze(self.dim, &self.cells, &self.outputs)
     }
 
     pub fn block_count(&self) -> usize {
@@ -151,11 +168,19 @@ impl ExactLayout {
             .filter(|(_, position)| coordinate(*position) != index)
             .map(|(name, position)| (name.clone(), shift(*position)))
             .collect();
+        let signals = self
+            .signals
+            .iter()
+            .filter(|(position, _)| coordinate(**position) != index)
+            .map(|(position, function)| (shift(*position), *function))
+            .collect();
         Some(Self {
             dim,
             cells,
             inputs,
             outputs,
+            signals,
+            delays: self.delays.clone(),
         })
     }
 }

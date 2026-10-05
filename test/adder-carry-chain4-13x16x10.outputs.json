@@ -1,0 +1,151 @@
+{
+  "format": "redstone-compiler.outputs.v1",
+  "inputs": [
+    {
+      "name": "cin",
+      "position": [
+        0,
+        2,
+        8
+      ]
+    },
+    {
+      "name": "a0",
+      "position": [
+        4,
+        0,
+        7
+      ]
+    },
+    {
+      "name": "b0",
+      "position": [
+        5,
+        0,
+        2
+      ]
+    },
+    {
+      "name": "a1",
+      "position": [
+        6,
+        0,
+        7
+      ]
+    },
+    {
+      "name": "b1",
+      "position": [
+        7,
+        0,
+        2
+      ]
+    },
+    {
+      "name": "a2",
+      "position": [
+        8,
+        0,
+        7
+      ]
+    },
+    {
+      "name": "b2",
+      "position": [
+        9,
+        0,
+        2
+      ]
+    },
+    {
+      "name": "a3",
+      "position": [
+        10,
+        0,
+        7
+      ]
+    },
+    {
+      "name": "b3",
+      "position": [
+        11,
+        0,
+        2
+      ]
+    }
+  ],
+  "outputs": [
+    {
+      "name": "ncout0",
+      "position": [
+        5,
+        2,
+        7
+      ]
+    },
+    {
+      "name": "s0",
+      "position": [
+        4,
+        15,
+        5
+      ]
+    },
+    {
+      "name": "ncout1",
+      "position": [
+        7,
+        2,
+        7
+      ]
+    },
+    {
+      "name": "s1",
+      "position": [
+        6,
+        15,
+        5
+      ]
+    },
+    {
+      "name": "ncout2",
+      "position": [
+        9,
+        2,
+        7
+      ]
+    },
+    {
+      "name": "s2",
+      "position": [
+        8,
+        15,
+        5
+      ]
+    },
+    {
+      "name": "ncout3",
+      "position": [
+        11,
+        2,
+        7
+      ]
+    },
+    {
+      "name": "s3",
+      "position": [
+        10,
+        15,
+        5
+      ]
+    },
+    {
+      "name": "cout",
+      "position": [
+        12,
+        2,
+        7
+      ]
+    }
+  ]
+}

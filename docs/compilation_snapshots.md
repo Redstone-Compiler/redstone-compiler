@@ -11,6 +11,10 @@ counter.snapshot/
 |-- summary.json
 |-- interface.json
 |-- placement-bboxes.nbt
+|-- frames/<sequence>/
+|   |-- frames.json
+|   |-- <NNN>-<label>.nbt
+|   `-- <NNN>-<label>.outputs.json
 |-- ir/
 |   |-- logical.rcir
 |   |-- logical.json
@@ -82,6 +86,24 @@ viewer tooling do not need to scan the NBT to rank candidates. A persistent or
 in-memory cache hit has candidate quality metadata but no new search report,
 because no local search ran in that compilation.
 
+`frames/<sequence>/` holds step-by-step recordings of a process that builds a
+world, such as the exact local placer's construction and compaction
+(`snapshot::emit_frame`). Each frame is `NNN-<label>.nbt` with its interface
+metadata (`NNN-<label>.outputs.json`, inputs and outputs) and an entry in the
+sequence's `frames.json` (file, label, and details such as the block count),
+which is rewritten with every frame so an unfinished run can still be played
+back. The manifest's `frames` array lists each sequence with its index path
+and frame count. The viewer shows the sequences under Frames and plays them
+with previous/next/play controls, a slider and the arrow keys, keeping one
+camera so the layout changes in place.
+
+The viewer's address names what is open, so links and the back and forward
+buttons work: `?example=<name>` opens an NBT or `.rsnap` from its example
+list (`?snapshot=<path>` a served `.rsnap`, `?frames=<path>/frames.json` a
+plain frame directory); inside a snapshot `&nbt=<artifact>` opens one of its
+NBTs and `&sequence=<name>&frame=<n>` one frame of a recording. Stepping
+through frames updates `frame` without adding history entries.
+
 `summary.json` records status, total elapsed time, selected placement and route
 metrics, and typed compilation events. Failed compilation scopes still write a
 summary and manifest with `status: "failed"`.
@@ -108,6 +130,20 @@ snapshot::record(SnapshotEvent::Stage {
     name: "generate candidates".to_owned(),
 });
 ```
+
+A stage that builds a world step by step can record each step as a frame:
+
+```rust
+snapshot::emit_frame("exact-full-adder", SnapshotFrame {
+    label: "construct g9".to_owned(),
+    nbt: NBTRoot::from(&world),
+    interface: Some(document.interface_json()),
+    details: json!({ "blocks": 96 }),
+});
+```
+
+The exact local placer records every accepted construction step and
+compaction change this way whenever a snapshot is active.
 
 An ambient run ID routes events to the correct session through a process-wide
 hub. A background writer thread writes artifacts, and finalization waits for a

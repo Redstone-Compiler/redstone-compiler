@@ -28,8 +28,13 @@ async function fetchStringifiedJson<T>(url: string, variableName: string): Promi
 async function loadImageData(url: string): Promise<ImageData> {
   const image = new Image();
   image.decoding = 'async';
-  image.src = url;
-  await image.decode();
+  // `decode()` can wait until the page is visible; `load` does not, so a
+  // viewer opened in a background tab still finishes loading.
+  await new Promise<void>((resolve, reject) => {
+    image.onload = () => resolve();
+    image.onerror = () => reject(new Error(`Failed to load ${url}`));
+    image.src = url;
+  });
 
   const canvas = document.createElement('canvas');
   canvas.width = upperPowerOfTwo(image.width);

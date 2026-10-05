@@ -20,6 +20,9 @@ impl fmt::Display for PhysicalCellDocument {
         if !support.is_empty() {
             writeln!(output, "  auto-support {};", support.join(" "))?;
         }
+        if self.settled_start {
+            writeln!(output, "  start settled;")?;
+        }
         for (glyph, spec) in &self.glyphs {
             match spec {
                 CellGlyph::Torch { support } => writeln!(

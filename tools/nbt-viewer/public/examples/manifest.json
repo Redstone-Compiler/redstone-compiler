@@ -1,6 +1,30 @@
 [
   {
     "kind": "nbt",
+    "name": "adder-carry-chain4-13x16x10.nbt",
+    "file": "adder-carry-chain4-13x16x10.nbt",
+    "path": "examples/adder-carry-chain4-13x16x10.nbt",
+    "size": 2376,
+    "outputsPath": "examples/adder-carry-chain4-13x16x10.outputs.json"
+  },
+  {
+    "kind": "nbt",
+    "name": "adder-carry-tile-2x16x10.nbt",
+    "file": "adder-carry-tile-2x16x10.nbt",
+    "path": "examples/adder-carry-tile-2x16x10.nbt",
+    "size": 979,
+    "outputsPath": "examples/adder-carry-tile-2x16x10.outputs.json"
+  },
+  {
+    "kind": "nbt",
+    "name": "adder2-exact-2x14x10.nbt",
+    "file": "adder2-exact-2x14x10.nbt",
+    "path": "examples/adder2-exact-2x14x10.nbt",
+    "size": 916,
+    "outputsPath": "examples/adder2-exact-2x14x10.outputs.json"
+  },
+  {
+    "kind": "nbt",
     "name": "alu-export.nbt",
     "file": "alu-export.nbt",
     "path": "examples/alu-export.nbt",
@@ -115,6 +139,21 @@
     "path": "examples/full-adder-exact-2x13x7.nbt",
     "size": 790,
     "outputsPath": "examples/full-adder-exact-2x13x7.outputs.json"
+  },
+  {
+    "kind": "nbt",
+    "name": "full-adder-exact-optimized-2x8x8.nbt",
+    "file": "full-adder-exact-optimized-2x8x8.nbt",
+    "path": "examples/full-adder-exact-optimized-2x8x8.nbt",
+    "size": 551,
+    "outputsPath": "examples/full-adder-exact-optimized-2x8x8.outputs.json"
+  },
+  {
+    "kind": "snapshot",
+    "name": "full-adder-exact-steps.rsnap",
+    "file": "full-adder-exact-steps.rsnap",
+    "path": "examples/full-adder-exact-steps.rsnap",
+    "size": 39979
   },
   {
     "kind": "nbt",

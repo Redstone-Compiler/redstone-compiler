@@ -1,0 +1,162 @@
+rcell 1;
+cell "exact-adder-carry-chain4" size [13, 16, 10] {
+  start settled;
+  glyph "P" = torch on x+;
+  glyph "Q" = torch on y+;
+  glyph "T" = torch on x-;
+  glyph "U" = repeater toward x- delay 1;
+  glyph "V" = torch on y-;
+  glyph "W" = repeater toward y- delay 1;
+  glyph "X" = torch on z-;
+  glyph "Y" = repeater toward y+ delay 1;
+
+  input "cin" at [0, 2, 8] on z-;
+  input "a0" at [4, 0, 7] on y+;
+  input "b0" at [5, 0, 2] on y+;
+  input "a1" at [6, 0, 7] on y+;
+  input "b1" at [7, 0, 2] on y+;
+  input "a2" at [8, 0, 7] on y+;
+  input "b2" at [9, 0, 2] on y+;
+  input "a3" at [10, 0, 7] on y+;
+  input "b3" at [11, 0, 2] on y+;
+  output "ncout0" at [5, 2, 7];
+  output "s0" at [4, 15, 5];
+  output "ncout1" at [7, 2, 7];
+  output "s1" at [6, 15, 5];
+  output "ncout2" at [9, 2, 7];
+  output "s2" at [8, 15, 5];
+  output "ncout3" at [11, 2, 7];
+  output "s3" at [10, 15, 5];
+  output "cout" at [12, 2, 7];
+
+  plane yz at x=0 {
+    z=7 "..#.............";
+  }
+
+  plane yz at x=1 {
+    z=7 "..T.............";
+  }
+
+  plane yz at x=2 {
+    z=7 "..U.............";
+    z=6 "..#.............";
+  }
+
+  plane yz at x=3 {
+    z=7 "..#.............";
+  }
+
+  plane yz at x=4 {
+    z=9 "...........PWr..";
+    z=8 "..PW#VW#r#..##r.";
+    z=7 ".#T#Q##V#r##Vr#.";
+    z=6 "..rW#VQ#.##V.#..";
+    z=5 "..##r..X#VP.PW#V";
+    z=4 "....#rW#P....#X.";
+    z=3 "...#Y##P....PW#.";
+    z=2 "...r#W#Vr...##X.";
+    z=1 "...#.#..#VW#VW#.";
+    z=0 "..........#..#..";
+  }
+
+  plane yz at x=5 {
+    z=9 ".rrW#r#W#VW#....";
+    z=8 ".###.#.#..#V....";
+    z=7 ".T#YQ#YYT.T...T.";
+    z=6 ".r.#..##......r.";
+    z=5 "Q#......TW#.#Y#V";
+    z=4 "r#W#VW#W##X.X#.r";
+    z=3 "#.#VW#.#WW#.#YQ#";
+    z=2 ".#V.#r#V##..T#..";
+    z=1 ".....#..........";
+  }
+
+  plane yz at x=6 {
+    z=9 "...........PWr..";
+    z=8 "..PW#VW#r#..##r.";
+    z=7 ".#T#Q##V#r##Vr#.";
+    z=6 "..rW#VQ#.##V.#..";
+    z=5 "..##r..X#VP.PW#V";
+    z=4 "....#rW#P....#X.";
+    z=3 "...#Y##P....PW#.";
+    z=2 "...r#W#Vr...##X.";
+    z=1 "...#.#..#VW#VW#.";
+    z=0 "..........#..#..";
+  }
+
+  plane yz at x=7 {
+    z=9 ".rrW#r#W#VW#....";
+    z=8 ".###.#.#..#V....";
+    z=7 ".T#YQ#YYT.T...T.";
+    z=6 ".r.#..##......r.";
+    z=5 "Q#......TW#.#Y#V";
+    z=4 "r#W#VW#W##X.X#.r";
+    z=3 "#.#VW#.#WW#.#YQ#";
+    z=2 ".#V.#r#V##..T#..";
+    z=1 ".....#..........";
+  }
+
+  plane yz at x=8 {
+    z=9 "...........PWr..";
+    z=8 "..PW#VW#r#..##r.";
+    z=7 ".#T#Q##V#r##Vr#.";
+    z=6 "..rW#VQ#.##V.#..";
+    z=5 "..##r..X#VP.PW#V";
+    z=4 "....#rW#P....#X.";
+    z=3 "...#Y##P....PW#.";
+    z=2 "...r#W#Vr...##X.";
+    z=1 "...#.#..#VW#VW#.";
+    z=0 "..........#..#..";
+  }
+
+  plane yz at x=9 {
+    z=9 ".rrW#r#W#VW#....";
+    z=8 ".###.#.#..#V....";
+    z=7 ".T#YQ#YYT.T...T.";
+    z=6 ".r.#..##......r.";
+    z=5 "Q#......TW#.#Y#V";
+    z=4 "r#W#VW#W##X.X#.r";
+    z=3 "#.#VW#.#WW#.#YQ#";
+    z=2 ".#V.#r#V##..T#..";
+    z=1 ".....#..........";
+  }
+
+  plane yz at x=10 {
+    z=9 "...........PWr..";
+    z=8 "..PW#VW#r#..##r.";
+    z=7 ".#T#Q##V#r##Vr#.";
+    z=6 "..rW#VQ#.##V.#..";
+    z=5 "..##r..X#VP.PW#V";
+    z=4 "....#rW#P....#X.";
+    z=3 "...#Y##P....PW#.";
+    z=2 "...r#W#Vr...##X.";
+    z=1 "...#.#..#VW#VW#.";
+    z=0 "..........#..#..";
+  }
+
+  plane yz at x=11 {
+    z=9 ".rrW#r#W#VW#....";
+    z=8 ".###.#.#..#V....";
+    z=7 ".T#YQ#YYT.T...T.";
+    z=6 ".r.#..##......r.";
+    z=5 "Q#......TW#.#Y#V";
+    z=4 "r#W#VW#W##X.X#.r";
+    z=3 "#.#VW#.#WW#.#YQ#";
+    z=2 ".#V.#r#V##..T#..";
+    z=1 ".....#..........";
+  }
+
+  plane yz at x=12 {
+    z=7 "..T.............";
+  }
+
+  expect "ncout0" = ~(~(~(a0|b0)|~(~(~(~((~cin))|a0)|~(~((~cin))|b0)))));
+  expect "s0" = ~(~(~(~(a0|~(a0|b0))|~(b0|~(a0|b0)))|~(~((~cin))|~(~(a0|~(a0|b0))|~(b0|~(a0|b0)))))|~(~((~cin))|~(~((~cin))|~(~(a0|~(a0|b0))|~(b0|~(a0|b0))))));
+  expect "ncout1" = ~(~(~(a1|b1)|~(~(~(~((ncout0))|a1)|~(~((ncout0))|b1)))));
+  expect "s1" = ~(~(~(~(a1|~(a1|b1))|~(b1|~(a1|b1)))|~(~((ncout0))|~(~(a1|~(a1|b1))|~(b1|~(a1|b1)))))|~(~((ncout0))|~(~((ncout0))|~(~(a1|~(a1|b1))|~(b1|~(a1|b1))))));
+  expect "ncout2" = ~(~(~(a2|b2)|~(~(~(~((ncout1))|a2)|~(~((ncout1))|b2)))));
+  expect "s2" = ~(~(~(~(a2|~(a2|b2))|~(b2|~(a2|b2)))|~(~((ncout1))|~(~(a2|~(a2|b2))|~(b2|~(a2|b2)))))|~(~((ncout1))|~(~((ncout1))|~(~(a2|~(a2|b2))|~(b2|~(a2|b2))))));
+  expect "ncout3" = ~(~(~(a3|b3)|~(~(~(~((ncout2))|a3)|~(~((ncout2))|b3)))));
+  expect "s3" = ~(~(~(~(a3|~(a3|b3))|~(b3|~(a3|b3)))|~(~((ncout2))|~(~(a3|~(a3|b3))|~(b3|~(a3|b3)))))|~(~((ncout2))|~(~((ncout2))|~(~(a3|~(a3|b3))|~(b3|~(a3|b3))))));
+  expect "cout" = ~ncout3;
+}

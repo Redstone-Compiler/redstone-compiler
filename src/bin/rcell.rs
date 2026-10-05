@@ -75,7 +75,7 @@ fn compile(options: &Options) -> eyre::Result<()> {
         .output
         .clone()
         .unwrap_or_else(|| options.input.with_extension("nbt"));
-    NBTRoot::from(&build.world).save(&output);
+    NBTRoot::from(&document.export_world(&build)).save(&output);
 
     if options.emit {
         print!("{document}");
