@@ -1,0 +1,166 @@
+# Equivalent NOR netlists from an e-graph (2026-10-05)
+
+The exact placer builds the NOR netlist it is given. Construction places one
+gate per step, and the signal vocabulary is the netlist's net functions and
+their complements. A hand-written netlist such as the full adder's `nor9`
+therefore fixes how many torches there are and how deep the logic runs.
+`exact/egraph.rs` searches the equivalent netlists with an e-graph (the `egg`
+crate) and extracts the ones worth placing.
+
+## Saturation
+
+The language has `~`, `|`, `&`, `^`, and inputs. Only `~` (a torch: one gate,
+one redstone tick) and `|` (dust and blocks: free) are built; `&` and `^`
+state functions and give the rewrites something to pass through.
+
+The rules are:
+
+- commutativity and associativity;
+- double negation, idempotence, and absorption;
+- De Morgan in both directions;
+- AND over OR and OR over AND, both ways;
+- XOR as a sum of products and as a product of sums;
+- XNOR as XOR with one input negated.
+
+The analysis gives every e-class its truth table (up to 6 inputs). `modify`
+unions any two classes with the same table as soon as the second appears.
+Two forms of one function thus always meet, whichever rules produced them,
+and the classes are the functions the rules have reached.
+
+The full adder (`s = a^b^cin`, `cout = ab|a·cin|b·cin`) reaches 230 of the
+256 three-input functions: 6,187 nodes, 12 iterations, 73 ms.
+
+## Extraction
+
+**Greedy extraction** (`Exploration::extract`) gives each class the node
+whose own and inputs' gates (shared ones counted once) and depth weigh
+least, until no class changes. It decides class by class, so it misses
+NORs that pay off only when several gates share them. On the full adder
+every weighting gave the same 13-gate netlist, against `nor9`'s 9.
+
+**Exact extraction** (`Exploration::extract_exact`) solves the choice with
+SAT, from a second rsdsl model, `exact/egraph_extract.rsdsl`:
+
+- the outputs are needed and are torches (an OR output would become a NOR
+  and a NOT in the netlist);
+- a needed class picks one node, and the classes that node reads are needed
+  too;
+- `Depth` adds a tick per NOT and none per OR, which also rules out loops;
+  `max_depth` bounds the outputs;
+- the objective is the number of picked NOTs, plus `or_cost` per picked
+  OR (every input of a NOR is a signal to route to its block);
+- `binary` allows only NORs of two signals.
+
+The same CaDiCaL binding as the placer lowers the bound until the minimum
+is proven. On the full adder each depth bound took 0.1-0.4 s:
+
+| Depth bound | Fewest gates (proven) | Depths cout / s | Most nets live at once |
+| --- | --- | --- | --- |
+| 2 | none | | |
+| 3 | 9 | 2 / 3 | 7 |
+| 4 and up | 8 | 3 / 4 | 6 |
+| `nor9` (by hand) | 9 | 5 / 6 | 4 |
+
+The 8-gate full adder:
+
+```
+g3 = NOR(a, b)
+g4 = NOR(a, cin, g3)
+g5 = NOR(b, cin, g3)
+g6 = NOR(a, g3, g4, g5)
+g7 = NOR(b, g3, g4, g5)
+g8 = NOR(cin, g4, g5)
+s = NOR(g6, g7, g8)
+cout = NOR(g3, g4, g5)
+```
+
+With `or_cost` 1 or more, the cheapest netlist has 9 gates and depths 4/5,
+one tick faster than `nor9`. Its widest NOR reads 3 signals, and as with
+`nor9` at most 4 nets are alive at once:
+
+```
+g3 = NOR(a, b)
+g4 = NOR(a)
+g5 = NOR(b)
+g6 = NOR(g4, g5)
+g7 = NOR(cin, g3, g6)
+g8 = NOR(g3, g6, g7)
+g9 = NOR(cin, g7)
+s = NOR(g8, g9)
+cout = NOR(g3, g7)
+```
+
+With `binary` (two-input NORs only), the minimum is 9 gates at depth 5/6:
+`nor9` itself, proven optimal for this e-graph. Depth 5/5 needs 12 gates,
+and nothing reaches depth 4. Every gain the e-graph finds over `nor9` uses
+wider NORs.
+
+The minimum holds within this e-graph. A netlist the rules never reach can
+still be smaller.
+
+## Placement
+
+The circuit harness places the extracted netlists:
+
+- `CIRCUIT=egraph-full-adder` uses the fewest gates overall;
+- `EGRAPH_DEPTH=<n>` uses the fewest gates within depth `n`;
+- `EGRAPH_OR_COST=<w>` charges each OR node `w`;
+- `EGRAPH_BINARY=1` allows only two-input NORs.
+
+Full adder, 5 workers, 600 s of compaction, no timing:
+
+| Netlist | Seed | Construction | Compacted |
+| --- | --- | --- | --- |
+| `nor9`, fan-in 2 | 1 | 64 s | 2x12x9, 146 blocks, cout 13, s 18 |
+| `nor9` | 2 | 96 s | 2x11x10, 148 blocks, cout 11, s 17 |
+| `or_cost` 1, 9 gates, fan-in 3 | 1 | 995 s, 3 restarts | 2x15x7, 121 blocks, cout 12, s 19 |
+| `or_cost` 1 | 2 | 937 s, 4 restarts | 2x11x9, 88 blocks, cout 7, s 11 |
+| 8 gates, fan-in 4 | 1 | no layout in 3 restarts | |
+| depth 3, 9 gates, fan-in 4 | 1 | no layout in 5 restarts | |
+
+- Construction is where wide NORs cost.
+  - Steps with a 3- or 4-input NOR ran out of their 60 s again and again:
+    `g4 = NOR(a, cin, g3)`, `cout = NOR(g4, g5, g7)`, and the `or_cost` 1
+    netlist's `g7 = NOR(cin, g3, g6)`.
+  - Every input of such a NOR has to reach one block within a window two
+    cells wide.
+  - `nor9`'s two-input NORs construct on the first try in 1-1.5 minutes.
+- Once built, the `or_cost` 1 netlist gave the smallest and fastest cell
+  of these runs (seed 2: 88 blocks, 11 ticks).
+- Compaction varies too much from run to run (the 600 s runs did not
+  converge) to rank the netlists on two seeds.
+
+Two placement steps had failed as infeasible within 0.1 s, the first time
+a new input was placed. Construction offered the new input the cell of a
+switch kept from an earlier step, and the fixed switch was read as the new
+input's. That is fixed: new inputs skip placed switches, and a fixed
+switch belongs to the input whose only site it is. With
+`EXACT_DIAGNOSE_INFEASIBLE`, an infeasible step is re-solved with one
+requirement dropped at a time, which is how it was found.
+
+## Next
+
+- Let construction build a wide NOR in parts, its OR terms first, so
+  narrow windows can place the netlists with fewer gates.
+- Constrain extraction for carry tiles: the carry needs monotone signals
+  (`carry_tiles.md`).
+
+## Running
+
+```sh
+cargo test --release --lib egraph_netlists_compute_the_full_adder
+cargo test --release --lib explore_egraph_netlists -- --ignored --nocapture
+CIRCUIT=egraph-full-adder CIRCUIT_COMPACT_SECONDS=600 \
+  cargo test --release --lib diagnose_construct_circuit -- --ignored --nocapture
+```
+
+`explore_egraph_netlists` takes these knobs:
+
+- saturation: `EGRAPH_ITERATIONS`, `EGRAPH_NODES`, `EGRAPH_SECONDS`;
+- the sweep: `EGRAPH_MAX_DEPTH`, `EGRAPH_OR_COSTS` (comma-separated),
+  `EGRAPH_BINARY=1`;
+- `EGRAPH_EXTRACT_SECONDS`;
+- `EGRAPH_GREEDY=1` also prints greedy extractions.
+
+The circuit harness takes `EGRAPH_DEPTH`, `EGRAPH_OR_COST`, and
+`EGRAPH_BINARY`.

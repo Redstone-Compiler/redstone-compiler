@@ -24,6 +24,9 @@ param depth_cost: int = 0;
 // Wide NORs are hard to build in a narrow box: every input is a signal that
 // has to reach the torch's block, so `or_cost` charges each OR node.
 param or_cost: int = 0;
+// Every NOR reads at most two signals: an OR node may only join classes that
+// are not themselves built as ORs.
+param binary: bool = false;
 
 var Pick[n: Node];
 var Need[c: Class];
@@ -58,6 +61,14 @@ rule "고른 노드의 자식도 만들고, 더 먼저 도착함" {
             require Pick[n] -> Depth[c] < Depth[k];
         } else {
             require Pick[n] -> Depth[c] <= Depth[k];
+        }
+    }
+}
+
+rule "2입력 NOR만" {
+    if binary {
+        forall (n, k, c) in edge where or_node(n) {
+            require Pick[n] -> not any(Pick[m] for (m, j) in node_class where j == c and or_node(m));
         }
     }
 }

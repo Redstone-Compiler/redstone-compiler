@@ -2049,7 +2049,8 @@ fn diagnose_construct_circuit() -> eyre::Result<()> {
     let circuit = std::env::var("CIRCUIT").unwrap_or_else(|_| "mux2".to_owned());
     // `egraph-full-adder`: the cheapest netlist the e-graph holds
     // (`Exploration::extract_exact`) within `EGRAPH_DEPTH` (any), with
-    // `EGRAPH_OR_COST` (0) per OR node.
+    // `EGRAPH_OR_COST` (0) per OR node, and only 2-input NORs with
+    // `EGRAPH_BINARY=1`.
     let placer = match circuit.as_str() {
         "egraph-full-adder" => {
             let (inputs, outputs) = full_adder_functions();
@@ -2060,6 +2061,7 @@ fn diagnose_construct_circuit() -> eyre::Result<()> {
                     .map(|depth| depth.parse::<usize>())
                     .transpose()?,
                 or_cost: env_usize("EGRAPH_OR_COST", 0),
+                binary: std::env::var("EGRAPH_BINARY").as_deref() == Ok("1"),
                 ..Default::default()
             };
             let extraction = exploration
@@ -3669,6 +3671,7 @@ fn explore_egraph_netlists() -> eyre::Result<()> {
             let options = ExtractOptions {
                 max_depth: depth,
                 or_cost,
+                binary: std::env::var("EGRAPH_BINARY").as_deref() == Ok("1"),
                 time_limit: seconds,
             };
             match exploration.extract_exact(&options)? {

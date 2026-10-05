@@ -45,6 +45,8 @@ pub struct ExtractOptions {
     pub max_depth: Option<usize>,
     /// Weight of each OR node (one more input on a NOR) against a gate's 1.
     pub or_cost: usize,
+    /// Only NORs of at most two signals.
+    pub binary: bool,
     pub time_limit: Duration,
 }
 
@@ -53,6 +55,7 @@ impl Default for ExtractOptions {
         Self {
             max_depth: None,
             or_cost: 0,
+            binary: false,
             time_limit: Duration::from_secs(60),
         }
     }
@@ -303,6 +306,7 @@ impl Exploration {
         let ExtractOptions {
             max_depth,
             or_cost,
+            binary,
             time_limit,
         } = *options;
         let egraph = &self.egraph;
@@ -349,7 +353,8 @@ impl Exploration {
             .domain("Node", (0..nodes.len()).map(IValue::from))
             .domain("Tick", (0..=levels).map(IValue::from))
             .param("levels", levels)
-            .param("or_cost", or_cost);
+            .param("or_cost", or_cost)
+            .param("binary", binary);
         if let Some(depth) = max_depth {
             instance.param("max_depth", depth);
         }
