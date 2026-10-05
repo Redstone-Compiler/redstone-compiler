@@ -353,6 +353,7 @@ impl Prepared {
             ),
             ("allow_unpowered_wires", config.allow_unpowered_wires.into()),
             ("min_torches", min_torches.into()),
+            ("timing", config.timing.into()),
         ]
     }
 
@@ -369,7 +370,8 @@ impl Prepared {
             .domain(
                 "Output",
                 self.observations.iter().map(|o| IValue::sym(&o.symbol)),
-            );
+            )
+            .domain("Tick", (0..=config.stage_levels).map(IValue::from));
         for fact in [
             "on",
             "unpowered",
@@ -387,6 +389,7 @@ impl Prepared {
             "solid_output",
             "increasing",
             "decreasing",
+            "output_delay",
         ] {
             instance.fact(fact);
         }
@@ -454,6 +457,15 @@ impl Prepared {
             );
             if config.driving_outputs.contains(&observation.name) {
                 instance.row("driving", vec![symbol.clone()]);
+            }
+            if let Some(&delay) = config.output_delays.get(&observation.name) {
+                ensure!(
+                    delay <= config.stage_levels,
+                    "output `{}` delay {delay} is above stage_levels ({})",
+                    observation.name,
+                    config.stage_levels
+                );
+                instance.row("output_delay", vec![symbol.clone(), delay.into()]);
             }
             if observation.solid {
                 instance.row("solid_output", vec![symbol]);

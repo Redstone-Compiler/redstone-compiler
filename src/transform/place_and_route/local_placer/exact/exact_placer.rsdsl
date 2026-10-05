@@ -17,6 +17,7 @@ enum Sink { DustSink, RepeaterSink, SolidSink }
 domain Case: int;      // input cases; bit i of a case is input i
 domain Class;          // signal vocabulary, one class per Boolean function
 domain Output;
+domain Tick: int;      // arrival times in redstone ticks (0..=stage_levels)
 
 fact on(Class, Case);                  // class is powered in that case
 fact unpowered(Class);                 // the constant-off class
@@ -47,6 +48,9 @@ fact solid_output(Output);             // observed on a block (the carry out)
 // operands and the carry in rise, so the carry input's complement falls.
 fact increasing(Class);
 fact decreasing(Class);
+// With `timing`, an observed output settles at most this many redstone ticks
+// after the inputs change (see the timing rules).
+fact output_delay(Output, Tick);
 
 // A repeater may point out of the box only where it drives an output into the
 // neighbor cell, or where one is already fixed. Elsewhere its output would
@@ -81,6 +85,8 @@ param seam_isolation: bool = true;
 // Monotone signals stay monotone in a carry tile (see the tiling rules);
 // off, a tile may glitch its carry.
 param monotone_signals: bool = true;
+// `Stage` is an arrival time in redstone ticks, bounded by `output_delay`.
+param timing: bool = false;
 
 fn dir(a: Attach) -> Dir6 = match a {
     Floor => Down, East => East, West => West, North => North, South => South,
@@ -540,6 +546,41 @@ rule "이음면: 이웃 타일과는 캐리 말고 상호작용 없음" {
         // Switches power dust and repeaters, and readers of a block beside a
         // switch see it powered; keep the neighbor empty.
         require Kind[c] is Switch(_, _) -> Kind[n] is Air;
+    }
+}
+
+// ===== timing ================================================================
+//
+// With `timing`, `Stage` is an arrival time in redstone ticks: a torch or a
+// repeater takes one tick, dust and blocks none, and the inputs start at 0.
+// Justification orders only the relations a layout chose to explain its
+// values. Here every relation orders its ends, since a cell fed by several
+// sources settles only after the slowest one, so `Stage` bounds the
+// worst-case delay to every cell (static timing: every path counts, even one
+// that no input case exercises). Given cells are included, so arrival times
+// run through frozen slices too. `timing.rs` computes the same bound for a
+// finished layout.
+
+rule "타이밍: 모든 전원 관계가 도착 시각 순서를 지킴" {
+    if timing {
+        forall (s, t, f, to) in Feeds {
+            if to == RepeaterSink {
+                require Feeds(s, t, f, to) -> Stage[s] < Stage[t];
+            } else {
+                require Feeds(s, t, f, to) -> Stage[s] <= Stage[t];
+            }
+        }
+        forall c: Cell, a: Attach where given(c) {
+            require Kind[c] is Torch(a) -> Stage[step(c, dir(a))] < Stage[c];
+        }
+    }
+}
+
+rule "타이밍: 출력은 정해진 틱 안에 도착" {
+    if timing {
+        forall (o, d) in output_delay, c: Cell where output_site(o, c) {
+            require Observe[o, c] -> Stage[c] <= d;
+        }
     }
 }
 

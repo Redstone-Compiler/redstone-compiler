@@ -2936,3 +2936,238 @@ fn carry_adder_tile_fixture_satisfies_the_model_and_chains() -> eyre::Result<()>
     assert!(verification.failures.is_empty());
     Ok(())
 }
+
+/// A fixture read for timing tests: the placer, the layout with the
+/// netlist's output names, and the compaction settings that fix it.
+fn timing_fixture(name: &str) -> eyre::Result<(ExactLocalPlacer, ExactLayout, CompactionConfig)> {
+    let (source, graph, carry) = match name {
+        "full-adder-2x8x8" => (
+            include_str!("../../../../../test/full-adder-exact-optimized-2x8x8.rcell"),
+            full_adder_graph("nor9"),
+            None,
+        ),
+        "full-adder-2x13x7" => (
+            include_str!("../../../../../test/full-adder-exact-2x13x7.rcell"),
+            full_adder_graph("nor9"),
+            None,
+        ),
+        "carry-tile-2x16x10" => (
+            include_str!("../../../../../test/adder-carry-tile-2x16x10.rcell"),
+            carry_adder_graph(false),
+            Some(adder_carry()),
+        ),
+        other => eyre::bail!("no timing fixture `{other}`"),
+    };
+    let document: crate::physical_cell::PhysicalCellDocument = source.parse()?;
+    let mut layout = ExactLayout::from_rcell(&document)?;
+    for (output, _) in layout.outputs.iter_mut() {
+        if output == "sum" {
+            *output = "s".to_owned();
+        }
+    }
+    let placer = ExactLocalPlacer::new(&graph)?;
+    let compaction = CompactionConfig {
+        workers: 1,
+        carry,
+        output_policies: [("s".to_owned(), OutputPolicy::MaxYFace)]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+    Ok((placer, layout, compaction))
+}
+
+/// The model with `timing` accepts each fixture with every output's delay
+/// at the static timing analysis' value and rejects it with any one output a
+/// tick sooner, so `timing.rs` mirrors the model's power relations.
+#[test]
+fn static_timing_matches_the_model() -> eyre::Result<()> {
+    for name in [
+        "full-adder-2x8x8",
+        "full-adder-2x13x7",
+        "carry-tile-2x16x10",
+    ] {
+        let (placer, layout, compaction) = timing_fixture(name)?;
+        let timing = analyze_timing(layout.dim, &layout.cells, &layout.outputs)?;
+        assert_eq!(timing.outputs.len(), layout.outputs.len());
+        let longest = timing.arrival.values().copied().max().unwrap_or(0);
+        let mut exact = placer.window_config(&layout, 1, (0, 0), None, &compaction)?;
+        exact.timing = true;
+        exact.stage_levels = longest + 1;
+        exact.output_delays = timing.outputs.iter().cloned().collect();
+        let (outcome, _) = placer.place(&exact)?;
+        let ExactOutcome::Placed(placement) = outcome else {
+            panic!("{name}: the model rejects the layout at its own delays {timing:?}");
+        };
+        assert_eq!(placement.delays, exact.output_delays, "{name}");
+        for (output, ticks) in &timing.outputs {
+            let mut sooner = exact.clone();
+            sooner.output_delays.insert(output.clone(), ticks - 1);
+            let (outcome, _) = placer.place(&sooner)?;
+            assert!(
+                matches!(outcome, ExactOutcome::Infeasible),
+                "{name}: `{output}` in {} ticks should be infeasible",
+                ticks - 1
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Delays of the fixtures, their logic-depth bounds, and each slowest path:
+/// `cargo test --release --lib report_fixture_timing -- --ignored --nocapture`.
+#[test]
+#[ignore = "report; run explicitly with --nocapture"]
+fn report_fixture_timing() -> eyre::Result<()> {
+    for name in [
+        "full-adder-2x8x8",
+        "full-adder-2x13x7",
+        "carry-tile-2x16x10",
+    ] {
+        let (placer, layout, _) = timing_fixture(name)?;
+        let timing = analyze_timing(layout.dim, &layout.cells, &layout.outputs)?;
+        println!(
+            "TIMING {name} outputs={:?} bounds={:?}",
+            timing.outputs,
+            depth_bounds(placer.netlist())
+        );
+        let show = |timing: &Timing, label: &str| {
+            let Some((output, ticks)) = timing.critical() else {
+                return;
+            };
+            let position = layout
+                .outputs
+                .iter()
+                .find(|(name, _)| name == output)
+                .unwrap()
+                .1;
+            let path = timing
+                .path(position)
+                .into_iter()
+                .map(|position| {
+                    format!(
+                        "{:?}@({},{},{})={}",
+                        layout
+                            .cells
+                            .get(&position)
+                            .copied()
+                            .unwrap_or(CellKind::Air),
+                        position.0,
+                        position.1,
+                        position.2,
+                        timing.arrival[&position]
+                    )
+                })
+                .collect::<Vec<_>>();
+            println!("  {label} {output} {ticks}: {}", path.join(" -> "));
+        };
+        show(&timing, "critical");
+        for (input, position, _) in &layout.inputs {
+            let from = analyze_timing_from(layout.dim, &layout.cells, &layout.outputs, *position)?;
+            println!("  from {input}: {:?}", from.outputs);
+            if std::env::var("TIMING_PATHS").is_ok() {
+                show(&from, &format!("from {input}:"));
+            }
+        }
+    }
+    let chain: crate::physical_cell::PhysicalCellDocument =
+        include_str!("../../../../../test/adder-carry-chain4-13x16x10.rcell").parse()?;
+    let timing = ExactLayout::from_rcell(&chain)?.timing()?;
+    println!(
+        "TIMING carry-chain4 cout={:?} slowest={:?}",
+        timing.output("cout"),
+        timing.critical()
+    );
+    let (placer, tile, _) = timing_fixture("carry-tile-2x16x10")?;
+    for bits in [8, 16] {
+        let chain = assemble_chain(placer.netlist(), &adder_carry(), &tile, bits, "chain")?;
+        let timing = ExactLayout::from_rcell(&chain)?.timing()?;
+        println!(
+            "TIMING carry-chain{bits} cout={:?} slowest={:?}",
+            timing.output("cout"),
+            timing.critical()
+        );
+    }
+    Ok(())
+}
+
+/// Minimizing the critical path of a one-solve cell ends at the logic depth
+/// or with a proof that the box allows nothing sooner, and never ends slower
+/// than an unconstrained layout.
+#[test]
+fn minimizing_delay_shortens_the_critical_path() -> eyre::Result<()> {
+    // XOR is slower to prove: `diagnose_delay_bound` measures it. The
+    // inverter must carry its signal the length of the box.
+    for (graph, dim) in [
+        (graph(&[("out", "~a")]), DimSize(1, 9, 3)),
+        (graph(&[("out", "~(~(a|b)|c)")]), DimSize(2, 6, 3)),
+    ] {
+        let placer = ExactLocalPlacer::new(&graph)?;
+        let mut config = ExactPlacerConfig::new(dim);
+        config.time_limit = Some(Duration::from_secs(60));
+        if dim.0 == 1 {
+            config = config
+                .with_input_site("a", Position(0, 0, 1), Direction::Bottom)
+                .with_output_sites("out", (0..dim.2).map(|z| Position(0, dim.1 - 1, z)));
+        }
+        let first = expect_placed(&placer, &config);
+        let (placement, proven) = placer.place_minimizing_delay(&config)?;
+        let placement = placement.expect("a layout");
+        let slowest = |delays: &BTreeMap<String, usize>| delays.values().copied().max().unwrap();
+        let bound = depth_bounds(placer.netlist()).into_values().max().unwrap();
+        println!(
+            "DELAY {dim:?} unconstrained={:?} minimized={:?} bound={bound} proven={proven}",
+            first.delays, placement.delays
+        );
+        assert!(proven);
+        assert!(slowest(&placement.delays) <= slowest(&first.delays));
+        // Both boxes have room for the logic depth.
+        assert_eq!(slowest(&placement.delays), bound);
+    }
+    Ok(())
+}
+
+/// One solve of `DELAY_EXPR` (`a^b`) in `DELAY_DIM` (`2,6,4`) with every
+/// output at most `DELAY_TICKS` (6) redstone ticks, for `DELAY_SECONDS` (120)
+/// on `DELAY_WORKERS` (4): how hard is a delay bound for the solver?
+/// `cargo test --release --lib diagnose_delay_bound -- --ignored --nocapture`.
+#[test]
+#[ignore = "diagnostic; run explicitly with --nocapture"]
+fn diagnose_delay_bound() -> eyre::Result<()> {
+    let expression = std::env::var("DELAY_EXPR").unwrap_or_else(|_| "a^b".to_owned());
+    let dim = std::env::var("DELAY_DIM").unwrap_or_else(|_| "2,6,4".to_owned());
+    let dim = dim
+        .split(',')
+        .map(|value| value.parse::<usize>())
+        .collect::<Result<Vec<_>, _>>()?;
+    let placer = ExactLocalPlacer::new(&graph(&[("out", expression.as_str())]))?;
+    let mut config = ExactPlacerConfig::new(DimSize(dim[0], dim[1], dim[2]));
+    config.workers = env_usize("DELAY_WORKERS", 4);
+    config.time_limit = Some(Duration::from_secs(env_usize("DELAY_SECONDS", 120) as u64));
+    config.timing = std::env::var("DELAY_TIMING").as_deref() != Ok("0");
+    config.stage_levels = env_usize("DELAY_STAGES", config.stage_levels);
+    if config.timing {
+        config.output_delays = [("out".to_owned(), env_usize("DELAY_TICKS", 6))]
+            .into_iter()
+            .collect();
+    }
+    let started = std::time::Instant::now();
+    let (outcome, stats) = placer.place(&config)?;
+    let result = match &outcome {
+        ExactOutcome::Placed(placement) => format!("placed {:?}", placement.delays),
+        ExactOutcome::Infeasible => "infeasible".to_owned(),
+        ExactOutcome::Unknown { .. } => "unknown".to_owned(),
+    };
+    println!(
+        "DELAYBOUND {expression} {dim:?} ticks={:?} stages={} {result} vars={} clauses={} elapsed={:?}",
+        config.output_delays.get("out"),
+        config.stage_levels,
+        stats.variables,
+        stats.clauses,
+        started.elapsed()
+    );
+    if let ExactOutcome::Placed(placement) = outcome {
+        println!("{}", placement.rcell);
+    }
+    Ok(())
+}

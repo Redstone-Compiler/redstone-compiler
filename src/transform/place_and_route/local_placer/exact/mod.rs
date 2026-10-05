@@ -29,6 +29,7 @@ mod solver;
 #[cfg(test)]
 mod tests;
 mod tiling;
+mod timing;
 mod verify;
 
 use std::collections::BTreeMap;
@@ -43,6 +44,9 @@ pub use encode::CellKind;
 pub use layout::{ExactLayout, InputPolicy, OutputPolicy};
 pub use netlist::{Net, NetDriver, NetId, NorNetlist};
 pub use tiling::assemble_chain;
+pub use timing::{
+    analyze as analyze_timing, analyze_from as analyze_timing_from, depth_bounds, Timing,
+};
 pub use verify::ExactVerificationFailure;
 
 use self::cnf::Lit;
@@ -129,6 +133,14 @@ pub struct ExactPlacerConfig {
     pub model_params: BTreeMap<String, rsdsl::IValue>,
     /// Lay the cell out as a tile that repeats along X with a ripple carry.
     pub carry: Option<CarryTiling>,
+    /// Bound output delays (`output_delays`): the model's `Stage` becomes an
+    /// arrival time in redstone ticks over every power relation, including
+    /// the fixed cells' (see `timing.rs`). Raise `stage_levels` to the
+    /// longest path in the box.
+    pub timing: bool,
+    /// With `timing`: the most redstone ticks each named output may settle
+    /// after the inputs change (at most `stage_levels`).
+    pub output_delays: BTreeMap<String, usize>,
     /// Search and verification constants.
     pub tuning: ExactTuning,
 }
@@ -219,6 +231,8 @@ impl ExactPlacerConfig {
             model_file: None,
             model_params: BTreeMap::new(),
             carry: None,
+            timing: false,
+            output_delays: BTreeMap::new(),
             tuning: ExactTuning::default(),
         }
     }
@@ -281,6 +295,9 @@ pub struct ExactPlacement {
     /// solver assigned it; see `ExactPlacerConfig::given_signals`.
     pub signals: Vec<(Position, u64)>,
     pub block_count: usize,
+    /// Redstone ticks from the inputs to each output (`timing.rs`), when
+    /// the layout has no feedback.
+    pub delays: BTreeMap<String, usize>,
     pub rcell: PhysicalCellDocument,
 }
 
@@ -812,6 +829,9 @@ impl ExactLocalPlacer {
                 })
             })
             .collect();
+        let delays = timing::analyze(dim, &cells.iter().copied().collect(), &decoded.outputs)
+            .map(|timing| timing.outputs.into_iter().collect())
+            .unwrap_or_default();
         let rcell = verify::to_rcell(&self.name, dim, &self.netlist, decoded);
         // Store settled torch states, so pasting the cell starts stable.
         let world = verify::settled_world(&world, &config.tuning).unwrap_or(world);
@@ -832,7 +852,60 @@ impl ExactLocalPlacer {
             cells,
             signals,
             block_count,
+            delays,
             rcell,
+        }
+    }
+
+    /// Finds a verified layout, then repeatedly asks for the slowest output
+    /// a tick sooner (no output later than that) until the solver proves it
+    /// impossible or `time_limit` runs out, so the result's critical path is
+    /// as short as the box allows. Returns the layout and whether that is
+    /// proven. Each tick is a new solve, so this is for cells one solve can
+    /// place; constructed layouts shorten their paths in compaction
+    /// (`CompactionConfig::timing`).
+    pub fn place_minimizing_delay(
+        &self,
+        config: &ExactPlacerConfig,
+    ) -> eyre::Result<(Option<ExactPlacement>, bool)> {
+        let deadline = config.time_limit.map(|limit| Instant::now() + limit);
+        let mut attempt = config.clone();
+        let (outcome, _) = self.place(&attempt)?;
+        let ExactOutcome::Placed(mut best) = outcome else {
+            return Ok((None, false));
+        };
+        let bound = timing::depth_bounds(&self.netlist)
+            .into_values()
+            .max()
+            .unwrap_or(0);
+        loop {
+            let Some(slowest) = best.delays.values().copied().max() else {
+                // Feedback: no timing to improve on.
+                return Ok((Some(*best), false));
+            };
+            if slowest <= bound {
+                return Ok((Some(*best), true));
+            }
+            let remaining =
+                deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
+            if remaining.is_some_and(|remaining| remaining.is_zero()) {
+                return Ok((Some(*best), false));
+            }
+            attempt.time_limit = remaining;
+            // `Stage` only has to hold arrival times, and fewer levels solve
+            // faster (see `CompactionConfig::timing`).
+            attempt.timing = true;
+            attempt.stage_levels = slowest + 1;
+            attempt.output_delays = best
+                .delays
+                .keys()
+                .map(|name| (name.clone(), slowest - 1))
+                .collect();
+            match self.place(&attempt)?.0 {
+                ExactOutcome::Placed(placement) => best = placement,
+                ExactOutcome::Infeasible => return Ok((Some(*best), true)),
+                ExactOutcome::Unknown { .. } => return Ok((Some(*best), false)),
+            }
         }
     }
 
