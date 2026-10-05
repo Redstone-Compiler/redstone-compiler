@@ -3757,6 +3757,32 @@ fn egraph_netlists_compute_the_full_adder() -> eyre::Result<()> {
     Ok(())
 }
 
+/// The circuits `synthesize_buildable_circuits` takes, as output expressions
+/// over the inputs. `adder2` is the 2-bit adder without carry in, the
+/// function of the harness's `adder2` and hand-written `adder2-nor`.
+fn synthesis_functions(
+    circuit: &str,
+) -> eyre::Result<(Vec<&'static str>, Vec<(&'static str, &'static str)>)> {
+    Ok(match circuit {
+        "full-adder" => full_adder_functions(),
+        "half-adder" => (vec!["a", "b"], vec![("sum", "a^b"), ("carry", "a&b")]),
+        "mux2" => (vec!["a", "b", "s"], vec![("out", "(a&~s)|(b&s)")]),
+        "mux4" => (
+            vec!["a", "b", "c", "d", "s0", "s1"],
+            vec![("out", "(~s1&~s0&a)|(~s1&s0&b)|(s1&~s0&c)|(s1&s0&d)")],
+        ),
+        "adder2" => (
+            vec!["a0", "a1", "b0", "b1"],
+            vec![
+                ("s0", "a0^b0"),
+                ("s1", "a1^b1^(a0&b0)"),
+                ("c1", "(a1&b1)|((a0&b0)&(a1^b1))"),
+            ],
+        ),
+        other => eyre::bail!("no functions for circuit {other}"),
+    })
+}
+
 /// Synthesis finds a full adder of 9 torches with at most 4 nets alive
 /// between steps, proves none has fewer in 9 steps, and with 11 steps (two
 /// OR stages) gets both outputs a torch shallower than `nor9`.
@@ -3785,6 +3811,29 @@ fn synthesized_full_adders_stay_buildable() -> eyre::Result<()> {
         let found_depths = netlist_depths(netlist);
         assert!(found_depths["cout"] <= depths[0], "{found_depths:?}");
         assert!(found_depths["s"] <= depths[1], "{found_depths:?}");
+    }
+    Ok(())
+}
+
+/// The half adder and the 2:1 mux need fewer torches than their netlists
+/// from expressions (7 gates each): 5 and 4, proven, with no step to spare.
+#[test]
+fn synthesized_small_circuits_need_fewer_torches() -> eyre::Result<()> {
+    for (circuit, torches) in [("half-adder", 5), ("mux2", 4)] {
+        let (inputs, outputs) = synthesis_functions(circuit)?;
+        let at = |steps| SynthesisOptions {
+            steps,
+            ..Default::default()
+        };
+        let SynthesisOutcome::Found(found) = synthesize(&inputs, &outputs, &at(torches))? else {
+            panic!("no {circuit} in {torches} steps");
+        };
+        assert!(found.proven);
+        assert_eq!(found.torches, torches, "{circuit}");
+        assert!(matches!(
+            synthesize(&inputs, &outputs, &at(torches - 1))?,
+            SynthesisOutcome::Infeasible
+        ));
     }
     Ok(())
 }
@@ -3956,17 +4005,19 @@ fn explore_egraph_netlists() -> eyre::Result<()> {
     Ok(())
 }
 
-/// Synthesizes full adders that construction can build
-/// (`exact::synthesize`): for each step count in `SYNTH_STEPS` (`9..=13`,
-/// as `lo..=hi`), the fewest torches with at most `SYNTH_LIVE` (4) nets
-/// alive between steps and outputs at most `SYNTH_DEPTH` torches deep (any),
-/// `SYNTH_SECONDS` (120) each. Prints each netlist in the form
-/// `CIRCUIT=netlist CIRCUIT_NETLIST=...` reads (with `CIRCUIT_ORDER=index`):
-/// `cargo test --release --lib synthesize_buildable_full_adders -- --ignored --nocapture`.
+/// Synthesizes circuits that construction can build (`exact::synthesize`):
+/// `SYNTH_CIRCUIT` (`full-adder`; see `synthesis_functions`), for each step
+/// count in `SYNTH_STEPS` (`9..=13`, as `lo..=hi`), the fewest torches with
+/// at most `SYNTH_LIVE` (4) nets alive between steps and outputs at most
+/// `SYNTH_DEPTH` torches deep (any), `SYNTH_SECONDS` (120) each. Prints each
+/// netlist in the form `CIRCUIT=netlist CIRCUIT_NETLIST=...` reads (with
+/// `CIRCUIT_ORDER=index`):
+/// `cargo test --release --lib synthesize_buildable_circuits -- --ignored --nocapture`.
 #[test]
 #[ignore = "experiment; run explicitly with --nocapture"]
-fn synthesize_buildable_full_adders() -> eyre::Result<()> {
-    let (inputs, outputs) = full_adder_functions();
+fn synthesize_buildable_circuits() -> eyre::Result<()> {
+    let circuit = std::env::var("SYNTH_CIRCUIT").unwrap_or_else(|_| "full-adder".to_owned());
+    let (inputs, outputs) = synthesis_functions(&circuit)?;
     let range = std::env::var("SYNTH_STEPS").unwrap_or_else(|_| "9..=13".to_owned());
     let (lo, hi) = range
         .split_once("..=")
