@@ -476,6 +476,21 @@ fn generate_unit_candidates(
             }
             let mut candidate =
                 LayoutCandidate::from_world(module_name.to_owned(), world, physical_ports)?;
+            // The check above drove the local placer's input switches.
+            // `candidate_layout` then replaces them with exposed ports, and a
+            // switch site can become dust that a neighbouring strongly powered
+            // block drives, closing a loop through the input (issue #56).
+            // Check the layout the global router will use, as clustering does.
+            if validate_truth_table
+                && input_mode == CandidateInputMode::ExternalPorts
+                && !clustering::candidate_matches_truth_table_with_switch_inputs(
+                    &graph.graph,
+                    &candidate,
+                )
+            {
+                truth_table_rejections += 1;
+                continue;
+            }
             if !candidate_satisfies_local_cell_contract(&mut candidate, &config.local_cell_contract)
             {
                 contract_rejections += 1;
@@ -1724,5 +1739,93 @@ mod tests {
 
         assert_eq!(port, switch);
         assert!(world[switch].kind.is_air());
+    }
+
+    /// The and2 cell of issue #56, as the local placer built it at `cc99773`:
+    /// input switches `a` at (0, 8, 3) and `b` at (0, 6, 4), output `y` at
+    /// (0, 7, 2). The switch of `a` sits beside the block above the NOT-`a`
+    /// torch, which the torch powers strongly. A switch ignores that; dust
+    /// would not.
+    fn issue_56_candidate(repeater_after_a: bool) -> (LogicGraph, PlacedWorld) {
+        let nbt = crate::nbt::NBTRoot::from_nbt_bytes(
+            &std::fs::read("test/issue56-and2-candidate.nbt").expect("fixture"),
+        )
+        .expect("fixture NBT");
+        let mut world = World3D::from(&nbt.to_world());
+        if repeater_after_a {
+            // With a repeater instead of the dust the switch fed, the switch
+            // powers no dust, so the rewrite turns its site into a port.
+            world[Position(0, 9, 3)] = Block {
+                kind: BlockKind::Repeater {
+                    is_on: false,
+                    is_locked: false,
+                    delay: 1,
+                    lock_input1: None,
+                    lock_input2: None,
+                },
+                direction: Direction::South,
+            };
+            world.initialize_redstone_states();
+        }
+        let graph = LogicGraph::from_assignments([("y".to_owned(), "a&b".to_owned())])
+            .and_then(|graph| graph.prepare_place())
+            .expect("and2");
+        let placed = PlacedWorld {
+            world,
+            inputs: vec![
+                OutputEndpoint::new("a".to_owned(), Position(0, 8, 3)),
+                OutputEndpoint::new("b".to_owned(), Position(0, 6, 4)),
+            ],
+            outputs: vec![OutputEndpoint::new("y".to_owned(), Position(0, 7, 2))],
+        };
+        (graph, placed)
+    }
+
+    /// The child layout `generate_unit_candidates` builds from a placed cell,
+    /// and whether it still computes the cell's function at its ports.
+    fn child_layout_matches(graph: &LogicGraph, placed: &PlacedWorld) -> (World3D, bool) {
+        let ports = [
+            CandidatePort::new("a", "a", PhysicalPortDirection::Input),
+            CandidatePort::new("b", "b", PhysicalPortDirection::Input),
+            CandidatePort::new("y", "y", PhysicalPortDirection::Output),
+        ];
+        let (world, physical_ports) = candidate_layout(
+            &ports,
+            false,
+            &Default::default(),
+            placed.world.clone(),
+            &placed.inputs,
+            &placed.outputs,
+            CandidateInputMode::ExternalPorts,
+        );
+        let candidate =
+            LayoutCandidate::from_world("and2".to_owned(), world.clone(), physical_ports)
+                .expect("candidate");
+        let matches =
+            clustering::candidate_matches_truth_table_with_switch_inputs(&graph.graph, &candidate);
+        (world, matches)
+    }
+
+    #[test]
+    fn issue_56_cell_keeps_its_function_after_its_input_switches_become_ports() {
+        let (graph, placed) = issue_56_candidate(false);
+        assert!(candidate_matches_truth_table(&graph, &placed).unwrap());
+        // Since `cc99773` the rewrite exposes the dust the switch fed instead
+        // of turning the switch site into dust, so this cell is fine.
+        let (world, matches) = child_layout_matches(&graph, &placed);
+        assert!(world[Position(0, 8, 3)].kind.is_air());
+        assert!(matches);
+    }
+
+    #[test]
+    fn child_layout_whose_input_port_closes_a_torch_loop_fails_the_post_rewrite_check() {
+        let (graph, placed) = issue_56_candidate(true);
+        // With switches the cell is an AND gate, so the first check passes.
+        assert!(candidate_matches_truth_table(&graph, &placed).unwrap());
+        // The rewrite turns the switch site into dust beside the strongly
+        // powered block, and the cell stops computing AND.
+        let (world, matches) = child_layout_matches(&graph, &placed);
+        assert!(world[Position(0, 8, 3)].kind.is_redstone());
+        assert!(!matches);
     }
 }
