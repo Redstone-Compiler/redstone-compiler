@@ -2030,7 +2030,7 @@ fn print_attempt_times(prefix: &str, report: &CompactionReport) {
 }
 
 /// Construction plus compaction for small circuits:
-/// `CIRCUIT=mux2|half-adder|adder2|adder2-nor|mux4|full-adder CIRCUIT_WIDTH=2
+/// `CIRCUIT=mux2|half-adder|adder2|adder2-nor|mux4|full-adder|egraph-full-adder CIRCUIT_WIDTH=2
 /// CIRCUIT_HEIGHT=10 CIRCUIT_STEP_SECONDS=60 CIRCUIT_COMPACT_SECONDS=300
 /// CIRCUIT_SEED=1 CIRCUIT_WORKERS=8 CIRCUIT_WRITE=<prefix>`; `CIRCUIT_NETLIST_ONLY=1` stops
 /// after printing the NOR netlist and its live-net counts;
@@ -2047,8 +2047,29 @@ fn diagnose_construct_circuit() -> eyre::Result<()> {
         .with_test_writer()
         .try_init();
     let circuit = std::env::var("CIRCUIT").unwrap_or_else(|_| "mux2".to_owned());
-    let graph = circuit_graph(&circuit)?;
-    let placer = ExactLocalPlacer::new(&graph)?.with_name(format!("exact-{circuit}"));
+    // `egraph-full-adder`: the cheapest netlist the e-graph holds
+    // (`Exploration::extract_exact`) within `EGRAPH_DEPTH` (any), with
+    // `EGRAPH_OR_COST` (0) per OR node.
+    let placer = match circuit.as_str() {
+        "egraph-full-adder" => {
+            let (inputs, outputs) = full_adder_functions();
+            let exploration = Exploration::new(&inputs, &outputs, Limits::default())?;
+            let options = ExtractOptions {
+                max_depth: std::env::var("EGRAPH_DEPTH")
+                    .ok()
+                    .map(|depth| depth.parse::<usize>())
+                    .transpose()?,
+                or_cost: env_usize("EGRAPH_OR_COST", 0),
+                ..Default::default()
+            };
+            let extraction = exploration
+                .extract_exact(&options)?
+                .ok_or_else(|| eyre::eyre!("no netlist for {options:?}"))?;
+            ExactLocalPlacer::from_netlist(extraction.netlist)
+        }
+        _ => ExactLocalPlacer::new(&circuit_graph(&circuit)?)?,
+    }
+    .with_name(format!("exact-{circuit}"));
     let netlist = placer.netlist();
     if circuit.starts_with("adder2") {
         // Both adder netlists must add: {c1, s1, s0} = a1a0 + b1b0.
@@ -3516,6 +3537,157 @@ fn report_rcell_timing() -> eyre::Result<()> {
                 .collect::<Vec<_>>()
                 .join("")
         );
+    }
+    Ok(())
+}
+
+/// The full adder as functions for the e-graph: `(inputs, outputs)`.
+fn full_adder_functions() -> (Vec<&'static str>, Vec<(&'static str, &'static str)>) {
+    (
+        vec!["a", "b", "cin"],
+        vec![("s", "a^b^cin"), ("cout", "(a&b)|(a&cin)|(b&cin)")],
+    )
+}
+
+/// Output functions of a netlist by name, as truth-table rows.
+fn output_functions(netlist: &NorNetlist) -> BTreeMap<String, Vec<bool>> {
+    let values = netlist.net_values();
+    netlist
+        .outputs
+        .iter()
+        .map(|(name, net)| (name.clone(), values[*net].clone()))
+        .collect()
+}
+
+/// Netlists extracted from the saturated full adder compute the full adder.
+/// Exact extraction needs fewer gates than the hand-written `nor9` (8, proven
+/// for this e-graph, against 9) and, at the same 9 gates, half its depth;
+/// greedy extraction misses the shared NORs and needs more.
+#[test]
+fn egraph_netlists_compute_the_full_adder() -> eyre::Result<()> {
+    let (inputs, outputs) = full_adder_functions();
+    let exploration = Exploration::new(&inputs, &outputs, Limits::default())?;
+    let nor9 = NorNetlist::from_logic_graph(&full_adder_graph("nor9"))?;
+    let expected = output_functions(&nor9);
+    let greedy = exploration.extract(Weights {
+        gates: 1.0,
+        depth: 0.0,
+    })?;
+    assert_eq!(output_functions(&greedy), expected);
+    let fewest = exploration
+        .extract_exact(&ExtractOptions::default())?
+        .expect("a netlist");
+    assert_eq!(output_functions(&fewest.netlist), expected);
+    assert!(fewest.proven);
+    assert_eq!(fewest.netlist.gates().count(), fewest.cost);
+    assert!(fewest.cost < nor9.gates().count());
+    let within = |depth| ExtractOptions {
+        max_depth: Some(depth),
+        ..Default::default()
+    };
+    let shallow = exploration
+        .extract_exact(&within(3))?
+        .expect("a netlist within 3 gates");
+    assert_eq!(output_functions(&shallow.netlist), expected);
+    assert!(netlist_depths(&shallow.netlist)
+        .values()
+        .all(|&depth| depth <= 3));
+    assert!(exploration.extract_exact(&within(2))?.is_none());
+    Ok(())
+}
+
+/// Saturates `EGRAPH_CIRCUIT` (`full-adder`) and prints the e-graph's size
+/// and, per weighting, the extracted netlist's gates, depths, and live nets
+/// beside `nor9`'s:
+/// `cargo test --release --lib explore_egraph_netlists -- --ignored --nocapture`.
+#[test]
+#[ignore = "experiment; run explicitly with --nocapture"]
+fn explore_egraph_netlists() -> eyre::Result<()> {
+    let (inputs, outputs) = full_adder_functions();
+    let limits = Limits {
+        iterations: env_usize("EGRAPH_ITERATIONS", 12),
+        nodes: env_usize("EGRAPH_NODES", 50_000),
+        time: Duration::from_secs(env_usize("EGRAPH_SECONDS", 20) as u64),
+    };
+    let started = std::time::Instant::now();
+    let exploration = Exploration::new(&inputs, &outputs, limits)?;
+    println!(
+        "EGRAPH classes={} nodes={} iterations={} stop={:?} in {:?}",
+        exploration.classes(),
+        exploration.nodes(),
+        exploration.iterations,
+        exploration.stop_reason,
+        started.elapsed()
+    );
+    let describe = |label: &str, netlist: &NorNetlist| {
+        let gates = construct::gate_order(netlist, GateOrder::SmallestConeFirst);
+        let live = live_after_each_step(netlist, &gates, &BTreeSet::new());
+        let fan_in = netlist
+            .gates()
+            .map(|gate| netlist.nets[gate].gate_inputs.len())
+            .max()
+            .unwrap_or(0);
+        println!(
+            "EGRAPH {label}: gates={} depths={:?} max_fan_in={fan_in} live_max={} live={live:?}",
+            netlist.gates().count(),
+            netlist_depths(netlist),
+            live.iter().max().unwrap_or(&0)
+        );
+        for gate in netlist.gates() {
+            let inputs = netlist.nets[gate]
+                .gate_inputs
+                .iter()
+                .map(|&input| netlist.nets[input].name.as_str())
+                .collect::<Vec<_>>();
+            println!("EGRAPH     {} = NOR{inputs:?}", netlist.nets[gate].name);
+        }
+    };
+    describe(
+        "nor9",
+        &NorNetlist::from_logic_graph(&full_adder_graph("nor9"))?,
+    );
+    if std::env::var("EGRAPH_GREEDY").is_ok() {
+        for (gates, depth) in [(1.0, 0.0), (1.0, 1.0), (0.01, 1.0)] {
+            let netlist = exploration.extract(Weights { gates, depth })?;
+            describe(&format!("greedy gates*{gates}+depth*{depth}"), &netlist);
+        }
+    }
+    // Exact: the cheapest netlist within each depth, shallowest first, for
+    // each OR cost (`EGRAPH_OR_COSTS`, `0`).
+    let seconds = Duration::from_secs(env_usize("EGRAPH_EXTRACT_SECONDS", 60) as u64);
+    let or_costs = std::env::var("EGRAPH_OR_COSTS")
+        .unwrap_or_else(|_| "0".to_owned())
+        .split(',')
+        .map(str::parse::<usize>)
+        .collect::<Result<Vec<_>, _>>()?;
+    for or_cost in or_costs {
+        for depth in (2..=env_usize("EGRAPH_MAX_DEPTH", 8))
+            .map(Some)
+            .chain([None])
+        {
+            let started = std::time::Instant::now();
+            let options = ExtractOptions {
+                max_depth: depth,
+                or_cost,
+                time_limit: seconds,
+            };
+            match exploration.extract_exact(&options)? {
+                Some(extraction) => describe(
+                    &format!(
+                        "exact or_cost={or_cost} depth<={} cost={} proven={} in {:.1?}",
+                        depth.map_or("any".to_owned(), |depth| depth.to_string()),
+                        extraction.cost,
+                        extraction.proven,
+                        started.elapsed()
+                    ),
+                    &extraction.netlist,
+                ),
+                None => println!(
+                    "EGRAPH exact or_cost={or_cost} depth<={depth:?}: none in {:.1?}",
+                    started.elapsed()
+                ),
+            }
+        }
     }
     Ok(())
 }

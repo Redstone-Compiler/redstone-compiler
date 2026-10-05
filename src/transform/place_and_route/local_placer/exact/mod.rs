@@ -21,6 +21,7 @@ mod compact;
 mod construct;
 mod dimacs;
 mod dsl;
+mod egraph;
 mod encode;
 mod layout;
 mod netlist;
@@ -40,6 +41,7 @@ use std::time::{Duration, Instant};
 pub use compact::{AttemptTime, CompactionConfig, CompactionReport};
 pub use construct::{ConstructionConfig, ConstructionReport, GateOrder};
 pub use dimacs::DimacsComments;
+pub use egraph::{netlist_depths, signature, Exploration, ExtractOptions, Extraction, Limits, Weights};
 pub use encode::CellKind;
 pub use layout::{ExactLayout, InputPolicy, OutputPolicy};
 pub use netlist::{Net, NetDriver, NetId, NorNetlist};
@@ -392,6 +394,14 @@ impl ExactLocalPlacer {
             netlist: NorNetlist::from_logic_graph(graph)?,
             name: "exact-local-cell".to_owned(),
         })
+    }
+
+    /// A placer for a netlist built elsewhere (an e-graph extraction, say).
+    pub fn from_netlist(netlist: NorNetlist) -> Self {
+        Self {
+            netlist,
+            name: "exact-local-cell".to_owned(),
+        }
     }
 
     pub fn with_name(mut self, name: impl Into<String>) -> Self {

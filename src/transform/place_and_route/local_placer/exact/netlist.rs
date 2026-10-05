@@ -151,7 +151,7 @@ impl NorNetlist {
         Ok(netlist)
     }
 
-    fn check_acyclic(&self) -> eyre::Result<()> {
+    pub(super) fn check_acyclic(&self) -> eyre::Result<()> {
         let mut state = vec![0u8; self.nets.len()];
         fn visit(netlist: &NorNetlist, net: NetId, state: &mut [u8]) -> eyre::Result<()> {
             match state[net] {
