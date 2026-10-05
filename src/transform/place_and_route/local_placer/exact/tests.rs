@@ -2055,8 +2055,9 @@ fn diagnose_construct_circuit() -> eyre::Result<()> {
     // `egraph-full-adder`: the cheapest netlist the e-graph holds
     // (`Exploration::extract_exact`) within `EGRAPH_DEPTH` (any), with
     // `EGRAPH_OR_COST` (0) per OR node, only 2-input NORs with
-    // `EGRAPH_BINARY=1`, and wide NORs built from OR nets with
-    // `EGRAPH_SPLIT=1`.
+    // `EGRAPH_BINARY=1`, wide NORs built from OR nets with `EGRAPH_SPLIT=1`,
+    // and NORs of more than `EGRAPH_CHAIN` signals built in stages on one
+    // support block (`NorNetlist::chain_wide_gates`).
     let placer = match circuit.as_str() {
         "egraph-full-adder" => {
             let (inputs, outputs) = full_adder_functions();
@@ -2074,7 +2075,12 @@ fn diagnose_construct_circuit() -> eyre::Result<()> {
             let extraction = exploration
                 .extract_exact(&options)?
                 .ok_or_else(|| eyre::eyre!("no netlist for {options:?}"))?;
-            ExactLocalPlacer::from_netlist(extraction.netlist)
+            match std::env::var("EGRAPH_CHAIN") {
+                Ok(fan_in) => ExactLocalPlacer::from_netlist(
+                    extraction.netlist.chain_wide_gates(fan_in.parse()?)?,
+                ),
+                Err(_) => ExactLocalPlacer::from_netlist(extraction.netlist),
+            }
         }
         _ => ExactLocalPlacer::new(&circuit_graph(&circuit)?)?,
     }
@@ -3630,6 +3636,56 @@ fn egraph_netlists_compute_the_full_adder() -> eyre::Result<()> {
         .nets
         .iter()
         .any(|net| net.driver == NetDriver::Or));
+    Ok(())
+}
+
+/// Chaining wide NORs keeps every function, leaves no NOR wider than two
+/// signals, and construction places each chain's stages consecutively,
+/// right before the NOR they end in.
+#[test]
+fn chained_wide_gates_keep_functions_and_stay_together() -> eyre::Result<()> {
+    let (inputs, outputs) = full_adder_functions();
+    let exploration = Exploration::new(&inputs, &outputs, Limits::default())?;
+    let wide = exploration
+        .extract_exact(&ExtractOptions::default())?
+        .expect("a netlist")
+        .netlist;
+    assert!(wide
+        .gates()
+        .any(|gate| wide.nets[gate].gate_inputs.len() > 2));
+    let chained = wide.chain_wide_gates(2)?;
+    assert_eq!(output_functions(&chained), output_functions(&wide));
+    assert_eq!(chained.gates().count(), wide.gates().count());
+    assert!(chained.nets.iter().all(|net| net.gate_inputs.len() <= 2));
+    let ors = construct::chained_ors(&chained);
+    assert_eq!(
+        ors.len(),
+        chained
+            .nets
+            .iter()
+            .filter(|net| net.driver == NetDriver::Or)
+            .count()
+    );
+    for order in [GateOrder::SmallestConeFirst, GateOrder::MinLive] {
+        let placed = construct::gate_order(&chained, order);
+        for (index, &net) in placed.iter().enumerate() {
+            for input in &chained.nets[net].gate_inputs {
+                if !matches!(chained.nets[*input].driver, NetDriver::Input(_)) {
+                    assert!(
+                        placed[..index].contains(input),
+                        "{order:?}: not topological"
+                    );
+                }
+            }
+            if ors.contains(&net) {
+                let reader = placed[index + 1];
+                assert!(
+                    chained.nets[reader].gate_inputs.contains(&net),
+                    "{order:?}: chain split"
+                );
+            }
+        }
+    }
     Ok(())
 }
 

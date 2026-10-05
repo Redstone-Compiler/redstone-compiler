@@ -40,11 +40,73 @@ pub enum GateOrder {
     MinLive,
 }
 
-/// Gates in construction order.
+/// Gates in construction order, each chain of OR nets built on a support
+/// block placed right before the NOR it ends in (`chained_ors`).
 pub(super) fn gate_order(netlist: &NorNetlist, order: GateOrder) -> Vec<NetId> {
-    if order == GateOrder::MinLive {
-        return min_live_order(netlist);
+    let gates = match order {
+        GateOrder::MinLive => min_live_order(netlist),
+        _ => depth_first_order(netlist, order),
+    };
+    keep_chains_together(netlist, gates)
+}
+
+/// OR nets built on a support block: read by exactly one net, which reads
+/// no other OR net, as `NorNetlist::chain_wide_gates` makes them. The chain's
+/// first OR goes on a block, each later step brings one more signal to that
+/// block, and the NOR that ends the chain is a torch on it, so the OR is
+/// never carried (carried on, merged dust would power its lines back and
+/// need a repeater to stop that).
+pub(super) fn chained_ors(netlist: &NorNetlist) -> BTreeSet<NetId> {
+    let is_or = |net: NetId| netlist.nets[net].driver == NetDriver::Or;
+    (0..netlist.nets.len())
+        .filter(|&net| is_or(net))
+        .filter(|&net| {
+            let readers = (0..netlist.nets.len())
+                .filter(|&reader| netlist.nets[reader].gate_inputs.contains(&net))
+                .collect::<Vec<_>>();
+            match readers[..] {
+                [reader] => {
+                    netlist.nets[reader]
+                        .gate_inputs
+                        .iter()
+                        .filter(|&&input| is_or(input))
+                        .count()
+                        == 1
+                }
+                _ => false,
+            }
+        })
+        .collect()
+}
+
+/// Moves each chain of `chained_ors` to just before the net it ends in, so
+/// its stages are consecutive steps and the support block stays reachable.
+/// Their other inputs come earlier already, so the order stays topological.
+fn keep_chains_together(netlist: &NorNetlist, order: Vec<NetId>) -> Vec<NetId> {
+    let chained = chained_ors(netlist);
+    if chained.is_empty() {
+        return order;
     }
+    fn chain(netlist: &NorNetlist, chained: &BTreeSet<NetId>, net: NetId, out: &mut Vec<NetId>) {
+        for &input in &netlist.nets[net].gate_inputs {
+            if chained.contains(&input) && !out.contains(&input) {
+                chain(netlist, chained, input, out);
+                out.push(input);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for net in order {
+        if chained.contains(&net) {
+            continue;
+        }
+        chain(netlist, &chained, net, &mut out);
+        out.push(net);
+    }
+    out
+}
+
+fn depth_first_order(netlist: &NorNetlist, order: GateOrder) -> Vec<NetId> {
     fn visit(netlist: &NorNetlist, net: NetId, done: &mut [bool], order: &mut Vec<NetId>) {
         if done[net] {
             return;
@@ -451,6 +513,8 @@ struct StepState {
     signals: BTreeMap<Position, u64>,
     placed_inputs: BTreeMap<String, (Position, Direction)>,
     available: BTreeSet<NetId>,
+    /// The support block of each chained OR net placed (`chained_ors`).
+    supports: BTreeMap<NetId, Position>,
     result: Option<(DimSize, ExactPlacement)>,
 }
 
@@ -524,6 +588,7 @@ impl ExactLocalPlacer {
             signals: BTreeMap::new(),
             placed_inputs: BTreeMap::new(),
             available: BTreeSet::new(),
+            supports: BTreeMap::new(),
             result: None,
         }];
         let mut blocked = vec![Vec::new(); order.len()];
@@ -890,6 +955,16 @@ impl ExactLocalPlacer {
             }
         }
         let length = state.length;
+        // A NOR built in stages (`chained_ors`): the step that adds a signal
+        // to a chain keeps its support block fixed and the block's slice
+        // open, so the new signal can reach it.
+        let chained = chained_ors(netlist);
+        let support = gates
+            .iter()
+            .flat_map(|&gate| &netlist.nets[gate].gate_inputs)
+            .filter(|input| chained.contains(input))
+            .find_map(|input| state.supports.get(input))
+            .copied();
         // The carry column, once the carry switch is placed, and whether
         // this step places the carry output. Until then the carry-out cell
         // is an unpowered block and a corridor from it along +Y stays clear,
@@ -924,6 +999,7 @@ impl ExactLocalPlacer {
                 // Nothing more to unfreeze (the layout is shorter).
                 continue;
             }
+            let frozen = support.map_or(frozen, |block| frozen.min(block.1));
             let dim = DimSize(config.width, length + window, config.height);
             let mut exact = ExactPlacerConfig::new(dim);
             exact.workers = config.workers;
@@ -970,6 +1046,10 @@ impl ExactLocalPlacer {
                             .or_insert(CellKind::Air);
                     }
                 }
+            }
+            if let Some(block) = support {
+                exact.fixed_cells.insert(block, CellKind::Solid);
+                exact.given_signals.remove(&block);
             }
             if let Some((y0, z0)) = corridor {
                 let x = dim.0 - 1;
@@ -1072,6 +1152,24 @@ impl ExactLocalPlacer {
                         observations.push((*net, everywhere.clone()));
                     }
                 }
+                // A chained OR sits on its support block: a block of the
+                // last slice for the chain's first OR, the same block after.
+                for (net, positions) in observations.iter_mut() {
+                    if !chained.contains(net) {
+                        continue;
+                    }
+                    let block = state
+                        .supports
+                        .get(net)
+                        .copied()
+                        .or(support.filter(|_| gates.contains(net)));
+                    if let Some(block) = block {
+                        *positions = vec![block];
+                    }
+                    exact
+                        .solid_observations
+                        .insert(netlist.nets[*net].name.clone());
+                }
                 exact.observations = Some(observations);
             }
             let step_started = Instant::now();
@@ -1153,6 +1251,20 @@ impl ExactLocalPlacer {
             let mut available = state.available.clone();
             available.extend(needed_inputs.iter().copied());
             available.extend(gates.iter().copied());
+            let mut supports = state.supports.clone();
+            for &gate in gates {
+                if !chained.contains(&gate) {
+                    continue;
+                }
+                if let Some(output) = placement
+                    .placed
+                    .outputs
+                    .iter()
+                    .find(|output| output.name == netlist.nets[gate].name)
+                {
+                    supports.insert(gate, output.position());
+                }
+            }
             let next = StepState {
                 label: gate_name.clone(),
                 length: dim.1,
@@ -1160,6 +1272,7 @@ impl ExactLocalPlacer {
                 signals: placement.signals.iter().copied().collect(),
                 placed_inputs,
                 available,
+                supports,
                 result: Some((dim, *placement)),
             };
             return Ok(Some((next, window_cells, (gate_name, window, seconds))));

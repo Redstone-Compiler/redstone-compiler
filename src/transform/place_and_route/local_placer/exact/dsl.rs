@@ -103,7 +103,8 @@ struct Observation {
     class: usize,
     /// Candidate observation cells.
     cells: Vec<usize>,
-    /// Observed on a block: the carry out of a tile (`CarryTiling`).
+    /// Observed on a block: the carry out of a tile (`CarryTiling`), or a
+    /// net in `ExactPlacerConfig::solid_observations`.
     solid: bool,
 }
 
@@ -272,18 +273,19 @@ impl Prepared {
         let last = config.dim.0 - 1;
         for ((name, net, positions), symbol) in requested.into_iter().zip(symbols) {
             // The carry out sits on the tile's last X slice.
-            let solid = config
+            let carry_out = config
                 .carry
                 .as_ref()
                 .is_some_and(|carry| carry.output == name);
+            let solid = carry_out || config.solid_observations.contains(&name);
             let positions = match positions {
-                Some(positions) if solid => Some(
+                Some(positions) if carry_out => Some(
                     positions
                         .into_iter()
                         .filter(|position| position.0 == last)
                         .collect(),
                 ),
-                None if solid => Some(
+                None if carry_out => Some(
                     (0..config.dim.2)
                         .flat_map(|z| (0..config.dim.1).map(move |y| Position(last, y, z)))
                         .collect(),

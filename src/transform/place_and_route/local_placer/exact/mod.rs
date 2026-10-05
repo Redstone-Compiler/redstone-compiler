@@ -41,7 +41,9 @@ use std::time::{Duration, Instant};
 pub use compact::{AttemptTime, CompactionConfig, CompactionReport};
 pub use construct::{ConstructionConfig, ConstructionReport, GateOrder};
 pub use dimacs::DimacsComments;
-pub use egraph::{netlist_depths, signature, Exploration, ExtractOptions, Extraction, Limits, Weights};
+pub use egraph::{
+    netlist_depths, signature, Exploration, ExtractOptions, Extraction, Limits, Weights,
+};
 pub use encode::CellKind;
 pub use layout::{ExactLayout, InputPolicy, OutputPolicy};
 pub use netlist::{Net, NetDriver, NetId, NorNetlist};
@@ -143,6 +145,9 @@ pub struct ExactPlacerConfig {
     /// With `timing`: the most redstone ticks each named output may settle
     /// after the inputs change (at most `stage_levels`).
     pub output_delays: BTreeMap<String, usize>,
+    /// Observations (by name) that must sit on a block, not dust or a torch:
+    /// the support block of a NOR being built in stages (`construct.rs`).
+    pub solid_observations: std::collections::BTreeSet<String>,
     /// Search and verification constants.
     pub tuning: ExactTuning,
 }
@@ -235,6 +240,7 @@ impl ExactPlacerConfig {
             carry: None,
             timing: false,
             output_delays: BTreeMap::new(),
+            solid_observations: Default::default(),
             tuning: ExactTuning::default(),
         }
     }

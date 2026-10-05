@@ -178,6 +178,45 @@ impl NorNetlist {
         Ok(())
     }
 
+    /// The same functions with every NOR of more than `max_fan_in` signals
+    /// (at least 2) built on a chain of OR nets: `NOR(x1, x2, x3, x4)`
+    /// becomes `s1 = OR(x1, x2)`, `s2 = OR(s1, x3)`, `NOR(s2, x4)`, its
+    /// inputs taken in topological order (inputs first). Construction builds
+    /// such a chain on one support block, a signal more per step
+    /// (`construct.rs`, support blocks).
+    pub fn chain_wide_gates(&self, max_fan_in: usize) -> eyre::Result<Self> {
+        ensure!(max_fan_in >= 2, "a chain needs NORs of two signals");
+        let rank = self
+            .topological_order()
+            .into_iter()
+            .enumerate()
+            .map(|(rank, net)| (net, rank))
+            .collect::<HashMap<_, _>>();
+        let mut netlist = self.clone();
+        for gate in self.gates().collect::<Vec<_>>() {
+            let mut inputs = self.nets[gate].gate_inputs.clone();
+            if inputs.len() <= max_fan_in {
+                continue;
+            }
+            let is_input = |net: NetId| matches!(self.nets[net].driver, NetDriver::Input(_));
+            inputs.sort_by_key(|&input| (!is_input(input), rank[&input]));
+            let last = inputs.pop().unwrap();
+            let mut chain = inputs[0];
+            for (index, &input) in inputs.iter().enumerate().skip(1) {
+                netlist.nets.push(Net {
+                    name: format!("{}_or{index}", self.nets[gate].name),
+                    node_id: self.nets[gate].node_id,
+                    driver: NetDriver::Or,
+                    gate_inputs: vec![chain, input],
+                });
+                chain = netlist.nets.len() - 1;
+            }
+            netlist.nets[gate].gate_inputs = vec![chain, last];
+        }
+        netlist.check_acyclic()?;
+        Ok(netlist)
+    }
+
     pub fn input_names(&self) -> Vec<String> {
         let mut names = self
             .nets
