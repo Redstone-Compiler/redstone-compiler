@@ -225,16 +225,52 @@ Chaining gets further than the flat netlist (it places `g5` in a 3-slice
 window after 240 s failed in 2), but a step with 6-7 nets crossing it is
 not solved in four minutes either.
 
+## A taller box
+
+The box was raised to 12 and 14 cells, and windows were allowed up to 6
+slices (`CIRCUIT_HEIGHT=12|14 CIRCUIT_MAX_WINDOW=6`, 180 s per step, 5
+workers). The same steps stay stuck, on every seed:
+
+| Netlist | Height | Seeds | Stuck at (every window 2-6 timed out) |
+| --- | --- | --- | --- |
+| 8 gates, flat | 12 | 3 | `g4` each time |
+| 8 gates, chained | 12 | 3 | `cout` twice, `cout_or1` once |
+| 8 gates, chained | 14 | 3 | `cout` once, `cout_or1` twice |
+| depth 3, chained | 12 | 2 | `g8` once, `cout` once |
+
+`nor9`, run as a control in the same settings, builds without trouble.
+So a taller box does not by itself make steps too hard for the solver:
+
+| `nor9` | Construction | Compacted (600 s) |
+| --- | --- | --- |
+| height 12 | 97 s, every step in window 2, 5-19 s each | 2x9x9, 94 blocks, cout 12, s 14 |
+| height 14 | 146 s, every step in window 2, 7-46 s each | 2x14x13, 296 blocks, cout 43, s 39 (not converged) |
+
+- Height is not what blocks the wide NORs.
+  - The chained 8-gate netlist builds `g4` in two steps: `g4_or1 =
+    OR(a, cin)`, then `g4 = NOR(g4_or1, g3)`. Each takes 14-21 s.
+  - The flat netlist cannot build the same `g4` in one step.
+  - After `g4` the same five nets stay alive in both (`a`, `b`, `cin`,
+    `g3`, `g4`), so the cross-section is not the obstacle there. Placing a
+    new input and merging three signals onto one block in one step is.
+- None of the timeouts was proven infeasible. Whether the 8-gate netlist
+  has a layout at all is still open; only a solve of the whole box without
+  windows would settle it.
+- Starting `nor9` at height 12 gave its smallest cell in these runs (94
+  blocks, against 146-148 at height 10). That is one seed, and height 14
+  did not converge in 600 s of compaction, so it is a lead rather than a
+  rule.
+
 ## Conclusion
 
-For the full adder in a box 2 wide and 10 high, nothing the e-graph finds
-beats `nor9` in practice:
+For the full adder in a box 2 wide and 10-14 high, nothing the e-graph
+finds beats `nor9` in practice:
 
 - Under two-input NORs, `nor9` is the proven minimum.
 - The netlists with fewer gates or less depth need wider NORs. Wider NORs
   keep more nets alive at once, and windowed construction cannot place
   them, flat, split into OR nets, or chained on a support block, with 60 s
-  or 240 s steps.
+  or 240 s steps, or in a box 12-14 high with windows up to 6 slices.
 
 The search and the exact extraction still hold their value. They prove
 when a hand-written netlist is optimal, and for other circuits they may
@@ -245,6 +281,8 @@ find better netlists that stay within two-input NORs.
 - Run the e-graph on circuits whose netlists were written by hand or
   decomposed mechanically (the 2-bit adder, the 4:1 multiplexer) with
   `binary`, and place what it finds against the current netlists.
+- Solve the 8-gate netlist in one piece (no windows) to settle whether it
+  has a layout in a 2-wide box at all.
 - Count crossing width in extraction (a bound on nets alive at once along
   the construction order), so it only proposes netlists construction can
   place.
@@ -270,4 +308,6 @@ CIRCUIT=egraph-full-adder CIRCUIT_COMPACT_SECONDS=600 \
 
 The circuit harness takes `EGRAPH_DEPTH`, `EGRAPH_OR_COST`,
 `EGRAPH_BINARY`, `EGRAPH_SPLIT`, `EGRAPH_CHAIN`, and
-`CIRCUIT_ORDER=min-live`.
+`CIRCUIT_ORDER=min-live`, besides the box and step knobs
+(`CIRCUIT_HEIGHT`, `CIRCUIT_MAX_WINDOW`, `CIRCUIT_STEP_SECONDS`,
+`CIRCUIT_RESTART_SECONDS`).
