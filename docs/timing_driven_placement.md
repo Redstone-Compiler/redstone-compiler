@@ -128,8 +128,15 @@ path is the slower of `cout` and `s`; the logic bound is 5 ticks for both.
 | no timing | 2x18x10, 179 blocks, cout 15, s 16 (66 s) | 2x13x10, 86 blocks, cout 15, s 16 |
 | `step_timing` 10 s + `timing` | 2x18x10, 228 blocks, cout 8, s 9 (168 s) | 2x12x9, 88 blocks, cout 7, s 8 |
 
-Timing-first placement settles in half the ticks (8 against 16) with 2 more
-blocks, in a smaller box. Both cells pass every case.
+Timing-first placement settles in half the ticks (8 against 16). Both cells
+pass every case. A second pair of runs with 600 s of compaction agreed on
+the ticks (10 against 20) but not on size:
+
+- without timing: 2x11x6, 112 blocks;
+- timing first: 2x14x8, 158 blocks.
+
+Box and block count vary from run to run as much as between the two modes
+(`exact_local_placer.md`, "Where compaction time goes").
 
 These runs follow the dust fix of the same day (`exact_local_placer.md`,
 "Dust beside a repeater"). The runs before it are not comparable:
