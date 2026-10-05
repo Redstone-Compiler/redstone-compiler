@@ -170,16 +170,54 @@ cannot carry it there. Dust joining two lines powers both lines back, so a
 carried OR needs a block and a repeater (a diode) after the merge, which
 costs cells and a tick. In `nor9` every OR feeds a torch on the spot.
 
+## Building a wide NOR on its support block
+
+`NorNetlist::chain_wide_gates(2)` (`EGRAPH_CHAIN=2`) turns every wide NOR
+into a left-leaning chain of OR nets, its inputs first:
+`NOR(x1, x2, x3, x4)` becomes `s1 = OR(x1, x2)`, `s2 = OR(s1, x3)`,
+`NOR(s2, x4)`. Construction builds such a chain (`chained_ors`: OR nets
+read once, by a net that reads no other OR net) on one block:
+
+- the first OR is observed on a block of the last slice
+  (`ExactPlacerConfig::solid_observations`), and the block's position is
+  kept;
+- each later stage and the final NOR fix that block, keep its slice open
+  (the frozen boundary stops there), and observe the next OR on the same
+  block;
+- gate orders place a chain's stages right before the NOR it ends in.
+
+The OR is never carried, so no repeater is needed.
+
+Width 2, height 10, 5 workers, windows up to 4, 60 s per step:
+
+| Netlist | Seed | Steps placed / timed out | Attempts |
+| --- | --- | --- | --- |
+| 8 gates, chained | 1 | 18 / 11 | 3 restarts (g5, g5, cout), stopped |
+| 8 gates, chained | 2 | 13 / 12 | 2 restarts (g6_or1, g5_or1), stopped |
+| depth 3, chained | 1 | 15 / 10 | 2 restarts (g8, cout_or1), stopped |
+
+The stages do place: an OR on a block and then its torch (`g4_or1`,
+`g4`) took 9-28 s each. But other steps still ran out of time, a different
+one in each attempt. None was proven infeasible; every failure was a 60 s
+timeout.
+
+A box 3 wide does not rescue them. More cells per slice make every step
+slower, and `nor9` itself restarted twice there (8 steps placed, 7 timed
+out). The 8-gate netlist placed 4 steps and timed out 9; chained, 9 and 7.
+
+These netlists keep 6-7 nets alive where `nor9` keeps 4, however the
+gates are ordered or split, and windowed construction pays for every
+crossing net in every step. Each gain the e-graph finds over `nor9` either
+needs wider NORs or more nets alive at once, and at the box size that
+makes `nor9` work, construction cannot place either within its limits.
+
 ## Next
 
-- Build a wide NOR around its support block: reserve the block in an early
-  step and bring the inputs to it over later steps, so the OR is never
-  carried. This is what splitting was meant to give.
-- Count crossing width in extraction. The nets alive at once depend on the
-  order, but a bound on them (or on how far each net reaches) could join
-  gates and fan-in in the cost.
-- Try a taller or wider box for the wider netlists, and compare the
-  volume.
+- Longer steps for these netlists (the timeouts were never proofs), to
+  see whether they place at all and how they compact once placed.
+- Count crossing width in extraction (a bound on nets alive at once along
+  the construction order), so the e-graph proposes netlists construction
+  can place: with `binary` the answer was `nor9` itself.
 - Constrain extraction for carry tiles: the carry needs monotone signals
   (`carry_tiles.md`).
 
@@ -201,4 +239,5 @@ CIRCUIT=egraph-full-adder CIRCUIT_COMPACT_SECONDS=600 \
 - `EGRAPH_GREEDY=1` also prints greedy extractions.
 
 The circuit harness takes `EGRAPH_DEPTH`, `EGRAPH_OR_COST`,
-`EGRAPH_BINARY`, `EGRAPH_SPLIT`, and `CIRCUIT_ORDER=min-live`.
+`EGRAPH_BINARY`, `EGRAPH_SPLIT`, `EGRAPH_CHAIN`, and
+`CIRCUIT_ORDER=min-live`.
