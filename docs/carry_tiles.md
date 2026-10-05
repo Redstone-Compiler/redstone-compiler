@@ -147,6 +147,11 @@ torch burnout after each change).
 The monotone tile is about twice the size of the glitching one: two more
 torches, the corridor, and a taller box.
 
+Its carry takes 11 redstone ticks per bit against a logic bound of 2, most
+of them on repeaters in the corridor. A 16-bit chain's `cout` settles 179
+ticks after the inputs. `timing_driven_placement.md` measures this and
+tries timing-first construction and compaction on the tile.
+
 ## Fixtures
 
 - `test/adder-carry-tile-2x16x10.rcell` (and `.nbt`): the tile, 164 blocks,

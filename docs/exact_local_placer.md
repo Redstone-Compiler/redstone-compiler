@@ -599,8 +599,15 @@ torch bound (class sets are `u64` masks).
 
 `dsl.rs` sets every model param the placer derives from the config in one
 place (`Prepared::params`: `rank_levels`, `stage_levels`, `max_blocks`,
-`allow_unpowered_wires`, `min_torches`); `model_params` are applied after
-them and override them.
+`allow_unpowered_wires`, `min_torches`, `timing`); `model_params` are applied
+after them and override them.
+
+**Timing.** Every placement carries `delays`, the redstone ticks from the
+inputs to each output by static timing analysis (`exact/timing.rs`).
+`ExactPlacerConfig::timing` with `output_delays` bounds them in the model,
+`place_minimizing_delay` shortens the critical path of a one-solve cell, and
+`CompactionConfig::timing` and `ConstructionConfig::step_timing` build and
+compact timing first (`timing_driven_placement.md`).
 
 ## Running
 
