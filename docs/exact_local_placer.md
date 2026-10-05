@@ -635,6 +635,30 @@ the model isolates the seam, keeps the carry monotone so glitches cannot pile
 up down the chain, and construction runs the carry back to its column down a
 reserved corridor. See `carry_tiles.md`.
 
+### Where compaction time goes (2026-10-05)
+
+`CompactionReport::attempt_times` counts every window solve by phase and
+outcome, with its wall, grounding, and solving time; the harnesses print it.
+Full adder, seed 1, 5 workers, 600 s of compaction:
+
+| Slice-removal solves | Without timing | Timing first |
+| --- | --- | --- |
+| proven infeasible | 193, 63 s (0.3 s each) | 131, 128 s (1.0 s each) |
+| repaired | 11, 42 s | 6, 21 s |
+| out of time (20 s limit) | 24, 482 s | 24, 443 s |
+
+- Proving that a removal cannot be repaired is cheap.
+- About three quarters of the time went to removals that neither repaired
+  nor proved impossible within the 20 s attempt limit. Whether those
+  windows have no layout or just a hard one is unknown.
+- Grounding took 2-3% of the time.
+- Neither run got past its first slice-removal pass to block reduction.
+
+The same runs show how much the result depends on the run. Construction is
+not deterministic with parallel workers. Without timing, this run reached
+2x11x6 with 112 blocks; a 1200 s run the same day reached 2x13x10 with 86.
+The timing-first run reached 2x14x8 with 158 blocks.
+
 ## Configuration
 
 `ExactPlacerConfig` holds the problem (box, pins, fixed cells, observations,

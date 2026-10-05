@@ -2015,6 +2015,20 @@ fn with_snapshot(
     }
 }
 
+/// One line per kind of compaction window solve: how many, and where the
+/// time went.
+fn print_attempt_times(prefix: &str, report: &CompactionReport) {
+    for ((phase, outcome), time) in &report.attempt_times {
+        println!(
+            "{prefix} attempts {phase:<12} {outcome:<16} count={:>4} wall={:>7.1}s encode={:>6.1}s solve={:>7.1}s",
+            time.count,
+            time.wall.as_secs_f64(),
+            time.encode.as_secs_f64(),
+            time.solve.as_secs_f64()
+        );
+    }
+}
+
 /// Construction plus compaction for small circuits:
 /// `CIRCUIT=mux2|half-adder|adder2|adder2-nor|mux4|full-adder CIRCUIT_WIDTH=2
 /// CIRCUIT_HEIGHT=10 CIRCUIT_STEP_SECONDS=60 CIRCUIT_COMPACT_SECONDS=300
@@ -2154,6 +2168,7 @@ fn diagnose_construct_circuit() -> eyre::Result<()> {
             report.elapsed,
             verification.failures.len()
         );
+        print_attempt_times("CIRCUIT", &report);
         if let Ok(prefix) = std::env::var("CIRCUIT_WRITE") {
             std::fs::write(format!("{prefix}.rcell"), document)?;
             crate::nbt::NBTRoot::from(&result.placed.world).save(format!("{prefix}.nbt"));
@@ -2449,6 +2464,7 @@ fn synthesize_carry_adder() -> eyre::Result<()> {
             layout.timing()?.outputs
         );
         let (compacted, best, report) = placer.compact(layout, &compaction)?;
+        print_attempt_times("TILE", &report);
         let tile = best.unwrap_or(placement);
         println!(
             "TILE compacted dim={:?} blocks={} delays={:?} removed={:?} reductions={} delay_reductions={} elapsed={:?}",

@@ -127,6 +127,42 @@ impl Default for CompactionConfig {
     }
 }
 
+/// Window solves of one kind and outcome, and the time they took.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AttemptTime {
+    pub count: usize,
+    /// Wall time of the whole attempt.
+    pub wall: Duration,
+    /// Grounding the model (`ExactPlacerStats::encode_time`).
+    pub encode: Duration,
+    /// SAT solving with simulator checks (`ExactPlacerStats::solve_time`).
+    pub solve: Duration,
+}
+
+thread_local! {
+    static ATTEMPTS: std::cell::RefCell<BTreeMap<(&'static str, &'static str), AttemptTime>> =
+        Default::default();
+}
+
+/// Adds one window solve to the running compaction's `attempt_times`.
+fn record_attempt(
+    phase: &'static str,
+    outcome: &'static str,
+    started: Instant,
+    stats: Option<&super::ExactPlacerStats>,
+) {
+    ATTEMPTS.with(|attempts| {
+        let mut attempts = attempts.borrow_mut();
+        let entry = attempts.entry((phase, outcome)).or_default();
+        entry.count += 1;
+        entry.wall += started.elapsed();
+        if let Some(stats) = stats {
+            entry.encode += stats.encode_time;
+            entry.solve += stats.solve_time;
+        }
+    });
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct CompactionReport {
     /// Accepted `(axis, slice)` removals in order.
@@ -138,6 +174,13 @@ pub struct CompactionReport {
     pub delay_reductions: usize,
     /// Rounds of slice removal followed by block reduction.
     pub rounds: usize,
+    /// Every window solve by `(phase, outcome)`: phases `remove` (slice
+    /// removal repairs), `repair` (minimizing a repair), `reduce` (block
+    /// reduction), `delay` and `delay-repair` (path shortening), `signals`;
+    /// outcomes `placed`, `infeasible` (proven), `unknown` (out of time),
+    /// `error` (not encodable), and for minimization `improved`,
+    /// `improved-optimal`, `optimal` (proven nothing smaller).
+    pub attempt_times: BTreeMap<(&'static str, &'static str), AttemptTime>,
     pub elapsed: Duration,
 }
 
@@ -163,6 +206,7 @@ impl ExactLocalPlacer {
         let started = Instant::now();
         let mut report = CompactionReport::default();
         let mut best = None;
+        ATTEMPTS.with(|attempts| attempts.borrow_mut().clear());
         let expired = || {
             config
                 .time_limit
@@ -208,6 +252,8 @@ impl ExactLocalPlacer {
             }
         }
         report.elapsed = started.elapsed();
+        report.attempt_times =
+            ATTEMPTS.with(|attempts| std::mem::take(&mut *attempts.borrow_mut()));
         Ok((layout, best, report))
     }
 
@@ -254,7 +300,7 @@ impl ExactLocalPlacer {
                     report.attempts += 1;
                     let window = (index.saturating_sub(radius), index + radius);
                     if let Some(mut placement) =
-                        self.resolve_window(&cut, axis, window, None, config)
+                        self.resolve_window("remove", &cut, axis, window, None, config)
                     {
                         if let Some(budget) = config.repair_optimize {
                             // A repair only has to fit; trade its dead wires
@@ -265,9 +311,14 @@ impl ExactLocalPlacer {
                                 ..config.clone()
                             };
                             let limit = repaired.cells.len().saturating_sub(1);
-                            if let (Some(better), _) =
-                                self.optimize_window(&repaired, axis, window, Some(limit), &quick)
-                            {
+                            if let (Some(better), _) = self.optimize_window(
+                                "repair",
+                                &repaired,
+                                axis,
+                                window,
+                                Some(limit),
+                                &quick,
+                            ) {
                                 placement = better;
                             }
                         }
@@ -348,10 +399,10 @@ impl ExactLocalPlacer {
             report.attempts += 1;
             let window = (low, low + config.reduction_window);
             let (placement, optimal) = if optimize {
-                self.optimize_window(layout, axis, window, Some(limit), config)
+                self.optimize_window("reduce", layout, axis, window, Some(limit), config)
             } else {
                 (
-                    self.resolve_window(layout, axis, window, Some(limit), config),
+                    self.resolve_window("reduce", layout, axis, window, Some(limit), config),
                     false,
                 )
             };
@@ -470,7 +521,8 @@ impl ExactLocalPlacer {
                 let mut sooner = layout.clone();
                 sooner.delays.insert(target.clone(), ticks - 1);
                 report.attempts += 1;
-                let Some(mut placement) = self.resolve_window(&sooner, axis, window, None, config)
+                let Some(mut placement) =
+                    self.resolve_window("delay", &sooner, axis, window, None, config)
                 else {
                     continue;
                 };
@@ -482,9 +534,14 @@ impl ExactLocalPlacer {
                         ..config.clone()
                     };
                     let limit = found.cells.len().saturating_sub(1);
-                    if let (Some(better), _) =
-                        self.optimize_window(&found, axis, window, Some(limit), &quick)
-                    {
+                    if let (Some(better), _) = self.optimize_window(
+                        "delay-repair",
+                        &found,
+                        axis,
+                        window,
+                        Some(limit),
+                        &quick,
+                    ) {
                         placement = better;
                     }
                 }
@@ -522,29 +579,45 @@ impl ExactLocalPlacer {
     /// exists there).
     fn optimize_window(
         &self,
+        phase: &'static str,
         layout: &ExactLayout,
         axis: usize,
         window: (usize, usize),
         limit: Option<usize>,
         config: &CompactionConfig,
     ) -> (Option<ExactPlacement>, bool) {
+        let started = Instant::now();
         match self.window_config(layout, axis, window, limit, config) {
             Ok(mut exact) => {
                 exact.optimize = true;
                 match self.place(&exact) {
                     Ok((ExactOutcome::Placed(placement), stats)) => {
+                        let outcome = if stats.optimal {
+                            "improved-optimal"
+                        } else {
+                            "improved"
+                        };
+                        record_attempt(phase, outcome, started, Some(&stats));
                         (Some(*placement), stats.optimal)
                     }
                     // No layout with fewer blocks: the window is optimal.
-                    Ok((ExactOutcome::Infeasible, _)) => (None, true),
-                    Ok(_) => (None, false),
+                    Ok((ExactOutcome::Infeasible, stats)) => {
+                        record_attempt(phase, "optimal", started, Some(&stats));
+                        (None, true)
+                    }
+                    Ok((_, stats)) => {
+                        record_attempt(phase, "unknown", started, Some(&stats));
+                        (None, false)
+                    }
                     Err(error) => {
+                        record_attempt(phase, "error", started, None);
                         tracing::debug!(?window, %error, "compaction window rejected");
                         (None, false)
                     }
                 }
             }
             Err(error) => {
+                record_attempt(phase, "error", started, None);
                 tracing::debug!(?window, %error, "compaction window rejected");
                 (None, false)
             }
@@ -557,13 +630,14 @@ impl ExactLocalPlacer {
     /// a block unsupported).
     fn resolve_window(
         &self,
+        phase: &'static str,
         layout: &ExactLayout,
         axis: usize,
         window: (usize, usize),
         max_blocks: Option<usize>,
         config: &CompactionConfig,
     ) -> Option<ExactPlacement> {
-        self.try_resolve_window(layout, axis, window, max_blocks, config)
+        self.try_resolve_window(phase, layout, axis, window, max_blocks, config)
             .unwrap_or_else(|error| {
                 tracing::debug!(axis, ?window, %error, "compaction window rejected");
                 None
@@ -572,14 +646,30 @@ impl ExactLocalPlacer {
 
     fn try_resolve_window(
         &self,
+        phase: &'static str,
         cut: &ExactLayout,
         axis: usize,
         window: (usize, usize),
         max_blocks: Option<usize>,
         config: &CompactionConfig,
     ) -> eyre::Result<Option<ExactPlacement>> {
-        let exact = self.window_config(cut, axis, window, max_blocks, config)?;
-        let (outcome, _) = self.place(&exact)?;
+        let started = Instant::now();
+        let solved = self
+            .window_config(cut, axis, window, max_blocks, config)
+            .and_then(|exact| self.place(&exact));
+        let (outcome, stats) = match solved {
+            Ok(solved) => solved,
+            Err(error) => {
+                record_attempt(phase, "error", started, None);
+                return Err(error);
+            }
+        };
+        let name = match &outcome {
+            ExactOutcome::Placed(_) => "placed",
+            ExactOutcome::Infeasible => "infeasible",
+            ExactOutcome::Unknown { .. } => "unknown",
+        };
+        record_attempt(phase, name, started, Some(&stats));
         Ok(match outcome {
             ExactOutcome::Placed(placement) => Some(*placement),
             _ => None,
@@ -589,7 +679,7 @@ impl ExactLocalPlacer {
     /// A layout read from RCELL has no solver signals yet: solve it once with
     /// every cell fixed to read them off.
     pub(super) fn read_signals(&self, layout: &mut ExactLayout, config: &CompactionConfig) {
-        match self.try_resolve_window(layout, 1, (0, 0), None, config) {
+        match self.try_resolve_window("signals", layout, 1, (0, 0), None, config) {
             Ok(Some(placement)) => layout.signals = placement.signals.into_iter().collect(),
             Ok(None) => tracing::warn!("could not read the layout's signals"),
             Err(error) => tracing::warn!(%error, "could not read the layout's signals"),

@@ -37,7 +37,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-pub use compact::{CompactionConfig, CompactionReport};
+pub use compact::{AttemptTime, CompactionConfig, CompactionReport};
 pub use construct::{ConstructionConfig, ConstructionReport, GateOrder};
 pub use dimacs::DimacsComments;
 pub use encode::CellKind;
