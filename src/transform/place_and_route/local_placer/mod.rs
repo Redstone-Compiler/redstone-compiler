@@ -65,7 +65,12 @@ pub struct LocalPlacer {
     time_limit: Option<Duration>,
     not_site_limit: Option<usize>,
     joint_ready_or_routes: bool,
+    port_inputs: bool,
 }
+
+/// The port name under which an input's terminal is recorded in the
+/// placement state when inputs are placed as ports.
+const INPUT_TERMINAL_PORT: &str = "terminal";
 
 type PlacerQueue = Vec<(World3D, PlacementState)>;
 
@@ -74,6 +79,33 @@ const RANKED_RANDOM_TAIL_SAMPLE_SCOPE: u64 = 2;
 const LEAK_SAMPLING_QUEUE_THRESHOLD: usize = 10_000;
 const PLACEMENT_DIVERSITY_SPAN_BUCKET_SIZE: usize = 4;
 const RANKED_DIVERSITY_SLOT_DIVISOR: usize = 4;
+
+/// One way to place an input node.
+#[derive(Clone, Debug)]
+enum InputPlacement {
+    Switch(PlacedNode),
+    Port(InputPortPlacement),
+}
+
+impl InputPlacement {
+    fn apply(self, node_id: GraphNodeId, world: &mut World3D, state: &mut PlacementState) {
+        match self {
+            Self::Switch(switch) => {
+                place_node(world, switch);
+                state.set_node_position(node_id, switch.position);
+                state.set_signal_footprint(node_id, [switch.position]);
+            }
+            Self::Port(port) => {
+                for placed in port.nodes {
+                    place_node(world, placed);
+                }
+                state.set_node_position(node_id, port.source);
+                state.set_port_position(node_id, INPUT_TERMINAL_PORT.to_owned(), port.terminal);
+                state.set_signal_footprint(node_id, [port.terminal, port.source]);
+            }
+        }
+    }
+}
 
 impl LocalPlacer {
     pub fn new(graph: LogicGraph, config: LocalPlacerConfig) -> eyre::Result<Self> {
@@ -112,6 +144,7 @@ impl LocalPlacer {
             time_limit: None,
             not_site_limit: None,
             joint_ready_or_routes: false,
+            port_inputs: false,
         };
         result.verify()?;
         Ok(result)
@@ -128,6 +161,17 @@ impl LocalPlacer {
     /// routing. This is an explicitly heuristic search budget, not a constraint.
     pub fn with_not_site_limit(mut self, limit: usize) -> Self {
         self.not_site_limit = Some(limit);
+        self
+    }
+
+    /// Place inputs as ports instead of switches: dust on an input site (the
+    /// terminal a global route connects to) feeding a repeater the cell's
+    /// logic reads (`routing::input_port_placements`). The verified layout is
+    /// then the one a child cell is routed as, instead of a layout whose
+    /// switches are rewritten into ports afterwards. The input endpoints are
+    /// the terminals, which a simulator drives directly.
+    pub fn with_port_inputs(mut self) -> Self {
+        self.port_inputs = true;
         self
     }
 
@@ -412,7 +456,8 @@ impl LocalPlacer {
             .iter()
             .filter_map(|node| match &node.kind {
                 GraphNodeKind::Input(name) => state
-                    .node_position(node.id)
+                    .port_position(node.id, INPUT_TERMINAL_PORT)
+                    .or_else(|| state.node_position(node.id))
                     .map(|position| OutputEndpoint::new(name.clone(), position)),
                 _ => None,
             })
@@ -494,29 +539,20 @@ impl LocalPlacer {
             // A 2,500 x 25 pin step therefore materializes at most the beam size.
             let mut extensions = Vec::new();
             for (parent, (world, _)) in queue.iter().enumerate() {
-                for kind in input_node_kind() {
-                    extensions.extend(
-                        input_placements(
-                            &self.config,
-                            world,
-                            kind,
-                            constrained_positions.as_deref(),
-                        )
+                extensions.extend(
+                    self.input_placements(world, constrained_positions.as_deref())
                         .into_iter()
-                        .map(|placed_node| (parent, placed_node)),
-                    );
-                }
+                        .map(|placement| (parent, placement)),
+                );
             }
             let extensions = self.sample_pin_extensions(step, extensions);
 
             let mut next = Vec::with_capacity(extensions.len());
-            for (parent, placed_node) in extensions {
+            for (parent, placement) in extensions {
                 let (parent_world, parent_state) = &queue[parent];
                 let mut world = parent_world.clone();
                 let mut state = parent_state.clone();
-                place_node(&mut world, placed_node);
-                state.set_node_position(node.id, placed_node.position);
-                state.set_signal_footprint(node.id, [placed_node.position]);
+                placement.apply(node.id, &mut world, &mut state);
                 next.push((world, state));
             }
             queue = next;
@@ -527,11 +563,30 @@ impl LocalPlacer {
         queue
     }
 
+    /// Every way to place one input: a switch, or with `port_inputs` a port.
+    fn input_placements(
+        &self,
+        world: &World3D,
+        constrained_positions: Option<&[Position]>,
+    ) -> Vec<InputPlacement> {
+        if self.port_inputs {
+            return input_port_placements(&self.config, world, constrained_positions)
+                .into_iter()
+                .map(InputPlacement::Port)
+                .collect();
+        }
+        input_node_kind()
+            .into_iter()
+            .flat_map(|kind| input_placements(&self.config, world, kind, constrained_positions))
+            .map(InputPlacement::Switch)
+            .collect()
+    }
+
     fn sample_pin_extensions(
         &self,
         step: usize,
-        extensions: Vec<(usize, PlacedNode)>,
-    ) -> Vec<(usize, PlacedNode)> {
+        extensions: Vec<(usize, InputPlacement)>,
+    ) -> Vec<(usize, InputPlacement)> {
         self.config.step_sampling_policy.sample_with_seed(
             extensions,
             self.config.sampling_seed(STEP_SAMPLE_SCOPE, step),
@@ -790,20 +845,12 @@ impl LocalPlacer {
                 } else {
                     let constrained_positions = input_constraints
                         .and_then(|constraints| constraints.positions_for(node.id, input_name));
-                    input_node_kind()
+                    self.input_placements(&world, constrained_positions.as_deref())
                         .into_iter()
-                        .flat_map(|kind| {
-                            generate_inputs(
-                                &self.config,
-                                &world,
-                                kind,
-                                constrained_positions.as_deref(),
-                            )
-                        })
-                        .map(|(world, position)| {
+                        .map(|placement| {
+                            let mut world = world.clone();
                             let mut state = state.clone();
-                            state.set_node_position(node.id, position);
-                            state.set_signal_footprint(node.id, [position]);
+                            placement.apply(node.id, &mut world, &mut state);
                             (world, state)
                         })
                         .collect()

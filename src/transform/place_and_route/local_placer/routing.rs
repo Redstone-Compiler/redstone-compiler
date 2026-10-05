@@ -26,6 +26,7 @@ pub(super) fn not_node_kind() -> Vec<BlockKind> {
 
 pub(super) use detailed_router::place_node;
 
+#[cfg(test)]
 pub(super) fn generate_inputs(
     config: &LocalPlacerConfig,
     world: &World3D,
@@ -55,7 +56,34 @@ pub(super) fn input_placements(
         input_strategy = input_strategy.into_iter().take(1).collect();
     }
 
-    let place_strategy = if let Some(positions) = constrained_positions {
+    let place_strategy = input_sites(config, world, constrained_positions);
+
+    let mut generated = input_strategy
+        .into_iter()
+        .cartesian_product(place_strategy)
+        .filter_map(|(block, position)| {
+            let placed_node = PlacedNode { position, block };
+            if placed_node.has_conflict(world, &Default::default()) {
+                return None;
+            }
+            Some(placed_node)
+        })
+        .collect_vec();
+
+    if let Some(limit) = config.input_candidate_limit {
+        generated.truncate(limit);
+    }
+    generated
+}
+
+/// Cells an input may occupy: the constrained ones, or the box boundary (the
+/// X- and Y-min faces) or anywhere, by `input_placement_strategy`.
+fn input_sites(
+    config: &LocalPlacerConfig,
+    world: &World3D,
+    constrained_positions: Option<&[Position]>,
+) -> Vec<Position> {
+    if let Some(positions) = constrained_positions {
         positions
             .iter()
             .copied()
@@ -75,24 +103,121 @@ pub(super) fn input_placements(
                     .collect_vec()
             }
         }
-    };
+    }
+}
 
-    let mut generated = input_strategy
-        .into_iter()
-        .cartesian_product(place_strategy)
-        .filter_map(|(block, position)| {
-            let placed_node = PlacedNode { position, block };
-            if placed_node.has_conflict(world, &Default::default()) {
-                return None;
+/// An input placed as a port (`LocalPlacer::with_port_inputs`).
+#[derive(Clone, Debug)]
+pub(super) struct InputPortPlacement {
+    /// Blocks to place, in order: supports, the terminal dust, the repeater.
+    pub(super) nodes: Vec<PlacedNode>,
+    /// The repeater the cell's logic reads, the input's signal source.
+    pub(super) source: Position,
+    /// The dust a global route connects to.
+    pub(super) terminal: Position,
+}
+
+/// Inputs in the form a child cell keeps once it is routed: dust on an input
+/// site (the terminal a global route connects to) feeding a repeater one cell
+/// over. The cell reads the input only through the repeater, which nothing in
+/// the cell can drive backwards, so the cell cannot power its own input wire.
+/// A switch, by contrast, ignores everything around it, and the dust that
+/// later replaced it did not (issue #56).
+pub(super) fn input_port_placements(
+    config: &LocalPlacerConfig,
+    world: &World3D,
+    constrained_positions: Option<&[Position]>,
+) -> Vec<InputPortPlacement> {
+    let mut generated = Vec::new();
+    for terminal in input_sites(config, world, constrained_positions) {
+        for direction in [
+            Direction::East,
+            Direction::West,
+            Direction::North,
+            Direction::South,
+        ] {
+            let Some(source) = terminal
+                .walk(direction)
+                .filter(|position| world.size.bound_on(*position))
+            else {
+                continue;
+            };
+            if let Some(placement) = input_port_placement(world, terminal, source) {
+                generated.push(placement);
+                // Greedy generation keeps one orientation per site, as it
+                // keeps one switch attachment.
+                if config.greedy_input_generation {
+                    break;
+                }
             }
-            Some(placed_node)
-        })
-        .collect_vec();
-
+        }
+    }
     if let Some(limit) = config.input_candidate_limit {
         generated.truncate(limit);
     }
     generated
+}
+
+fn input_port_placement(
+    world: &World3D,
+    terminal: Position,
+    source: Position,
+) -> Option<InputPortPlacement> {
+    if !world[terminal].kind.is_air() || !world[source].kind.is_air() {
+        return None;
+    }
+    let own = [
+        Some(terminal),
+        Some(source),
+        terminal.down(),
+        source.down(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    let mut scratch = world.clone();
+    let mut nodes = Vec::new();
+    for support in [terminal.down()?, source.down()?] {
+        if scratch[support].kind.is_cobble() {
+            continue;
+        }
+        let cobble = detailed_router::try_generate_cobble_node(&scratch, support, &own)?;
+        place_node(&mut scratch, cobble);
+        nodes.push(cobble);
+    }
+    let except = own.iter().copied().collect();
+    let dust = PlacedNode::new_redstone(terminal);
+    if dust.has_conflict(&scratch, &except) || dust.has_short(&scratch, &except) {
+        return None;
+    }
+    place_node(&mut scratch, dust);
+    nodes.push(dust);
+    // A repeater's direction names its input side.
+    let repeater = PlacedNode::new_repeater(source, source.diff(terminal));
+    if repeater.has_conflict(&scratch, &except) {
+        return None;
+    }
+    place_node(&mut scratch, repeater);
+    nodes.push(repeater);
+    // The terminal must reach the repeater, and nothing already placed may
+    // power either of them.
+    if !detailed_router::target_powers_position(&scratch, terminal, source) {
+        return None;
+    }
+    let powered_from_outside = world.iter_block().into_iter().any(|(position, block)| {
+        !block.kind.is_air()
+            && !block.kind.is_cobble()
+            && (detailed_router::target_powers_position(&scratch, position, terminal)
+                || detailed_router::target_powers_position(&scratch, position, source))
+    });
+    if powered_from_outside {
+        return None;
+    }
+    Some(InputPortPlacement {
+        nodes,
+        source,
+        terminal,
+    })
 }
 
 pub(super) fn generate_output_routes(
