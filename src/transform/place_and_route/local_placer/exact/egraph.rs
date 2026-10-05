@@ -22,9 +22,9 @@ use egg::{
     StopReason, Symbol,
 };
 use eyre::{bail, ensure, eyre};
-use rsdsl::{GroundOptions, IValue, Instance, Model};
+use rsdsl::{GroundOptions, IValue, Instance, Model, Objective};
 
-use super::cnf::Cnf;
+use super::cnf::{Cnf, Lit};
 use super::netlist::{Net, NetDriver, NetId, NorNetlist};
 use super::solver::{SatSolver, SolveResult, StopSignal};
 
@@ -74,6 +74,53 @@ pub struct Extraction {
     pub cost: usize,
     /// No netlist in the e-graph within the depth costs less.
     pub proven: bool,
+}
+
+/// The extraction model on a solver, with what reads its answers back.
+struct GroundedExtraction {
+    nodes: Vec<(Id, Bool)>,
+    picks: Vec<Lit>,
+    objective: Objective,
+    /// `-at_least[b]` requires cost `<= offset + b` (`objective_counter`).
+    at_least: Vec<Lit>,
+    solver: SatSolver,
+}
+
+impl GroundedExtraction {
+    /// Assumptions for a cost of at most `cost`; `None` if none is that low.
+    fn at_most(&self, cost: i64) -> Option<Vec<Lit>> {
+        let bound = cost - self.objective.offset;
+        if bound < 0 {
+            return None;
+        }
+        Some(
+            self.at_least
+                .get(bound as usize)
+                .map(|&lit| vec![-lit])
+                .unwrap_or_default(),
+        )
+    }
+
+    fn cost(&self) -> i64 {
+        self.objective.cost(|lit| self.solver.value(lit))
+    }
+
+    /// The picked nodes by class.
+    fn chosen(&self) -> HashMap<Id, Choice> {
+        self.nodes
+            .iter()
+            .zip(&self.picks)
+            .filter(|(_, &lit)| self.solver.value(lit))
+            .map(|((class, node), _)| {
+                let choice = Choice {
+                    node: node.clone(),
+                    gates: BTreeSet::new(),
+                    depth: 0,
+                };
+                (*class, choice)
+            })
+            .collect()
+    }
 }
 
 define_language! {
@@ -308,12 +355,52 @@ impl Exploration {
     /// class, shared classes built once. Lowers the bound until it is proven
     /// or `time_limit` runs out; `None` when no netlist of the e-graph fits.
     pub fn extract_exact(&self, options: &ExtractOptions) -> eyre::Result<Option<Extraction>> {
+        let mut grounded = self.ground_extraction(options)?;
+        let stop = AtomicBool::new(false);
+        let signal = StopSignal {
+            stop: &stop,
+            deadline: Some(Instant::now() + options.time_limit),
+            restart: None,
+        };
+        let mut best = None::<(i64, HashMap<Id, Choice>)>;
+        let mut proven = false;
+        loop {
+            let assumptions = match &best {
+                None => Vec::new(),
+                Some((cost, _)) => match grounded.at_most(cost - 1) {
+                    Some(assumptions) => assumptions,
+                    None => {
+                        proven = true;
+                        break;
+                    }
+                },
+            };
+            match grounded.solver.solve(&assumptions, &signal) {
+                SolveResult::Sat => best = Some((grounded.cost(), grounded.chosen())),
+                SolveResult::Unsat => {
+                    proven = best.is_some();
+                    break;
+                }
+                SolveResult::Interrupted => break,
+            }
+        }
+        let Some((cost, chosen)) = best else {
+            return Ok(None);
+        };
+        Ok(Some(Extraction {
+            netlist: self.netlist(&chosen, options.split_wide)?,
+            cost: cost as usize,
+            proven,
+        }))
+    }
+
+    /// `egraph_extract.rsdsl` grounded over this e-graph, on a solver.
+    fn ground_extraction(&self, options: &ExtractOptions) -> eyre::Result<GroundedExtraction> {
         let ExtractOptions {
             max_depth,
             or_cost,
             binary,
-            split_wide,
-            time_limit,
+            ..
         } = *options;
         let egraph = &self.egraph;
         let classes = egraph.classes().map(|class| class.id).collect::<Vec<_>>();
@@ -373,14 +460,14 @@ impl Exploration {
         for (_, root) in &self.outputs {
             instance.row("root", vec![index[&egraph.find(*root)].into()]);
         }
-        let options = GroundOptions {
+        let ground = GroundOptions {
             guards: false,
             provenance: false,
             positive_or_aux: false,
             no_fold: false,
         };
         let mut program = extract_model()
-            .ground(&instance, options)
+            .ground(&instance, ground)
             .map_err(|error| eyre!("grounding egraph_extract failed:\n{error}"))?;
         let objective = program
             .objective()
@@ -397,59 +484,13 @@ impl Exploration {
         );
         let mut solver = SatSolver::new(1);
         solver.add_cnf(&cnf);
-        let stop = AtomicBool::new(false);
-        let signal = StopSignal {
-            stop: &stop,
-            deadline: Some(Instant::now() + time_limit),
-            restart: None,
-        };
-        let mut best = None::<(i64, HashMap<Id, Choice>)>;
-        let mut proven = false;
-        loop {
-            let assumptions = match &best {
-                None => Vec::new(),
-                Some((cost, _)) => {
-                    let bound = cost - 1 - objective.offset;
-                    if bound < 0 {
-                        proven = true;
-                        break;
-                    }
-                    vec![-at_least[bound as usize]]
-                }
-            };
-            match solver.solve(&assumptions, &signal) {
-                SolveResult::Sat => {
-                    let cost = objective.cost(|lit| solver.value(lit));
-                    let chosen = nodes
-                        .iter()
-                        .zip(&picks)
-                        .filter(|(_, &lit)| solver.value(lit))
-                        .map(|((class, node), _)| {
-                            let choice = Choice {
-                                node: node.clone(),
-                                gates: BTreeSet::new(),
-                                depth: 0,
-                            };
-                            (*class, choice)
-                        })
-                        .collect();
-                    best = Some((cost, chosen));
-                }
-                SolveResult::Unsat => {
-                    proven = best.is_some();
-                    break;
-                }
-                SolveResult::Interrupted => break,
-            }
-        }
-        let Some((cost, chosen)) = best else {
-            return Ok(None);
-        };
-        Ok(Some(Extraction {
-            netlist: self.netlist(&chosen, split_wide)?,
-            cost: cost as usize,
-            proven,
-        }))
+        Ok(GroundedExtraction {
+            nodes,
+            picks,
+            objective,
+            at_least,
+            solver,
+        })
     }
 
     fn candidate(&self, class: Id, node: &Bool, best: &HashMap<Id, Choice>) -> Option<Choice> {
@@ -633,6 +674,14 @@ impl Builder<'_> {
         self.net_of_class.insert(class, net);
         Ok(net)
     }
+}
+
+/// The truth table of `expression` over `inputs`: bit `k` is its value in
+/// case `k`, where bit `i` of `k` is `inputs[i]`.
+pub fn truth_table(inputs: &[&str], expression: &str) -> eyre::Result<u64> {
+    let mut egraph = EGraph::new(TruthTable::new(inputs)?);
+    let id = egraph.add_expr(&parse(expression)?);
+    Ok(egraph[id].data)
 }
 
 /// Gates on the slowest path to each output (OR nets free, NOT one).

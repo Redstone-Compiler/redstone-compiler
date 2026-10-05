@@ -58,7 +58,10 @@ impl NorNetlist {
                 }
                 GraphNodeKind::Logic(logic) if logic.logic_type == LogicType::Or => continue,
                 GraphNodeKind::Output(_) => continue,
-                other => bail!("exact placer supports NOT/OR logic only, found {}", other.name()),
+                other => bail!(
+                    "exact placer supports NOT/OR logic only, found {}",
+                    other.name()
+                ),
             };
             let name = match &driver {
                 NetDriver::Input(name) => name.clone(),
@@ -105,7 +108,11 @@ impl NorNetlist {
                 continue;
             }
             let node = graph.find_node_by_id(net.node_id).unwrap();
-            ensure!(node.inputs.len() == 1, "NOT node {} must have one input", net.node_id);
+            ensure!(
+                node.inputs.len() == 1,
+                "NOT node {} must have one input",
+                net.node_id
+            );
             let mut sources = BTreeSet::new();
             collect_sources(graph, &net_of_node, node.inputs[0], &mut sources, 0)?;
             ensure!(!sources.is_empty(), "gate {} has no inputs", net.node_id);
@@ -150,7 +157,10 @@ impl NorNetlist {
                 nets[*net].name = name.clone();
             }
         }
-        ensure!(!outputs.is_empty(), "exact placer needs at least one output");
+        ensure!(
+            !outputs.is_empty(),
+            "exact placer needs at least one output"
+        );
 
         let netlist = Self { nets, outputs };
         netlist.check_acyclic()?;
@@ -213,6 +223,103 @@ impl NorNetlist {
             }
             netlist.nets[gate].gate_inputs = vec![chain, last];
         }
+        netlist.check_acyclic()?;
+        Ok(netlist)
+    }
+
+    /// One line per netlist: `g3=NOR(a,b); g4=NOR(a,g3); ...`, gates and OR
+    /// nets in net order (`from_text` reads it back).
+    pub fn to_text(&self) -> String {
+        self.nets
+            .iter()
+            .filter_map(|net| {
+                let kind = match net.driver {
+                    NetDriver::Input(_) => return None,
+                    NetDriver::Gate => "NOR",
+                    NetDriver::Or => "OR",
+                };
+                let inputs = net
+                    .gate_inputs
+                    .iter()
+                    .map(|&input| self.nets[input].name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                Some(format!("{}={kind}({inputs})", net.name))
+            })
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+
+    /// Reads `to_text`'s form. A name used before it is defined is an input;
+    /// a net no other net reads is an output under its own name.
+    pub fn from_text(text: &str) -> eyre::Result<Self> {
+        let mut nets = Vec::<Net>::new();
+        let mut defined = Vec::<(String, NetDriver, Vec<String>)>::new();
+        for item in text
+            .split(';')
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+        {
+            let (name, rest) = item
+                .split_once('=')
+                .ok_or_else(|| eyre::eyre!("expected `name=NOR(...)`: {item}"))?;
+            let rest = rest.trim();
+            let (driver, inputs) = if let Some(inputs) = rest.strip_prefix("NOR(") {
+                (NetDriver::Gate, inputs)
+            } else if let Some(inputs) = rest.strip_prefix("OR(") {
+                (NetDriver::Or, inputs)
+            } else {
+                eyre::bail!("expected NOR(...) or OR(...): {item}");
+            };
+            let inputs = inputs
+                .strip_suffix(')')
+                .ok_or_else(|| eyre::eyre!("missing `)`: {item}"))?
+                .split(',')
+                .map(|input| input.trim().to_owned())
+                .filter(|input| !input.is_empty())
+                .collect::<Vec<_>>();
+            defined.push((name.trim().to_owned(), driver, inputs));
+        }
+        let mut inputs = BTreeSet::new();
+        for (index, (_, _, reads)) in defined.iter().enumerate() {
+            for read in reads {
+                if !defined[..index].iter().any(|(name, _, _)| name == read) {
+                    eyre::ensure!(
+                        !defined.iter().any(|(name, _, _)| name == read),
+                        "`{read}` is read before it is defined"
+                    );
+                    inputs.insert(read.clone());
+                }
+            }
+        }
+        for input in inputs {
+            nets.push(Net {
+                node_id: nets.len(),
+                driver: NetDriver::Input(input.clone()),
+                name: input,
+                gate_inputs: Vec::new(),
+            });
+        }
+        for (name, driver, reads) in &defined {
+            let gate_inputs = reads
+                .iter()
+                .map(|read| nets.iter().position(|net| &net.name == read).unwrap())
+                .collect();
+            nets.push(Net {
+                name: name.clone(),
+                node_id: nets.len(),
+                driver: driver.clone(),
+                gate_inputs,
+            });
+        }
+        let outputs = (0..nets.len())
+            .filter(|&net| !matches!(nets[net].driver, NetDriver::Input(_)))
+            .filter(|&net| !nets.iter().any(|other| other.gate_inputs.contains(&net)))
+            .map(|net| (nets[net].name.clone(), net))
+            .collect::<Vec<_>>();
+        let mut outputs = outputs;
+        outputs.sort();
+        let netlist = Self { nets, outputs };
         netlist.check_acyclic()?;
         Ok(netlist)
     }

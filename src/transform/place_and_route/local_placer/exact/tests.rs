@@ -278,6 +278,15 @@ fn gate_order_from_env(name: &str) -> GateOrder {
     }
 }
 
+/// With `EGRAPH_CHAIN=<n>`, NORs of more than `n` signals are built in
+/// stages on one support block (`NorNetlist::chain_wide_gates`).
+fn chain_from_env(netlist: NorNetlist) -> eyre::Result<NorNetlist> {
+    match std::env::var("EGRAPH_CHAIN") {
+        Ok(fan_in) => netlist.chain_wide_gates(fan_in.parse()?),
+        Err(_) => Ok(netlist),
+    }
+}
+
 fn env_usize(name: &str, default: usize) -> usize {
     std::env::var(name)
         .ok()
@@ -2169,12 +2178,14 @@ fn diagnose_construct_circuit() -> eyre::Result<()> {
             let extraction = exploration
                 .extract_exact(&options)?
                 .ok_or_else(|| eyre::eyre!("no netlist for {options:?}"))?;
-            match std::env::var("EGRAPH_CHAIN") {
-                Ok(fan_in) => ExactLocalPlacer::from_netlist(
-                    extraction.netlist.chain_wide_gates(fan_in.parse()?)?,
-                ),
-                Err(_) => ExactLocalPlacer::from_netlist(extraction.netlist),
-            }
+            ExactLocalPlacer::from_netlist(chain_from_env(extraction.netlist)?)
+        }
+        // `netlist`: the netlist in `CIRCUIT_NETLIST`, in `NorNetlist::to_text`'s
+        // form (`screen_egraph_netlists` prints them so), with `EGRAPH_CHAIN`.
+        "netlist" => {
+            let text = std::env::var("CIRCUIT_NETLIST")
+                .map_err(|_| eyre::eyre!("CIRCUIT=netlist needs CIRCUIT_NETLIST"))?;
+            ExactLocalPlacer::from_netlist(chain_from_env(NorNetlist::from_text(&text)?)?)
         }
         _ => ExactLocalPlacer::new(&circuit_graph(&circuit)?)?,
     }
@@ -3746,6 +3757,38 @@ fn egraph_netlists_compute_the_full_adder() -> eyre::Result<()> {
     Ok(())
 }
 
+/// Synthesis finds a full adder of 9 torches with at most 4 nets alive
+/// between steps, proves none has fewer in 9 steps, and with 11 steps (two
+/// OR stages) gets both outputs a torch shallower than `nor9`.
+#[test]
+fn synthesized_full_adders_stay_buildable() -> eyre::Result<()> {
+    let (inputs, outputs) = full_adder_functions();
+    let nor9 = NorNetlist::from_logic_graph(&full_adder_graph("nor9"))?;
+    let expected = output_functions(&nor9);
+    for (steps, depths) in [(9, [5, 6]), (11, [4, 5])] {
+        let options = SynthesisOptions {
+            steps,
+            max_depth: Some(depths[1]),
+            ..Default::default()
+        };
+        let SynthesisOutcome::Found(found) = synthesize(&inputs, &outputs, &options)? else {
+            panic!("no netlist in {steps} steps");
+        };
+        let netlist = &found.netlist;
+        assert_eq!(output_functions(netlist), expected);
+        assert!(found.proven);
+        assert_eq!(found.torches, 9);
+        let order = construct::gate_order(netlist, GateOrder::NetIndex);
+        assert_eq!(order.len(), steps);
+        let live = live_after_each_step(netlist, &order, &BTreeSet::new());
+        assert!(live.iter().all(|&live| live <= 4), "{live:?}");
+        let found_depths = netlist_depths(netlist);
+        assert!(found_depths["cout"] <= depths[0], "{found_depths:?}");
+        assert!(found_depths["s"] <= depths[1], "{found_depths:?}");
+    }
+    Ok(())
+}
+
 /// Chaining wide NORs keeps every function, leaves no NOR wider than two
 /// signals, and construction places each chain's stages consecutively,
 /// right before the NOR they end in.
@@ -3909,6 +3952,61 @@ fn explore_egraph_netlists() -> eyre::Result<()> {
                 ),
             }
         }
+    }
+    Ok(())
+}
+
+/// Synthesizes full adders that construction can build
+/// (`exact::synthesize`): for each step count in `SYNTH_STEPS` (`9..=13`,
+/// as `lo..=hi`), the fewest torches with at most `SYNTH_LIVE` (4) nets
+/// alive between steps and outputs at most `SYNTH_DEPTH` torches deep (any),
+/// `SYNTH_SECONDS` (120) each. Prints each netlist in the form
+/// `CIRCUIT=netlist CIRCUIT_NETLIST=...` reads (with `CIRCUIT_ORDER=index`):
+/// `cargo test --release --lib synthesize_buildable_full_adders -- --ignored --nocapture`.
+#[test]
+#[ignore = "experiment; run explicitly with --nocapture"]
+fn synthesize_buildable_full_adders() -> eyre::Result<()> {
+    let (inputs, outputs) = full_adder_functions();
+    let range = std::env::var("SYNTH_STEPS").unwrap_or_else(|_| "9..=13".to_owned());
+    let (lo, hi) = range
+        .split_once("..=")
+        .ok_or_else(|| eyre::eyre!("SYNTH_STEPS is lo..=hi"))?;
+    for steps in lo.parse::<usize>()?..=hi.parse::<usize>()? {
+        let options = SynthesisOptions {
+            steps,
+            max_live: env_usize("SYNTH_LIVE", 4),
+            max_depth: std::env::var("SYNTH_DEPTH")
+                .ok()
+                .map(|depth| depth.parse())
+                .transpose()?,
+            time_limit: Duration::from_secs(env_usize("SYNTH_SECONDS", 120) as u64),
+        };
+        let started = Instant::now();
+        let outcome = synthesize(&inputs, &outputs, &options)?;
+        let seconds = started.elapsed().as_secs_f64();
+        let found = match outcome {
+            SynthesisOutcome::Found(found) => found,
+            SynthesisOutcome::Infeasible => {
+                println!("SYNTH steps={steps} none, proven ({seconds:.1}s)");
+                continue;
+            }
+            SynthesisOutcome::Unknown => {
+                println!("SYNTH steps={steps} unknown, out of time ({seconds:.1}s)");
+                continue;
+            }
+        };
+        let netlist = &found.netlist;
+        let order = construct::gate_order(netlist, GateOrder::NetIndex);
+        let none = BTreeSet::new();
+        println!(
+            "SYNTH steps={steps} torches={} proven={} depths={:?} live={:?} continuing={:?} ({seconds:.1}s)\n    {}",
+            found.torches,
+            found.proven,
+            netlist_depths(netlist),
+            live_after_each_step(netlist, &order, &none),
+            continuing_inputs_each_step(netlist, &order, &none),
+            netlist.to_text()
+        );
     }
     Ok(())
 }

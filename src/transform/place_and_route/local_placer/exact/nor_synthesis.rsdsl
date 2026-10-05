@@ -1,0 +1,137 @@
+rsdsl 2;
+model nor_synthesis;
+
+// Exact synthesis of a NOR netlist together with the order construction
+// places it in (synthesis.rs). Step t builds one net from at most two earlier
+// nets: a torch (NOR), or an OR, a stage of a wide NOR on its support block,
+// which only the next step reads (construct.rs, `chained_ors`). Windowed
+// construction fails where too many nets are alive between two steps
+// (docs/egraph_netlists.md, "Why the steps fail"), so that is bounded here
+// rather than screened afterwards.
+
+domain Net: int;                     // the inputs, then the steps in order
+domain Case: int;                    // bit i of a case is input i
+domain Output;
+domain Tick: int;                    // 0..=levels
+
+fact input(Net);
+fact step(Net);
+fact on(Net, Case);                  // an input's value
+fact target(Output, Case);           // an output's value
+
+param max_live: int = 4;
+param max_fan_in: int = 2;
+param levels: int = 16;
+param max_depth: int? = none;
+
+var Nor[t: Net];                     // a torch; otherwise an OR stage
+var Read[j: Net, t: Net];            // step t reads net j
+var V[n: Net, k: Case];
+var Out[o: Output, t: Net];
+
+// Torches on the slowest path from the inputs (at least; enough for a bound).
+@encoding(order)
+int Depth[n: Net] in 0..=levels;
+
+// Net x is alive after step t: placed by then (an input once a step up to
+// t read it) and read by a later step.
+def Placed[x: Net, t: Net] :=
+    (input(x) and any(Read[x, i] for i: Net where step(i) and i <= t))
+    or (not input(x) and x <= t);
+def Live[x: Net, t: Net] := Placed[x, t] and any(Read[x, u] for u: Net where step(u) and u > t);
+
+rule "입력의 값" {
+    forall n: Net, k: Case where input(n) {
+        if on(n, k) { require V[n, k]; } else { require not V[n, k]; }
+    }
+}
+
+rule "앞선 넷만, 한두 개 읽음" {
+    forall j: Net, t: Net where not step(t) or j >= t {
+        require not Read[j, t];
+    }
+    forall t: Net where step(t) {
+        require any(Read[j, t] for j: Net where j < t);
+        require count(Read[j, t] for j: Net where j < t) <= max_fan_in;
+    }
+}
+
+rule "토치는 NOR, 단계는 OR" {
+    forall t: Net, k: Case where step(t) {
+        require V[t, k] <-> (Nor[t] xor any(Read[j, t] and V[j, k] for j: Net where j < t));
+    }
+}
+
+// An OR is a stage of a wide NOR: two signals onto the support block, read
+// by the next step only, which ends the chain with a torch or adds a signal.
+rule "OR 단계는 둘을 합치고 바로 다음 단계만 읽음" {
+    forall t: Net where step(t) {
+        require not Nor[t] -> count(Read[j, t] for j: Net where j < t) >= 2;
+        if step(t + 1) {
+            require not Nor[t] -> Read[t, t + 1];
+        } else {
+            require Nor[t];
+        }
+        forall u: Net where step(u) and u > t + 1 {
+            require not Nor[t] -> not Read[t, u];
+        }
+        // A torch on a chain of one OR is just the NOR of the OR's two.
+        if step(t + 1) {
+            require not Nor[t] and Nor[t + 1] -> count(Read[j, t + 1] for j: Net where j < t + 1) >= 2;
+        }
+    }
+}
+
+// Of two inputs, each is on in some case the other is off in; otherwise one
+// adds nothing (an OR stage repeating a signal of its chain, say).
+rule "입력은 모두 보탬이 됨" {
+    forall t: Net, i: Net, j: Net where step(t) and i < j and j < t {
+        require Read[i, t] and Read[j, t] -> any(V[i, k] and not V[j, k] for k: Case);
+        require Read[i, t] and Read[j, t] -> any(V[j, k] and not V[i, k] for k: Case);
+    }
+}
+
+rule "단계는 모두 쓰임" {
+    forall t: Net where step(t) {
+        require any(Read[t, u] for u: Net where step(u) and u > t) or any(Out[o, t] for o: Output);
+    }
+}
+
+rule "출력은 토치 하나" {
+    forall o: Output {
+        require exactly_one(Out[o, t] for t: Net where step(t));
+    }
+    forall o: Output, t: Net {
+        if step(t) {
+            require Out[o, t] -> Nor[t];
+            forall k: Case {
+                if target(o, k) { require Out[o, t] -> V[t, k]; } else { require Out[o, t] -> not V[t, k]; }
+            }
+        } else {
+            require not Out[o, t];
+        }
+    }
+}
+
+rule "단계 사이에 살아 있는 넷" {
+    forall t: Net where step(t) {
+        require count(Live[x, t] for x: Net where input(x) or x <= t) <= max_live;
+    }
+}
+
+rule "깊이" {
+    forall n: Net where input(n) {
+        require Depth[n] <= 0;
+    }
+    forall j: Net, t: Net where step(t) and j < t {
+        require Read[j, t] and Nor[t] -> Depth[j] < Depth[t];
+        require Read[j, t] -> Depth[j] <= Depth[t];
+    }
+    if has(max_depth) {
+        forall o: Output, t: Net where step(t) {
+            require Out[o, t] -> Depth[t] <= max_depth;
+        }
+    }
+}
+
+minimize count(Nor[t] for t: Net where step(t));

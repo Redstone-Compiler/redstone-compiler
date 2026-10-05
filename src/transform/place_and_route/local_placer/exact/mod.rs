@@ -27,6 +27,7 @@ mod layout;
 mod netlist;
 mod progress;
 mod solver;
+mod synthesis;
 #[cfg(test)]
 mod tests;
 mod tiling;
@@ -47,6 +48,7 @@ pub use egraph::{
 pub use encode::CellKind;
 pub use layout::{ExactLayout, InputPolicy, OutputPolicy};
 pub use netlist::{Net, NetDriver, NetId, NorNetlist};
+pub use synthesis::{synthesize, Synthesis, SynthesisOptions, SynthesisOutcome};
 pub use tiling::assemble_chain;
 pub use timing::{
     analyze as analyze_timing, analyze_from as analyze_timing_from, depth_bounds, Timing,

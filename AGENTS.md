@@ -20,6 +20,7 @@
 - Full-adder tiles that chain into n-bit ripple-carry adders (`CarryTiling`): `docs/carry_tiles.md`
 - Critical paths in redstone ticks: static timing, delay bounds, and timing-first construction and compaction: `docs/timing_driven_placement.md`
 - Equivalent NOR netlists from an e-graph (egg) with exact SAT extraction: `docs/egraph_netlists.md`
+- Exact synthesis of NOR netlists that windowed construction can build (`exact::synthesize`, `nor_synthesis.rsdsl`): `docs/nor_synthesis.md`
 - Solver modeling DSL (rsdsl v2, crate `crates/rsdsl`): design and parity measurements `docs/solver_dsl_design.md`; grammar and language spec `docs/solver_dsl_grammar.md`; the exact placer's model is `src/transform/place_and_route/local_placer/exact/exact_placer.rsdsl` (grounded by `exact/dsl.rs`)
 
 When asked to create or preserve project documentation, add an appropriate file under `docs/` and link it from this file when it is useful for future agents.

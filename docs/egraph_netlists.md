@@ -339,7 +339,12 @@ For the full adder in a 2-wide box:
   - in a box 12-14 high with windows up to 6 slices.
 - The `or_cost` 1 netlist chained on a support block has `nor9`'s
   numbers (4 live nets, 2 continuing inputs). It builds as reliably as
-  `nor9` and compacts about 30 blocks smaller.
+  `nor9` and compacted about 30 blocks smaller on two seeds. More runs
+  (`nor_synthesis.md`) show that compaction varies by seed more than
+  that, though.
+- Exact synthesis within those bounds (`nor_synthesis.md`) proves that no
+  buildable full adder of up to 14 steps has fewer than 9 torches. The
+  chained `or_cost` 1 netlist's depth (4/5) is the best at 9 torches.
 
 ## Next
 
@@ -348,9 +353,11 @@ For the full adder in a 2-wide box:
   `binary`, and place what it finds against the current netlists.
 - Solve the 8-gate netlist in one piece (no windows) to settle whether it
   has a layout in a 2-wide box at all.
-- Screen extractions by live nets and continuing inputs along the
-  construction order (at most 4 and 2), or put both bounds into extraction,
-  so it only proposes netlists construction can place.
+- Screening extractions by live nets and continuing inputs is superseded:
+  `nor_synthesis.md` synthesizes within those bounds directly. Listing
+  an e-graph's netlists one by one was tried first and found only 8 in a
+  minute, because a NOR's ORs can be nested and padded with redundant
+  inputs in many ways.
 - In construction, a step that fails could first place the gate without
   observing its output (seconds), then route the output out in a second
   solve.
