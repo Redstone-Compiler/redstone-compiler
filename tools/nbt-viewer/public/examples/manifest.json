@@ -149,6 +149,13 @@
     "outputsPath": "examples/full-adder-exact-optimized-2x8x8.outputs.json"
   },
   {
+    "kind": "snapshot",
+    "name": "full-adder-exact-steps.rsnap",
+    "file": "full-adder-exact-steps.rsnap",
+    "path": "examples/full-adder-exact-steps.rsnap",
+    "size": 39979
+  },
+  {
     "kind": "nbt",
     "name": "full-adder-right-inputs-2x14x10.nbt",
     "file": "full-adder-right-inputs-2x14x10.nbt",
