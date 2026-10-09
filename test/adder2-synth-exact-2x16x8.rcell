@@ -1,0 +1,44 @@
+rcell 1;
+cell "exact-adder2-synth" size [2, 16, 8] {
+  start settled;
+  glyph "P" = repeater toward y+ delay 1;
+  glyph "T" = torch on y-;
+  glyph "U" = repeater toward y- delay 1;
+  glyph "V" = torch on x+;
+  glyph "W" = torch on z-;
+  glyph "X" = torch on y+;
+  glyph "Y" = torch on x-;
+
+  input "a0" at [1, 0, 7] on y+;
+  input "a1" at [1, 4, 6] on z-;
+  input "b0" at [0, 1, 1] on x+;
+  input "b1" at [0, 4, 5] on x+;
+  output "c1" at [0, 13, 7];
+  output "s0" at [1, 2, 6];
+  output "s1" at [1, 12, 3];
+
+  plane yz at x=0 {
+    z=7 "r.r#..#r.....V..";
+    z=6 "###r..r#TU#T....";
+    z=5 ".X##.r##U#TV....";
+    z=4 "..WV.#UU#T.rU#Tr";
+    z=3 "#U#...##...##W.#";
+    z=2 ".#.....Vr...r#..";
+    z=1 "........#TUU#...";
+    z=0 "..........##....";
+  }
+
+  plane yz at x=1 {
+    z=7 ".#T....W.Wr#U#..";
+    z=6 "YYY..UU#U##r#W..";
+    z=5 "r...###r#Y.#U#..";
+    z=4 "#r.#...#....#T.r";
+    z=3 "r#TW.......YX#P#";
+    z=2 "#.r#TrU#...r#T#.";
+    z=1 "X##..##....#....";
+  }
+
+  expect "c1" = ~(~(a1|b1)|~(~(~(a1|~(a1|b1))|~(b1|~(a1|b1)))|(~(~(a0)|~(b0|~(a0)))|~(a1|b1))));
+  expect "s0" = ~(~(~(a0)|~(b0|~(a0)))|~(b0|~(b0|~(a0))));
+  expect "s1" = ~(~(~(~(a1|~(a1|b1))|~(b1|~(a1|b1)))|~(~(~(a1|~(a1|b1))|~(b1|~(a1|b1)))|(~(~(a0)|~(b0|~(a0)))|~(a1|b1))))|~(~(~(a0)|~(b0|~(a0)))|~(~(~(a1|~(a1|b1))|~(b1|~(a1|b1)))|(~(~(a0)|~(b0|~(a0)))|~(a1|b1)))));
+}

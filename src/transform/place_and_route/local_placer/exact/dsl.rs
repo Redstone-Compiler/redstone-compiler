@@ -103,7 +103,8 @@ struct Observation {
     class: usize,
     /// Candidate observation cells.
     cells: Vec<usize>,
-    /// Observed on a block: the carry out of a tile (`CarryTiling`).
+    /// Observed on a block: the carry out of a tile (`CarryTiling`), or a
+    /// net in `ExactPlacerConfig::solid_observations`.
     solid: bool,
 }
 
@@ -272,18 +273,19 @@ impl Prepared {
         let last = config.dim.0 - 1;
         for ((name, net, positions), symbol) in requested.into_iter().zip(symbols) {
             // The carry out sits on the tile's last X slice.
-            let solid = config
+            let carry_out = config
                 .carry
                 .as_ref()
                 .is_some_and(|carry| carry.output == name);
+            let solid = carry_out || config.solid_observations.contains(&name);
             let positions = match positions {
-                Some(positions) if solid => Some(
+                Some(positions) if carry_out => Some(
                     positions
                         .into_iter()
                         .filter(|position| position.0 == last)
                         .collect(),
                 ),
-                None if solid => Some(
+                None if carry_out => Some(
                     (0..config.dim.2)
                         .flat_map(|z| (0..config.dim.1).map(move |y| Position(last, y, z)))
                         .collect(),
@@ -488,12 +490,30 @@ impl Prepared {
                     IValue::member("Repeater", vec![IValue::sym(direction_name(direction))])
                 }
                 CellKind::Switch(attach) => {
-                    let Some(&(_, _, net)) = self
+                    // The input whose switch this is: the one with a site
+                    // here, and of several, the one with no other site (a
+                    // placed switch kept fixed while another input is new).
+                    let owners = self
                         .sites
                         .iter()
-                        .find(|&&(c, a, _)| c == cell && a == attach)
-                    else {
-                        bail!("fixed cell {position:?} cannot hold {kind:?}");
+                        .filter(|&&(c, a, _)| c == cell && a == attach)
+                        .map(|&(_, _, net)| net)
+                        .collect::<Vec<_>>();
+                    let only_here =
+                        |net: NetId| self.sites.iter().filter(|site| site.2 == net).count() == 1;
+                    let net = match owners[..] {
+                        [] => bail!("fixed cell {position:?} cannot hold {kind:?}"),
+                        [net] => net,
+                        _ => match owners
+                            .iter()
+                            .filter(|&&net| only_here(net))
+                            .collect::<Vec<_>>()[..]
+                        {
+                            [&net] => net,
+                            _ => {
+                                bail!("fixed switch at {position:?} could belong to several inputs")
+                            }
+                        },
                     };
                     IValue::member(
                         "Switch",

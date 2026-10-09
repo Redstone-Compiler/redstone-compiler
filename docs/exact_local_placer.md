@@ -607,7 +607,10 @@ from 8 to 6 but raises the mux from 6 to 8, so it was not adopted;
 smallest-cone-first with early outputs (see above) reaches the same 6 for the
 adder without hurting the mux, which has a single output. Circuits much
 beyond six live nets should still be split into local cells by global
-placement.
+placement. (2026-10-06: a synthesized 8-torch netlist with at most 4 live
+nets builds the 4:1 mux on its second attempt, and a synthesized 14-torch
+2-bit adder compacts about a fifth smaller than `adder2-nor`;
+see `nor_synthesis.md`.)
 
 **Netlist quality matters more than flat versus split (2026-10-04).** The
 2-bit adder above comes from expressions, so XOR and AND decomposition

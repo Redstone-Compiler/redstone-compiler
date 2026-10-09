@@ -1,0 +1,86 @@
+rsdsl 2;
+model egraph_extract;
+
+// Exact extraction of a NOR netlist from a saturated Boolean e-graph
+// (egraph.rs). Every e-class is a function of the inputs; its nodes are the
+// ways to build it from other classes: an input, a NOT of one class (a
+// torch), or an OR of two (dust and blocks, free). Picking one node in every
+// class the outputs need gives a netlist; shared classes are built once.
+
+domain Class: int;
+domain Node: int;
+domain Tick: int;                    // 0..=levels
+
+fact node_class(Node, Class);        // every buildable node and its class
+fact edge(Node, Class, Class);       // a node, its class, and a child class
+fact gate(Node);                     // a NOT: one torch, one tick
+fact or_node(Node);                  // an OR: one more input on a NOR
+fact root(Class);                    // an output
+
+param levels: int = 16;
+param max_depth: int? = none;
+param gate_cost: int = 1;
+param depth_cost: int = 0;
+// Wide NORs are hard to build in a narrow box: every input is a signal that
+// has to reach the torch's block, so `or_cost` charges each OR node.
+param or_cost: int = 0;
+// Every NOR reads at most two signals: an OR node may only join classes that
+// are not themselves built as ORs.
+param binary: bool = false;
+
+var Pick[n: Node];
+var Need[c: Class];
+
+// Ticks from the inputs: a NOT adds one, an OR none. Children come strictly
+// before a NOT, so picks cannot loop through torches; an OR loop would join
+// classes with the same function, which the e-graph already merged (self
+// loops are left out of `edge`).
+@encoding(order)
+int Depth[c: Class] in 0..=levels;
+
+// An output is a torch: the netlist names a gate for it (an OR output would
+// become a NOR and a NOT there, two torches the count would miss).
+rule "출력은 만들어야 하고, 토치임" {
+    forall c: Class where root(c) {
+        require Need[c];
+        require any(Pick[n] for (n, k) in node_class where k == c and gate(n));
+    }
+}
+
+rule "만들 클래스는 노드 하나를 고름" {
+    forall c: Class {
+        require Need[c] -> any(Pick[n] for (n, k) in node_class where k == c);
+        require at_most_one(Pick[n] for (n, k) in node_class where k == c);
+    }
+}
+
+rule "고른 노드의 자식도 만들고, 더 먼저 도착함" {
+    forall (n, k, c) in edge {
+        require Pick[n] -> Need[c];
+        if gate(n) {
+            require Pick[n] -> Depth[c] < Depth[k];
+        } else {
+            require Pick[n] -> Depth[c] <= Depth[k];
+        }
+    }
+}
+
+rule "2입력 NOR만" {
+    if binary {
+        forall (n, k, c) in edge where or_node(n) {
+            require Pick[n] -> not any(Pick[m] for (m, j) in node_class where j == c and or_node(m));
+        }
+    }
+}
+
+rule "출력 깊이 상한" {
+    if has(max_depth) {
+        forall c: Class where root(c) {
+            require Depth[c] <= max_depth;
+        }
+    }
+}
+
+minimize gate_cost * count(Pick[n] for n: Node where gate(n))
+       + or_cost * count(Pick[n] for n: Node where or_node(n))
+       + depth_cost * count(Depth[c] >= t for c: Class, t: Tick where root(c) and t >= 1);

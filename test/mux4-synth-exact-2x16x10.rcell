@@ -1,0 +1,45 @@
+rcell 1;
+cell "exact-mux4-synth" size [2, 16, 10] {
+  start settled;
+  glyph "P" = repeater toward y+ delay 1;
+  glyph "T" = repeater toward y- delay 1;
+  glyph "U" = torch on y+;
+  glyph "V" = torch on y-;
+  glyph "W" = torch on x+;
+  glyph "X" = torch on z-;
+  glyph "Y" = torch on x-;
+
+  input "a" at [1, 0, 6] on y+;
+  input "b" at [0, 2, 9] on y+;
+  input "c" at [1, 8, 9] on x-;
+  input "d" at [1, 11, 7] on x-;
+  input "s0" at [0, 1, 6] on x+;
+  input "s1" at [1, 6, 5] on y+;
+  output "out" at [0, 14, 8];
+
+  plane yz at x=0 {
+    z=9 "#r.#..rT#Tr.....";
+    z=8 "r#VT#.##U##T#VW.";
+    z=7 "#..#r....W.#.r..";
+    z=6 "X..r#T#Tr#...#V.";
+    z=5 "#r.#.#U##..W..r.";
+    z=4 ".#V...#V...r.r#.";
+    z=3 "..r.......U#.#..";
+    z=2 "..#....r#T#r....";
+    z=1 ".......#.#.#....";
+  }
+
+  plane yz at x=1 {
+    z=9 "...XT#V....r#Vr#";
+    z=8 "#VT##..XTTT#..#r";
+    z=7 "..#....####....#";
+    z=6 ".#.#...X.Y#r...X";
+    z=5 "rT#V...#Prr#...#";
+    z=4 "##X...r.####...X";
+    z=3 "..#Vr.#...rr.YT#";
+    z=2 "....#VT#..##TT#V";
+    z=1 "......#.....##..";
+  }
+
+  expect "out" = ~(~(s1|~(s1|(~(a|s0)|~(b|~(s0)))))|(~(c|(s0|~(s1|(~(a|s0)|~(b|~(s0))))))|~(~(s0)|(d|~(s1|(~(a|s0)|~(b|~(s0))))))));
+}

@@ -1,0 +1,63 @@
+{
+  "format": "redstone-compiler.outputs.v1",
+  "inputs": [
+    {
+      "name": "a0",
+      "position": [
+        1,
+        0,
+        7
+      ]
+    },
+    {
+      "name": "a1",
+      "position": [
+        1,
+        4,
+        6
+      ]
+    },
+    {
+      "name": "b0",
+      "position": [
+        0,
+        1,
+        1
+      ]
+    },
+    {
+      "name": "b1",
+      "position": [
+        0,
+        4,
+        5
+      ]
+    }
+  ],
+  "outputs": [
+    {
+      "name": "c1",
+      "position": [
+        0,
+        13,
+        7
+      ]
+    },
+    {
+      "name": "s0",
+      "position": [
+        1,
+        2,
+        6
+      ]
+    },
+    {
+      "name": "s1",
+      "position": [
+        1,
+        12,
+        3
+      ]
+    }
+  ]
+}
