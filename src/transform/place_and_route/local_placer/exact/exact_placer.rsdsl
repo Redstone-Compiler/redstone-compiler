@@ -18,6 +18,8 @@ domain Case: int;      // input cases; bit i of a case is input i
 domain Class;          // signal vocabulary, one class per Boolean function
 domain Output;
 domain Tick: int;      // arrival times in redstone ticks (0..=stage_levels)
+domain Sym: int;       // box mirrors in use (see the mirror rule)
+domain Order: int;     // positions in the order the mirror rule compares cells
 
 fact on(Class, Case);                  // class is powered in that case
 fact unpowered(Class);                 // the constant-off class
@@ -61,6 +63,9 @@ fact output_delay(Output, Tick);
 // (the two agree in the settled cases, where the loop is closed) and from the
 // stage order (the latch's loop runs through it).
 fact cut(n: Class, m: Class);
+// Mirror `g` maps cell `c`, the `i`-th compared, to cell `m`. Only filled
+// for a symmetric instance (`ExactPlacerConfig::box_symmetry`).
+fact mirror(g: Sym, i: Order, c: Cell, m: Cell);
 
 // A repeater may point out of the box only where it drives an output into the
 // neighbor cell, or where one is already fixed. Elsewhere its output would
@@ -428,6 +433,27 @@ rule "대칭 제거: 가루·리피터는 기여 원천을 하나만 고름" {
             require at_most_one(Contrib(s, t, f, to)
                                 for (s, t, f, to) in Feeds where t == c and to != SolidSink);
         }
+    }
+}
+
+// The rules do not tell east from west or north from south: a layout
+// mirrored along x or y is a layout too, when nothing else is placed
+// asymmetrically (default sites, nothing fixed). Comparing which cells are
+// filled, in one fixed order for every mirror, keeps a lexicographically
+// least layout of each mirror family (the lex-leader constraint). Every
+// family keeps a member, so the fewest blocks and every proof that no
+// layout exists stay the same.
+var Same[g: Sym, i: Order];
+
+rule "대칭 제거: 상자를 뒤집은 배치 가운데 사전순으로 앞선 것만" {
+    forall (g, i, c, m) in mirror {
+        let x = not Kind[c] is Air;
+        let y = not Kind[m] is Air;
+        if i == 0 {
+            require Same[g, i];
+        }
+        require Same[g, i] and x -> y;
+        require Same[g, i] and (x <-> y) -> Same[g, i + 1];
     }
 }
 
