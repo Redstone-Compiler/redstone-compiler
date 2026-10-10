@@ -1106,7 +1106,8 @@ fn diagnose_full_adder_construct_and_compact() -> eyre::Result<()> {
 /// Compacts an existing full-adder RCELL (generated or hand-made) further.
 /// Knobs: `RECOMPACT_SOURCE=<rcell path>`, `RECOMPACT_WRITE=<path prefix>`,
 /// `RECOMPACT_CIRCUIT=<name>` (another `circuit_graph` circuit instead of the
-/// full adder), `RECOMPACT_SECONDS`, `RECOMPACT_WORKERS`, `RECOMPACT_RADIUS`,
+/// full adder), `RECOMPACT_SEQ=<name>` (a `sequential_netlist` cell),
+/// `RECOMPACT_SECONDS`, `RECOMPACT_WORKERS`, `RECOMPACT_RADIUS`,
 /// `RECOMPACT_ATTEMPT_SECONDS`, `RECOMPACT_CONTINUE=0` (restart each
 /// block-reduction pass after a gain), `RECOMPACT_ROUNDS=0`,
 /// `RECOMPACT_REDUCTION_AXES=1` (Y windows only), `RECOMPACT_GIVEN=0` (no
@@ -1124,20 +1125,28 @@ fn recompact_full_adder_rcell() -> eyre::Result<()> {
     let mut layout = ExactLayout::from_rcell(&document)?;
     // Another circuit's cell keeps its own output names and has no face policy.
     let circuit = std::env::var("RECOMPACT_CIRCUIT").ok();
-    if circuit.is_none() {
+    if circuit.is_none() && std::env::var("RECOMPACT_SEQ").is_err() {
         for (name, _) in layout.outputs.iter_mut() {
             if name == "sum" {
                 *name = "s".to_owned();
             }
         }
     }
-    let graph = match &circuit {
-        Some(circuit) => circuit_graph(circuit)?,
-        None => full_adder_graph("nor9"),
-    };
-    let placer = ExactLocalPlacer::new(&graph)?.with_name(format!(
+    // `RECOMPACT_SEQ=<name>`: a sequential cell (`sequential_netlist`).
+    let sequential = std::env::var("RECOMPACT_SEQ").ok();
+    let placer = match (&sequential, &circuit) {
+        (Some(name), _) => {
+            ExactLocalPlacer::from_netlist(NorNetlist::from_text(sequential_netlist(name)?)?)
+        }
+        (None, Some(circuit)) => ExactLocalPlacer::new(&circuit_graph(circuit)?)?,
+        (None, None) => ExactLocalPlacer::new(&full_adder_graph("nor9"))?,
+    }
+    .with_name(format!(
         "exact-{}",
-        circuit.as_deref().unwrap_or("full-adder")
+        sequential
+            .as_deref()
+            .or(circuit.as_deref())
+            .unwrap_or("full-adder")
     ));
     let compaction = CompactionConfig {
         workers: env_usize("RECOMPACT_WORKERS", 8),
@@ -1147,7 +1156,7 @@ fn recompact_full_adder_rcell() -> eyre::Result<()> {
         time_limit: Some(Duration::from_secs(
             env_usize("RECOMPACT_SECONDS", 1200) as u64
         )),
-        output_policies: match circuit {
+        output_policies: match circuit.as_ref().or(sequential.as_ref()) {
             Some(_) => BTreeMap::new(),
             None => [("s".to_owned(), OutputPolicy::MaxYFace)]
                 .into_iter()
@@ -1182,6 +1191,10 @@ fn recompact_full_adder_rcell() -> eyre::Result<()> {
     if let (Some(placement), Ok(prefix)) = (best, std::env::var("RECOMPACT_WRITE")) {
         std::fs::write(format!("{prefix}.rcell"), placement.rcell.to_string())?;
         crate::nbt::NBTRoot::from(&placement.placed.world).save(format!("{prefix}.nbt"));
+        std::fs::write(
+            format!("{prefix}.outputs.json"),
+            serde_json::to_string_pretty(&placement.rcell.interface_json())?,
+        )?;
         println!(
             "RECOMPACT wrote {prefix}.rcell blocks={}",
             placement.block_count
@@ -4099,11 +4112,12 @@ fn exact_d_latch_fixture_follows_and_holds() -> eyre::Result<()> {
     )
 }
 
-/// The falling-edge flip-flop (`test/dff-exact-2x6x4`, 39 blocks, six
+/// The falling-edge flip-flop (`test/dff-exact-2x6x4`, 29 blocks, six
 /// torches) changes `q` only when `clk` falls, to the `d` it saw while `clk`
 /// was on. It was placed with the D latch fixture fixed as its master
-/// (`SEQ_FIX_RCELL`); without that hint, one solve finds no flip-flop in
-/// 30 minutes (`docs/sequential_exact_cells.md`).
+/// (`SEQ_FIX_RCELL`, 39 blocks), then compacted with nothing fixed
+/// (`RECOMPACT_SEQ=dff-neg`). Without that hint, one solve finds no
+/// flip-flop in 30 minutes (`docs/sequential_exact_cells.md`).
 #[test]
 fn exact_falling_edge_flip_flop_fixture_samples_on_the_falling_edge() -> eyre::Result<()> {
     run_latch_fixture(
@@ -4128,7 +4142,8 @@ fn exact_falling_edge_flip_flop_fixture_samples_on_the_falling_edge() -> eyre::R
 /// `SEQ_CIRCUIT=rs-latch|rs-latch-both|d-latch|d-latch-mux|dff|dff-mux|dff-neg` (or
 /// `SEQ_NETLIST=` text),
 /// `SEQ_SECONDS` (120) per box, `SEQ_WORKERS` (8), `SEQ_ALL=1` to try every
-/// box, `SEQ_REFINEMENTS` (2000) simulator rejections per worker,
+/// box, `SEQ_REFINEMENTS` (2000) simulator rejections per worker, `SEQ_SYM=1`
+/// for the box-mirror rule,
 /// `SEQ_WRITE=<prefix>` for `.rcell`, `.nbt` (in its first settled case with
 /// the inputs off) and `.outputs.json`, `SEQ_MODEL_FILE` for another
 /// model:
@@ -4179,6 +4194,7 @@ fn explore_sequential_cells() -> eyre::Result<()> {
         config.time_limit = Some(Duration::from_secs(env_usize("SEQ_SECONDS", 120) as u64));
         config.optimize = std::env::var("SEQ_OPTIMIZE").as_deref() != Ok("0");
         config.model_file = std::env::var("SEQ_MODEL_FILE").ok().map(Into::into);
+        config.box_symmetry = std::env::var("SEQ_SYM").as_deref() == Ok("1");
         // Latch layouts that are consistent in every settled case can still
         // fail a transition, so the simulator rejects many more of them.
         config.max_refinements = env_usize("SEQ_REFINEMENTS", 2000);

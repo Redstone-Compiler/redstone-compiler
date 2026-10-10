@@ -161,8 +161,12 @@ hold, and reset, or through clock edges:
 - `test/d-latch-exact-2x3x4.{rcell,nbt,outputs.json}`
   (`exact_d_latch_fixture_follows_and_holds`)
 - `test/dff-exact-2x6x4.{rcell,nbt,outputs.json}`: the falling-edge
-  flip-flop, 39 blocks, placed with the D latch fixed as its master
-  (`exact_falling_edge_flip_flop_fixture_samples_on_the_falling_edge`)
+  flip-flop, 29 blocks
+  (`exact_falling_edge_flip_flop_fixture_samples_on_the_falling_edge`). It
+  was placed with the D latch fixed as its master (39 blocks), then
+  compacted with nothing fixed (`RECOMPACT_SEQ=dff-neg`, 178 s, 39 → 29;
+  no slice could go). With the master kept fixed, minimizing alone also
+  reaches 29, proven fewest for that master (8.7 s).
 
 Both are in the viewer's examples.
 

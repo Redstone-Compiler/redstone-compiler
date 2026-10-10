@@ -21,7 +21,7 @@ use super::encode::{
 use super::netlist::{NetId, NorNetlist};
 use super::{CarryTiling, ExactPlacerConfig};
 use crate::world::block::Direction;
-use crate::world::position::Position;
+use crate::world::position::{DimSize, Position};
 
 const SOURCE: &str = include_str!("exact_placer.rsdsl");
 
@@ -405,6 +405,11 @@ impl Prepared {
                 self.observations.iter().map(|o| IValue::sym(&o.symbol)),
             )
             .domain("Tick", (0..=config.stage_levels).map(IValue::from));
+        let mirrors = mirror_tuples(config);
+        let orders = mirrors.iter().map(|&(_, i, _, _)| i + 1).max().unwrap_or(0);
+        instance
+            .domain("Sym", (0..3usize).map(IValue::from))
+            .domain("Order", (0..=orders).map(IValue::from));
         for fact in [
             "on",
             "unpowered",
@@ -424,8 +429,20 @@ impl Prepared {
             "decreasing",
             "output_delay",
             "cut",
+            "mirror",
         ] {
             instance.fact(fact);
+        }
+        for &(g, i, c, m) in &mirrors {
+            instance.row(
+                "mirror",
+                vec![
+                    g.into(),
+                    i.into(),
+                    cell_value(geometry, geometry.index(c)),
+                    cell_value(geometry, geometry.index(m)),
+                ],
+            );
         }
         for &(next, stored) in &self.cuts {
             instance.row(
@@ -826,6 +843,50 @@ impl Prepared {
         }
         Ok(encoding)
     }
+}
+
+/// The model's `mirror` facts: for the x, y, and xy mirrors of the box, each
+/// cell that a mirror moves, numbered in one order (by height, then y, then
+/// x). Empty unless `box_symmetry` is on and the instance is symmetric.
+fn mirror_tuples(config: &ExactPlacerConfig) -> Vec<(usize, usize, Position, Position)> {
+    let symmetric = config.box_symmetry
+        && config.input_sites.is_empty()
+        && config.output_sites.is_empty()
+        && config.observations.is_none()
+        && config.fixed_cells.is_empty()
+        && config.given_signals.is_empty()
+        && config.blocked.is_empty()
+        && config.carry.is_none()
+        && config.driving_outputs.is_empty();
+    if !symmetric {
+        return Vec::new();
+    }
+    let DimSize(dx, dy, dz) = config.dim;
+    let mirrors: [(usize, bool, bool); 3] = [(0, true, false), (1, false, true), (2, true, true)];
+    let mut tuples = Vec::new();
+    for (g, flip_x, flip_y) in mirrors {
+        if (flip_x && dx < 2) || (flip_y && dy < 2) {
+            continue;
+        }
+        let mut order = 0;
+        for z in 0..dz {
+            for y in 0..dy {
+                for x in 0..dx {
+                    let c = Position(x, y, z);
+                    let m = Position(
+                        if flip_x { dx - 1 - x } else { x },
+                        if flip_y { dy - 1 - y } else { y },
+                        z,
+                    );
+                    if c != m {
+                        tuples.push((g, order, c, m));
+                        order += 1;
+                    }
+                }
+            }
+        }
+    }
+    tuples
 }
 
 /// Grounds the configured model (the built-in one unless `model_file` is set).
