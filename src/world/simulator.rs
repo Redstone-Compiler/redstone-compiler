@@ -1353,8 +1353,11 @@ impl Simulator {
     }
 
     fn cobble_power_counts(&self, target: Position) -> (usize, usize) {
-        let mut sources = 0;
-        let mut hard_sources = 0;
+        // An external input terminal (`drive_inputs_with_limits`) counts as
+        // one hard source; it has no block in the world to find below.
+        let external = usize::from(self.cobble_is_driven_externally(target));
+        let mut sources = external;
+        let mut hard_sources = external;
         for input in &self.cobble_power_inputs[target.index(&self.world.size).0] {
             let active = match self.world[input.source].kind {
                 BlockKind::Torch { is_on }
@@ -1372,7 +1375,17 @@ impl Simulator {
         (sources, hard_sources)
     }
 
+    /// A block driven as an external input terminal
+    /// (`drive_inputs_with_limits`): its power source is recorded under its
+    /// own position, since nothing in the world drives it.
+    fn cobble_is_driven_externally(&self, target: Position) -> bool {
+        self.hard_power_sources.contains(&(target, target))
+    }
+
     fn cobble_disables_attached_torch(&self, target: Position) -> bool {
+        if self.cobble_is_driven_externally(target) {
+            return true;
+        }
         self.cobble_power_inputs[target.index(&self.world.size).0]
             .iter()
             .any(|input| {
@@ -3557,6 +3570,86 @@ mod test {
             "sequential switch toggles should settle to the same state as a fresh recompute"
         );
 
+        Ok(())
+    }
+
+    /// A block driven as an external input terminal powers what a lever
+    /// attached to it would: the torch attached to it turns off, and dust on
+    /// top of it turns on.
+    #[test]
+    fn externally_driven_block_powers_its_torch_and_dust_like_a_lever() -> eyre::Result<()> {
+        let block = Position(1, 1, 1);
+        let torch = Position(2, 1, 1);
+        let dust = Position(1, 1, 2);
+        let lever = Position(0, 1, 1);
+        let cobble = Block {
+            kind: BlockKind::Cobble {
+                on_count: 0,
+                on_base_count: 0,
+            },
+            direction: Direction::None,
+        };
+        let mut blocks = vec![
+            (Position(1, 1, 0), cobble),
+            (block, cobble),
+            (
+                torch,
+                Block {
+                    kind: BlockKind::Torch { is_on: true },
+                    direction: Direction::West,
+                },
+            ),
+            (
+                dust,
+                Block {
+                    kind: BlockKind::Redstone {
+                        on_count: 0,
+                        state: 0,
+                        strength: 0,
+                    },
+                    direction: Direction::None,
+                },
+            ),
+        ];
+        let observe = |sim: &Simulator| {
+            (
+                sim.world()[torch].kind.is_powered(),
+                sim.world()[dust].kind.is_powered(),
+            )
+        };
+        let world = World {
+            size: DimSize(4, 3, 4),
+            blocks: blocks.clone(),
+        };
+        let mut driven = Simulator::from_with_limits_and_trace(&world, 256, 50_000, 0)
+            .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
+        assert_eq!(observe(&driven), (true, false));
+        driven.drive_inputs_with_limits(vec![(block, true)], 256, 50_000)?;
+
+        blocks.push((
+            lever,
+            Block {
+                kind: BlockKind::Switch { is_on: false },
+                direction: Direction::East,
+            },
+        ));
+        let world = World {
+            size: DimSize(4, 3, 4),
+            blocks,
+        };
+        let mut levered = Simulator::from_with_limits_and_trace(&world, 256, 50_000, 0)
+            .map_err(|error| eyre::eyre!(error.message().to_owned()))?;
+        levered.change_state_with_limits(vec![(lever, true)], 256, 50_000)?;
+
+        assert_eq!(observe(&levered), (false, true));
+        assert_eq!(observe(&driven), observe(&levered));
+        assert!(driven.world()[block].kind.is_powered());
+
+        // Released, the block lets the torch back on and the dust off.
+        driven.advance_idle_cycles(MANUAL_INPUT_IDLE_CYCLES)?;
+        driven.drive_inputs_with_limits(vec![(block, false)], 256, 50_000)?;
+        assert_eq!(observe(&driven), (true, false));
+        assert!(!driven.world()[block].kind.is_powered());
         Ok(())
     }
 
