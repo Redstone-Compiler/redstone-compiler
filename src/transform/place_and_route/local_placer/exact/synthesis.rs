@@ -18,7 +18,6 @@ use eyre::{ensure, eyre};
 use rsdsl::{GroundOptions, IValue, Instance, Model};
 
 use super::cnf::Cnf;
-use super::egraph::truth_table;
 use super::netlist::{Net, NetDriver, NorNetlist};
 use super::solver::{SatSolver, SolveResult, StopSignal};
 
@@ -75,7 +74,7 @@ pub enum SynthesisOutcome {
 }
 
 /// The netlist of `options.steps` steps computing `outputs` (expressions over
-/// `inputs`, as in `Exploration::new`) with the fewest torches, within the
+/// `inputs`, see `truth_table`) with the fewest torches, within the
 /// live and depth bounds. Construction should take its nets in index order
 /// (`GateOrder::NetIndex`), the order the bound holds for.
 pub fn synthesize(
@@ -280,4 +279,108 @@ fn check_outputs(
         }
     }
     Ok(())
+}
+
+/// The truth table of `expression` over `inputs`: bit `k` is its value in
+/// case `k`, where bit `i` of `k` is `inputs[i]`. The expression uses input
+/// names, parentheses, and `~ & ^ |`, tightest first.
+pub fn truth_table(inputs: &[&str], expression: &str) -> eyre::Result<u64> {
+    ensure!(inputs.len() <= 6, "a truth table holds at most 6 inputs");
+    let cases = 1usize << inputs.len();
+    let mut parser = Parser {
+        text: expression.as_bytes(),
+        at: 0,
+        inputs,
+        cases,
+        full: if cases == 64 {
+            u64::MAX
+        } else {
+            (1u64 << cases) - 1
+        },
+    };
+    let table = parser.binary(0)?;
+    parser.skip();
+    ensure!(
+        parser.at == parser.text.len(),
+        "unexpected `{}` in `{expression}`",
+        &expression[parser.at..]
+    );
+    Ok(table)
+}
+
+/// Recursive descent over `truth_table`'s expressions, one table per term.
+struct Parser<'a> {
+    text: &'a [u8],
+    at: usize,
+    inputs: &'a [&'a str],
+    cases: usize,
+    full: u64,
+}
+
+impl Parser<'_> {
+    /// Binary operators from the loosest: `|`, `^`, `&`.
+    const LEVELS: [u8; 3] = [b'|', b'^', b'&'];
+
+    fn skip(&mut self) {
+        while self.text.get(self.at).is_some_and(u8::is_ascii_whitespace) {
+            self.at += 1;
+        }
+    }
+
+    fn binary(&mut self, level: usize) -> eyre::Result<u64> {
+        if level == Self::LEVELS.len() {
+            return self.unary();
+        }
+        let mut table = self.binary(level + 1)?;
+        loop {
+            self.skip();
+            if self.text.get(self.at) != Some(&Self::LEVELS[level]) {
+                return Ok(table);
+            }
+            self.at += 1;
+            let right = self.binary(level + 1)?;
+            table = match Self::LEVELS[level] {
+                b'|' => table | right,
+                b'^' => table ^ right,
+                _ => table & right,
+            };
+        }
+    }
+
+    fn unary(&mut self) -> eyre::Result<u64> {
+        self.skip();
+        match self.text.get(self.at) {
+            Some(b'~') => {
+                self.at += 1;
+                Ok(!self.unary()? & self.full)
+            }
+            Some(b'(') => {
+                self.at += 1;
+                let table = self.binary(0)?;
+                self.skip();
+                ensure!(self.text.get(self.at) == Some(&b')'), "missing `)`");
+                self.at += 1;
+                Ok(table)
+            }
+            _ => {
+                let start = self.at;
+                while self
+                    .text
+                    .get(self.at)
+                    .is_some_and(|&c| c.is_ascii_alphanumeric() || c == b'_')
+                {
+                    self.at += 1;
+                }
+                let name = std::str::from_utf8(&self.text[start..self.at])?;
+                let index = self
+                    .inputs
+                    .iter()
+                    .position(|&input| input == name)
+                    .ok_or_else(|| eyre!("unknown input `{name}`"))?;
+                Ok((0..self.cases)
+                    .filter(|case| case >> index & 1 == 1)
+                    .fold(0, |table, case| table | 1 << case))
+            }
+        }
+    }
 }

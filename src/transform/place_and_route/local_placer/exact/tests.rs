@@ -278,10 +278,10 @@ fn gate_order_from_env(name: &str) -> GateOrder {
     }
 }
 
-/// With `EGRAPH_CHAIN=<n>`, NORs of more than `n` signals are built in
+/// With `CIRCUIT_CHAIN=<n>`, NORs of more than `n` signals are built in
 /// stages on one support block (`NorNetlist::chain_wide_gates`).
 fn chain_from_env(netlist: NorNetlist) -> eyre::Result<NorNetlist> {
-    match std::env::var("EGRAPH_CHAIN") {
+    match std::env::var("CIRCUIT_CHAIN") {
         Ok(fan_in) => netlist.chain_wide_gates(fan_in.parse()?),
         Err(_) => Ok(netlist),
     }
@@ -2137,7 +2137,7 @@ fn print_attempt_times(prefix: &str, report: &CompactionReport) {
 }
 
 /// Construction plus compaction for small circuits:
-/// `CIRCUIT=mux2|half-adder|adder2|adder2-nor|mux4|full-adder|egraph-full-adder CIRCUIT_WIDTH=2
+/// `CIRCUIT=mux2|half-adder|adder2|adder2-nor|mux4|full-adder|netlist CIRCUIT_WIDTH=2
 /// CIRCUIT_HEIGHT=10 CIRCUIT_MAX_WINDOW=4 CIRCUIT_STEP_SECONDS=60 CIRCUIT_RESTART_SECONDS=600
 /// CIRCUIT_COMPACT_SECONDS=300
 /// CIRCUIT_SEED=1 CIRCUIT_WORKERS=8 CIRCUIT_WRITE=<prefix>`; `CIRCUIT_NETLIST_ONLY=1` stops
@@ -2155,33 +2155,10 @@ fn diagnose_construct_circuit() -> eyre::Result<()> {
         .with_test_writer()
         .try_init();
     let circuit = std::env::var("CIRCUIT").unwrap_or_else(|_| "mux2".to_owned());
-    // `egraph-full-adder`: the cheapest netlist the e-graph holds
-    // (`Exploration::extract_exact`) within `EGRAPH_DEPTH` (any), with
-    // `EGRAPH_OR_COST` (0) per OR node, only 2-input NORs with
-    // `EGRAPH_BINARY=1`, wide NORs built from OR nets with `EGRAPH_SPLIT=1`,
-    // and NORs of more than `EGRAPH_CHAIN` signals built in stages on one
-    // support block (`NorNetlist::chain_wide_gates`).
     let placer = match circuit.as_str() {
-        "egraph-full-adder" => {
-            let (inputs, outputs) = full_adder_functions();
-            let exploration = Exploration::new(&inputs, &outputs, Limits::default())?;
-            let options = ExtractOptions {
-                max_depth: std::env::var("EGRAPH_DEPTH")
-                    .ok()
-                    .map(|depth| depth.parse::<usize>())
-                    .transpose()?,
-                or_cost: env_usize("EGRAPH_OR_COST", 0),
-                binary: std::env::var("EGRAPH_BINARY").as_deref() == Ok("1"),
-                split_wide: std::env::var("EGRAPH_SPLIT").as_deref() == Ok("1"),
-                ..Default::default()
-            };
-            let extraction = exploration
-                .extract_exact(&options)?
-                .ok_or_else(|| eyre::eyre!("no netlist for {options:?}"))?;
-            ExactLocalPlacer::from_netlist(chain_from_env(extraction.netlist)?)
-        }
         // `netlist`: the netlist in `CIRCUIT_NETLIST`, in `NorNetlist::to_text`'s
-        // form (`screen_egraph_netlists` prints them so), with `EGRAPH_CHAIN`.
+        // form (`synthesize_buildable_circuits` prints them so), with
+        // `CIRCUIT_CHAIN`.
         "netlist" => {
             let text = std::env::var("CIRCUIT_NETLIST")
                 .map_err(|_| eyre::eyre!("CIRCUIT=netlist needs CIRCUIT_NETLIST"))?;
@@ -3707,7 +3684,7 @@ fn report_rcell_timing() -> eyre::Result<()> {
     Ok(())
 }
 
-/// The full adder as functions for the e-graph: `(inputs, outputs)`.
+/// The full adder as output expressions over its inputs: `(inputs, outputs)`.
 fn full_adder_functions() -> (Vec<&'static str>, Vec<(&'static str, &'static str)>) {
     (
         vec!["a", "b", "cin"],
@@ -3723,62 +3700,6 @@ fn output_functions(netlist: &NorNetlist) -> BTreeMap<String, Vec<bool>> {
         .iter()
         .map(|(name, net)| (name.clone(), values[*net].clone()))
         .collect()
-}
-
-/// Netlists extracted from the saturated full adder compute the full adder.
-/// Exact extraction needs fewer gates than the hand-written `nor9` (8, proven
-/// for this e-graph, against 9) and, at the same 9 gates, half its depth;
-/// greedy extraction misses the shared NORs and needs more.
-#[test]
-fn egraph_netlists_compute_the_full_adder() -> eyre::Result<()> {
-    let (inputs, outputs) = full_adder_functions();
-    let exploration = Exploration::new(&inputs, &outputs, Limits::default())?;
-    let nor9 = NorNetlist::from_logic_graph(&full_adder_graph("nor9"))?;
-    let expected = output_functions(&nor9);
-    let greedy = exploration.extract(Weights {
-        gates: 1.0,
-        depth: 0.0,
-    })?;
-    assert_eq!(output_functions(&greedy), expected);
-    let fewest = exploration
-        .extract_exact(&ExtractOptions::default())?
-        .expect("a netlist");
-    assert_eq!(output_functions(&fewest.netlist), expected);
-    assert!(fewest.proven);
-    assert_eq!(fewest.netlist.gates().count(), fewest.cost);
-    assert!(fewest.cost < nor9.gates().count());
-    let within = |depth| ExtractOptions {
-        max_depth: Some(depth),
-        ..Default::default()
-    };
-    let shallow = exploration
-        .extract_exact(&within(3))?
-        .expect("a netlist within 3 gates");
-    assert_eq!(output_functions(&shallow.netlist), expected);
-    assert!(netlist_depths(&shallow.netlist)
-        .values()
-        .all(|&depth| depth <= 3));
-    assert!(exploration.extract_exact(&within(2))?.is_none());
-    // Split, the 8 gates read at most two signals each, OR nets included.
-    let split = exploration
-        .extract_exact(&ExtractOptions {
-            split_wide: true,
-            ..Default::default()
-        })?
-        .expect("a netlist");
-    assert_eq!(output_functions(&split.netlist), expected);
-    assert_eq!(split.netlist.gates().count(), fewest.cost);
-    assert!(split
-        .netlist
-        .nets
-        .iter()
-        .all(|net| net.gate_inputs.len() <= 2));
-    assert!(split
-        .netlist
-        .nets
-        .iter()
-        .any(|net| net.driver == NetDriver::Or));
-    Ok(())
 }
 
 /// The circuits `synthesize_buildable_circuits` takes, as output expressions
@@ -3832,7 +3753,7 @@ fn synthesized_full_adders_stay_buildable() -> eyre::Result<()> {
         assert_eq!(order.len(), steps);
         let live = live_after_each_step(netlist, &order, &BTreeSet::new());
         assert!(live.iter().all(|&live| live <= 4), "{live:?}");
-        let found_depths = netlist_depths(netlist);
+        let found_depths = netlist.output_depths();
         assert!(found_depths["cout"] <= depths[0], "{found_depths:?}");
         assert!(found_depths["s"] <= depths[1], "{found_depths:?}");
     }
@@ -3862,17 +3783,43 @@ fn synthesized_small_circuits_need_fewer_torches() -> eyre::Result<()> {
     Ok(())
 }
 
+/// Synthesis reads its targets as expressions: `~` binds tightest, then
+/// `&`, `^` and `|`; bit `k` of a table is case `k`, bit `i` of `k` input `i`.
+#[test]
+fn synthesis_truth_tables_follow_precedence() -> eyre::Result<()> {
+    use super::synthesis::truth_table;
+    let inputs = ["a", "b", "c"];
+    let table = |expression| truth_table(&inputs, expression);
+    let bit = |case: usize, index: usize| case >> index & 1 == 1;
+    let expected = |f: fn(bool, bool, bool) -> bool| {
+        (0..8usize)
+            .filter(|&case| f(bit(case, 0), bit(case, 1), bit(case, 2)))
+            .fold(0u64, |table, case| table | 1 << case)
+    };
+    assert_eq!(table("a^b^c")?, expected(|a, b, c| a ^ b ^ c));
+    assert_eq!(table("a|b&c")?, expected(|a, b, c| a | (b & c)));
+    assert_eq!(table("~a&b")?, expected(|a, b, _| !a & b));
+    assert_eq!(table("~(a|b) ^ c")?, expected(|a, b, c| !(a | b) ^ c));
+    assert!(table("a&d").is_err());
+    assert!(table("(a|b").is_err());
+    Ok(())
+}
+
+/// The 8-gate full adder an e-graph found (`docs/egraph_netlists.md`), with
+/// NORs of up to four signals.
+const WIDE_FULL_ADDER: &str = "g3=NOR(a,b); g4=NOR(a,cin,g3); g5=NOR(b,cin,g3); \
+    g6=NOR(a,g3,g4,g5); g7=NOR(cin,g4,g5); g8=NOR(b,g3,g5); s=NOR(g6,g7,g8); \
+    cout=NOR(g3,g4,g5)";
+
 /// Chaining wide NORs keeps every function, leaves no NOR wider than two
 /// signals, and construction places each chain's stages consecutively,
 /// right before the NOR they end in.
 #[test]
 fn chained_wide_gates_keep_functions_and_stay_together() -> eyre::Result<()> {
-    let (inputs, outputs) = full_adder_functions();
-    let exploration = Exploration::new(&inputs, &outputs, Limits::default())?;
-    let wide = exploration
-        .extract_exact(&ExtractOptions::default())?
-        .expect("a netlist")
-        .netlist;
+    let wide = NorNetlist::from_text(WIDE_FULL_ADDER)?;
+    let nor9 = NorNetlist::from_logic_graph(&full_adder_graph("nor9"))?;
+    assert_eq!(output_functions(&wide), output_functions(&nor9));
+    assert_eq!(wide.gates().count(), 8);
     assert!(wide
         .gates()
         .any(|gate| wide.nets[gate].gate_inputs.len() > 2));
@@ -3906,123 +3853,6 @@ fn chained_wide_gates_keep_functions_and_stay_together() -> eyre::Result<()> {
                     chained.nets[reader].gate_inputs.contains(&net),
                     "{order:?}: chain split"
                 );
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Saturates `EGRAPH_CIRCUIT` (`full-adder`) and prints the e-graph's size
-/// and, per weighting, the extracted netlist's gates, depths, and live nets
-/// beside `nor9`'s:
-/// `cargo test --release --lib explore_egraph_netlists -- --ignored --nocapture`.
-#[test]
-#[ignore = "experiment; run explicitly with --nocapture"]
-fn explore_egraph_netlists() -> eyre::Result<()> {
-    let (inputs, outputs) = full_adder_functions();
-    let limits = Limits {
-        iterations: env_usize("EGRAPH_ITERATIONS", 12),
-        nodes: env_usize("EGRAPH_NODES", 50_000),
-        time: Duration::from_secs(env_usize("EGRAPH_SECONDS", 20) as u64),
-    };
-    let started = std::time::Instant::now();
-    let exploration = Exploration::new(&inputs, &outputs, limits)?;
-    println!(
-        "EGRAPH classes={} nodes={} iterations={} stop={:?} in {:?}",
-        exploration.classes(),
-        exploration.nodes(),
-        exploration.iterations,
-        exploration.stop_reason,
-        started.elapsed()
-    );
-    let describe = |label: &str, netlist: &NorNetlist| {
-        let min_live = live_after_each_step(
-            netlist,
-            &construct::gate_order(netlist, GateOrder::MinLive),
-            &BTreeSet::new(),
-        );
-        println!(
-            "EGRAPH {label}: min-live order live_max={} live={min_live:?}",
-            min_live.iter().max().unwrap_or(&0)
-        );
-        let gates = construct::gate_order(netlist, GateOrder::SmallestConeFirst);
-        let live = live_after_each_step(netlist, &gates, &BTreeSet::new());
-        let fan_in = netlist
-            .gates()
-            .map(|gate| netlist.nets[gate].gate_inputs.len())
-            .max()
-            .unwrap_or(0);
-        let ors = netlist
-            .nets
-            .iter()
-            .filter(|net| net.driver == NetDriver::Or)
-            .count();
-        println!(
-            "EGRAPH {label}: gates={} or_nets={ors} depths={:?} max_fan_in={fan_in} live_max={} live={live:?}",
-            netlist.gates().count(),
-            netlist_depths(netlist),
-            live.iter().max().unwrap_or(&0)
-        );
-        for net in gates {
-            let inputs = netlist.nets[net]
-                .gate_inputs
-                .iter()
-                .map(|&input| netlist.nets[input].name.as_str())
-                .collect::<Vec<_>>();
-            let kind = if netlist.nets[net].driver == NetDriver::Or {
-                "OR"
-            } else {
-                "NOR"
-            };
-            println!("EGRAPH     {} = {kind}{inputs:?}", netlist.nets[net].name);
-        }
-    };
-    describe(
-        "nor9",
-        &NorNetlist::from_logic_graph(&full_adder_graph("nor9"))?,
-    );
-    if std::env::var("EGRAPH_GREEDY").is_ok() {
-        for (gates, depth) in [(1.0, 0.0), (1.0, 1.0), (0.01, 1.0)] {
-            let netlist = exploration.extract(Weights { gates, depth })?;
-            describe(&format!("greedy gates*{gates}+depth*{depth}"), &netlist);
-        }
-    }
-    // Exact: the cheapest netlist within each depth, shallowest first, for
-    // each OR cost (`EGRAPH_OR_COSTS`, `0`).
-    let seconds = Duration::from_secs(env_usize("EGRAPH_EXTRACT_SECONDS", 60) as u64);
-    let or_costs = std::env::var("EGRAPH_OR_COSTS")
-        .unwrap_or_else(|_| "0".to_owned())
-        .split(',')
-        .map(str::parse::<usize>)
-        .collect::<Result<Vec<_>, _>>()?;
-    for or_cost in or_costs {
-        for depth in (2..=env_usize("EGRAPH_MAX_DEPTH", 8))
-            .map(Some)
-            .chain([None])
-        {
-            let started = std::time::Instant::now();
-            let options = ExtractOptions {
-                max_depth: depth,
-                or_cost,
-                binary: std::env::var("EGRAPH_BINARY").as_deref() == Ok("1"),
-                split_wide: std::env::var("EGRAPH_SPLIT").as_deref() == Ok("1"),
-                time_limit: seconds,
-            };
-            match exploration.extract_exact(&options)? {
-                Some(extraction) => describe(
-                    &format!(
-                        "exact or_cost={or_cost} depth<={} cost={} proven={} in {:.1?}",
-                        depth.map_or("any".to_owned(), |depth| depth.to_string()),
-                        extraction.cost,
-                        extraction.proven,
-                        started.elapsed()
-                    ),
-                    &extraction.netlist,
-                ),
-                None => println!(
-                    "EGRAPH exact or_cost={or_cost} depth<={depth:?}: none in {:.1?}",
-                    started.elapsed()
-                ),
             }
         }
     }
@@ -4077,7 +3907,7 @@ fn synthesize_buildable_circuits() -> eyre::Result<()> {
             "SYNTH steps={steps} torches={} proven={} depths={:?} live={:?} continuing={:?} ({seconds:.1}s)\n    {}",
             found.torches,
             found.proven,
-            netlist_depths(netlist),
+            netlist.output_depths(),
             live_after_each_step(netlist, &order, &none),
             continuing_inputs_each_step(netlist, &order, &none),
             netlist.to_text()
