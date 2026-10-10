@@ -324,6 +324,28 @@ impl NorNetlist {
         Ok(netlist)
     }
 
+    /// Torches on the slowest path to each output (OR nets add none).
+    pub fn output_depths(&self) -> BTreeMap<String, usize> {
+        let mut depth = vec![0usize; self.nets.len()];
+        for net in self.topological_order() {
+            let latest = self.nets[net]
+                .gate_inputs
+                .iter()
+                .map(|&input| depth[input])
+                .max()
+                .unwrap_or(0);
+            depth[net] = match self.nets[net].driver {
+                NetDriver::Input(_) => 0,
+                NetDriver::Gate => latest + 1,
+                NetDriver::Or => latest,
+            };
+        }
+        self.outputs
+            .iter()
+            .map(|(name, net)| (name.clone(), depth[*net]))
+            .collect()
+    }
+
     pub fn input_names(&self) -> Vec<String> {
         let mut names = self
             .nets
