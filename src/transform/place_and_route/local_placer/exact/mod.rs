@@ -139,6 +139,11 @@ pub struct ExactPlacerConfig {
     /// arrival time in redstone ticks over every power relation, including
     /// the fixed cells' (see `timing.rs`). Raise `stage_levels` to the
     /// longest path in the box.
+    /// Keep one of each pair of layouts that mirror each other along x or
+    /// y (the model's mirror rule). Only applied when the instance is
+    /// symmetric: default input and output sites, nothing fixed or given,
+    /// no carry, no driving outputs.
+    pub box_symmetry: bool,
     pub timing: bool,
     /// With `timing`: the most redstone ticks each named output may settle
     /// after the inputs change (at most `stage_levels`).
@@ -236,6 +241,7 @@ impl ExactPlacerConfig {
             model_file: None,
             model_params: BTreeMap::new(),
             carry: None,
+            box_symmetry: false,
             timing: false,
             output_delays: BTreeMap::new(),
             solid_observations: Default::default(),
@@ -848,7 +854,12 @@ impl ExactLocalPlacer {
             .unwrap_or_default();
         let rcell = verify::to_rcell(&self.name, dim, &self.netlist, decoded);
         // Store settled torch states, so pasting the cell starts stable.
-        let world = verify::settled_world(&world, &config.tuning).unwrap_or(world);
+        let settled = if self.netlist.state.is_empty() {
+            verify::settled_world(&world, &config.tuning)
+        } else {
+            verify::settled_sequential_world(&world, &self.netlist, decoded, &config.tuning)
+        };
+        let world = settled.unwrap_or(world);
         ExactPlacement {
             placed: PlacedWorld {
                 world,

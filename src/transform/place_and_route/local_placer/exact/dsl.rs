@@ -21,7 +21,7 @@ use super::encode::{
 use super::netlist::{NetId, NorNetlist};
 use super::{CarryTiling, ExactPlacerConfig};
 use crate::world::block::Direction;
-use crate::world::position::Position;
+use crate::world::position::{DimSize, Position};
 
 const SOURCE: &str = include_str!("exact_placer.rsdsl");
 
@@ -114,7 +114,10 @@ struct Prepared {
     geometry: Geometry,
     classes: Vec<SignalClass>,
     class_names: Vec<String>,
+    /// Cases: `1 << NorNetlist::case_bits`, the inputs and stored state.
     cases: usize,
+    /// Each state net's next-value and stored-value classes (`cut`).
+    cuts: Vec<(usize, usize)>,
     /// Switch candidates of the present inputs as `(cell, attach, net)`.
     sites: Vec<(usize, Direction, NetId)>,
     /// The carry input's net (`CarryTiling`).
@@ -153,13 +156,39 @@ impl Prepared {
             input_count <= MAX_INPUTS,
             "exact placer supports at most {MAX_INPUTS} inputs"
         );
+        ensure!(
+            netlist.case_bits() <= MAX_INPUTS,
+            "exact placer supports at most {MAX_INPUTS} input and state bits"
+        );
+        ensure!(
+            netlist.state.is_empty() || config.carry.is_none(),
+            "a carry tile cannot hold state"
+        );
         let classes = vocabulary(netlist);
         let class_names = unique_names(classes.iter().map(|class| class.name.as_str()));
+        let values = netlist.net_values();
+        let cuts = netlist
+            .state
+            .iter()
+            .map(|&net| {
+                let function = net_function(&values, net);
+                let next = classes.iter().position(|class| class.function == function);
+                let stored = classes.iter().position(|class| class.stored == Some(net));
+                match (next, stored) {
+                    (Some(next), Some(stored)) if next != stored => Ok((next, stored)),
+                    _ => bail!(
+                        "state net `{}` needs a next value that differs from its stored one",
+                        netlist.nets[net].name
+                    ),
+                }
+            })
+            .collect::<eyre::Result<Vec<_>>>()?;
         let mut prepared = Self {
             geometry,
             classes,
             class_names,
-            cases: 1 << input_count,
+            cases: 1 << netlist.case_bits(),
+            cuts,
             sites: Vec::new(),
             carry_net: config
                 .carry
@@ -331,7 +360,9 @@ impl Prepared {
         // The implied torch bound speeds up optimality proofs (AND 2x4x3:
         // about 20% faster) but slowed finding a first layout in
         // measurements, so it is only set when optimizing.
-        let min_torches = if config.optimize {
+        // The bound's search starts from the inputs only; a cut state also
+        // starts from its stored value, so it is left out there.
+        let min_torches = if config.optimize && self.cuts.is_empty() {
             let targets = self
                 .observations
                 .iter()
@@ -374,6 +405,11 @@ impl Prepared {
                 self.observations.iter().map(|o| IValue::sym(&o.symbol)),
             )
             .domain("Tick", (0..=config.stage_levels).map(IValue::from));
+        let mirrors = mirror_tuples(config);
+        let orders = mirrors.iter().map(|&(_, i, _, _)| i + 1).max().unwrap_or(0);
+        instance
+            .domain("Sym", (0..3usize).map(IValue::from))
+            .domain("Order", (0..=orders).map(IValue::from));
         for fact in [
             "on",
             "unpowered",
@@ -392,8 +428,27 @@ impl Prepared {
             "increasing",
             "decreasing",
             "output_delay",
+            "cut",
+            "mirror",
         ] {
             instance.fact(fact);
+        }
+        for &(g, i, c, m) in &mirrors {
+            instance.row(
+                "mirror",
+                vec![
+                    g.into(),
+                    i.into(),
+                    cell_value(geometry, geometry.index(c)),
+                    cell_value(geometry, geometry.index(m)),
+                ],
+            );
+        }
+        for &(next, stored) in &self.cuts {
+            instance.row(
+                "cut",
+                vec![IValue::sym(&names[next]), IValue::sym(&names[stored])],
+            );
         }
         if let Some(carry) = &config.carry {
             self.tiling_facts(&mut instance);
@@ -626,6 +681,7 @@ impl Prepared {
             cnf: Cnf::from_literals(1, vec![1, 0], 1),
             classes: self.classes.clone(),
             cases: self.cases,
+            cuts: self.cuts.clone(),
             air: Vec::new(),
             solid: Vec::new(),
             dust: Vec::new(),
@@ -787,6 +843,50 @@ impl Prepared {
         }
         Ok(encoding)
     }
+}
+
+/// The model's `mirror` facts: for the x, y, and xy mirrors of the box, each
+/// cell that a mirror moves, numbered in one order (by height, then y, then
+/// x). Empty unless `box_symmetry` is on and the instance is symmetric.
+fn mirror_tuples(config: &ExactPlacerConfig) -> Vec<(usize, usize, Position, Position)> {
+    let symmetric = config.box_symmetry
+        && config.input_sites.is_empty()
+        && config.output_sites.is_empty()
+        && config.observations.is_none()
+        && config.fixed_cells.is_empty()
+        && config.given_signals.is_empty()
+        && config.blocked.is_empty()
+        && config.carry.is_none()
+        && config.driving_outputs.is_empty();
+    if !symmetric {
+        return Vec::new();
+    }
+    let DimSize(dx, dy, dz) = config.dim;
+    let mirrors: [(usize, bool, bool); 3] = [(0, true, false), (1, false, true), (2, true, true)];
+    let mut tuples = Vec::new();
+    for (g, flip_x, flip_y) in mirrors {
+        if (flip_x && dx < 2) || (flip_y && dy < 2) {
+            continue;
+        }
+        let mut order = 0;
+        for z in 0..dz {
+            for y in 0..dy {
+                for x in 0..dx {
+                    let c = Position(x, y, z);
+                    let m = Position(
+                        if flip_x { dx - 1 - x } else { x },
+                        if flip_y { dy - 1 - y } else { y },
+                        z,
+                    );
+                    if c != m {
+                        tuples.push((g, order, c, m));
+                        order += 1;
+                    }
+                }
+            }
+        }
+    }
+    tuples
 }
 
 /// Grounds the configured model (the built-in one unless `model_file` is set).

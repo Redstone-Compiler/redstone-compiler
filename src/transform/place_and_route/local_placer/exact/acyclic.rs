@@ -10,7 +10,12 @@
 //!   driver get a loop formula ("if any of them is powered, some relation from
 //!   outside the set must deliver power"), as in answer-set solving;
 //! * feedback: a cycle of active relations through a torch's support and the
-//!   torch itself is forbidden as a whole.
+//!   torch itself is forbidden as a whole, unless it runs through a state
+//!   net's cut (a latch, see `cut` in the model).
+//!
+//! The sink of an active cut is a driver too: past the cut, a cell carries
+//! the stored state, which its source need not match outside the settled
+//! cases.
 //!
 //! Both clauses hold in every acyclic, physically consistent layout, so they
 //! never remove a valid solution.
@@ -117,6 +122,26 @@ pub(super) fn refine(
                 })
         })
         .collect::<Vec<_>>();
+    // Active relations across a state net's cut (`cut` in the model).
+    let carries = |cell: usize, class: usize| solver.value(encoding.class_lits[cell][class]);
+    let is_cut = encoding
+        .relations
+        .iter()
+        .zip(&active)
+        .map(|(relation, &active)| {
+            active
+                && relation.sink_kind != super::encode::SinkKind::Solid
+                && encoding.cuts.iter().any(|&(next, stored)| {
+                    carries(relation.source, next) && carries(relation.sink, stored)
+                })
+        })
+        .collect::<Vec<_>>();
+    let mut cut_sink = vec![false; cells];
+    for (relation, &cut) in encoding.relations.iter().zip(&is_cut) {
+        if cut {
+            cut_sink[relation.sink] = true;
+        }
+    }
     let mut is_switch = vec![false; cells];
     for site in &encoding.switches {
         if solver.value(site.lit) {
@@ -138,14 +163,14 @@ pub(super) fn refine(
         let mut reached = vec![false; cells];
         let mut queue = VecDeque::new();
         for cell in 0..cells {
-            if powered[cell] && (torch_of[cell].is_some() || is_switch[cell]) {
+            if powered[cell] && (torch_of[cell].is_some() || is_switch[cell] || cut_sink[cell]) {
                 reached[cell] = true;
                 queue.push_back(cell);
             }
         }
         while let Some(cell) = queue.pop_front() {
             for &relation in &index.outgoing[cell] {
-                if !active[relation] {
+                if !active[relation] || is_cut[relation] {
                     continue;
                 }
                 let sink = encoding.relations[relation].sink;
@@ -230,7 +255,7 @@ pub(super) fn refine(
         'search: while let Some(cell) = queue.pop_front() {
             let mut steps = index.outgoing[cell]
                 .iter()
-                .filter(|&&relation| active[relation])
+                .filter(|&&relation| active[relation] && !is_cut[relation])
                 .map(|&relation| (encoding.relations[relation].sink, Some(relation)))
                 .collect::<Vec<_>>();
             // Passing through another torch: its support powers it.

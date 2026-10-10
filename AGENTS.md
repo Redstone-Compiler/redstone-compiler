@@ -21,6 +21,7 @@
 - Critical paths in redstone ticks: static timing, delay bounds, and timing-first construction and compaction: `docs/timing_driven_placement.md`
 - Equivalent NOR netlists from an e-graph (egg) with exact SAT extraction, an experiment record (the code was removed for exact synthesis) that also explains why wide-NOR construction steps time out: `docs/egraph_netlists.md`
 - Exact synthesis of NOR netlists that windowed construction can build (`exact::synthesize`, `nor_synthesis.rsdsl`): `docs/nor_synthesis.md`
+- Sequential cells (latches, flip-flops) with the exact placer: state nets, the loop cut, sequential verification, and compact latch fixtures: `docs/sequential_exact_cells.md`
 - Solver modeling DSL (rsdsl v2, crate `crates/rsdsl`): design and parity measurements `docs/solver_dsl_design.md`; grammar and language spec `docs/solver_dsl_grammar.md`; the exact placer's model is `src/transform/place_and_route/local_placer/exact/exact_placer.rsdsl` (grounded by `exact/dsl.rs`)
 
 When asked to create or preserve project documentation, add an appropriate file under `docs/` and link it from this file when it is useful for future agents.

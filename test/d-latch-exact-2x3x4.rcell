@@ -1,0 +1,26 @@
+rcell 1;
+cell "exact-d-latch-mux" size [2, 3, 4] {
+  start settled;
+  glyph "T" = torch on x+;
+  glyph "U" = repeater toward y- delay 1;
+  glyph "V" = repeater toward y+ delay 1;
+  glyph "W" = torch on z-;
+  glyph "X" = torch on x-;
+
+  input "d" at [0, 0, 1] on x+;
+  input "en" at [0, 2, 0] on x+;
+  output "q" at [0, 0, 3];
+
+  plane yz at x=0 {
+    z=3 "TU#";
+    z=2 ".#T";
+  }
+
+  plane yz at x=1 {
+    z=3 "#VX";
+    z=2 "W##";
+    z=1 "#VW";
+    z=0 ".##";
+  }
+
+}

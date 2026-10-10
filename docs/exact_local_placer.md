@@ -726,3 +726,37 @@ CIRCUIT=full-adder CIRCUIT_COMPACT_SECONDS=600 CIRCUIT_SNAPSHOT=target/full-adde
 # copy target/full-adder.rsnap to tools/nbt-viewer/public/progress/ and open
 # http://localhost:5173/?snapshot=progress/full-adder.rsnap
 ```
+
+## Box-mirror symmetry breaking (2026-10-10)
+
+The model's rules do not tell east from west or north from south. A layout
+mirrored along x or y is therefore a layout too, as long as the instance
+places nothing asymmetrically. `ExactPlacerConfig::box_symmetry` adds the
+lex-leader constraint for the x, y, and xy mirrors:
+
+- It compares which cells are filled, in one fixed order (by height, then y,
+  then x).
+- It keeps the lexicographically least layout of each mirror family (rule
+  "대칭 제거: 상자를 뒤집은 배치 가운데 사전순으로 앞선 것만", facts `mirror`).
+- Every family keeps a member, so the fewest blocks and every infeasibility
+  proof are unchanged.
+- It applies only to a symmetric instance: default input and output sites,
+  nothing fixed or given, no carry, no driving outputs. Otherwise the facts
+  stay empty. Construction and compaction windows are never symmetric.
+
+Each pair below ran at the same time, 4 workers each
+(`explore_sequential_cells`, `SEQ_SYM=1`):
+
+| Instance | Off | On |
+| --- | --- | --- |
+| set-reset latch, optimum 8 in 2x4x3 / 3x3x3 / 2x4x4 | 15.7 / 39.8 / 83.3 s | 10.0 / 22.2 / 37.3 s |
+| 2:1 mux, optimum 11 in 2x4x3 | 150 s | 99 s |
+| 2:1 mux, optimum 14 in 3x3x3 | not proven in 900 s | proven in 876 s |
+| D latch (6 torches), no layout in 2x4x3 / 2x3x4 | 48.7 / 74.5 s | 59.2 / 85.6 s |
+| D latch (multiplexer), no layout in 2x4x3; optimum 16 in 2x3x4 | 49.4 / 83.4 s | 58.9 / 104 s |
+| half adder (5 torches), no layout in 2x3x4 | 114 s | 146 s |
+
+It makes optimum proofs 1.5-2.2x faster, but infeasibility proofs 15-30%
+slower. One run per pair cannot separate a 20% difference from a different
+winning worker. The option stays off by default. Comparing other variables
+(torches rather than filled cells) or another order might tip the balance.
