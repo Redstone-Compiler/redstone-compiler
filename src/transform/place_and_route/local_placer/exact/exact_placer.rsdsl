@@ -51,6 +51,16 @@ fact decreasing(Class);
 // With `timing`, an observed output settles at most this many redstone ticks
 // after the inputs change (see the timing rules).
 fact output_delay(Output, Tick);
+// A sequential cell's state nets (a latch's output, `NorNetlist::state`) are
+// cut open: the state net's torch computes the next value (class `n`), and
+// the cells past the cut carry the stored value (class `m`) that the rest of
+// the cell reads. Cases range over the inputs and the stored values, so the
+// layout has to compute the netlist's next value from every stored one: the
+// inputs cannot be left unconnected. A relation from a cell carrying `n` into
+// dust or a repeater carrying `m` is the cut. It is exempt from soundness
+// (the two agree in the settled cases, where the loop is closed) and from the
+// stage order (the latch's loop runs through it).
+fact cut(n: Class, m: Class);
 
 // A repeater may point out of the box only where it drives an output into the
 // neighbor cell, or where one is already fixed. Elsewhere its output would
@@ -121,6 +131,8 @@ def Powered[k: Case, c: Cell] := any(Sig[c] is Carry(j) for j: Class where on(j,
 
 @display("{c} 꺼짐 신호")
 def Unpowered[c: Cell] := any(Sig[c] is Carry(u) for u: Class where unpowered(u));
+def Cut[s: Cell, t: Cell] :=
+    Kind[t] is Dust | Repeater(_) and any(Sig[s] is Carry(n) and Sig[t] is Carry(m) for (n, m) in cut);
 
 @internal
 def Stick[c: Cell] := Kind[c] is Dust | Torch(_) | Switch(_, _);
@@ -346,11 +358,12 @@ rule "건전성: 원천이 켜지면 받는 쪽도 켜짐 (가루·리피터는 
         let feeds = Feeds(s, t, f, to);
         // Dust next to a block follows only the block's strong power.
         let strong = f == FromSolid and to == DustSink;
+        let open = to != SolidSink and Cut[s, t];
         forall k: Case {
             let source = if strong { Strong[k, s] } else { Powered[k, s] };
-            require feeds and source -> Powered[k, t];
+            require feeds and source and not open -> Powered[k, t];
             if to != SolidSink {
-                require feeds and Powered[k, t] -> source;
+                require feeds and Powered[k, t] and not open -> source;
             }
         }
     }
@@ -364,14 +377,14 @@ rule "정당화: 기여 관계, 순위·단계 순서" {
         if to == RepeaterSink {
             // Repeaters restart the rank and advance the stage instead.
             if stage_levels > 0 {
-                require used -> Stage[s] < Stage[t];
+                require used and not Cut[s, t] -> Stage[s] < Stage[t];
             }
         } else {
             if rank_levels > 0 {
                 require used -> Rank[s] < Rank[t];
             }
             if stage_levels > 0 {
-                require used -> Stage[s] <= Stage[t];
+                require used and not (to == DustSink and Cut[s, t]) -> Stage[s] <= Stage[t];
             }
         }
         if to != SolidSink {

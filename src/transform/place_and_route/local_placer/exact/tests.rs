@@ -3805,6 +3805,413 @@ fn synthesis_truth_tables_follow_precedence() -> eyre::Result<()> {
     Ok(())
 }
 
+/// Sequential cells as NOR netlists with their state nets
+/// (`NorNetlist::from_text`).
+fn sequential_netlist(circuit: &str) -> eyre::Result<&'static str> {
+    Ok(match circuit {
+        // Set-reset latch: two cross-coupled NORs.
+        "rs-latch" => "state(q); out(q); q=NOR(r,nq); nq=NOR(s,q)",
+        "rs-latch-both" => "state(q); out(q,nq); q=NOR(r,nq); nq=NOR(s,q)",
+        // D latch: the set-reset core, set by `d & en`, reset by `~d & en`.
+        "d-latch" => {
+            "state(q); out(q); nd=NOR(d); nen=NOR(en); s=NOR(nd,nen); r=NOR(d,nen); \
+             q=NOR(r,nq); nq=NOR(s,q)"
+        }
+        // D latch as a multiplexer: `q = en ? d : q`, four torches.
+        "d-latch-mux" => "state(q); out(q); nen=NOR(en); a=NOR(d,nen); b=NOR(q,en); q=NOR(a,b)",
+        // Master-slave flip-flop from two multiplexer latches, which share
+        // `NOR(m, nclk)`: six torches.
+        "dff-mux" => {
+            "state(m,q); out(q); nclk=NOR(clk); a=NOR(d,clk); b=NOR(m,nclk); m=NOR(a,b); \
+             c=NOR(q,clk); q=NOR(b,c)"
+        }
+        // Master-slave D flip-flop on the rising edge: the master follows
+        // `d` while `clk` is off, the slave copies the master while it is on.
+        "dff" => {
+            "state(m,q); out(q); nd=NOR(d); nclk=NOR(clk); ms=NOR(nd,clk); mr=NOR(d,clk); \
+             m=NOR(mr,nm); nm=NOR(ms,m); ss=NOR(nm,nclk); sr=NOR(m,nclk); \
+             q=NOR(sr,nq); nq=NOR(ss,q)"
+        }
+        other => eyre::bail!("no sequential netlist for {other}"),
+    })
+}
+
+/// The latch netlists settle where a latch does: a set-reset latch holds
+/// either value with both inputs off and has one state otherwise, and the
+/// flip-flop's slave follows its master only while the clock is on.
+#[test]
+fn sequential_netlists_settle_like_latches() -> eyre::Result<()> {
+    let latch = NorNetlist::from_text(sequential_netlist("rs-latch")?)?;
+    assert_eq!(latch.input_names(), ["r", "s"]);
+    assert_eq!(latch.case_bits(), 3);
+    // Case bits: r, s, then the stored q.
+    let cases = |mask: u64| {
+        (0..64)
+            .filter(|&case| mask & 1 << case != 0)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        cases(latch.valid_cases()),
+        [0b000, 0b001, 0b011, 0b100, 0b110]
+    );
+    assert_eq!(latch.next_state(0b10, 0), Some(1), "set");
+    assert_eq!(latch.next_state(0b01, 1), Some(0), "reset");
+    assert_eq!(latch.next_state(0b00, 1), Some(1), "hold");
+    let read = NorNetlist::from_text(&latch.to_text())?;
+    assert_eq!(read.to_text(), latch.to_text());
+
+    let dff = NorNetlist::from_text(sequential_netlist("dff")?)?;
+    assert_eq!(dff.input_names(), ["clk", "d"]);
+    // Case bits: clk, d, m, q. Eight settled cases.
+    assert_eq!(dff.valid_cases().count_ones(), 8);
+    // The clock rises with d = 1 and the master holding 1: q becomes 1.
+    let (m, q) = (1, 2);
+    assert_eq!(dff.next_state(0b11, m), Some(m | q));
+    // While the clock is on, d does not reach the master.
+    assert_eq!(dff.next_state(0b01, 0), Some(0));
+    let plan = super::verify::SequentialPlan::new(&dff).map_err(|e| eyre::eyre!(e))?;
+    assert!(plan.homing.len() <= 3, "{:?}", plan.homing);
+    Ok(())
+}
+
+/// The repository's hand-made set-reset latch (`sequential/layout.rs`,
+/// 8x6x3: two wall torches on their supports, each feeding the other's
+/// support over a dust loop) with levers for its dust inputs. It works in
+/// the simulator, so the model must accept it: every block is fixed and the
+/// solver only labels classes, ranks, and stages. An unsatisfiable answer
+/// prints the cells in the core.
+#[test]
+fn model_accepts_hand_rs_latch() -> eyre::Result<()> {
+    use super::encode::{Encoding, TORCH_ATTACH};
+    use super::solver::{SatSolver, SolveResult, StopSignal};
+    let netlist = NorNetlist::from_text(sequential_netlist("rs-latch")?)?;
+    let mut cells = BTreeMap::new();
+    let p = |x, y, z| Position(x, y, z);
+    // Levers on the floor, each beside an input dust that points into a support.
+    for (lever, dust) in [(p(0, 2, 1), p(1, 2, 1)), (p(6, 2, 1), p(5, 2, 1))] {
+        cells.insert(lever, CellKind::Switch(Direction::Bottom));
+        cells.insert(lever.down().unwrap(), CellKind::Solid);
+        cells.insert(dust, CellKind::Dust);
+        cells.insert(dust.down().unwrap(), CellKind::Solid);
+    }
+    cells.insert(p(2, 2, 1), CellKind::Solid);
+    cells.insert(p(4, 2, 1), CellKind::Solid);
+    cells.insert(p(2, 1, 1), CellKind::Torch(Direction::North));
+    cells.insert(p(4, 3, 1), CellKind::Torch(Direction::South));
+    for dust in [
+        p(2, 0, 1),
+        p(3, 0, 1),
+        p(4, 0, 1),
+        p(4, 1, 1),
+        p(4, 4, 1),
+        p(3, 4, 1),
+        p(2, 4, 1),
+        p(2, 3, 1),
+    ] {
+        cells.insert(dust, CellKind::Dust);
+        cells.insert(dust.down().unwrap(), CellKind::Solid);
+    }
+    let mut config = ExactPlacerConfig::new(DimSize(8, 6, 3))
+        .with_input_site("r", p(0, 2, 1), Direction::Bottom)
+        .with_input_site("s", p(6, 2, 1), Direction::Bottom)
+        .with_output_sites("q", [p(2, 1, 1)]);
+    config.workers = 1;
+    let encoding = Encoding::build(&netlist, &config)?;
+    let mut described = Vec::new();
+    for cell in 0..encoding.geometry.len() {
+        let position = encoding.geometry.position(cell);
+        let kind = cells.get(&position).copied().unwrap_or(CellKind::Air);
+        let lit = match kind {
+            CellKind::Air => encoding.air[cell],
+            CellKind::Solid => encoding.solid[cell],
+            CellKind::Dust => encoding.dust[cell],
+            CellKind::Torch(attach) => {
+                encoding.torch[cell][TORCH_ATTACH.iter().position(|&d| d == attach).unwrap()]
+            }
+            CellKind::Repeater(_) => unreachable!(),
+            CellKind::Switch(attach) => {
+                encoding
+                    .switches
+                    .iter()
+                    .find(|site| site.cell == cell && site.attach == attach)
+                    .unwrap()
+                    .lit
+            }
+        };
+        described.push((lit, position, kind));
+    }
+    let mut solver = SatSolver::new(1);
+    solver.add_cnf(&encoding.cnf);
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let signal = StopSignal {
+        stop: &stop,
+        deadline: Some(Instant::now() + Duration::from_secs(60)),
+        restart: None,
+    };
+    let lits = described.iter().map(|(lit, ..)| *lit).collect::<Vec<_>>();
+    let result = solver.solve(&lits, &signal);
+    let core = described
+        .iter()
+        .filter(|(lit, ..)| result == SolveResult::Unsat && solver.failed(*lit))
+        .map(|(_, position, kind)| format!("{position:?}={kind:?}"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        result,
+        SolveResult::Sat,
+        "model rejects the hand latch; core: {core:?}"
+    );
+    // The whole pipeline, with every cell fixed: solve, then verify the
+    // latch in the simulator.
+    let placer = ExactLocalPlacer::from_netlist(netlist);
+    let mut fixed = config.clone();
+    for cell in 0..encoding.geometry.len() {
+        let position = encoding.geometry.position(cell);
+        let kind = cells.get(&position).copied().unwrap_or(CellKind::Air);
+        fixed.fixed_cells.insert(position, kind);
+    }
+    fixed.time_limit = Some(Duration::from_secs(60));
+    let direct = Encoding::build(placer.netlist(), &fixed)?;
+    let mut direct_solver = SatSolver::new(1);
+    direct_solver.add_cnf(&direct.cnf);
+    eprintln!("fixed CNF alone: {:?}", direct_solver.solve(&[], &signal));
+    let (outcome, stats) = placer.place(&fixed)?;
+    assert!(
+        matches!(outcome, ExactOutcome::Placed(_)),
+        "{outcome:?} after {} refinements",
+        stats.refinements
+    );
+    Ok(())
+}
+
+/// With its loop cut at the state net, the set-reset latch fits 2x3x3 in
+/// 8 blocks (two torches, two repeaters crossing over, and their blocks),
+/// proven to be the fewest, and the simulator accepts it in every settled
+/// case and every single input change.
+#[test]
+fn rs_latch_places_in_eight_blocks() -> eyre::Result<()> {
+    let netlist = NorNetlist::from_text(sequential_netlist("rs-latch")?)?;
+    let placer = ExactLocalPlacer::from_netlist(netlist);
+    let mut config = ExactPlacerConfig::new(DimSize(2, 3, 3));
+    config.workers = 4;
+    config.optimize = true;
+    config.time_limit = Some(Duration::from_secs(120));
+    let (outcome, stats) = placer.place(&config)?;
+    let ExactOutcome::Placed(placement) = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert_eq!(placement.block_count, 8);
+    assert!(stats.optimal);
+    Ok(())
+}
+
+/// Pastes a latch fixture from its NBT, which stores a settled state with
+/// every input off and `q` off, and pulls its levers one step at a time:
+/// each step sets inputs and expects `q`.
+fn run_latch_fixture(stem: &str, steps: &[(&[(&str, bool)], bool)]) -> eyre::Result<()> {
+    use crate::world::simulator::{Simulator, MANUAL_INPUT_IDLE_CYCLES};
+    let document: crate::physical_cell::PhysicalCellDocument =
+        std::fs::read_to_string(format!("test/{stem}.rcell"))?.parse()?;
+    let world = crate::nbt::NBTRoot::from_nbt_bytes(&std::fs::read(format!("test/{stem}.nbt"))?)?
+        .to_world();
+    let mut simulator =
+        Simulator::from_preserving_torch_states_with_limits_and_trace(&world, 256, 50_000, 0)
+            .map_err(|error| eyre::eyre!("{}", error.message()))?;
+    let input = |name: &str| {
+        document
+            .inputs
+            .iter()
+            .find(|input| input.name == name)
+            .unwrap()
+            .position
+    };
+    let q = document
+        .outputs
+        .iter()
+        .find(|output| output.name == "q")
+        .unwrap()
+        .position;
+    assert!(
+        !simulator.world()[q].kind.is_powered(),
+        "{stem}: q starts off"
+    );
+    for (index, (inputs, expected)) in steps.iter().enumerate() {
+        simulator.advance_idle_cycles(MANUAL_INPUT_IDLE_CYCLES)?;
+        let states = inputs.iter().map(|&(name, on)| (input(name), on)).collect();
+        simulator.change_state_with_limits(states, 256, 50_000)?;
+        assert_eq!(
+            simulator.world()[q].kind.is_powered(),
+            *expected,
+            "{stem}: q after step {index} {inputs:?}"
+        );
+        for (position, block) in simulator.world().iter_block() {
+            assert!(
+                !(block.kind.is_torch() && simulator.is_torch_burned_out(position)),
+                "{stem}: torch at {position:?} burned out at step {index}"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The 8-block set-reset latch (`test/rs-latch-exact-2x3x3`) sets, holds,
+/// and resets when pasted from its NBT.
+#[test]
+fn exact_rs_latch_fixture_sets_holds_and_resets() -> eyre::Result<()> {
+    run_latch_fixture(
+        "rs-latch-exact-2x3x3",
+        &[
+            (&[("s", true)], true),
+            (&[("s", false)], true),
+            (&[("r", true)], false),
+            (&[("r", false)], false),
+            (&[("s", true)], true),
+            (&[("r", true)], false),
+            (&[("s", false)], false),
+            (&[("r", false)], false),
+        ],
+    )
+}
+
+/// The 16-block D latch (`test/d-latch-exact-2x3x4`, a multiplexer of four
+/// torches) follows `d` while `en` is on and holds while it is off.
+#[test]
+fn exact_d_latch_fixture_follows_and_holds() -> eyre::Result<()> {
+    run_latch_fixture(
+        "d-latch-exact-2x3x4",
+        &[
+            (&[("d", true)], false),
+            (&[("en", true)], true),
+            (&[("d", false)], false),
+            (&[("d", true)], true),
+            (&[("en", false)], true),
+            (&[("d", false)], true),
+            (&[("en", true)], false),
+            (&[("en", false)], false),
+            (&[("d", true)], false),
+        ],
+    )
+}
+
+/// Places a sequential cell in the smallest box of `SEQ_DIMS` that holds
+/// it (comma-separated `XxYxZ`, `2x4x3,2x4x4,2x5x4,2x6x4,2x6x5`), with the
+/// fewest blocks (`SEQ_OPTIMIZE=0` takes the first layout):
+/// `SEQ_CIRCUIT=rs-latch|rs-latch-both|d-latch|d-latch-mux|dff|dff-mux` (or
+/// `SEQ_NETLIST=` text),
+/// `SEQ_SECONDS` (120) per box, `SEQ_WORKERS` (8), `SEQ_ALL=1` to try every
+/// box, `SEQ_REFINEMENTS` (2000) simulator rejections per worker,
+/// `SEQ_WRITE=<prefix>` for `.rcell`, `.nbt` (in its first settled case with
+/// the inputs off) and `.outputs.json`, `SEQ_MODEL_FILE` for another
+/// model:
+/// `cargo test --release --lib explore_sequential_cells -- --ignored --nocapture`.
+#[test]
+#[ignore = "experiment; run explicitly with --nocapture"]
+fn explore_sequential_cells() -> eyre::Result<()> {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_test_writer()
+        .try_init();
+    let circuit = std::env::var("SEQ_CIRCUIT").unwrap_or_else(|_| "rs-latch".to_owned());
+    let text = match std::env::var("SEQ_NETLIST") {
+        Ok(text) => text,
+        Err(_) => sequential_netlist(&circuit)?.to_owned(),
+    };
+    let netlist = NorNetlist::from_text(&text)?;
+    let plan = super::verify::SequentialPlan::new(&netlist).map_err(|e| eyre::eyre!(e))?;
+    let valid = netlist.valid_cases();
+    println!(
+        "SEQ {circuit} inputs={:?} state={:?} torches={} settled cases={:?} homing={:?}",
+        netlist.input_names(),
+        netlist
+            .state
+            .iter()
+            .map(|&net| netlist.nets[net].name.as_str())
+            .collect::<Vec<_>>(),
+        netlist.gates().count(),
+        (0..64)
+            .filter(|&case| valid & 1 << case != 0)
+            .map(|case| format!("{case:0width$b}", width = netlist.case_bits()))
+            .collect::<Vec<_>>(),
+        plan.homing
+    );
+    let placer = ExactLocalPlacer::from_netlist(netlist).with_name(format!("exact-{circuit}"));
+    let dims =
+        std::env::var("SEQ_DIMS").unwrap_or_else(|_| "2x4x3,2x4x4,2x5x4,2x6x4,2x6x5".to_owned());
+    for dim in dims.split(',') {
+        let size = dim
+            .split('x')
+            .map(|value| value.trim().parse::<usize>())
+            .collect::<Result<Vec<_>, _>>()?;
+        let [x, y, z] = size[..] else {
+            eyre::bail!("SEQ_DIMS entries are XxYxZ: {dim}");
+        };
+        let mut config = ExactPlacerConfig::new(DimSize(x, y, z));
+        config.workers = env_usize("SEQ_WORKERS", 8);
+        config.time_limit = Some(Duration::from_secs(env_usize("SEQ_SECONDS", 120) as u64));
+        config.optimize = std::env::var("SEQ_OPTIMIZE").as_deref() != Ok("0");
+        config.model_file = std::env::var("SEQ_MODEL_FILE").ok().map(Into::into);
+        // Latch layouts that are consistent in every settled case can still
+        // fail a transition, so the simulator rejects many more of them.
+        config.max_refinements = env_usize("SEQ_REFINEMENTS", 2000);
+        // `SEQ_FIX=x,y,z=solid|dust|torch:<dir>;...` fixes cells, as hints.
+        if let Ok(fixes) = std::env::var("SEQ_FIX") {
+            for fix in fixes.split(';').filter(|fix| !fix.is_empty()) {
+                let (at, kind) = fix
+                    .split_once('=')
+                    .ok_or_else(|| eyre::eyre!("SEQ_FIX entries are x,y,z=kind"))?;
+                let at = at
+                    .split(',')
+                    .map(|value| value.trim().parse::<usize>())
+                    .collect::<Result<Vec<_>, _>>()?;
+                let direction = |name: &str| match name {
+                    "north" => Direction::North,
+                    "south" => Direction::South,
+                    "east" => Direction::East,
+                    "west" => Direction::West,
+                    _ => Direction::Bottom,
+                };
+                let kind = match kind.split_once(':') {
+                    Some(("torch", d)) => CellKind::Torch(direction(d)),
+                    _ if kind == "solid" => CellKind::Solid,
+                    _ if kind == "dust" => CellKind::Dust,
+                    _ => CellKind::Air,
+                };
+                config
+                    .fixed_cells
+                    .insert(Position(at[0], at[1], at[2]), kind);
+            }
+        }
+        let started = Instant::now();
+        let (outcome, stats) = placer.place(&config)?;
+        let seconds = started.elapsed().as_secs_f64();
+        match outcome {
+            ExactOutcome::Placed(placement) => {
+                println!(
+                    "SEQ placed {dim}: {} blocks, optimal={} refinements={} ({seconds:.1}s)\n{}",
+                    placement.block_count, stats.optimal, stats.refinements, placement.rcell
+                );
+                if let Ok(prefix) = std::env::var("SEQ_WRITE") {
+                    std::fs::write(format!("{prefix}.rcell"), placement.rcell.to_string())?;
+                    crate::nbt::NBTRoot::from(&placement.placed.world)
+                        .save(format!("{prefix}.nbt"));
+                    std::fs::write(
+                        format!("{prefix}.outputs.json"),
+                        serde_json::to_string_pretty(&placement.rcell.interface_json())?,
+                    )?;
+                }
+                if std::env::var("SEQ_ALL").as_deref() != Ok("1") {
+                    break;
+                }
+            }
+            ExactOutcome::Infeasible => println!("SEQ infeasible {dim} ({seconds:.1}s)"),
+            ExactOutcome::Unknown { last_rejection } => println!(
+                "SEQ unknown {dim} refinements={} last rejection {last_rejection:?} ({seconds:.1}s)",
+                stats.refinements
+            ),
+        }
+    }
+    Ok(())
+}
+
 /// The 8-gate full adder an e-graph found (`docs/egraph_netlists.md`), with
 /// NORs of up to four signals.
 const WIDE_FULL_ADDER: &str = "g3=NOR(a,b); g4=NOR(a,cin,g3); g5=NOR(b,cin,g3); \

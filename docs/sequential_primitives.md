@@ -85,3 +85,7 @@ Tests currently validate:
 - Reuse the D latch composition when building flip-flops.
 
 Run placement-related tests with `cargo test --release`.
+
+The exact SAT placer builds latches too, much smaller than the heuristic
+layouts (a set-reset latch in 2x3x3, a D latch in 2x3x4): see
+`sequential_exact_cells.md`.
