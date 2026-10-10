@@ -113,16 +113,56 @@ counted):
   simulator rejected 35 layouts on the way. They are the static hazard of the
   multiplexer form, where `q` can drop for a tick while `en` changes. The
   check over input changes catches it.
-- **Flip-flops** are too large for one solve, like the full adder. They need
-  construction that can place a latch's loop in one step, or two latch cells
-  composed.
+- **Flip-flops** do not come out of one solve; see below.
+
+## Why flip-flops do not come out of one solve
+
+The six-torch flip-flops tested here:
+
+- `dff-mux`: two multiplexer latches that share `NOR(m, nclk)`, rising
+  edge.
+- `dff-neg`: the D latch fixture's netlist as the master, falling edge.
+
+Each was tried without optimizing (the first layout), 5 workers unless
+noted:
+
+| Run | Box | Result |
+| --- | --- | --- |
+| `dff-mux` | 2x7x4, 4x3x4 | nothing in 600 s each |
+| `dff-neg` | 2x7x4, 10 workers | nothing in 30 minutes |
+| `dff-neg`, the cut forced onto the state torch's output | 2x6x4, 2x7x4 | nothing in 600 s each |
+| **`dff-neg`, the D latch fixture fixed as its master** (`SEQ_FIX_RCELL`) | 2x7x4 | **42 blocks in 0.7 s**, 0 rejections |
+| the same | 2x6x4 | **39 blocks in 2.7 s**, 0 rejections |
+| the same | 2x5x4 | no layout (proven, 0.5 s) |
+| `dff-neg` with both loops opened (its stored values as levers: combinational, 4 inputs) | 2x6x4 | 43 blocks in 368 s |
+| the same | 2x7x4 | 43 blocks in 592 s |
+
+What the runs show:
+
+- **Flip-flops exist in small boxes.** With the master latch given, the rest
+  is found in seconds, with no rejection.
+- **One solve is slow already for six torches over 16 cases.** The
+  combinational version with the loops opened takes 6-10 minutes.
+- **Closing the two loops makes it much slower.** The stored values have to
+  come back from their own torches through the cut, and the solve found
+  nothing in 30 minutes.
+- **Fixing where the cut sits does not help.** A rule that only the state
+  torch carries the next value (`target/seq/cut-at-torch.rsdsl` in the runs)
+  found nothing either.
+- **Placing one latch first works.** That is construction's way:
+  1. place each latch's loop, the state net with its readers, as one step;
+  2. then place the gating around it.
 
 Fixtures, with tests that paste the NBT and pull the levers through set,
-hold, and reset (`exact_rs_latch_fixture_sets_holds_and_resets`,
-`exact_d_latch_fixture_follows_and_holds`):
+hold, and reset, or through clock edges:
 
 - `test/rs-latch-exact-2x3x3.{rcell,nbt,outputs.json}`
+  (`exact_rs_latch_fixture_sets_holds_and_resets`)
 - `test/d-latch-exact-2x3x4.{rcell,nbt,outputs.json}`
+  (`exact_d_latch_fixture_follows_and_holds`)
+- `test/dff-exact-2x6x4.{rcell,nbt,outputs.json}`: the falling-edge
+  flip-flop, 39 blocks, placed with the D latch fixed as its master
+  (`exact_falling_edge_flip_flop_fixture_samples_on_the_falling_edge`)
 
 Both are in the viewer's examples.
 
@@ -130,7 +170,7 @@ Both are in the viewer's examples.
 
 - **Flip-flops through construction.** Place each latch, its loop with the cut,
   as one step (the state net and its readers together), then the gating
-  around it.
+  around it. Fixing the master by hand already does this once.
 - **Synthesis with state** (`nor_synthesis.md`). Search latch and flip-flop
   netlists by next-state function, and screen them for hazards.
 - **Repeater locking.** A repeater powered from the side holds its output,
@@ -152,10 +192,12 @@ SEQ_CIRCUIT=d-latch-mux SEQ_DIMS=2x3x4 SEQ_SECONDS=300 SEQ_WRITE=target/d-latch 
 `explore_sequential_cells` takes the following knobs:
 
 - `SEQ_CIRCUIT`: `rs-latch`, `rs-latch-both`, `d-latch`, `d-latch-mux`, `dff`,
-  `dff-mux`; or `SEQ_NETLIST=<text>` for any other netlist.
+  `dff-mux`, `dff-neg`; or `SEQ_NETLIST=<text>` for any other netlist.
 - `SEQ_DIMS`: boxes to try in turn; `SEQ_ALL=1` tries every one.
 - `SEQ_SECONDS`, `SEQ_WORKERS`, `SEQ_OPTIMIZE=0`, `SEQ_REFINEMENTS`.
 - `SEQ_FIX`: fixed cells, as hints.
+- `SEQ_FIX_RCELL`: a placed cell's blocks as hints, with `SEQ_FIX_OFFSET` and
+  input renames in `SEQ_FIX_RENAME` (`en=clk`).
 - `SEQ_MODEL_FILE`: another model.
 - `SEQ_WRITE`: where to write the layout.
 

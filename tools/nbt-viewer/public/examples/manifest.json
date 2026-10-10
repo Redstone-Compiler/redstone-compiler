@@ -113,6 +113,14 @@
   },
   {
     "kind": "nbt",
+    "name": "dff-exact-2x6x4.nbt",
+    "file": "dff-exact-2x6x4.nbt",
+    "path": "examples/dff-exact-2x6x4.nbt",
+    "size": 481,
+    "outputsPath": "examples/dff-exact-2x6x4.outputs.json"
+  },
+  {
+    "kind": "nbt",
     "name": "dust-step-up-primitive.nbt",
     "file": "dust-step-up-primitive.nbt",
     "path": "examples/dust-step-up-primitive.nbt",
