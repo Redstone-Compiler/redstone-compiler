@@ -848,7 +848,12 @@ impl ExactLocalPlacer {
             .unwrap_or_default();
         let rcell = verify::to_rcell(&self.name, dim, &self.netlist, decoded);
         // Store settled torch states, so pasting the cell starts stable.
-        let world = verify::settled_world(&world, &config.tuning).unwrap_or(world);
+        let settled = if self.netlist.state.is_empty() {
+            verify::settled_world(&world, &config.tuning)
+        } else {
+            verify::settled_sequential_world(&world, &self.netlist, decoded, &config.tuning)
+        };
+        let world = settled.unwrap_or(world);
         ExactPlacement {
             placed: PlacedWorld {
                 world,

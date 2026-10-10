@@ -213,6 +213,7 @@ pub fn synthesize(
                 })
                 .collect(),
             outputs: Vec::new(),
+            state: Vec::new(),
         };
         for (index, t) in steps.clone().enumerate() {
             let torch = solver.value(nor[index]);

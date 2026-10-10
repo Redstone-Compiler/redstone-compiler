@@ -114,7 +114,10 @@ struct Prepared {
     geometry: Geometry,
     classes: Vec<SignalClass>,
     class_names: Vec<String>,
+    /// Cases: `1 << NorNetlist::case_bits`, the inputs and stored state.
     cases: usize,
+    /// Each state net's next-value and stored-value classes (`cut`).
+    cuts: Vec<(usize, usize)>,
     /// Switch candidates of the present inputs as `(cell, attach, net)`.
     sites: Vec<(usize, Direction, NetId)>,
     /// The carry input's net (`CarryTiling`).
@@ -153,13 +156,39 @@ impl Prepared {
             input_count <= MAX_INPUTS,
             "exact placer supports at most {MAX_INPUTS} inputs"
         );
+        ensure!(
+            netlist.case_bits() <= MAX_INPUTS,
+            "exact placer supports at most {MAX_INPUTS} input and state bits"
+        );
+        ensure!(
+            netlist.state.is_empty() || config.carry.is_none(),
+            "a carry tile cannot hold state"
+        );
         let classes = vocabulary(netlist);
         let class_names = unique_names(classes.iter().map(|class| class.name.as_str()));
+        let values = netlist.net_values();
+        let cuts = netlist
+            .state
+            .iter()
+            .map(|&net| {
+                let function = net_function(&values, net);
+                let next = classes.iter().position(|class| class.function == function);
+                let stored = classes.iter().position(|class| class.stored == Some(net));
+                match (next, stored) {
+                    (Some(next), Some(stored)) if next != stored => Ok((next, stored)),
+                    _ => bail!(
+                        "state net `{}` needs a next value that differs from its stored one",
+                        netlist.nets[net].name
+                    ),
+                }
+            })
+            .collect::<eyre::Result<Vec<_>>>()?;
         let mut prepared = Self {
             geometry,
             classes,
             class_names,
-            cases: 1 << input_count,
+            cases: 1 << netlist.case_bits(),
+            cuts,
             sites: Vec::new(),
             carry_net: config
                 .carry
@@ -331,7 +360,9 @@ impl Prepared {
         // The implied torch bound speeds up optimality proofs (AND 2x4x3:
         // about 20% faster) but slowed finding a first layout in
         // measurements, so it is only set when optimizing.
-        let min_torches = if config.optimize {
+        // The bound's search starts from the inputs only; a cut state also
+        // starts from its stored value, so it is left out there.
+        let min_torches = if config.optimize && self.cuts.is_empty() {
             let targets = self
                 .observations
                 .iter()
@@ -392,8 +423,15 @@ impl Prepared {
             "increasing",
             "decreasing",
             "output_delay",
+            "cut",
         ] {
             instance.fact(fact);
+        }
+        for &(next, stored) in &self.cuts {
+            instance.row(
+                "cut",
+                vec![IValue::sym(&names[next]), IValue::sym(&names[stored])],
+            );
         }
         if let Some(carry) = &config.carry {
             self.tiling_facts(&mut instance);
@@ -626,6 +664,7 @@ impl Prepared {
             cnf: Cnf::from_literals(1, vec![1, 0], 1),
             classes: self.classes.clone(),
             cases: self.cases,
+            cuts: self.cuts.clone(),
             air: Vec::new(),
             solid: Vec::new(),
             dust: Vec::new(),
