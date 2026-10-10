@@ -100,8 +100,8 @@ counted):
 | D latch as a multiplexer | 4 | 2x3x3, 2x4x3 | no layout (proven) |
 | D latch as a multiplexer | 4 | 2x3x4 | **16 blocks, proven fewest**, 35 rejections, 77-111 s |
 | D latch as a multiplexer | 4 | 2x4x4 | 15 blocks, not proven in 300 s |
-| master-slave flip-flop | 10 | 2x6x4, 2x6x5 | nothing found in 900 s each (4 workers) |
-| flip-flop from two multiplexer latches | 6 | 2x4x4, 2x5x4, 2x6x4 | nothing found in 600 s each (4 workers) |
+| master-slave flip-flop | 10 | 2x6x4, 2x6x5, 2x8x5 | nothing found in 900 s each (4 workers) |
+| flip-flop from two multiplexer latches | 6 | 2x4x4, 2x5x4, 2x6x4, 2x6x5 | nothing found in 600 s each (4 workers) |
 
 - **The set-reset latch** is two torches on two blocks. Each block carries one
   lever, and two repeaters cross over, each from one torch into the other
