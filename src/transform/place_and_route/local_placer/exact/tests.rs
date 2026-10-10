@@ -3817,6 +3817,13 @@ fn sequential_netlist(circuit: &str) -> eyre::Result<&'static str> {
             "state(q); out(q); nd=NOR(d); nen=NOR(en); s=NOR(nd,nen); r=NOR(d,nen); \
              q=NOR(r,nq); nq=NOR(s,q)"
         }
+        // Falling-edge flip-flop: the multiplexer D latch above as the
+        // master (`m`, open while `clk` is on), and a slave open while it is
+        // off that shares the master's `NOR(m, clk)`. Six torches.
+        "dff-neg" => {
+            "state(m,q); out(q); nen=NOR(clk); a=NOR(d,nen); b=NOR(m,clk); m=NOR(a,b); \
+             f=NOR(q,nen); q=NOR(b,f)"
+        }
         // D latch as a multiplexer: `q = en ? d : q`, four torches.
         "d-latch-mux" => "state(q); out(q); nen=NOR(en); a=NOR(d,nen); b=NOR(q,en); q=NOR(a,b)",
         // Master-slave flip-flop from two multiplexer latches, which share
@@ -4092,10 +4099,33 @@ fn exact_d_latch_fixture_follows_and_holds() -> eyre::Result<()> {
     )
 }
 
+/// The falling-edge flip-flop (`test/dff-exact-2x6x4`, 39 blocks, six
+/// torches) changes `q` only when `clk` falls, to the `d` it saw while `clk`
+/// was on. It was placed with the D latch fixture fixed as its master
+/// (`SEQ_FIX_RCELL`); without that hint, one solve finds no flip-flop in
+/// 30 minutes (`docs/sequential_exact_cells.md`).
+#[test]
+fn exact_falling_edge_flip_flop_fixture_samples_on_the_falling_edge() -> eyre::Result<()> {
+    run_latch_fixture(
+        "dff-exact-2x6x4",
+        &[
+            (&[("d", true)], false),
+            (&[("clk", true)], false),
+            (&[("clk", false)], true),
+            (&[("d", false)], true),
+            (&[("clk", true)], true),
+            (&[("d", true)], true),
+            (&[("d", false)], true),
+            (&[("clk", false)], false),
+            (&[("d", true)], false),
+        ],
+    )
+}
+
 /// Places a sequential cell in the smallest box of `SEQ_DIMS` that holds
 /// it (comma-separated `XxYxZ`, `2x4x3,2x4x4,2x5x4,2x6x4,2x6x5`), with the
 /// fewest blocks (`SEQ_OPTIMIZE=0` takes the first layout):
-/// `SEQ_CIRCUIT=rs-latch|rs-latch-both|d-latch|d-latch-mux|dff|dff-mux` (or
+/// `SEQ_CIRCUIT=rs-latch|rs-latch-both|d-latch|d-latch-mux|dff|dff-mux|dff-neg` (or
 /// `SEQ_NETLIST=` text),
 /// `SEQ_SECONDS` (120) per box, `SEQ_WORKERS` (8), `SEQ_ALL=1` to try every
 /// box, `SEQ_REFINEMENTS` (2000) simulator rejections per worker,
@@ -4178,6 +4208,44 @@ fn explore_sequential_cells() -> eyre::Result<()> {
                 config
                     .fixed_cells
                     .insert(Position(at[0], at[1], at[2]), kind);
+            }
+        }
+        // `SEQ_FIX_RCELL=<rcell>` fixes a placed cell's blocks as hints, at
+        // `SEQ_FIX_OFFSET` (`x,y,z`), its inputs renamed by `SEQ_FIX_RENAME`
+        // (`old=new,...`); a renamed lever becomes that input's only site.
+        if let Ok(path) = std::env::var("SEQ_FIX_RCELL") {
+            let document: crate::physical_cell::PhysicalCellDocument =
+                std::fs::read_to_string(&path)?.parse()?;
+            let build = document.build()?;
+            let offset = std::env::var("SEQ_FIX_OFFSET")
+                .unwrap_or_else(|_| "0,0,0".to_owned())
+                .split(',')
+                .map(|value| value.trim().parse::<usize>())
+                .collect::<Result<Vec<_>, _>>()?;
+            let renames = std::env::var("SEQ_FIX_RENAME").unwrap_or_default();
+            let rename = |name: &str| {
+                renames
+                    .split(',')
+                    .filter_map(|pair| pair.split_once('='))
+                    .find(|(old, _)| *old == name)
+                    .map_or(name.to_owned(), |(_, new)| new.to_owned())
+            };
+            let at = |position: Position| {
+                Position(
+                    position.0 + offset[0],
+                    position.1 + offset[1],
+                    position.2 + offset[2],
+                )
+            };
+            for (position, block) in build.world.iter_block() {
+                let kind = manual_kind(&block);
+                if kind != CellKind::Air {
+                    config.fixed_cells.insert(at(position), kind);
+                }
+            }
+            for input in &document.inputs {
+                let attach = build.world[input.position].direction;
+                config = config.with_input_site(rename(&input.name), at(input.position), attach);
             }
         }
         let started = Instant::now();
