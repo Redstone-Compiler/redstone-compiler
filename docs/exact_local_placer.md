@@ -777,51 +777,101 @@ seconds:
 A slice removal's window is solved with every cell outside it fixed, and
 most removals come back infeasible. The Benders idea: ask which of those
 fixed cells the proof needs, free only those, and solve again. A proof that
-needs none of them would rule the removal out for every wider window.
+needs none of them rules the removal out.
 
-What was built (off by default):
+`CompactionConfig::core_guided` (off by default) does this:
 
-- `CompactionConfig::core_guided`, with `core_expansions` (3) and
-  `core_shell` (2).
-- After an infeasible removal, the fixed cells within `core_shell` steps of
-  the window become soft cells: model fact `soft`, rule "물러설 수 있는 고정
-  칸", one guard per cell.
-- `ExactLocalPlacer::fixed_core` solves with the soft cells assumed, adds the
-  acyclicity cuts lazily as the workers do, and returns the cells in the
-  unsatisfiable core.
-  - Core cells are freed and the window is solved again.
-  - An empty core marks the removal hopeless until the layout changes.
-- rsdsl's `GroundOptions::guard_rules` emits guards for some `@guarded` rules
-  only. `relax_soundness` guards only its own two rules.
+- After an infeasible removal, the fixed cells within `core_shell` (2) steps
+  of the window become soft cells (fact `soft`).
+- `ExactLocalPlacer::proof_core` names the soft cells the proof needs.
+- Those cells are freed and the window is solved again, up to
+  `core_expansions` (3) times and `core_max_freed` (20) cells.
+- An empty core marks the removal hopeless until the layout changes.
 
-The full adder layouts from `CIRCUIT=full-adder` construction (seeds 1-3)
-were recompacted with 6 workers (`RECOMPACT_CORE=1`,
-`RECOMPACT_CORE_SHELL`):
+### First try: guards and assumptions
+
+Each soft cell's requires got a guard, and the solve assumed every guard,
+so the failed assumptions would be the core. It cost too much:
 
 | Core query | Guards | Clauses | Result |
 | --- | --- | --- | --- |
-| first version: one solve, every outside cell, soundness guarded too | 300-320 | 830 000 | satisfiable in 0.5 s, all 332 queries |
+| every outside cell, soundness guarded too, one solve | 300-320 | 830 000 | satisfiable in 0.5 s, all 332 queries |
 | the same with lazy acyclicity | 300-320 | 830 000 | no answer in 20 s |
 | shell of 2 steps | 40-80 | 165 000-305 000 | no answer in 20 s, all 6 |
 | shell of 1 step | 20-40 | 110 000-230 000 | no answer in 20 s, 4 of 5 |
-| one soft cell (a check) | 1 | 68 000-134 000 | 0-8 s |
 
-With every cell fixed, the same windows are proven infeasible in 1-3 s on
-average.
+- With every cell fixed, the same windows are proven infeasible in 1-3 s
+  on average.
+- **The single solve** got layouts whose torches feed their own support:
+  acyclicity is added lazily. The query now runs the lazy loop.
+- **A guarded require is not a unit.** The grounder folds fixed units into
+  every later rule, so constraints among fixed cells never reach the solver
+  (`exact_placer.rsdsl`, "고정된 칸"). Each guarded cell brings its
+  constraints back, and the solver then proves the same infeasibility under
+  assumptions, more than 10 times slower.
 
-- **The first version** solved once and got layouts whose torches feed their
-  own support. Acyclicity is a lazy constraint. Nothing was freed, and the
-  600 s runs ended 10-17 blocks worse than without the queries.
-- **A guarded require is not a unit.** The grounder folds the fixed cells'
-  units into every later rule, so the constraints among fixed cells never
-  reach the solver (`exact_placer.rsdsl`, "고정된 칸"). Each soft cell brings
-  its constraints back; 40 cells more than double the formula. The solver then
-  has to prove the same infeasibility under assumptions, more than 10 times
-  slower.
-- An explanation that costs more than the proof it explains is not worth
-  asking for, so `core_guided` stays off.
+### Second try: read the core from the proof
 
-Construction steps fail by timing out, not by infeasibility, so cores would
-not explain them either. A cheaper explanation has to keep the fixed cells
-folded. One way is to read which fixed units a proof used from a solver that
-logs its proof (LRAT).
+The proof itself says which clauses it used, so the units can stay units:
+
+- **The proof.** `SatSolver::trace_frat` traces CaDiCaL's proof in FRAT
+  with antecedents. Every original clause comes with its id, including the
+  lazy acyclicity clauses added between solves. Every derived clause lists
+  the clauses it was derived from.
+- **The core.** `frat::refutation_originals` follows the empty clause back
+  to the original clauses it rests on. The soft cells with a unit clause
+  among them are the core.
+- **Unfolded units.** The soft cells' requires sit in an rsdsl `@nofold`
+  rule ("물러설 수 있는 고정 칸"). Their units stay plain unit clauses: no
+  guard, and no folding, not even by the final unit propagation. Every other
+  fixed cell still folds away.
+- **Timing.** With timing on, a given torch's ordering clause also exists
+  only because the cell is given, so given soft cells in any used clause
+  count too.
+- **Test.** `proof_core_names_the_broken_cell` replaces a placed NOR's torch
+  with air. The core names that cell, and fixing only the core keeps the
+  instance infeasible.
+
+The query is cheap now:
+
+- Single-threaded, a proof takes 0.03-10 s and writes 10-180 MB; reading it
+  takes under 0.3 s.
+- A first version left every fixed cell unfolded (`no_fold`). Its cores held
+  209-286 of 300 cells: the root-level propagation derived the boundary
+  signals through the whole fixed circuit. With only the shell unfolded,
+  cores held 1-79 of its 40-81 cells.
+
+The cores are still too broad to help. On the three full adder layouts, the
+retries without the 20-cell cap went:
+
+| Cells freed | Retries | Placed | No answer in 20 s | Time |
+| --- | --- | --- | --- | --- |
+| 1-20 | 27 | 3 | 0 | 19 s |
+| 21-40 | 37 | 1 | 21 | 515 s |
+| 41-60 | 21 | 6 | 15 | 352 s |
+| more | 28 | 0 | 28 | 566 s |
+
+Recompaction for 600 s, 6 workers, each pair of runs at the same time
+(`RECOMPACT_CORE=1`):
+
+| Seed | Off (two runs) | On | On, at most 20 cells freed |
+| --- | --- | --- | --- |
+| 1 | 2x11x10, 163 blocks; 2x11x10, 165 | 2x14x10, 206 | 2x13x10, 189 |
+| 2 | 2x9x9, 104; 2x10x6, 60 | 2x13x10, 156 | 2x10x7, 98 |
+| 3 | 2x12x10, 103; 2x10x10, 99 | 2x13x10, 166 | 2x11x10, 117 |
+
+- **Removing a slice fails across the whole cross-section.** Every wire
+  through the slice has to be reconnected, so the proof needs most of the
+  boundary. Small cores rarely hold a fix: with the cap, 4 of 89 retries
+  placed the removal.
+- **The queries cost up to a third of the budget.** Core solves took
+  90-190 s per run, and every run with cores ended larger than the run
+  beside it.
+- **Seeds vary a lot.** Seed 2's two runs without cores ended at 104 and 60
+  blocks. The 60-block run, 2x10x6, ties the smallest full adder in blocks
+  (2x8x8, 60, from the pipeline with fixed faces).
+
+`core_guided` stays off. `proof_core` remains as a tool: it explains an
+infeasible instance cheaply when the cause is local, such as a hand-edited
+cell or a fixed sub-cell (the flip-flop's master latch,
+`sequential_exact_cells.md`).

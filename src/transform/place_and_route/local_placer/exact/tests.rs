@@ -1173,6 +1173,10 @@ fn recompact_full_adder_rcell() -> eyre::Result<()> {
             .ok()
             .and_then(|value| value.parse().ok())
             .unwrap_or(2),
+        core_max_freed: std::env::var("RECOMPACT_CORE_MAX_FREED")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(20),
         reduction_axes: match std::env::var("RECOMPACT_REDUCTION_AXES").as_deref() {
             Ok("1") => vec![1],
             _ => vec![1, 2],
@@ -4032,6 +4036,58 @@ fn rs_latch_places_in_eight_blocks() -> eyre::Result<()> {
     };
     assert_eq!(placement.block_count, 8);
     assert!(stats.optimal);
+    Ok(())
+}
+
+/// A refutation's core names the fixed cell that breaks a layout, and the
+/// core alone keeps the instance infeasible.
+#[test]
+fn proof_core_names_the_broken_cell() -> eyre::Result<()> {
+    let netlist = NorNetlist::from_text("o=NOR(a,b)")?;
+    let placer = ExactLocalPlacer::from_netlist(netlist);
+    let dim = DimSize(2, 3, 3);
+    let mut config = ExactPlacerConfig::new(dim);
+    config.time_limit = Some(Duration::from_secs(60));
+    let (outcome, _) = placer.place(&config)?;
+    let ExactOutcome::Placed(placement) = outcome else {
+        panic!("{outcome:?}");
+    };
+    let kinds = placement.cells.iter().copied().collect::<BTreeMap<_, _>>();
+    let (&torch, _) = kinds
+        .iter()
+        .find(|(_, kind)| matches!(kind, CellKind::Torch(_)))
+        .expect("a NOR needs a torch");
+    let layout = ExactLayout::from_placement(dim, &placement);
+    let mut broken = ExactPlacerConfig::new(dim);
+    for (name, position, attach) in &layout.inputs {
+        broken = broken.with_input_site(name.clone(), *position, *attach);
+    }
+    for x in 0..dim.0 {
+        for y in 0..dim.1 {
+            for z in 0..dim.2 {
+                let position = Position(x, y, z);
+                let kind = kinds.get(&position).copied().unwrap_or(CellKind::Air);
+                broken.fixed_cells.insert(position, kind);
+            }
+        }
+    }
+    broken.fixed_cells.insert(torch, CellKind::Air);
+    broken.soft_fixed_cells = broken.fixed_cells.keys().copied().collect();
+    let core = placer
+        .proof_core(&broken, Duration::from_secs(60))?
+        .expect("the broken layout is infeasible");
+    assert!(core.contains(&torch), "{core:?}");
+    let mut only_core = broken.clone();
+    only_core.fixed_cells.clear();
+    only_core.soft_fixed_cells.clear();
+    only_core.time_limit = Some(Duration::from_secs(60));
+    for position in &core {
+        only_core
+            .fixed_cells
+            .insert(*position, broken.fixed_cells[position]);
+    }
+    let (outcome, _) = placer.place(&only_core)?;
+    assert!(matches!(outcome, ExactOutcome::Infeasible), "{outcome:?}");
     Ok(())
 }
 

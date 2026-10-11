@@ -189,6 +189,9 @@ pub(crate) struct RuleDef {
     pub label: String,
     body: Arc<Vec<Stmt>>,
     guarded: Option<Vec<String>>,
+    /// `@nofold`: its unit requires stay unit clauses that nothing folds,
+    /// so a refutation that needs them names them.
+    nofold: bool,
     /// Uses no relation (directly or through the defs it reads), so it can
     /// run before relations are collected; its unit requires then fold into
     /// everything grounded after it.
@@ -224,9 +227,6 @@ pub(crate) struct GuardDef {
 pub struct GroundOptions {
     /// Emit `@guarded` selectors (otherwise those rules are unguarded).
     pub guards: bool,
-    /// With `guards`, emit selectors only for the rules with these labels
-    /// (every `@guarded` rule when `None`); the other rules are unguarded.
-    pub guard_rules: Option<Vec<String>>,
     /// Record the binder valuation of every clause (for explained output).
     pub provenance: bool,
     /// Encode OR auxiliaries as positive variables instead of negated AND
@@ -1192,6 +1192,7 @@ impl Program {
                 }
                 ItemKind::Rule { label, body } => {
                     let mut guarded = None;
+                    let mut nofold = false;
                     for a in &item.annotations {
                         match a.name.as_str() {
                             "guarded" => {
@@ -1236,6 +1237,7 @@ impl Program {
                                 }
                                 guarded = Some(per);
                             }
+                            "nofold" => nofold = true,
                             "label" => {}
                             other => return Err(unknown_annotation(other, a.span, "rule")),
                         }
@@ -1246,6 +1248,7 @@ impl Program {
                         label: label.clone(),
                         body: Arc::new(body.clone()),
                         guarded,
+                        nofold,
                         early: false,
                         has_contrib,
                         has_require: contains(body, |s| matches!(s.kind, StmtKind::Require(_))),
@@ -1821,8 +1824,23 @@ impl Program {
                     self.encoder.origin = self.new_origin(label, valuation);
                 }
                 // A required literal holds in every model: fix it, so later
-                // formulas fold it (a guarded clause is not a unit).
-                if !self.options.no_fold && self.encoder.guard.is_none() {
+                // formulas fold it (a guarded clause is not a unit). A
+                // `@nofold` rule's literals stay open, even to the final
+                // unit propagation.
+                let nofold = self.rules[self.current_rule.unwrap()].nofold;
+                if nofold {
+                    match &f {
+                        F::Lit(l) => self.encoder.protect(*l),
+                        F::And(items) => {
+                            for item in items {
+                                if let F::Lit(l) = item {
+                                    self.encoder.protect(*l);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                } else if !self.options.no_fold && self.encoder.guard.is_none() {
                     match &f {
                         F::Lit(l) => self.fix_lit(*l),
                         F::And(items) => {
@@ -1943,11 +1961,7 @@ impl Program {
             self.encoder.guard = None;
             return Ok(());
         };
-        let selected = match &self.options.guard_rules {
-            Some(labels) => labels.contains(&self.rules[r].label),
-            None => true,
-        };
-        if !self.options.guards || !selected {
+        if !self.options.guards {
             self.encoder.guard = None;
             return Ok(());
         }

@@ -244,9 +244,6 @@ pub(super) struct Encoding {
     pub(super) relaxations: Vec<Lit>,
     /// Per-cell coverage guards (only with `relax_soundness`).
     pub(super) coverage_relaxations: Vec<(usize, Lit)>,
-    /// Guards of each soft cell's fixed kind and given signal
-    /// (`soft_fixed_cells`).
-    pub(super) fixed_guards: Vec<(usize, Lit)>,
     /// Required observations as `(name, function)`.
     pub(super) observed: Vec<(String, u64)>,
     /// The grounded rsdsl program behind `cnf`.
