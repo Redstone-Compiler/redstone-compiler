@@ -47,16 +47,22 @@ pub struct CompactionConfig {
     pub repair_optimize: Option<Duration>,
     /// When a slice removal's window is proven infeasible, ask which fixed
     /// cells within `core_shell` of it the proof needs
-    /// (`ExactLocalPlacer::fixed_core`), free those too, and try again, up to
+    /// (`ExactLocalPlacer::proof_core`), free those too, and try again, up to
     /// `core_expansions` times. A proof that needs none of them rules the
     /// slice out until the layout changes: every wider window up to
     /// `core_shell` fails too.
     pub core_guided: bool,
     pub core_expansions: usize,
     /// How far (in steps between neighboring cells) from the free cells the
-    /// core may reach. The cells further out stay fixed units, which keeps
+    /// core may reach. The cells further out stay folded units, which keeps
     /// the core solve as small as the window's own.
     pub core_shell: usize,
+    /// Free at most this many cells; a larger core is not tried. Windows
+    /// that free more rarely finish (full adder: 21-60 freed cells timed
+    /// out 36 times of 58).
+    pub core_max_freed: usize,
+    /// Time for each core solve, which runs on one thread.
+    pub core_time_limit: Duration,
     /// Slice removals per round before block reduction gets a turn. A long
     /// constructed layout can otherwise spend the whole budget removing
     /// slices (the 2-bit adder did, and kept its dead blocks). `None` (the
@@ -120,6 +126,8 @@ impl Default for CompactionConfig {
             core_guided: false,
             core_expansions: 3,
             core_shell: 2,
+            core_max_freed: 20,
+            core_time_limit: Duration::from_secs(5),
             model_params: BTreeMap::new(),
             max_refinements: 8,
             tuning: ExactTuning::default(),
@@ -711,7 +719,7 @@ impl ExactLocalPlacer {
                 .window_config_freeing(cut, axis, window, None, config, &freed)
                 .and_then(|mut exact| {
                     exact.soft_fixed_cells = shell(&exact, config.core_shell);
-                    self.fixed_core(&exact, config.attempt_time_limit)
+                    self.proof_core(&exact, config.core_time_limit)
                 });
             let core = match core {
                 Ok(Some(core)) => core,
@@ -726,14 +734,14 @@ impl ExactLocalPlacer {
                 }
             };
             if core.is_empty() {
-                // Every fixed cell was only assumed: no outside layout helps.
+                // The proof needs no shell cell: changing them cannot help.
                 record_attempt("core", "impossible", started, None);
                 return (None, true);
             }
             record_attempt("core", "cells", started, None);
             let before = freed.len();
             freed.extend(core);
-            if freed.len() == before {
+            if freed.len() == before || freed.len() > config.core_max_freed {
                 return (None, false);
             }
             tracing::info!(

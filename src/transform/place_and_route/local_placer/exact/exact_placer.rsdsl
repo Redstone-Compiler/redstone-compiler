@@ -36,8 +36,8 @@ fact fixed(Cell, Kind);                // fixed block kinds, as members of `Kind
 // cell is powered for real, so it needs no justification here.
 fact given_sig(Cell, Class);
 fact given(c: Cell) := any(given_sig(c, k) for k: Class);
-// Fixed or given cells whose requires are guarded, so a core can name the ones
-// an infeasible instance needs (`ExactLocalPlacer::fixed_core`).
+// Fixed or given cells whose units are not folded, so a refutation that needs
+// them names them (`ExactLocalPlacer::proof_core`).
 fact soft(Cell);
 
 // Tiling along X with a ripple carry (`CarryTiling` in mod.rs; see the
@@ -227,8 +227,8 @@ rule "주어진 신호" {
     }
 }
 
-// The soft ones, each cell behind its own guard (only with guards on).
-@guarded(per = c)
+// The soft ones: plain unit clauses that nothing folds.
+@nofold
 rule "물러설 수 있는 고정 칸" {
     forall c: Cell, m: Kind where fixed(c, m) and soft(c) {
         require Kind[c] is m;

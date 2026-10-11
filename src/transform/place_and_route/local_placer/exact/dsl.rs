@@ -30,9 +30,6 @@ const SOURCE: &str = include_str!("exact_placer.rsdsl");
 const SOUNDNESS_RULE: &str =
     "건전성: 원천이 켜지면 받는 쪽도 켜짐 (가루·리피터는 원천과 똑같은 신호)";
 const COVERAGE_RULE: &str = "켜진 것은 켜진 원천이 있어야 함";
-/// The rule whose guards stand for one soft cell's fixed kind and given
-/// signal (`soft_fixed_cells`).
-const SOFT_FIXED_RULE: &str = "물러설 수 있는 고정 칸";
 
 /// Signal functions are `u64` truth tables over input cases (2^6 = 64).
 const MAX_INPUTS: usize = 6;
@@ -712,7 +709,6 @@ impl Prepared {
             sections: Vec::new(),
             relaxations: Vec::new(),
             coverage_relaxations: Vec::new(),
-            fixed_guards: Vec::new(),
             observed: self
                 .observations
                 .iter()
@@ -845,10 +841,6 @@ impl Prepared {
                 encoding
                     .coverage_relaxations
                     .push((cell_index(&guard.key[0].1), guard.lit));
-            } else if guard.rule == SOFT_FIXED_RULE {
-                encoding
-                    .fixed_guards
-                    .push((cell_index(&guard.key[0].1), guard.lit));
             }
         }
         if config.relax_soundness {
@@ -925,17 +917,8 @@ fn ground(
     instance: &Instance,
     provenance: bool,
 ) -> eyre::Result<rsdsl::Program> {
-    // Each diagnostic guards only its own rules, so the other stay required.
-    let mut guard_rules = Vec::new();
-    if config.relax_soundness {
-        guard_rules.extend([SOUNDNESS_RULE, COVERAGE_RULE]);
-    }
-    if !config.soft_fixed_cells.is_empty() {
-        guard_rules.push(SOFT_FIXED_RULE);
-    }
     let options = GroundOptions {
-        guards: !guard_rules.is_empty(),
-        guard_rules: Some(guard_rules.into_iter().map(str::to_owned).collect()),
+        guards: config.relax_soundness,
         provenance,
         positive_or_aux: false,
         no_fold: config.no_fold,

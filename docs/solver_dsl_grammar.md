@@ -490,6 +490,7 @@ model minimizes non-air blocks plus optional repeater and torch weights.
 | `@label("text")` | declarations | Rule label for clauses produced by the declaration itself. |
 | `@encoding(name)` | int (`order`), cardinality statements (`pairwise`, `seqcounter`, `totalizer`, `auto`) | Encoding choice. |
 | `@guarded(per = binders)` | rule | Adds a selector literal per distinct valuation of the listed binders, or one per rule without `per`. Rust assumes them true by default and can drop any for UNSAT cores, relaxation, or toggling. This generalizes `relax_soundness`. |
+| `@nofold` | rule | Its unit requires stay plain unit clauses: nothing folds them, not even the final unit propagation. A refutation that needs one then cites it (`ExactLocalPlacer::proof_core` reads them from a FRAT proof). |
 
 Unknown annotations are errors, so a misspelled `@encodng` cannot silently do
 nothing.
@@ -552,7 +553,7 @@ while each placer model adds its own interface rules.
 
 Unit folding is automatic. A `require` that grounds to a literal, or to a
 conjunction of literals, fixes them (unless a `@guarded` selector is
-attached). A choice option fixed true fixes its siblings false. Every formula
+attached or the rule is `@nofold`). A choice option fixed true fixes its siblings false. Every formula
 grounded afterwards folds them to constants, which is why step 4 comes before
 relations are collected. Step 8 catches clauses written before a unit was
 known. Instance facts that pin choices, such as fixed cells, therefore never

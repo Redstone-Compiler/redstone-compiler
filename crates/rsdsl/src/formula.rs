@@ -218,6 +218,8 @@ pub struct Encoder {
     /// Known values of variables (`1` true, `-1` false, `0` free), fixed
     /// before the rules that use them are grounded so they fold away.
     fixed: Vec<i8>,
+    /// Variables the final unit propagation leaves open (`@nofold`).
+    protected: Vec<bool>,
 }
 
 impl Default for Encoder {
@@ -243,6 +245,7 @@ impl Encoder {
             key_scratch: Vec::new(),
             or_as_negated_and: true,
             fixed: Vec::new(),
+            protected: Vec::new(),
         };
         let t = encoder.new_var(VarOrigin::True);
         debug_assert_eq!(t, 1);
@@ -274,6 +277,15 @@ impl Encoder {
             self.fixed.resize(var + 1, 0);
         }
         self.fixed[var] = if lit > 0 { 1 } else { -1 };
+    }
+
+    /// Keeps `lit`'s variable open in `propagate_units`.
+    pub fn protect(&mut self, lit: Lit) {
+        let var = lit.unsigned_abs() as usize;
+        if self.protected.len() <= var {
+            self.protected.resize(var + 1, false);
+        }
+        self.protected[var] = true;
     }
 
     /// Unit propagation over the clauses emitted so far, from the fixed
@@ -332,7 +344,13 @@ impl Encoder {
                 }
                 match (open_count, open) {
                     (0, _) => return, // conflict: leave the CNF to the solver
-                    (1, Some(l)) => {
+                    (1, Some(l))
+                        if !self
+                            .protected
+                            .get(l.unsigned_abs() as usize)
+                            .copied()
+                            .unwrap_or(false) =>
+                    {
                         value[l.unsigned_abs() as usize] = if l > 0 { 1 } else { -1 };
                         changed = true;
                     }

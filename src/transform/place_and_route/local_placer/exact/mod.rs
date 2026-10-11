@@ -22,6 +22,7 @@ mod construct;
 mod dimacs;
 mod dsl;
 mod encode;
+mod frat;
 mod layout;
 mod netlist;
 mod progress;
@@ -107,9 +108,9 @@ pub struct ExactPlacerConfig {
     /// literal that tests can assume false to locate model/simulator mismatches.
     #[doc(hidden)]
     pub relax_soundness: bool,
-    /// Fixed or given cells whose kind and signal are guarded by one
-    /// literal each, so a solve can assume them and report which ones an
-    /// infeasibility needs (`ExactLocalPlacer::fixed_core`).
+    /// Fixed or given cells whose units are not folded into the formula, so
+    /// a refutation that needs them names them
+    /// (`ExactLocalPlacer::proof_core`).
     #[doc(hidden)]
     pub soft_fixed_cells: std::collections::BTreeSet<Position>,
     /// Diagnostic only: ground in the original rule order without folding
@@ -447,58 +448,109 @@ impl ExactLocalPlacer {
         &self.netlist
     }
 
-    /// Which of `config.soft_fixed_cells` (fixed kinds and given signals) an
-    /// infeasible instance needs: one solve with those cells assumed rather
-    /// than required, and the ones in the unsatisfiable core. An empty set
-    /// means the instance is infeasible whatever those cells are. `None`
-    /// when an acyclic layout exists (simulator rejections aside) or the
-    /// solve is undecided within `limit`.
-    pub(super) fn fixed_core(
+    /// Which of `config.soft_fixed_cells` an infeasible instance needs, read
+    /// from its refutation. The soft cells' units are left unfolded; the
+    /// instance is solved once with the proof traced
+    /// (`SatSolver::trace_frat`, acyclicity added lazily as in
+    /// `run_worker`); the soft cells whose unit clauses the proof uses are
+    /// the core. With the other soft cells free, the instance is still
+    /// infeasible, so an empty core means it is infeasible whatever the soft
+    /// cells are. `None` when an acyclic layout exists (simulator rejections
+    /// aside) or the solve is undecided within `limit`.
+    pub(super) fn proof_core(
         &self,
         config: &ExactPlacerConfig,
         limit: Duration,
     ) -> eyre::Result<Option<std::collections::BTreeSet<Position>>> {
+        static PROOFS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         eyre::ensure!(
             !config.soft_fixed_cells.is_empty(),
-            "a fixed core needs soft fixed cells"
+            "a proof core needs soft fixed cells"
         );
         let encoding = Encoding::build(&self.netlist, config)?;
-        let mut solver = solver::SatSolver::new(config.seed);
+        // The variables a soft cell's units can name: its kinds and classes.
+        let mut owner = std::collections::HashMap::new();
+        for &position in &config.soft_fixed_cells {
+            let cell = encoding.geometry.index(position);
+            let kinds = [
+                encoding.air[cell],
+                encoding.solid[cell],
+                encoding.dust[cell],
+            ]
+            .into_iter()
+            .chain(encoding.torch[cell])
+            .chain(encoding.repeater[cell])
+            .chain(
+                encoding
+                    .switches
+                    .iter()
+                    .filter(|site| site.cell == cell)
+                    .map(|site| site.lit),
+            )
+            .chain(encoding.class_lits[cell].iter().copied());
+            for lit in kinds {
+                owner.insert(lit.abs(), position);
+            }
+        }
+        let path = std::env::temp_dir().join(format!(
+            "exact-core-{}-{}.frat",
+            std::process::id(),
+            PROOFS.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut solver = SatSolver::new(config.seed);
+        solver.trace_frat(&path)?;
         solver.add_cnf(&encoding.cnf);
-        let assumptions = encoding
-            .fixed_guards
-            .iter()
-            .map(|&(_, guard)| -guard)
-            .collect::<Vec<_>>();
         let stop = AtomicBool::new(false);
-        let signal = solver::StopSignal {
+        let signal = StopSignal {
             stop: &stop,
             deadline: Some(Instant::now() + limit),
             restart: None,
         };
-        // Acyclicity is added lazily, as in `run_worker`: a layout whose
-        // torches feed back into their own support is not a counterexample.
         let index = acyclic::LazyIndex::new(&encoding);
         let mut aux = acyclic::AuxVars::new(&encoding);
         let mut lazy = acyclic::LazyStats::default();
-        loop {
-            match solver.solve(&assumptions, &signal) {
-                solver::SolveResult::Unsat => {
-                    return Ok(Some(
-                        encoding
-                            .fixed_guards
-                            .iter()
-                            .filter(|&&(_, guard)| solver.failed(-guard))
-                            .map(|&(cell, _)| encoding.geometry.position(cell))
-                            .collect(),
-                    ))
-                }
-                solver::SolveResult::Sat
+        let refuted = loop {
+            match solver.solve(&[], &signal) {
+                SolveResult::Unsat => break true,
+                SolveResult::Sat
                     if acyclic::refine(&encoding, &index, &mut solver, &mut aux, &mut lazy) > 0 => {
                 }
-                _ => return Ok(None),
+                _ => break false,
+            }
+        };
+        solver.close_proof();
+        drop(solver);
+        let used = if refuted {
+            Some(frat::refutation_originals(&path))
+        } else {
+            None
+        };
+        let _ = std::fs::remove_file(&path);
+        let Some(used) = used.transpose()? else {
+            return Ok(None);
+        };
+        let mut core = std::collections::BTreeSet::new();
+        for clause in &used {
+            if let [lit] = clause.as_slice() {
+                if let Some(&position) = owner.get(&lit.abs()) {
+                    core.insert(position);
+                }
             }
         }
+        if config.timing {
+            // The timing rule orders a given torch after its support: a
+            // clause that only exists because the cell is given.
+            for clause in &used {
+                for lit in clause {
+                    if let Some(&position) = owner.get(&lit.abs()) {
+                        if config.given_signals.contains_key(&position) {
+                            core.insert(position);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(Some(core))
     }
 
     pub fn place(
