@@ -22,6 +22,7 @@ mod construct;
 mod dimacs;
 mod dsl;
 mod encode;
+mod frat;
 mod layout;
 mod netlist;
 mod progress;
@@ -107,6 +108,11 @@ pub struct ExactPlacerConfig {
     /// literal that tests can assume false to locate model/simulator mismatches.
     #[doc(hidden)]
     pub relax_soundness: bool,
+    /// Fixed or given cells whose units are not folded into the formula, so
+    /// a refutation that needs them names them
+    /// (`ExactLocalPlacer::proof_core`).
+    #[doc(hidden)]
+    pub soft_fixed_cells: std::collections::BTreeSet<Position>,
     /// Diagnostic only: ground in the original rule order without folding
     /// required units (fixed and given cells) into later formulas. Same
     /// models, larger CNF; for comparisons and for checking the folding.
@@ -139,6 +145,11 @@ pub struct ExactPlacerConfig {
     /// arrival time in redstone ticks over every power relation, including
     /// the fixed cells' (see `timing.rs`). Raise `stage_levels` to the
     /// longest path in the box.
+    /// Keep one of each family of layouts that mirror each other along x
+    /// or y (the model's mirror rule). Only applied when the instance is
+    /// symmetric: default input and output sites, nothing fixed or given,
+    /// no carry, no driving outputs.
+    pub box_symmetry: Option<BoxSymmetry>,
     pub timing: bool,
     /// With `timing`: the most redstone ticks each named output may settle
     /// after the inputs change (at most `stage_levels`).
@@ -230,12 +241,19 @@ impl ExactPlacerConfig {
             max_refinements: 64,
             allow_unpowered_wires: false,
             relax_soundness: false,
+            soft_fixed_cells: Default::default(),
             no_fold: false,
             optimize: false,
             core_guided: false,
             model_file: None,
             model_params: BTreeMap::new(),
             carry: None,
+            // Torch positions decided fastest over three seeds of five
+            // instances (`exact_local_placer.md`, box-mirror symmetry).
+            box_symmetry: Some(BoxSymmetry {
+                torches: true,
+                ..Default::default()
+            }),
             timing: false,
             output_delays: BTreeMap::new(),
             solid_observations: Default::default(),
@@ -305,6 +323,19 @@ pub struct ExactPlacement {
     /// the layout has no feedback.
     pub delays: BTreeMap<String, usize>,
     pub rcell: PhysicalCellDocument,
+}
+
+/// How the mirror rule compares a layout with its mirror images
+/// (`ExactPlacerConfig::box_symmetry`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BoxSymmetry {
+    /// Compare where the torches are rather than which cells are filled.
+    pub torches: bool,
+    /// Compare along the box's length first (y, then height, then x)
+    /// rather than height first.
+    pub length_first: bool,
+    /// Only the x mirror, not y and xy.
+    pub x_only: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -415,6 +446,111 @@ impl ExactLocalPlacer {
 
     pub fn netlist(&self) -> &NorNetlist {
         &self.netlist
+    }
+
+    /// Which of `config.soft_fixed_cells` an infeasible instance needs, read
+    /// from its refutation. The soft cells' units are left unfolded; the
+    /// instance is solved once with the proof traced
+    /// (`SatSolver::trace_frat`, acyclicity added lazily as in
+    /// `run_worker`); the soft cells whose unit clauses the proof uses are
+    /// the core. With the other soft cells free, the instance is still
+    /// infeasible, so an empty core means it is infeasible whatever the soft
+    /// cells are. `None` when an acyclic layout exists (simulator rejections
+    /// aside) or the solve is undecided within `limit`.
+    pub(super) fn proof_core(
+        &self,
+        config: &ExactPlacerConfig,
+        limit: Duration,
+    ) -> eyre::Result<Option<std::collections::BTreeSet<Position>>> {
+        static PROOFS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        eyre::ensure!(
+            !config.soft_fixed_cells.is_empty(),
+            "a proof core needs soft fixed cells"
+        );
+        let encoding = Encoding::build(&self.netlist, config)?;
+        // The variables a soft cell's units can name: its kinds and classes.
+        let mut owner = std::collections::HashMap::new();
+        for &position in &config.soft_fixed_cells {
+            let cell = encoding.geometry.index(position);
+            let kinds = [
+                encoding.air[cell],
+                encoding.solid[cell],
+                encoding.dust[cell],
+            ]
+            .into_iter()
+            .chain(encoding.torch[cell])
+            .chain(encoding.repeater[cell])
+            .chain(
+                encoding
+                    .switches
+                    .iter()
+                    .filter(|site| site.cell == cell)
+                    .map(|site| site.lit),
+            )
+            .chain(encoding.class_lits[cell].iter().copied());
+            for lit in kinds {
+                owner.insert(lit.abs(), position);
+            }
+        }
+        let path = std::env::temp_dir().join(format!(
+            "exact-core-{}-{}.frat",
+            std::process::id(),
+            PROOFS.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut solver = SatSolver::new(config.seed);
+        solver.trace_frat(&path)?;
+        solver.add_cnf(&encoding.cnf);
+        let stop = AtomicBool::new(false);
+        let signal = StopSignal {
+            stop: &stop,
+            deadline: Some(Instant::now() + limit),
+            restart: None,
+        };
+        let index = acyclic::LazyIndex::new(&encoding);
+        let mut aux = acyclic::AuxVars::new(&encoding);
+        let mut lazy = acyclic::LazyStats::default();
+        let refuted = loop {
+            match solver.solve(&[], &signal) {
+                SolveResult::Unsat => break true,
+                SolveResult::Sat
+                    if acyclic::refine(&encoding, &index, &mut solver, &mut aux, &mut lazy) > 0 => {
+                }
+                _ => break false,
+            }
+        };
+        solver.close_proof();
+        drop(solver);
+        let used = if refuted {
+            Some(frat::refutation_originals(&path))
+        } else {
+            None
+        };
+        let _ = std::fs::remove_file(&path);
+        let Some(used) = used.transpose()? else {
+            return Ok(None);
+        };
+        let mut core = std::collections::BTreeSet::new();
+        for clause in &used {
+            if let [lit] = clause.as_slice() {
+                if let Some(&position) = owner.get(&lit.abs()) {
+                    core.insert(position);
+                }
+            }
+        }
+        if config.timing {
+            // The timing rule orders a given torch after its support: a
+            // clause that only exists because the cell is given.
+            for clause in &used {
+                for lit in clause {
+                    if let Some(&position) = owner.get(&lit.abs()) {
+                        if config.given_signals.contains_key(&position) {
+                            core.insert(position);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(Some(core))
     }
 
     pub fn place(
@@ -848,7 +984,12 @@ impl ExactLocalPlacer {
             .unwrap_or_default();
         let rcell = verify::to_rcell(&self.name, dim, &self.netlist, decoded);
         // Store settled torch states, so pasting the cell starts stable.
-        let world = verify::settled_world(&world, &config.tuning).unwrap_or(world);
+        let settled = if self.netlist.state.is_empty() {
+            verify::settled_world(&world, &config.tuning)
+        } else {
+            verify::settled_sequential_world(&world, &self.netlist, decoded, &config.tuning)
+        };
+        let world = settled.unwrap_or(world);
         ExactPlacement {
             placed: PlacedWorld {
                 world,

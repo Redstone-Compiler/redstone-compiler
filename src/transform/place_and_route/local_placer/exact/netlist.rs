@@ -40,6 +40,12 @@ pub struct Net {
 pub struct NorNetlist {
     pub nets: Vec<Net>,
     pub outputs: Vec<(String, NetId)>,
+    /// The state nets of a sequential cell (a latch's output, say): every
+    /// cycle of the netlist passes through one, and a gate that reads one
+    /// reads the stored state. Each becomes a case bit after the inputs
+    /// (`case_bits`), and the cases are the settled states (`valid_cases`).
+    /// Empty for combinational logic.
+    pub state: Vec<NetId>,
 }
 
 impl NorNetlist {
@@ -162,11 +168,17 @@ impl NorNetlist {
             "exact placer needs at least one output"
         );
 
-        let netlist = Self { nets, outputs };
+        let netlist = Self {
+            nets,
+            outputs,
+            state: Vec::new(),
+        };
         netlist.check_acyclic()?;
         Ok(netlist)
     }
 
+    /// No cycle except through a state net (whose readers read the stored
+    /// state, so their edges from it are cut).
     pub(super) fn check_acyclic(&self) -> eyre::Result<()> {
         let mut state = vec![0u8; self.nets.len()];
         fn visit(netlist: &NorNetlist, net: NetId, state: &mut [u8]) -> eyre::Result<()> {
@@ -177,7 +189,9 @@ impl NorNetlist {
             }
             state[net] = 1;
             for &input in &netlist.nets[net].gate_inputs {
-                visit(netlist, input, state)?;
+                if !netlist.state.contains(&input) {
+                    visit(netlist, input, state)?;
+                }
             }
             state[net] = 2;
             Ok(())
@@ -228,38 +242,66 @@ impl NorNetlist {
     }
 
     /// One line per netlist: `g3=NOR(a,b); g4=NOR(a,g3); ...`, gates and OR
-    /// nets in net order (`from_text` reads it back).
+    /// nets in net order (`from_text` reads it back). A sequential netlist
+    /// starts with `state(q,...)` and `out(...)` items.
     pub fn to_text(&self) -> String {
-        self.nets
-            .iter()
-            .filter_map(|net| {
-                let kind = match net.driver {
-                    NetDriver::Input(_) => return None,
-                    NetDriver::Gate => "NOR",
-                    NetDriver::Or => "OR",
-                };
-                let inputs = net
-                    .gate_inputs
-                    .iter()
-                    .map(|&input| self.nets[input].name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(",");
-                Some(format!("{}={kind}({inputs})", net.name))
-            })
-            .collect::<Vec<_>>()
-            .join("; ")
+        let names = |nets: &mut dyn Iterator<Item = NetId>| {
+            nets.map(|net| self.nets[net].name.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let mut items = Vec::new();
+        if !self.state.is_empty() {
+            items.push(format!("state({})", names(&mut self.state.iter().copied())));
+            items.push(format!(
+                "out({})",
+                names(&mut self.outputs.iter().map(|(_, net)| *net))
+            ));
+        }
+        items.extend(self.nets.iter().filter_map(|net| {
+            let kind = match net.driver {
+                NetDriver::Input(_) => return None,
+                NetDriver::Gate => "NOR",
+                NetDriver::Or => "OR",
+            };
+            let inputs = names(&mut net.gate_inputs.iter().copied());
+            Some(format!("{}={kind}({inputs})", net.name))
+        }));
+        items.join("; ")
     }
 
-    /// Reads `to_text`'s form. A name used before it is defined is an input;
-    /// a net no other net reads is an output under its own name.
+    /// Reads `to_text`'s form. A name that is never defined is an input.
+    /// `state(q,...)` names the state nets, which may be read before they
+    /// are defined; every cycle must pass through one. The outputs are the
+    /// nets in `out(...)`, or else the nets no other net reads, each under
+    /// its own name.
     pub fn from_text(text: &str) -> eyre::Result<Self> {
-        let mut nets = Vec::<Net>::new();
+        let list = |inner: &str| {
+            inner
+                .split(',')
+                .map(|name| name.trim().to_owned())
+                .filter(|name| !name.is_empty())
+                .collect::<Vec<_>>()
+        };
         let mut defined = Vec::<(String, NetDriver, Vec<String>)>::new();
+        let mut state_names = Vec::new();
+        let mut out_names = None;
         for item in text
             .split(';')
             .map(str::trim)
             .filter(|item| !item.is_empty())
         {
+            if let Some(inner) = item
+                .strip_prefix("state(")
+                .and_then(|r| r.strip_suffix(')'))
+            {
+                state_names.extend(list(inner));
+                continue;
+            }
+            if let Some(inner) = item.strip_prefix("out(").and_then(|r| r.strip_suffix(')')) {
+                out_names = Some(list(inner));
+                continue;
+            }
             let (name, rest) = item
                 .split_once('=')
                 .ok_or_else(|| eyre::eyre!("expected `name=NOR(...)`: {item}"))?;
@@ -273,53 +315,67 @@ impl NorNetlist {
             };
             let inputs = inputs
                 .strip_suffix(')')
-                .ok_or_else(|| eyre::eyre!("missing `)`: {item}"))?
-                .split(',')
-                .map(|input| input.trim().to_owned())
-                .filter(|input| !input.is_empty())
-                .collect::<Vec<_>>();
-            defined.push((name.trim().to_owned(), driver, inputs));
+                .ok_or_else(|| eyre::eyre!("missing `)`: {item}"))?;
+            defined.push((name.trim().to_owned(), driver, list(inputs)));
         }
-        let mut inputs = BTreeSet::new();
-        for (index, (_, _, reads)) in defined.iter().enumerate() {
-            for read in reads {
-                if !defined[..index].iter().any(|(name, _, _)| name == read) {
-                    eyre::ensure!(
-                        !defined.iter().any(|(name, _, _)| name == read),
-                        "`{read}` is read before it is defined"
-                    );
-                    inputs.insert(read.clone());
-                }
-            }
-        }
-        for input in inputs {
-            nets.push(Net {
-                node_id: nets.len(),
+        let is_defined = |name: &str| defined.iter().any(|(defined, _, _)| defined == name);
+        let inputs = defined
+            .iter()
+            .flat_map(|(_, _, reads)| reads)
+            .filter(|read| !is_defined(read))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let mut nets = inputs
+            .into_iter()
+            .enumerate()
+            .map(|(index, input)| Net {
+                node_id: index,
                 driver: NetDriver::Input(input.clone()),
                 name: input,
                 gate_inputs: Vec::new(),
-            });
-        }
-        for (name, driver, reads) in &defined {
-            let gate_inputs = reads
-                .iter()
-                .map(|read| nets.iter().position(|net| &net.name == read).unwrap())
-                .collect();
+            })
+            .collect::<Vec<_>>();
+        for (name, driver, _) in &defined {
             nets.push(Net {
                 name: name.clone(),
                 node_id: nets.len(),
                 driver: driver.clone(),
-                gate_inputs,
+                gate_inputs: Vec::new(),
             });
         }
-        let outputs = (0..nets.len())
-            .filter(|&net| !matches!(nets[net].driver, NetDriver::Input(_)))
-            .filter(|&net| !nets.iter().any(|other| other.gate_inputs.contains(&net)))
-            .map(|net| (nets[net].name.clone(), net))
-            .collect::<Vec<_>>();
-        let mut outputs = outputs;
+        let net_of = |nets: &[Net], name: &str| {
+            nets.iter()
+                .position(|net| net.name == name)
+                .ok_or_else(|| eyre::eyre!("unknown net `{name}`"))
+        };
+        for (name, _, reads) in &defined {
+            let net = net_of(&nets, name)?;
+            nets[net].gate_inputs = reads
+                .iter()
+                .map(|read| net_of(&nets, read))
+                .collect::<eyre::Result<_>>()?;
+        }
+        let state = state_names
+            .iter()
+            .map(|name| net_of(&nets, name))
+            .collect::<eyre::Result<Vec<_>>>()?;
+        let mut outputs = match out_names {
+            Some(names) => names
+                .iter()
+                .map(|name| Ok((name.clone(), net_of(&nets, name)?)))
+                .collect::<eyre::Result<Vec<_>>>()?,
+            None => (0..nets.len())
+                .filter(|&net| !matches!(nets[net].driver, NetDriver::Input(_)))
+                .filter(|&net| !nets.iter().any(|other| other.gate_inputs.contains(&net)))
+                .map(|net| (nets[net].name.clone(), net))
+                .collect(),
+        };
         outputs.sort();
-        let netlist = Self { nets, outputs };
+        let netlist = Self {
+            nets,
+            outputs,
+            state,
+        };
         netlist.check_acyclic()?;
         Ok(netlist)
     }
@@ -381,11 +437,29 @@ impl NorNetlist {
 
     /// Value of every net for each input assignment. Bit `i` of a case index is
     /// the value of `input_names()[i]`.
+    /// Bits of a case: the inputs (sorted by name), then the state nets.
+    pub fn case_bits(&self) -> usize {
+        self.input_names().len() + self.state.len()
+    }
+
+    /// Value of every net in every case (`case_bits`): bit `i` of a case is
+    /// `input_names()[i]`, and bit `inputs + j` the stored value of
+    /// `state[j]`, which its readers read. A state net's own value is what
+    /// its gate computes; in the cases outside `valid_cases` it differs from
+    /// the stored value.
     pub fn net_values(&self) -> Vec<Vec<bool>> {
         let input_names = self.input_names();
-        let case_count = 1usize << input_names.len();
+        let case_count = 1usize << self.case_bits();
         let mut values = vec![vec![false; case_count]; self.nets.len()];
         let order = self.topological_order();
+        let read = |values: &[Vec<bool>], input: NetId, case: usize| match self
+            .state
+            .iter()
+            .position(|&state| state == input)
+        {
+            Some(index) => case & (1 << (input_names.len() + index)) != 0,
+            None => values[input][case],
+        };
         for case in 0..case_count {
             for &net in &order {
                 values[net][case] = match &self.nets[net].driver {
@@ -396,15 +470,56 @@ impl NorNetlist {
                     NetDriver::Gate => !self.nets[net]
                         .gate_inputs
                         .iter()
-                        .any(|&input| values[input][case]),
+                        .any(|&input| read(&values, input, case)),
                     NetDriver::Or => self.nets[net]
                         .gate_inputs
                         .iter()
-                        .any(|&input| values[input][case]),
+                        .any(|&input| read(&values, input, case)),
                 };
             }
         }
         values
+    }
+
+    /// The settled cases as a mask over `case_bits` cases: those whose
+    /// stored state is what the state nets compute from it. Every case of a
+    /// combinational netlist.
+    pub fn valid_cases(&self) -> u64 {
+        let case_count = 1usize << self.case_bits();
+        let inputs = self.input_names().len();
+        let values = self.net_values();
+        (0..case_count)
+            .filter(|&case| {
+                self.state
+                    .iter()
+                    .enumerate()
+                    .all(|(index, &net)| values[net][case] == (case & (1 << (inputs + index)) != 0))
+            })
+            .fold(0u64, |mask, case| mask | 1 << case)
+    }
+
+    /// The state a sequential netlist settles in when `inputs` (a case's
+    /// input bits) are applied with `state` (its state bits, shifted down)
+    /// stored: the state nets are recomputed from the stored state until
+    /// they hold. `None` if that never settles.
+    pub fn next_state(&self, inputs: usize, state: usize) -> Option<usize> {
+        let shift = self.input_names().len();
+        let values = self.net_values();
+        let mut state = state;
+        for _ in 0..=(1usize << self.state.len()) {
+            let case = inputs | state << shift;
+            let next = self
+                .state
+                .iter()
+                .enumerate()
+                .filter(|&(_, &net)| values[net][case])
+                .fold(0usize, |next, (index, _)| next | 1 << index);
+            if next == state {
+                return Some(state);
+            }
+            state = next;
+        }
+        None
     }
 
     pub fn topological_order(&self) -> Vec<NetId> {
@@ -416,7 +531,9 @@ impl NorNetlist {
             }
             done[net] = true;
             for &input in &netlist.nets[net].gate_inputs {
-                visit(netlist, input, done, order);
+                if !netlist.state.contains(&input) {
+                    visit(netlist, input, done, order);
+                }
             }
             order.push(net);
         }

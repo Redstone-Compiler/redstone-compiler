@@ -205,6 +205,9 @@ pub(super) fn verify(
     world: &World3D,
     tuning: &ExactTuning,
 ) -> Result<(), ExactVerificationFailure> {
+    if !netlist.state.is_empty() {
+        return verify_sequential(netlist, decoded, world, tuning);
+    }
     let case_count = 1usize << netlist.input_names().len();
     let world = World::from(world);
     let dim = world.size;
@@ -272,6 +275,240 @@ pub(super) fn verify(
                 if block.kind.is_torch() && simulator.is_torch_burned_out(position) {
                     return Err(ExactVerificationFailure {
                         message: format!("torch burned out after transition {from}->{to}"),
+                        position: Some(position),
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// How a sequential netlist moves between its settled cases: the next case
+/// for every case and input assignment, and a homing sequence that settles
+/// any state into one known case (for driving a cell whose state is not
+/// known). Inputs change one at a time, as levers do: releasing both inputs
+/// of a set-and-reset latch at once races its two torches.
+pub(super) struct SequentialPlan {
+    inputs: usize,
+    valid: u64,
+    /// `next[case][assignment]`: the case after applying `assignment`.
+    next: Vec<Vec<Option<usize>>>,
+    /// Input assignments that bring every state settled with all inputs off
+    /// into one known case.
+    pub(super) homing: Vec<usize>,
+}
+
+impl SequentialPlan {
+    pub(super) fn new(netlist: &NorNetlist) -> Result<Self, String> {
+        let inputs = netlist.input_names().len();
+        let valid = netlist.valid_cases();
+        let cases = 1usize << netlist.case_bits();
+        let assignments = 1usize << inputs;
+        let input_mask = assignments - 1;
+        let next = (0..cases)
+            .map(|case| {
+                (0..assignments)
+                    .map(|assignment| {
+                        netlist
+                            .next_state(assignment, case >> inputs)
+                            .map(|state| assignment | state << inputs)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        // Breadth-first over the set of cases the cell may be in.
+        let start = (0..cases)
+            .filter(|&case| case & input_mask == 0 && valid & 1 << case != 0)
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut seen = std::collections::BTreeSet::from([start.clone()]);
+        let mut layer = vec![(start, Vec::new())];
+        let homing = 'search: loop {
+            let mut grown = Vec::new();
+            for (set, path) in &layer {
+                if set.len() == 1 {
+                    break 'search path.clone();
+                }
+                let current = path.last().copied().unwrap_or(0);
+                for assignment in (0..inputs).map(|bit| current ^ 1 << bit) {
+                    let moved = set
+                        .iter()
+                        .map(|&case| next[case][assignment])
+                        .collect::<Option<std::collections::BTreeSet<_>>>();
+                    let Some(moved) = moved else { continue };
+                    if seen.insert(moved.clone()) {
+                        let mut path = path.clone();
+                        path.push(assignment);
+                        grown.push((moved, path));
+                    }
+                }
+            }
+            if grown.is_empty() {
+                return Err("no input sequence brings the cell into a known state".to_owned());
+            }
+            layer = grown;
+        };
+        Ok(Self {
+            inputs,
+            valid,
+            next,
+            homing,
+        })
+    }
+
+    pub(super) fn valid_cases(&self) -> impl Iterator<Item = usize> + '_ {
+        (0..self.next.len()).filter(|&case| self.valid & 1 << case != 0)
+    }
+
+    /// The assignments one input change away from `case`'s.
+    pub(super) fn changes(&self, case: usize) -> impl Iterator<Item = usize> {
+        let current = case & ((1 << self.inputs) - 1);
+        (0..self.inputs).map(move |bit| current ^ 1 << bit)
+    }
+
+    pub(super) fn next(&self, case: usize, assignment: usize) -> Option<usize> {
+        self.next[case][assignment]
+    }
+}
+
+/// The cell as it stands in settled `case`: its switches at the case's
+/// inputs and every torch lit as the case's state has it. A latch started
+/// with every torch lit races its two torches, so a sequential cell starts
+/// from one of its settled states instead (as an exported cell stores it).
+fn start_in_case(
+    world: &World3D,
+    netlist: &NorNetlist,
+    decoded: &Decoded,
+    case: usize,
+    tuning: &ExactTuning,
+) -> Result<Simulator, ExactVerificationFailure> {
+    let mut world = world.clone();
+    for (position, on) in case_inputs(netlist, &decoded.inputs, case) {
+        world[position].kind = BlockKind::Switch { is_on: on };
+    }
+    for (cell, kind) in decoded.kinds.iter().enumerate() {
+        if let CellKind::Torch(_) = kind {
+            let position = Position(
+                cell % world.size.0,
+                (cell / world.size.0) % world.size.1,
+                cell / (world.size.0 * world.size.1),
+            );
+            let lit = decoded.functions[cell].is_some_and(|function| function & 1 << case != 0);
+            world[position].kind = BlockKind::Torch { is_on: lit };
+        }
+    }
+    Simulator::from_preserving_torch_states_with_limits_and_trace(
+        &World::from(&world),
+        tuning.sim_max_cycles,
+        tuning.sim_max_events,
+        0,
+    )
+    .map_err(|error| ExactVerificationFailure {
+        message: format!("case {case:b} did not settle: {}", error.message()),
+        position: None,
+    })
+}
+
+/// A sequential cell's world in its first settled case with every input off
+/// (state zero where that settles): what an exported latch should store, as
+/// settling from scratch would race its torches.
+pub(super) fn settled_sequential_world(
+    world: &World3D,
+    netlist: &NorNetlist,
+    decoded: &Decoded,
+    tuning: &ExactTuning,
+) -> Option<World3D> {
+    let inputs = (1usize << netlist.input_names().len()) - 1;
+    let valid = netlist.valid_cases();
+    let case = (0..64).find(|&case| case & inputs == 0 && valid & 1 << case != 0)?;
+    let simulator = start_in_case(world, netlist, decoded, case, tuning).ok()?;
+    Some(simulator.world().clone())
+}
+
+/// Checks a sequential cell (`NorNetlist::state`). Each settled case is set
+/// up as it should stand (`start_in_case`), left to settle, and every
+/// net-labelled element checked. Then, from every settled case, each input
+/// is flipped, and the outputs and torch burnout are checked against the
+/// case the netlist settles in.
+fn verify_sequential(
+    netlist: &NorNetlist,
+    decoded: &Decoded,
+    world: &World3D,
+    tuning: &ExactTuning,
+) -> Result<(), ExactVerificationFailure> {
+    let plan = SequentialPlan::new(netlist).map_err(|message| ExactVerificationFailure {
+        message,
+        position: None,
+    })?;
+    let dim = world.size;
+    let observed = decoded.observed.iter().cloned().collect::<BTreeMap<_, _>>();
+    for case in plan.valid_cases() {
+        let simulator = start_in_case(world, netlist, decoded, case, tuning)?;
+        for (cell, function) in decoded.functions.iter().enumerate() {
+            let Some(function) = function else {
+                continue;
+            };
+            if !matches!(
+                decoded.kinds[cell],
+                CellKind::Dust | CellKind::Torch(_) | CellKind::Repeater(_)
+            ) {
+                continue;
+            }
+            let position = Position(cell % dim.0, (cell / dim.0) % dim.1, cell / (dim.0 * dim.1));
+            let actual = simulator.world()[position].kind.is_powered();
+            let expected = function & (1 << case) != 0;
+            if actual != expected {
+                return Err(ExactVerificationFailure {
+                    message: format!(
+                        "{:?} carrying {} is {} in case {case:b}, expected {}",
+                        decoded.kinds[cell],
+                        decoded.class_names[cell].as_deref().unwrap_or("?"),
+                        actual,
+                        expected
+                    ),
+                    position: Some(position),
+                });
+            }
+        }
+    }
+    for from in plan.valid_cases() {
+        for assignment in plan.changes(from) {
+            let Some(to) = plan.next(from, assignment) else {
+                return Err(ExactVerificationFailure {
+                    message: format!("inputs {assignment:b} from case {from:b} never settle"),
+                    position: None,
+                });
+            };
+            let mut simulator = start_in_case(world, netlist, decoded, from, tuning)?;
+            simulator
+                .advance_idle_cycles(MANUAL_INPUT_IDLE_CYCLES)
+                .map_err(|error| ExactVerificationFailure {
+                    message: format!("idle in case {from:b} failed: {error}"),
+                    position: None,
+                })?;
+            simulator
+                .drive_inputs_with_limits(
+                    case_inputs(netlist, &decoded.inputs, assignment),
+                    tuning.sim_max_cycles,
+                    tuning.sim_max_events,
+                )
+                .map_err(|error| ExactVerificationFailure {
+                    message: format!("{from:b} -> {to:b} did not settle: {error}"),
+                    position: None,
+                })?;
+            for (name, position) in &decoded.outputs {
+                let actual = simulator.world()[*position].kind.is_powered();
+                if actual != (observed[name] & (1 << to) != 0) {
+                    return Err(ExactVerificationFailure {
+                        message: format!("output {name} wrong after {from:b} -> {to:b}"),
+                        position: Some(*position),
+                    });
+                }
+            }
+            for (position, block) in simulator.world().iter_block() {
+                if block.kind.is_torch() && simulator.is_torch_burned_out(position) {
+                    return Err(ExactVerificationFailure {
+                        message: format!("torch burned out after {from:b} -> {to:b}"),
                         position: Some(position),
                     });
                 }
@@ -467,11 +704,16 @@ pub(super) fn to_rcell(
             (input.clone(), *position, attach)
         })
         .collect::<Vec<_>>();
-    let expectations = netlist
-        .outputs
-        .iter()
-        .map(|(output, net)| (output.clone(), net_expression(netlist, *net)))
-        .collect();
+    // RCELL expectations are combinational: a sequential cell has none.
+    let expectations = if netlist.state.is_empty() {
+        netlist
+            .outputs
+            .iter()
+            .map(|(output, net)| (output.clone(), net_expression(netlist, *net)))
+            .collect()
+    } else {
+        Vec::new()
+    };
     rcell_document(name, dim, &cells, &inputs, &decoded.outputs, expectations)
 }
 

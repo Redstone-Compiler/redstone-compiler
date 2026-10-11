@@ -117,12 +117,7 @@ pub fn synthesize(
             instance.row("target", vec![IValue::sym(*name), case.into()]);
         }
     }
-    let ground = GroundOptions {
-        guards: false,
-        provenance: false,
-        positive_or_aux: false,
-        no_fold: false,
-    };
+    let ground = GroundOptions::default();
     let mut program = synthesis_model()
         .ground(&instance, ground)
         .map_err(|error| eyre!("grounding nor_synthesis failed:\n{error}"))?;
@@ -213,6 +208,7 @@ pub fn synthesize(
                 })
                 .collect(),
             outputs: Vec::new(),
+            state: Vec::new(),
         };
         for (index, t) in steps.clone().enumerate() {
             let torch = solver.value(nor[index]);

@@ -1,0 +1,23 @@
+rcell 1;
+cell "exact-rs-latch" size [2, 3, 3] {
+  start settled;
+  glyph "T" = repeater toward y+ delay 1;
+  glyph "U" = torch on x+;
+  glyph "V" = torch on x-;
+  glyph "W" = repeater toward y- delay 1;
+
+  input "r" at [1, 2, 2] on z-;
+  input "s" at [0, 0, 2] on z-;
+  output "q" at [0, 2, 1];
+
+  plane yz at x=0 {
+    z=1 "#TU";
+    z=0 ".#.";
+  }
+
+  plane yz at x=1 {
+    z=1 "VW#";
+    z=0 ".#.";
+  }
+
+}

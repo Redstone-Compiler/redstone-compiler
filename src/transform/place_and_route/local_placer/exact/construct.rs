@@ -539,6 +539,10 @@ impl ExactLocalPlacer {
         &self,
         config: &ConstructionConfig,
     ) -> eyre::Result<(ExactLayout, ExactPlacement, ConstructionReport)> {
+        eyre::ensure!(
+            self.netlist.state.is_empty(),
+            "construction places one gate per step and cannot cut a latch's loop yet"
+        );
         let started = Instant::now();
         let mut restarts = Vec::new();
         let mut attempt = 0u32;

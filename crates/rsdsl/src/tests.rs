@@ -341,3 +341,32 @@ fn totalizer_bounds_count_exactly() {
         }
     }
 }
+
+/// A `@nofold` rule's units stay unit clauses, and the clauses that mention
+/// their literals keep them; a plain rule's units fold those clauses away.
+#[test]
+fn nofold_rules_keep_their_units_open() {
+    // Pins the west cell, so the east one cannot be red either.
+    let pin = "rule \"pin\" {\n    forall c: Cell where has(step(c, East)) {\n        require Paint[c] is Dot(Red);\n    }\n}\n";
+    for nofold in [false, true] {
+        let annotation = if nofold { "@nofold\n" } else { "" };
+        let source = format!("{TINY}\n{annotation}{pin}");
+        let model = Model::parse("pin.rsdsl", &source).unwrap_or_else(|e| panic!("{e}"));
+        let mut instance = crate::Instance::new("two");
+        instance.grid("Cell", (2, 1, 1));
+        let program = model
+            .ground(&instance, GroundOptions::default())
+            .unwrap_or_else(|e| panic!("{e}"));
+        let red = |x| {
+            program
+                .option_lit("Paint", &[IValue::cell(x, 0, 0)], "Dot", &[IValue::sym("Red")])
+                .expect("a red option")
+        };
+        let clauses = clauses(&program);
+        let differ = clauses
+            .iter()
+            .any(|clause| clause.contains(&-red(0)) && clause.contains(&-red(1)));
+        assert_eq!(differ, nofold, "{clauses:?}");
+        assert!(clauses.contains(&vec![red(0)]), "{clauses:?}");
+    }
+}
