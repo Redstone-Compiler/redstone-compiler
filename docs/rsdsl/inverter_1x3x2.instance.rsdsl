@@ -10,6 +10,8 @@ domain Case = [0, 1];                 // case 0: a = 0, case 1: a = 1
 domain Class = [off, a, out];         // vocabulary: off, a, ~a
 domain Output = [out];
 domain Tick = [0, 1, 2, 3, 4, 5, 6, 7, 8];   // 0..=stage_levels
+domain Sym = [];                      // no box mirrors
+domain Order = [];
 
 fact on = [(a, 1), (out, 0)];
 fact unpowered = [off];
@@ -21,6 +23,9 @@ fact output_class = [(out, out)];
 fact driving = [];
 fact fixed = [];
 fact given_sig = [];
+fact soft = [];
+fact cut = [];
+fact mirror = [];
 fact ghost = [];
 fact seam = [];
 fact carry_site = [];

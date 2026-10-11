@@ -734,9 +734,9 @@ mirrored along x or y is therefore a layout too, as long as the instance
 places nothing asymmetrically. `ExactPlacerConfig::box_symmetry` adds the
 lex-leader constraint for the x, y, and xy mirrors:
 
-- It compares which cells are filled, in one fixed order (by height, then y,
-  then x).
-- It keeps the lexicographically least layout of each mirror family (rule
+- It compares the layout with each mirror image, cell by cell in one fixed
+  order.
+- It keeps a lexicographically least layout of each mirror family (rule
   "대칭 제거: 상자를 뒤집은 배치 가운데 사전순으로 앞선 것만", facts `mirror`).
 - Every family keeps a member, so the fewest blocks and every infeasibility
   proof are unchanged.
@@ -744,19 +744,84 @@ lex-leader constraint for the x, y, and xy mirrors:
   nothing fixed or given, no carry, no driving outputs. Otherwise the facts
   stay empty. Construction and compaction windows are never symmetric.
 
-Each pair below ran at the same time, 4 workers each
-(`explore_sequential_cells`, `SEQ_SYM=1`):
+`BoxSymmetry` picks:
 
-| Instance | Off | On |
-| --- | --- | --- |
-| set-reset latch, optimum 8 in 2x4x3 / 3x3x3 / 2x4x4 | 15.7 / 39.8 / 83.3 s | 10.0 / 22.2 / 37.3 s |
-| 2:1 mux, optimum 11 in 2x4x3 | 150 s | 99 s |
-| 2:1 mux, optimum 14 in 3x3x3 | not proven in 900 s | proven in 876 s |
-| D latch (6 torches), no layout in 2x4x3 / 2x3x4 | 48.7 / 74.5 s | 59.2 / 85.6 s |
-| D latch (multiplexer), no layout in 2x4x3; optimum 16 in 2x3x4 | 49.4 / 83.4 s | 58.9 / 104 s |
-| half adder (5 torches), no layout in 2x3x4 | 114 s | 146 s |
+- what is compared: filled cells, or torch positions (`torches`);
+- the order: height first, or length first (`length_first`);
+- the mirrors: all three, or x only (`x_only`).
 
-It makes optimum proofs 1.5-2.2x faster, but infeasibility proofs 15-30%
-slower. One run per pair cannot separate a 20% difference from a different
-winning worker. The option stays off by default. Comparing other variables
-(torches rather than filled cells) or another order might tip the balance.
+Five instances, three seeds each, the five settings of one seed running
+together with 3 workers each (`SEQ_SYM`, `SEQ_SEED`). Geometric mean
+seconds:
+
+| Instance | Off | Filled | **Torches** | Length first | x only |
+| --- | --- | --- | --- | --- | --- |
+| set-reset latch, optimum 8 in 2x4x4 | 106 | 72 | **76** | 79 | 78 |
+| 2:1 mux, optimum 11 in 2x4x3 | 188 | 151 | **153** | 139 | 176 |
+| D latch (6 torches), no layout in 2x4x3 | 69 | 77 | **64** | 93 | 65 |
+| half adder (5 torches), no layout in 2x3x4 | 184 | 192 | **130** | 188 | 189 |
+| D latch (multiplexer), no layout in 2x4x3 | 81 | 89 | **84** | 78 | 82 |
+| all five, against off | 1 | 0.93 | **0.83** | 0.94 | 0.93 |
+
+- Comparing filled cells speeds up the optimum proofs but slows the
+  infeasibility proofs.
+- Comparing torch positions does both: 17% faster overall, never more than
+  4% slower, and the half adder's proof is 30% faster.
+- It is the default (`box_symmetry` is torches, all mirrors, height first);
+  `None` turns it off.
+- After the change, the exact placer's unit tests ran in 17.5 s instead of
+  about 40 s.
+
+## Core-guided slice removal (2026-10-11): it does not pay
+
+A slice removal's window is solved with every cell outside it fixed, and
+most removals come back infeasible. The Benders idea: ask which of those
+fixed cells the proof needs, free only those, and solve again. A proof that
+needs none of them would rule the removal out for every wider window.
+
+What was built (off by default):
+
+- `CompactionConfig::core_guided`, with `core_expansions` (3) and
+  `core_shell` (2).
+- After an infeasible removal, the fixed cells within `core_shell` steps of
+  the window become soft cells: model fact `soft`, rule "물러설 수 있는 고정
+  칸", one guard per cell.
+- `ExactLocalPlacer::fixed_core` solves with the soft cells assumed, adds the
+  acyclicity cuts lazily as the workers do, and returns the cells in the
+  unsatisfiable core.
+  - Core cells are freed and the window is solved again.
+  - An empty core marks the removal hopeless until the layout changes.
+- rsdsl's `GroundOptions::guard_rules` emits guards for some `@guarded` rules
+  only. `relax_soundness` guards only its own two rules.
+
+The full adder layouts from `CIRCUIT=full-adder` construction (seeds 1-3)
+were recompacted with 6 workers (`RECOMPACT_CORE=1`,
+`RECOMPACT_CORE_SHELL`):
+
+| Core query | Guards | Clauses | Result |
+| --- | --- | --- | --- |
+| first version: one solve, every outside cell, soundness guarded too | 300-320 | 830 000 | satisfiable in 0.5 s, all 332 queries |
+| the same with lazy acyclicity | 300-320 | 830 000 | no answer in 20 s |
+| shell of 2 steps | 40-80 | 165 000-305 000 | no answer in 20 s, all 6 |
+| shell of 1 step | 20-40 | 110 000-230 000 | no answer in 20 s, 4 of 5 |
+| one soft cell (a check) | 1 | 68 000-134 000 | 0-8 s |
+
+With every cell fixed, the same windows are proven infeasible in 1-3 s on
+average.
+
+- **The first version** solved once and got layouts whose torches feed their
+  own support. Acyclicity is a lazy constraint. Nothing was freed, and the
+  600 s runs ended 10-17 blocks worse than without the queries.
+- **A guarded require is not a unit.** The grounder folds the fixed cells'
+  units into every later rule, so the constraints among fixed cells never
+  reach the solver (`exact_placer.rsdsl`, "고정된 칸"). Each soft cell brings
+  its constraints back; 40 cells more than double the formula. The solver then
+  has to prove the same infeasibility under assumptions, more than 10 times
+  slower.
+- An explanation that costs more than the proof it explains is not worth
+  asking for, so `core_guided` stays off.
+
+Construction steps fail by timing out, not by infeasibility, so cores would
+not explain them either. A cheaper explanation has to keep the fixed cells
+folded. One way is to read which fixed units a proof used from a solver that
+logs its proof (LRAT).

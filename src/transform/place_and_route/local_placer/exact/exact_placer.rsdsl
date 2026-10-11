@@ -36,6 +36,9 @@ fact fixed(Cell, Kind);                // fixed block kinds, as members of `Kind
 // cell is powered for real, so it needs no justification here.
 fact given_sig(Cell, Class);
 fact given(c: Cell) := any(given_sig(c, k) for k: Class);
+// Fixed or given cells whose requires are guarded, so a core can name the ones
+// an infeasible instance needs (`ExactLocalPlacer::fixed_core`).
+fact soft(Cell);
 
 // Tiling along X with a ripple carry (`CarryTiling` in mod.rs; see the
 // tiling rules below). Ghost cells stand for the previous tile.
@@ -102,6 +105,8 @@ param seam_isolation: bool = true;
 param monotone_signals: bool = true;
 // `Stage` is an arrival time in redstone ticks, bounded by `output_delay`.
 param timing: bool = false;
+// The mirror rule compares where torches are rather than filled cells.
+param mirror_torches: bool = false;
 
 fn dir(a: Attach) -> Dir6 = match a {
     Floor => Down, East => East, West => West, North => North, South => South,
@@ -211,13 +216,24 @@ rule "입력마다 스위치는 정확히 하나" {
 // rules that use no relation first and folds such units into everything after,
 // so constraints among fixed cells never reach the solver.
 rule "고정된 칸" {
-    forall c: Cell, m: Kind where fixed(c, m) {
+    forall c: Cell, m: Kind where fixed(c, m) and not soft(c) {
         require Kind[c] is m;
     }
 }
 
 rule "주어진 신호" {
-    forall (c, k) in given_sig {
+    forall (c, k) in given_sig where not soft(c) {
+        require Sig[c] is Carry(k);
+    }
+}
+
+// The soft ones, each cell behind its own guard (only with guards on).
+@guarded(per = c)
+rule "물러설 수 있는 고정 칸" {
+    forall c: Cell, m: Kind where fixed(c, m) and soft(c) {
+        require Kind[c] is m;
+    }
+    forall (c, k) in given_sig where soft(c) {
         require Sig[c] is Carry(k);
     }
 }
@@ -447,8 +463,8 @@ var Same[g: Sym, i: Order];
 
 rule "대칭 제거: 상자를 뒤집은 배치 가운데 사전순으로 앞선 것만" {
     forall (g, i, c, m) in mirror {
-        let x = not Kind[c] is Air;
-        let y = not Kind[m] is Air;
+        let x = if mirror_torches { Kind[c] is Torch(_) } else { not Kind[c] is Air };
+        let y = if mirror_torches { Kind[m] is Torch(_) } else { not Kind[m] is Air };
         if i == 0 {
             require Same[g, i];
         }

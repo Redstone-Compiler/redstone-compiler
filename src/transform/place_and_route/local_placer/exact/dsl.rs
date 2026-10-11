@@ -30,6 +30,9 @@ const SOURCE: &str = include_str!("exact_placer.rsdsl");
 const SOUNDNESS_RULE: &str =
     "건전성: 원천이 켜지면 받는 쪽도 켜짐 (가루·리피터는 원천과 똑같은 신호)";
 const COVERAGE_RULE: &str = "켜진 것은 켜진 원천이 있어야 함";
+/// The rule whose guards stand for one soft cell's fixed kind and given
+/// signal (`soft_fixed_cells`).
+const SOFT_FIXED_RULE: &str = "물러설 수 있는 고정 칸";
 
 /// Signal functions are `u64` truth tables over input cases (2^6 = 64).
 const MAX_INPUTS: usize = 6;
@@ -387,6 +390,10 @@ impl Prepared {
             ("allow_unpowered_wires", config.allow_unpowered_wires.into()),
             ("min_torches", min_torches.into()),
             ("timing", config.timing.into()),
+            (
+                "mirror_torches",
+                config.box_symmetry.is_some_and(|s| s.torches).into(),
+            ),
         ]
     }
 
@@ -421,6 +428,7 @@ impl Prepared {
             "driving",
             "fixed",
             "given_sig",
+            "soft",
             "ghost",
             "seam",
             "carry_site",
@@ -581,6 +589,9 @@ impl Prepared {
             };
             instance.row("fixed", vec![cell_value(geometry, cell), member]);
         }
+        for &position in &config.soft_fixed_cells {
+            instance.row("soft", vec![cell_value(geometry, geometry.index(position))]);
+        }
         for (name, value) in self.params(config) {
             instance.param(name, value);
         }
@@ -701,6 +712,7 @@ impl Prepared {
             sections: Vec::new(),
             relaxations: Vec::new(),
             coverage_relaxations: Vec::new(),
+            fixed_guards: Vec::new(),
             observed: self
                 .observations
                 .iter()
@@ -833,6 +845,10 @@ impl Prepared {
                 encoding
                     .coverage_relaxations
                     .push((cell_index(&guard.key[0].1), guard.lit));
+            } else if guard.rule == SOFT_FIXED_RULE {
+                encoding
+                    .fixed_guards
+                    .push((cell_index(&guard.key[0].1), guard.lit));
             }
         }
         if config.relax_soundness {
@@ -849,8 +865,10 @@ impl Prepared {
 /// cell that a mirror moves, numbered in one order (by height, then y, then
 /// x). Empty unless `box_symmetry` is on and the instance is symmetric.
 fn mirror_tuples(config: &ExactPlacerConfig) -> Vec<(usize, usize, Position, Position)> {
-    let symmetric = config.box_symmetry
-        && config.input_sites.is_empty()
+    let Some(symmetry) = config.box_symmetry else {
+        return Vec::new();
+    };
+    let symmetric = config.input_sites.is_empty()
         && config.output_sites.is_empty()
         && config.observations.is_none()
         && config.fixed_cells.is_empty()
@@ -862,27 +880,39 @@ fn mirror_tuples(config: &ExactPlacerConfig) -> Vec<(usize, usize, Position, Pos
         return Vec::new();
     }
     let DimSize(dx, dy, dz) = config.dim;
-    let mirrors: [(usize, bool, bool); 3] = [(0, true, false), (1, false, true), (2, true, true)];
+    let mirrors: &[(usize, bool, bool)] = if symmetry.x_only {
+        &[(0, true, false)]
+    } else {
+        &[(0, true, false), (1, false, true), (2, true, true)]
+    };
+    // One order for every mirror, as the lex-leader constraint needs.
+    let mut cells = Vec::new();
+    for z in 0..dz {
+        for y in 0..dy {
+            for x in 0..dx {
+                cells.push(Position(x, y, z));
+            }
+        }
+    }
+    if symmetry.length_first {
+        cells.sort_by_key(|&Position(x, y, z)| (y, z, x));
+    }
     let mut tuples = Vec::new();
-    for (g, flip_x, flip_y) in mirrors {
+    for &(g, flip_x, flip_y) in mirrors {
         if (flip_x && dx < 2) || (flip_y && dy < 2) {
             continue;
         }
         let mut order = 0;
-        for z in 0..dz {
-            for y in 0..dy {
-                for x in 0..dx {
-                    let c = Position(x, y, z);
-                    let m = Position(
-                        if flip_x { dx - 1 - x } else { x },
-                        if flip_y { dy - 1 - y } else { y },
-                        z,
-                    );
-                    if c != m {
-                        tuples.push((g, order, c, m));
-                        order += 1;
-                    }
-                }
+        for &c in &cells {
+            let Position(x, y, z) = c;
+            let m = Position(
+                if flip_x { dx - 1 - x } else { x },
+                if flip_y { dy - 1 - y } else { y },
+                z,
+            );
+            if c != m {
+                tuples.push((g, order, c, m));
+                order += 1;
             }
         }
     }
@@ -895,8 +925,17 @@ fn ground(
     instance: &Instance,
     provenance: bool,
 ) -> eyre::Result<rsdsl::Program> {
+    // Each diagnostic guards only its own rules, so the other stay required.
+    let mut guard_rules = Vec::new();
+    if config.relax_soundness {
+        guard_rules.extend([SOUNDNESS_RULE, COVERAGE_RULE]);
+    }
+    if !config.soft_fixed_cells.is_empty() {
+        guard_rules.push(SOFT_FIXED_RULE);
+    }
     let options = GroundOptions {
-        guards: config.relax_soundness,
+        guards: !guard_rules.is_empty(),
+        guard_rules: Some(guard_rules.into_iter().map(str::to_owned).collect()),
         provenance,
         positive_or_aux: false,
         no_fold: config.no_fold,
