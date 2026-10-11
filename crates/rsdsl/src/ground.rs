@@ -224,6 +224,9 @@ pub(crate) struct GuardDef {
 pub struct GroundOptions {
     /// Emit `@guarded` selectors (otherwise those rules are unguarded).
     pub guards: bool,
+    /// With `guards`, emit selectors only for the rules with these labels
+    /// (every `@guarded` rule when `None`); the other rules are unguarded.
+    pub guard_rules: Option<Vec<String>>,
     /// Record the binder valuation of every clause (for explained output).
     pub provenance: bool,
     /// Encode OR auxiliaries as positive variables instead of negated AND
@@ -1940,7 +1943,11 @@ impl Program {
             self.encoder.guard = None;
             return Ok(());
         };
-        if !self.options.guards {
+        let selected = match &self.options.guard_rules {
+            Some(labels) => labels.contains(&self.rules[r].label),
+            None => true,
+        };
+        if !self.options.guards || !selected {
             self.encoder.guard = None;
             return Ok(());
         }

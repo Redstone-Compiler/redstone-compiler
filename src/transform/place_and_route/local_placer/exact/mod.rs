@@ -107,6 +107,11 @@ pub struct ExactPlacerConfig {
     /// literal that tests can assume false to locate model/simulator mismatches.
     #[doc(hidden)]
     pub relax_soundness: bool,
+    /// Fixed or given cells whose kind and signal are guarded by one
+    /// literal each, so a solve can assume them and report which ones an
+    /// infeasibility needs (`ExactLocalPlacer::fixed_core`).
+    #[doc(hidden)]
+    pub soft_fixed_cells: std::collections::BTreeSet<Position>,
     /// Diagnostic only: ground in the original rule order without folding
     /// required units (fixed and given cells) into later formulas. Same
     /// models, larger CNF; for comparisons and for checking the folding.
@@ -139,11 +144,11 @@ pub struct ExactPlacerConfig {
     /// arrival time in redstone ticks over every power relation, including
     /// the fixed cells' (see `timing.rs`). Raise `stage_levels` to the
     /// longest path in the box.
-    /// Keep one of each pair of layouts that mirror each other along x or
-    /// y (the model's mirror rule). Only applied when the instance is
+    /// Keep one of each family of layouts that mirror each other along x
+    /// or y (the model's mirror rule). Only applied when the instance is
     /// symmetric: default input and output sites, nothing fixed or given,
     /// no carry, no driving outputs.
-    pub box_symmetry: bool,
+    pub box_symmetry: Option<BoxSymmetry>,
     pub timing: bool,
     /// With `timing`: the most redstone ticks each named output may settle
     /// after the inputs change (at most `stage_levels`).
@@ -235,13 +240,19 @@ impl ExactPlacerConfig {
             max_refinements: 64,
             allow_unpowered_wires: false,
             relax_soundness: false,
+            soft_fixed_cells: Default::default(),
             no_fold: false,
             optimize: false,
             core_guided: false,
             model_file: None,
             model_params: BTreeMap::new(),
             carry: None,
-            box_symmetry: false,
+            // Torch positions decided fastest over three seeds of five
+            // instances (`exact_local_placer.md`, box-mirror symmetry).
+            box_symmetry: Some(BoxSymmetry {
+                torches: true,
+                ..Default::default()
+            }),
             timing: false,
             output_delays: BTreeMap::new(),
             solid_observations: Default::default(),
@@ -311,6 +322,19 @@ pub struct ExactPlacement {
     /// the layout has no feedback.
     pub delays: BTreeMap<String, usize>,
     pub rcell: PhysicalCellDocument,
+}
+
+/// How the mirror rule compares a layout with its mirror images
+/// (`ExactPlacerConfig::box_symmetry`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BoxSymmetry {
+    /// Compare where the torches are rather than which cells are filled.
+    pub torches: bool,
+    /// Compare along the box's length first (y, then height, then x)
+    /// rather than height first.
+    pub length_first: bool,
+    /// Only the x mirror, not y and xy.
+    pub x_only: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -421,6 +445,60 @@ impl ExactLocalPlacer {
 
     pub fn netlist(&self) -> &NorNetlist {
         &self.netlist
+    }
+
+    /// Which of `config.soft_fixed_cells` (fixed kinds and given signals) an
+    /// infeasible instance needs: one solve with those cells assumed rather
+    /// than required, and the ones in the unsatisfiable core. An empty set
+    /// means the instance is infeasible whatever those cells are. `None`
+    /// when an acyclic layout exists (simulator rejections aside) or the
+    /// solve is undecided within `limit`.
+    pub(super) fn fixed_core(
+        &self,
+        config: &ExactPlacerConfig,
+        limit: Duration,
+    ) -> eyre::Result<Option<std::collections::BTreeSet<Position>>> {
+        eyre::ensure!(
+            !config.soft_fixed_cells.is_empty(),
+            "a fixed core needs soft fixed cells"
+        );
+        let encoding = Encoding::build(&self.netlist, config)?;
+        let mut solver = solver::SatSolver::new(config.seed);
+        solver.add_cnf(&encoding.cnf);
+        let assumptions = encoding
+            .fixed_guards
+            .iter()
+            .map(|&(_, guard)| -guard)
+            .collect::<Vec<_>>();
+        let stop = AtomicBool::new(false);
+        let signal = solver::StopSignal {
+            stop: &stop,
+            deadline: Some(Instant::now() + limit),
+            restart: None,
+        };
+        // Acyclicity is added lazily, as in `run_worker`: a layout whose
+        // torches feed back into their own support is not a counterexample.
+        let index = acyclic::LazyIndex::new(&encoding);
+        let mut aux = acyclic::AuxVars::new(&encoding);
+        let mut lazy = acyclic::LazyStats::default();
+        loop {
+            match solver.solve(&assumptions, &signal) {
+                solver::SolveResult::Unsat => {
+                    return Ok(Some(
+                        encoding
+                            .fixed_guards
+                            .iter()
+                            .filter(|&&(_, guard)| solver.failed(-guard))
+                            .map(|&(cell, _)| encoding.geometry.position(cell))
+                            .collect(),
+                    ))
+                }
+                solver::SolveResult::Sat
+                    if acyclic::refine(&encoding, &index, &mut solver, &mut aux, &mut lazy) > 0 => {
+                }
+                _ => return Ok(None),
+            }
+        }
     }
 
     pub fn place(

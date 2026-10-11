@@ -1111,7 +1111,8 @@ fn diagnose_full_adder_construct_and_compact() -> eyre::Result<()> {
 /// `RECOMPACT_ATTEMPT_SECONDS`, `RECOMPACT_CONTINUE=0` (restart each
 /// block-reduction pass after a gain), `RECOMPACT_ROUNDS=0`,
 /// `RECOMPACT_REDUCTION_AXES=1` (Y windows only), `RECOMPACT_GIVEN=0` (no
-/// given signals outside the window).
+/// given signals outside the window), `RECOMPACT_CORE=1` (core-guided
+/// slice removal).
 #[test]
 #[ignore = "full-adder recompaction measurement; run explicitly with --nocapture"]
 fn recompact_full_adder_rcell() -> eyre::Result<()> {
@@ -1167,6 +1168,11 @@ fn recompact_full_adder_rcell() -> eyre::Result<()> {
         repair_optimize: repair_optimize_from_env("RECOMPACT_REPAIR_OPTIMIZE"),
         max_removals_per_round: removals_per_round_from_env("RECOMPACT_REMOVALS_PER_ROUND"),
         repeat_rounds: std::env::var("RECOMPACT_ROUNDS").as_deref() != Ok("0"),
+        core_guided: std::env::var("RECOMPACT_CORE").as_deref() == Ok("1"),
+        core_shell: std::env::var("RECOMPACT_CORE_SHELL")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(2),
         reduction_axes: match std::env::var("RECOMPACT_REDUCTION_AXES").as_deref() {
             Ok("1") => vec![1],
             _ => vec![1, 2],
@@ -1179,6 +1185,7 @@ fn recompact_full_adder_rcell() -> eyre::Result<()> {
         layout.cells.len()
     );
     let (compacted, best, report) = placer.compact(layout, &compaction)?;
+    print_attempt_times("RECOMPACT", &report);
     println!(
         "RECOMPACT done dim={:?} cells={} removed={:?} reductions={} attempts={} elapsed={:?}",
         compacted.dim,
@@ -2292,6 +2299,9 @@ fn diagnose_construct_circuit() -> eyre::Result<()> {
                 .collect::<Vec<_>>(),
             report.elapsed
         );
+        if let Ok(prefix) = std::env::var("CIRCUIT_WRITE_CONSTRUCTED") {
+            std::fs::write(format!("{prefix}.rcell"), placement.rcell.to_string())?;
+        }
         let compaction = CompactionConfig {
             seed,
             time_limit: Some(Duration::from_secs(
@@ -2301,6 +2311,7 @@ fn diagnose_construct_circuit() -> eyre::Result<()> {
             repair_optimize: repair_optimize_from_env("CIRCUIT_REPAIR_OPTIMIZE"),
             progress: std::env::var("CIRCUIT_PROGRESS").ok().map(Into::into),
             timing: std::env::var("CIRCUIT_TIMING").as_deref() == Ok("1"),
+            core_guided: std::env::var("CIRCUIT_CORE").as_deref() == Ok("1"),
             workers: env_usize("CIRCUIT_WORKERS", 8),
             ..Default::default()
         };
@@ -4142,8 +4153,8 @@ fn exact_falling_edge_flip_flop_fixture_samples_on_the_falling_edge() -> eyre::R
 /// `SEQ_CIRCUIT=rs-latch|rs-latch-both|d-latch|d-latch-mux|dff|dff-mux|dff-neg` (or
 /// `SEQ_NETLIST=` text),
 /// `SEQ_SECONDS` (120) per box, `SEQ_WORKERS` (8), `SEQ_ALL=1` to try every
-/// box, `SEQ_REFINEMENTS` (2000) simulator rejections per worker, `SEQ_SYM=1`
-/// for the box-mirror rule,
+/// box, `SEQ_REFINEMENTS` (2000) simulator rejections per worker, `SEQ_SYM`
+/// (`off`, `1`, or `torches,length,x`) for the box-mirror rule, `SEQ_SEED`,
 /// `SEQ_WRITE=<prefix>` for `.rcell`, `.nbt` (in its first settled case with
 /// the inputs off) and `.outputs.json`, `SEQ_MODEL_FILE` for another
 /// model:
@@ -4194,7 +4205,16 @@ fn explore_sequential_cells() -> eyre::Result<()> {
         config.time_limit = Some(Duration::from_secs(env_usize("SEQ_SECONDS", 120) as u64));
         config.optimize = std::env::var("SEQ_OPTIMIZE").as_deref() != Ok("0");
         config.model_file = std::env::var("SEQ_MODEL_FILE").ok().map(Into::into);
-        config.box_symmetry = std::env::var("SEQ_SYM").as_deref() == Ok("1");
+        // `SEQ_SYM=off`, `1` (filled cells), or a comma list of `torches`,
+        // `length`, `x`; unset keeps the default.
+        if let Ok(value) = std::env::var("SEQ_SYM") {
+            config.box_symmetry = (value != "off").then(|| BoxSymmetry {
+                torches: value.contains("torches"),
+                length_first: value.contains("length"),
+                x_only: value.split(',').any(|part| part == "x"),
+            });
+        }
+        config.seed = env_usize("SEQ_SEED", 1) as u32;
         // Latch layouts that are consistent in every settled case can still
         // fail a transition, so the simulator rejects many more of them.
         config.max_refinements = env_usize("SEQ_REFINEMENTS", 2000);
