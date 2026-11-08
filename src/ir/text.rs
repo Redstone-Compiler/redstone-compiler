@@ -165,6 +165,7 @@ fn write_design_profile_body(output: &mut fmt::Formatter<'_>, pnr: &PnrSpec) -> 
                 NetOrderSpec::Criticality => "criticality",
                 NetOrderSpec::HighestFanoutFirst => "highest-fanout-first",
                 NetOrderSpec::ReverseCriticality => "reverse-criticality",
+                NetOrderSpec::PinAccess => "pin-access",
             }
         )?;
     }
@@ -520,6 +521,9 @@ fn write_route_stage(
     match stage.strategy {
         RouteStrategySpec::BreadthFirst => writeln!(output, "      strategy breadth-first;")?,
         RouteStrategySpec::AStar => writeln!(output, "      strategy astar;")?,
+        RouteStrategySpec::AStarBudgeted { max_expansions } => {
+            writeln!(output, "      strategy astar-budgeted {max_expansions};")?
+        }
         RouteStrategySpec::DirectGreedy { max_steps } => {
             writeln!(output, "      strategy direct-greedy;")?;
             writeln!(output, "      max-steps {max_steps};")?;
@@ -543,6 +547,7 @@ fn write_route_stage(
             RouteValidationSpec::Deferred => "deferred",
         }
     )?;
+    writeln!(output, "      max-steps {};", stage.max_route_steps)?;
     writeln!(output, "    }}")
 }
 
@@ -1600,6 +1605,7 @@ impl Parser {
                     "criticality" => NetOrderSpec::Criticality,
                     "highest-fanout-first" => NetOrderSpec::HighestFanoutFirst,
                     "reverse-criticality" => NetOrderSpec::ReverseCriticality,
+                    "pin-access" => NetOrderSpec::PinAccess,
                     value => eyre::bail!("unknown net order `{value}`"),
                 });
                 if self.consume_symbol(']') {
@@ -1625,10 +1631,20 @@ impl Parser {
         self.expect_symbol('{')?;
         self.expect_keyword("strategy")?;
         let kind = self.expect_word()?;
+        let astar_budget = if kind == "astar-budgeted" {
+            let budget = self.expect_usize()?;
+            eyre::ensure!(budget > 0, "astar-budgeted max-expansions must be positive");
+            Some(budget)
+        } else {
+            None
+        };
         self.expect_symbol(';')?;
         let strategy = match kind.as_str() {
             "breadth-first" => RouteStrategySpec::BreadthFirst,
             "astar" => RouteStrategySpec::AStar,
+            "astar-budgeted" => RouteStrategySpec::AStarBudgeted {
+                max_expansions: astar_budget.expect("parsed budget"),
+            },
             "direct-greedy" => {
                 self.expect_keyword("max-steps")?;
                 let max_steps = self.expect_usize()?;
@@ -1653,6 +1669,12 @@ impl Parser {
             }
             _ => eyre::bail!("unknown route strategy `{kind}`"),
         };
+        let mut max_route_steps = 128;
+        if self.peek_keyword("max-steps") {
+            self.expect_keyword("max-steps")?;
+            max_route_steps = self.expect_usize()?;
+            self.expect_symbol(';')?;
+        }
         self.expect_keyword("validation")?;
         let validation = match self.expect_word()?.as_str() {
             "incremental" => RouteValidationSpec::Incremental,
@@ -1660,8 +1682,15 @@ impl Parser {
             value => eyre::bail!("unknown route validation mode `{value}`"),
         };
         self.expect_symbol(';')?;
+        if self.peek_keyword("max-steps") {
+            self.expect_keyword("max-steps")?;
+            max_route_steps = self.expect_usize()?;
+            self.expect_symbol(';')?;
+        }
+        eyre::ensure!(max_route_steps > 0, "route max-steps must be positive");
         self.expect_symbol('}')?;
         Ok(RouteStageSpec {
+            max_route_steps,
             strategy,
             validation,
         })

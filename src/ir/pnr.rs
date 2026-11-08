@@ -422,8 +422,14 @@ pub struct RoutingSpec {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RouteStageSpec {
+    #[serde(default = "default_route_max_steps")]
+    pub max_route_steps: usize,
     pub strategy: RouteStrategySpec,
     pub validation: RouteValidationSpec,
+}
+
+fn default_route_max_steps() -> usize {
+    128
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -431,6 +437,9 @@ pub struct RouteStageSpec {
 pub enum RouteStrategySpec {
     BreadthFirst,
     AStar,
+    AStarBudgeted {
+        max_expansions: usize,
+    },
     DirectGreedy {
         max_steps: usize,
     },
@@ -454,6 +463,7 @@ pub enum NetOrderSpec {
     Criticality,
     HighestFanoutFirst,
     ReverseCriticality,
+    PinAccess,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

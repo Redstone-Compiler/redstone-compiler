@@ -10,7 +10,7 @@ use crate::nbt::{NBTRoot, ToNBT};
 use crate::world::position::Position;
 use crate::world::World3D;
 
-const CACHE_FORMAT: &str = "redstone-compiler.local-candidate-cache.v1";
+const CACHE_FORMAT: &str = "redstone-compiler.local-candidate-cache.v10";
 
 #[derive(Serialize, Deserialize)]
 struct CacheManifest {
@@ -83,6 +83,7 @@ pub(super) fn load(
             .into_iter()
             .map(array_position)
             .collect::<HashSet<_>>();
+        candidate.include_reserved_cells_in_bounds();
         if candidate_parity_hash(&candidate) != entry.id {
             eyre::bail!("cached candidate `{}` failed its content hash", entry.id);
         }
@@ -189,16 +190,33 @@ mod tests {
                 connection: PortConnection::Direct,
             }],
         )?;
-        candidate.blocked_cells.insert(Position(1, 0, 0));
+        candidate.blocked_cells.insert(Position(1, 0, 1));
+        candidate.include_reserved_cells_in_bounds();
 
         store(&root, "shape", &[candidate.clone()])?;
         let loaded = load(&root, "shape", "second")?.context("cache miss")?;
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].module_name, "second");
+        assert_eq!(loaded[0].blocked_cells, candidate.blocked_cells);
+        assert_eq!(loaded[0].bbox.max, Position(1, 0, 1));
+        assert_eq!(loaded[0].cost.bbox_height, 2);
+        assert!(loaded[0].world[Position(1, 0, 1)].kind.is_air());
         assert_eq!(
             candidate_parity_hash(&loaded[0]),
             candidate_parity_hash(&candidate)
         );
+        let restored = super::super::candidate::nary::build_verified_candidate(
+            &crate::graph::logic::LogicGraph::from_stmt("a&b", "y")?,
+            "restored",
+        )?
+        .unwrap();
+        store(&root, "restored", &[restored])?;
+        let restored = load(&root, "restored", "renamed")?.context("restored cache miss")?;
+        assert!(restored[0]
+            .ports
+            .iter()
+            .filter(|p| p.direction == PhysicalPortDirection::Output)
+            .all(|p| p.connection == PortConnection::RestoredDirect));
         std::fs::remove_dir_all(root)?;
         Ok(())
     }

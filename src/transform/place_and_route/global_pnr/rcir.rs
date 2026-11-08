@@ -339,6 +339,25 @@ pub fn pnr_spec_from_config(config: &GlobalPnrConfig) -> PnrSpec {
 }
 
 pub fn apply_pnr_spec(spec: &PnrSpec, config: &mut GlobalPnrConfig) -> eyre::Result<()> {
+    for stage in [
+        Some(spec.routing.primary),
+        spec.routing.probe,
+        spec.routing.refinement,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        eyre::ensure!(
+            stage.max_route_steps > 0,
+            "route max-steps must be positive"
+        );
+        if let RouteStrategySpec::AStarBudgeted { max_expansions } = stage.strategy {
+            eyre::ensure!(
+                max_expansions > 0,
+                "astar-budgeted max-expansions must be positive"
+            );
+        }
+    }
     config.placement.spacing = spec.placement.initial_spacing;
     config.placement.shelf_width = spec.placement.shelf_width;
     config.placement.max_attempts = spec.placement.max_attempts;
@@ -388,6 +407,9 @@ pub(super) fn candidate_spec_from_policy(policy: &UnitCandidateConfig) -> Candid
 
 fn candidate_policy_from_spec(spec: &CandidateSpec) -> UnitCandidateConfig {
     UnitCandidateConfig {
+        verified_nary_cells: false,
+        nary_stagger_inputs: false,
+        reserve_combinational_io_diodes: false,
         dim: DimSize(spec.search_box[0], spec.search_box[1], spec.search_box[2]),
         local_config: local_config(spec.local_placer.clone()),
         input_constraints: LocalPlacerInputConstraints::default(),
@@ -744,9 +766,13 @@ fn placement_weights(w: ObjectiveSpec) -> PlacementCostWeights {
 
 fn route_stage_spec(config: GlobalRoutingConfig) -> RouteStageSpec {
     RouteStageSpec {
+        max_route_steps: config.max_route_steps,
         strategy: match config.strategy {
             GlobalRoutingStrategy::BreadthFirst => RouteStrategySpec::BreadthFirst,
             GlobalRoutingStrategy::AStar => RouteStrategySpec::AStar,
+            GlobalRoutingStrategy::AStarBudgeted { max_expansions } => {
+                RouteStrategySpec::AStarBudgeted { max_expansions }
+            }
             GlobalRoutingStrategy::DirectGreedy { max_steps } => {
                 RouteStrategySpec::DirectGreedy { max_steps }
             }
@@ -768,9 +794,13 @@ fn route_stage_spec(config: GlobalRoutingConfig) -> RouteStageSpec {
 }
 fn route_stage_config(spec: RouteStageSpec) -> GlobalRoutingConfig {
     GlobalRoutingConfig {
+        max_route_steps: spec.max_route_steps,
         strategy: match spec.strategy {
             RouteStrategySpec::BreadthFirst => GlobalRoutingStrategy::BreadthFirst,
             RouteStrategySpec::AStar => GlobalRoutingStrategy::AStar,
+            RouteStrategySpec::AStarBudgeted { max_expansions } => {
+                GlobalRoutingStrategy::AStarBudgeted { max_expansions }
+            }
             RouteStrategySpec::DirectGreedy { max_steps } => {
                 GlobalRoutingStrategy::DirectGreedy { max_steps }
             }
@@ -797,6 +827,7 @@ fn net_order_spec(value: NetOrderStrategy) -> NetOrderSpec {
         NetOrderStrategy::Criticality => NetOrderSpec::Criticality,
         NetOrderStrategy::HighestFanoutFirst => NetOrderSpec::HighestFanoutFirst,
         NetOrderStrategy::ReverseCriticality => NetOrderSpec::ReverseCriticality,
+        NetOrderStrategy::PinAccess => NetOrderSpec::PinAccess,
     }
 }
 fn net_order_strategy(value: NetOrderSpec) -> NetOrderStrategy {
@@ -804,6 +835,7 @@ fn net_order_strategy(value: NetOrderSpec) -> NetOrderStrategy {
         NetOrderSpec::Criticality => NetOrderStrategy::Criticality,
         NetOrderSpec::HighestFanoutFirst => NetOrderStrategy::HighestFanoutFirst,
         NetOrderSpec::ReverseCriticality => NetOrderStrategy::ReverseCriticality,
+        NetOrderSpec::PinAccess => NetOrderStrategy::PinAccess,
     }
 }
 
@@ -1067,6 +1099,11 @@ mod tests {
             }],
         };
         let mut original = GlobalPnrConfig::default();
+        original.routing.strategy = GlobalRoutingStrategy::AStarBudgeted {
+            max_expansions: 20_000,
+        };
+        original.routing.max_route_steps = 256;
+        original.search.policies.net_order_strategies = vec![NetOrderStrategy::PinAccess];
         original.candidate =
             original
                 .candidate
@@ -1122,6 +1159,51 @@ mod tests {
             .collect();
         let document = routable_document_from_config(&design, &original)?;
         let text = document.to_string();
+        assert!(text.contains("strategy astar-budgeted 20000;"));
+        assert!(text.contains("max-steps 256;"));
+        assert!(text.contains("pin-access"));
+        assert!(text
+            .replace("max-steps 256;", "max-steps 0;")
+            .parse::<RoutableDocument>()
+            .is_err());
+        let legacy_steps: RoutableDocument = text.replace("      max-steps 256;\n", "").parse()?;
+        let mut legacy_steps_config = GlobalPnrConfig::default();
+        apply_routable_document(&legacy_steps, &mut legacy_steps_config)?;
+        assert_eq!(legacy_steps_config.routing.max_route_steps, 128);
+
+        assert!(text
+            .replace("astar-budgeted 20000", "astar-budgeted 0")
+            .parse::<RoutableDocument>()
+            .is_err());
+        let legacy: RoutableDocument = text.replace("astar-budgeted 20000", "astar").parse()?;
+        let mut legacy_config = GlobalPnrConfig::default();
+        apply_routable_document(&legacy, &mut legacy_config)?;
+        assert_eq!(legacy_config.routing.strategy, GlobalRoutingStrategy::AStar);
+        let mut invalid_budget = pnr_spec_from_config(&original);
+        invalid_budget.routing.primary.strategy =
+            RouteStrategySpec::AStarBudgeted { max_expansions: 0 };
+        assert!(apply_pnr_spec(&invalid_budget, &mut GlobalPnrConfig::default()).is_err());
+        let json = serde_json::to_string(&pnr_spec_from_config(&original))?;
+        let decoded: PnrSpec = serde_json::from_str(&json)?;
+        assert_eq!(decoded.routing.primary.max_route_steps, 256);
+        assert_eq!(decoded.routing.net_order, vec![NetOrderSpec::PinAccess]);
+        let mut legacy_json: serde_json::Value = serde_json::from_str(&json)?;
+        legacy_json["routing"]["primary"]
+            .as_object_mut()
+            .unwrap()
+            .remove("max_route_steps");
+        let legacy_decoded: PnrSpec = serde_json::from_value(legacy_json)?;
+        assert_eq!(legacy_decoded.routing.primary.max_route_steps, 128);
+        let mut invalid_steps = decoded.clone();
+        invalid_steps.routing.primary.max_route_steps = 0;
+        assert!(apply_pnr_spec(&invalid_steps, &mut GlobalPnrConfig::default()).is_err());
+
+        assert_eq!(
+            decoded.routing.primary.strategy,
+            RouteStrategySpec::AStarBudgeted {
+                max_expansions: 20_000
+            }
+        );
         assert!(text.contains("profile pnr.candidate \"leaf-cell-search\""));
         assert!(text.contains("profile pnr.design \"leaf-design\""));
         assert!(text.contains("@pnr.candidate(profile = \"leaf-cell-search\")"));
