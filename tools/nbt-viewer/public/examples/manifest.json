@@ -437,5 +437,29 @@
     "path": "examples/dff-global-optimized.nbt",
     "size": 500,
     "outputsPath": "examples/dff-global-optimized.outputs.json"
+  },
+  {
+    "kind": "nbt",
+    "name": "alu-display-adder2-verified-73x10x9.nbt",
+    "file": "alu-display-adder2-verified-73x10x9.nbt",
+    "path": "examples/alu-display-adder2-verified-73x10x9.nbt",
+    "size": 2601,
+    "outputsPath": "examples/alu-display-adder2-verified-73x10x9.outputs.json"
+  },
+  {
+    "kind": "nbt",
+    "name": "alu-display-adder8-verified.nbt",
+    "file": "alu-display-adder8-verified.nbt",
+    "path": "examples/alu-display-adder8-verified.nbt",
+    "size": 11857,
+    "outputsPath": "examples/alu-display-adder8-verified.outputs.json"
+  },
+  {
+    "kind": "nbt",
+    "name": "alu-display-decoder-digit-verified.nbt",
+    "file": "alu-display-decoder-digit-verified.nbt",
+    "path": "examples/alu-display-decoder-digit-verified.nbt",
+    "size": 17926,
+    "outputsPath": "examples/alu-display-decoder-digit-verified.outputs.json"
   }
 ]

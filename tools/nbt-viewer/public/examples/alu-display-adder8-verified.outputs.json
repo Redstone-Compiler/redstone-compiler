@@ -1,0 +1,77 @@
+{
+  "format": "redstone-compiler.outputs.v1",
+  "outputs": [
+    {
+      "name": "sum_0",
+      "position": [
+        8,
+        4,
+        2
+      ]
+    },
+    {
+      "name": "sum_1",
+      "position": [
+        21,
+        14,
+        2
+      ]
+    },
+    {
+      "name": "sum_2",
+      "position": [
+        8,
+        42,
+        2
+      ]
+    },
+    {
+      "name": "sum_3",
+      "position": [
+        21,
+        62,
+        2
+      ]
+    },
+    {
+      "name": "sum_4",
+      "position": [
+        8,
+        90,
+        2
+      ]
+    },
+    {
+      "name": "sum_5",
+      "position": [
+        21,
+        110,
+        2
+      ]
+    },
+    {
+      "name": "sum_6",
+      "position": [
+        8,
+        138,
+        2
+      ]
+    },
+    {
+      "name": "sum_7",
+      "position": [
+        21,
+        158,
+        2
+      ]
+    },
+    {
+      "name": "sum_8",
+      "position": [
+        9,
+        181,
+        1
+      ]
+    }
+  ]
+}

@@ -1,0 +1,61 @@
+{
+  "format": "redstone-compiler.outputs.v1",
+  "outputs": [
+    {
+      "name": "seg_0",
+      "position": [
+        27,
+        75,
+        1
+      ]
+    },
+    {
+      "name": "seg_1",
+      "position": [
+        55,
+        75,
+        1
+      ]
+    },
+    {
+      "name": "seg_2",
+      "position": [
+        21,
+        91,
+        1
+      ]
+    },
+    {
+      "name": "seg_3",
+      "position": [
+        94,
+        56,
+        1
+      ]
+    },
+    {
+      "name": "seg_4",
+      "position": [
+        60,
+        50,
+        1
+      ]
+    },
+    {
+      "name": "seg_5",
+      "position": [
+        49,
+        94,
+        1
+      ]
+    },
+    {
+      "name": "seg_6",
+      "position": [
+        83,
+        75,
+        1
+      ]
+    }
+  ]
+}
