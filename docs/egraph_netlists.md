@@ -1,5 +1,16 @@
 # Equivalent NOR netlists from an e-graph (2026-10-05)
 
+> **Status (2026-10-10): the e-graph code is removed.** Exact synthesis
+> (`nor_synthesis.md`) took its place. Synthesis designs a netlist and its
+> construction order together, proves minimum torch counts, and gave the
+> improvements (the 2-bit adder about a fifth smaller, the 4:1 mux built for
+> the first time). The e-graph's netlists were mostly unbuildable. Its lasting
+> results are the diagnosis below ("Why the steps fail") and the
+> `or_cost` 1 netlist, which synthesis found again. The measurements here
+> were taken at commit `600ad6d`, which still has `exact/egraph.rs`,
+> `exact/egraph_extract.rsdsl`, and the harness's `CIRCUIT=egraph-full-adder`
+> mode. The 8-gate netlist survives as `WIDE_FULL_ADDER` in `exact/tests.rs`.
+
 The exact placer builds the NOR netlist it is given. Construction places one
 gate per step, and the signal vocabulary is the netlist's net functions and
 their complements. A hand-written netlist such as the full adder's `nor9`
@@ -366,6 +377,8 @@ For the full adder in a 2-wide box:
 
 ## Running
 
+At commit `600ad6d` (the code is gone since):
+
 ```sh
 cargo test --release --lib egraph_netlists_compute_the_full_adder
 cargo test --release --lib explore_egraph_netlists -- --ignored --nocapture
@@ -373,24 +386,18 @@ CIRCUIT=egraph-full-adder CIRCUIT_COMPACT_SECONDS=600 \
   cargo test --release --lib diagnose_construct_circuit -- --ignored --nocapture
 ```
 
-`explore_egraph_netlists` takes these knobs:
+`explore_egraph_netlists` took these knobs:
 
 - saturation: `EGRAPH_ITERATIONS`, `EGRAPH_NODES`, `EGRAPH_SECONDS`;
 - the sweep: `EGRAPH_MAX_DEPTH`, `EGRAPH_OR_COSTS` (comma-separated),
   `EGRAPH_BINARY=1`;
 - `EGRAPH_EXTRACT_SECONDS`;
-- `EGRAPH_GREEDY=1` also prints greedy extractions.
+- `EGRAPH_GREEDY=1` also printed greedy extractions.
 
-The circuit harness takes `EGRAPH_DEPTH`, `EGRAPH_OR_COST`,
-`EGRAPH_BINARY`, `EGRAPH_SPLIT`, `EGRAPH_CHAIN`, and
-`CIRCUIT_ORDER=min-live`, besides the box and step knobs
-(`CIRCUIT_HEIGHT`, `CIRCUIT_MAX_WINDOW`, `CIRCUIT_STEP_SECONDS`,
-`CIRCUIT_RESTART_SECONDS`). `CIRCUIT_NETLIST_ONLY=1` prints the netlist,
-its live nets and its continuing inputs, and stops. The harness also prints
-each construction step: the gate, the input cases it is on in, its
-continuing inputs, and the nets alive after it.
+The circuit harness took `EGRAPH_DEPTH`, `EGRAPH_OR_COST`,
+`EGRAPH_BINARY`, `EGRAPH_SPLIT` and `EGRAPH_CHAIN`.
 
-To see why a step times out, set `EXACT_DIAGNOSE_UNKNOWN=1` (with
-`EXACT_DIAGNOSE_VARIANT_SECONDS`, default 20). To solve that step again
-for longer and write it as DIMACS, set
-`EXACT_DIAGNOSE_FAILED_STEP=<prefix>` (with `EXACT_DIAGNOSE_SECONDS`).
+Still available: any netlist runs through the harness as text
+(`CIRCUIT=netlist CIRCUIT_NETLIST=...`, `CIRCUIT_CHAIN=<n>` for the support
+block stages), with `CIRCUIT_ORDER=min-live`, the box and step knobs, the
+per-step printout and the step diagnostics (`nor_synthesis.md`, "Running").

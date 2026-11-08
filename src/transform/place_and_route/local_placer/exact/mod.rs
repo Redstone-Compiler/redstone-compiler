@@ -21,7 +21,6 @@ mod compact;
 mod construct;
 mod dimacs;
 mod dsl;
-mod egraph;
 mod encode;
 mod layout;
 mod netlist;
@@ -42,9 +41,6 @@ use std::time::{Duration, Instant};
 pub use compact::{AttemptTime, CompactionConfig, CompactionReport};
 pub use construct::{ConstructionConfig, ConstructionReport, GateOrder};
 pub use dimacs::DimacsComments;
-pub use egraph::{
-    netlist_depths, signature, Exploration, ExtractOptions, Extraction, Limits, Weights,
-};
 pub use encode::CellKind;
 pub use layout::{ExactLayout, InputPolicy, OutputPolicy};
 pub use netlist::{Net, NetDriver, NetId, NorNetlist};

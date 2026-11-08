@@ -182,3 +182,20 @@ CIRCUIT=netlist CIRCUIT_ORDER=index CIRCUIT_NETLIST='g3=NOR(cin); ...' \
 
 `CIRCUIT_NETLIST` takes `NorNetlist::to_text`'s form. A name read before it
 is defined is an input, and a net nothing reads is an output.
+`CIRCUIT_CHAIN=<n>` builds NORs of more than `n` signals in stages on one
+support block (`NorNetlist::chain_wide_gates`); a synthesized netlist has its
+OR stages already. Targets are expressions over the inputs (`~ & ^ |`,
+tightest first; `synthesis::truth_table`).
+
+The harness knobs: `CIRCUIT_HEIGHT`, `CIRCUIT_MAX_WINDOW`,
+`CIRCUIT_STEP_SECONDS`, `CIRCUIT_RESTART_SECONDS`, `CIRCUIT_ORDER`
+(`index`, `min-live`, smallest cone first otherwise). `CIRCUIT_NETLIST_ONLY=1`
+prints the netlist, its live nets and continuing inputs per gate order, and
+each construction step (the gate, the input cases it is on in, its
+continuing inputs, the nets alive after it), then stops.
+
+To see why a step times out, set `EXACT_DIAGNOSE_UNKNOWN=1` (with
+`EXACT_DIAGNOSE_VARIANT_SECONDS`, default 20): the first timed-out step is
+solved again with one requirement dropped at a time. To solve that step
+again for longer and write it as DIMACS, set
+`EXACT_DIAGNOSE_FAILED_STEP=<prefix>` (with `EXACT_DIAGNOSE_SECONDS`).
