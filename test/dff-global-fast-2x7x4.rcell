@@ -1,0 +1,30 @@
+rcell 1;
+cell "exact-dff-neg" size [2, 7, 4] {
+  start settled;
+  glyph "P" = torch on x-;
+  glyph "T" = torch on y+;
+  glyph "U" = repeater toward y+ delay 1;
+  glyph "V" = torch on y-;
+  glyph "W" = torch on x+;
+  glyph "X" = repeater toward y- delay 1;
+  glyph "Y" = torch on z-;
+
+  input "clk" at [0, 4, 2] on y+;
+  input "d" at [0, 3, 2] on z-;
+  output "q" at [0, 4, 3];
+
+  plane yz at x=0 {
+    z=3 ".#.#WX#";
+    z=2 ".r#..#V";
+    z=1 ".#T#U#r";
+    z=0 "#..####";
+  }
+
+  plane yz at x=1 {
+    z=3 ".r#r#rP";
+    z=2 "T#Y#r#.";
+    z=1 "rX#U#..";
+    z=0 "##.###.";
+  }
+
+}

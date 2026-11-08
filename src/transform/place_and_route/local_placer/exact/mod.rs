@@ -22,9 +22,12 @@ mod construct;
 mod dimacs;
 mod dsl;
 mod encode;
+mod frat;
 mod layout;
 mod netlist;
 mod progress;
+#[cfg(test)]
+mod search_benchmark;
 mod solver;
 mod synthesis;
 #[cfg(test)]
@@ -78,6 +81,9 @@ pub struct ExactPlacerConfig {
     pub absent_inputs: std::collections::BTreeSet<String>,
     /// Cells whose block kind is fixed.
     pub fixed_cells: BTreeMap<Position, CellKind>,
+    /// Each cell may keep this kind or become Air. Used to minimize an
+    /// existing layout globally over all deletion subsets, without relocating it.
+    pub removable_cells: BTreeMap<Position, CellKind>,
     /// Signal functions (bit per input case) of fixed cells taken from an
     /// earlier verified layout. Their class is fixed and they need no
     /// justification (rank, stage, contributing source) in this solve; the
@@ -107,6 +113,11 @@ pub struct ExactPlacerConfig {
     /// literal that tests can assume false to locate model/simulator mismatches.
     #[doc(hidden)]
     pub relax_soundness: bool,
+    /// Fixed or given cells whose units are not folded into the formula, so
+    /// a refutation that needs them names them
+    /// (`ExactLocalPlacer::proof_core`).
+    #[doc(hidden)]
+    pub soft_fixed_cells: std::collections::BTreeSet<Position>,
     /// Diagnostic only: ground in the original rule order without folding
     /// required units (fixed and given cells) into later formulas. Same
     /// models, larger CNF; for comparisons and for checking the folding.
@@ -139,6 +150,11 @@ pub struct ExactPlacerConfig {
     /// arrival time in redstone ticks over every power relation, including
     /// the fixed cells' (see `timing.rs`). Raise `stage_levels` to the
     /// longest path in the box.
+    /// Keep one of each family of layouts that mirror each other along x
+    /// or y (the model's mirror rule). Only applied when the instance is
+    /// symmetric: default input and output sites, nothing fixed or given,
+    /// no carry, no driving outputs.
+    pub box_symmetry: Option<BoxSymmetry>,
     pub timing: bool,
     /// With `timing`: the most redstone ticks each named output may settle
     /// after the inputs change (at most `stage_levels`).
@@ -185,6 +201,8 @@ impl CarryTiling {
 pub struct ExactTuning {
     /// Seed spacing between portfolio workers (`seed + worker * stride`).
     pub worker_seed_stride: u32,
+    /// CaDiCaL heuristic overrides; do not change the encoded constraints.
+    pub solver_options: BTreeMap<String, i32>,
     /// Simulator cycle limit for each settle during verification.
     pub sim_max_cycles: usize,
     /// Simulator event limit for each settle during verification.
@@ -201,6 +219,7 @@ impl Default for ExactTuning {
     fn default() -> Self {
         Self {
             worker_seed_stride: 7919,
+            solver_options: BTreeMap::new(),
             sim_max_cycles: 256,
             sim_max_events: 50_000,
             torch_bound_max_states: 200_000,
@@ -219,6 +238,7 @@ impl ExactPlacerConfig {
             observations: None,
             absent_inputs: Default::default(),
             fixed_cells: BTreeMap::new(),
+            removable_cells: BTreeMap::new(),
             given_signals: BTreeMap::new(),
             blocked: Vec::new(),
             rank_levels: 24,
@@ -230,12 +250,19 @@ impl ExactPlacerConfig {
             max_refinements: 64,
             allow_unpowered_wires: false,
             relax_soundness: false,
+            soft_fixed_cells: Default::default(),
             no_fold: false,
             optimize: false,
             core_guided: false,
             model_file: None,
             model_params: BTreeMap::new(),
             carry: None,
+            // Torch positions decided fastest over three seeds of five
+            // instances (`exact_local_placer.md`, box-mirror symmetry).
+            box_symmetry: Some(BoxSymmetry {
+                torches: true,
+                ..Default::default()
+            }),
             timing: false,
             output_delays: BTreeMap::new(),
             solid_observations: Default::default(),
@@ -305,6 +332,19 @@ pub struct ExactPlacement {
     /// the layout has no feedback.
     pub delays: BTreeMap<String, usize>,
     pub rcell: PhysicalCellDocument,
+}
+
+/// How the mirror rule compares a layout with its mirror images
+/// (`ExactPlacerConfig::box_symmetry`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BoxSymmetry {
+    /// Compare where the torches are rather than which cells are filled.
+    pub torches: bool,
+    /// Compare along the box's length first (y, then height, then x)
+    /// rather than height first.
+    pub length_first: bool,
+    /// Only the x mirror, not y and xy.
+    pub x_only: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -417,9 +457,122 @@ impl ExactLocalPlacer {
         &self.netlist
     }
 
+    /// Which of `config.soft_fixed_cells` an infeasible instance needs, read
+    /// from its refutation. The soft cells' units are left unfolded; the
+    /// instance is solved once with the proof traced
+    /// (`SatSolver::trace_frat`, acyclicity added lazily as in
+    /// `run_worker`); the soft cells whose unit clauses the proof uses are
+    /// the core. With the other soft cells free, the instance is still
+    /// infeasible, so an empty core means it is infeasible whatever the soft
+    /// cells are. `None` when an acyclic layout exists (simulator rejections
+    /// aside) or the solve is undecided within `limit`.
+    pub(super) fn proof_core(
+        &self,
+        config: &ExactPlacerConfig,
+        limit: Duration,
+    ) -> eyre::Result<Option<std::collections::BTreeSet<Position>>> {
+        static PROOFS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        eyre::ensure!(
+            !config.soft_fixed_cells.is_empty(),
+            "a proof core needs soft fixed cells"
+        );
+        let encoding = Encoding::build(&self.netlist, config)?;
+        // The variables a soft cell's units can name: its kinds and classes.
+        let mut owner = std::collections::HashMap::new();
+        for &position in &config.soft_fixed_cells {
+            let cell = encoding.geometry.index(position);
+            let kinds = [
+                encoding.air[cell],
+                encoding.solid[cell],
+                encoding.dust[cell],
+            ]
+            .into_iter()
+            .chain(encoding.torch[cell])
+            .chain(encoding.repeater[cell])
+            .chain(
+                encoding
+                    .switches
+                    .iter()
+                    .filter(|site| site.cell == cell)
+                    .map(|site| site.lit),
+            )
+            .chain(encoding.class_lits[cell].iter().copied());
+            for lit in kinds {
+                owner.insert(lit.abs(), position);
+            }
+        }
+        let path = std::env::temp_dir().join(format!(
+            "exact-core-{}-{}.frat",
+            std::process::id(),
+            PROOFS.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut solver = SatSolver::new(config.seed);
+        solver.trace_frat(&path)?;
+        solver.add_cnf(&encoding.cnf);
+        let stop = AtomicBool::new(false);
+        let signal = StopSignal {
+            stop: &stop,
+            deadline: Some(Instant::now() + limit),
+            restart: None,
+        };
+        let index = acyclic::LazyIndex::new(&encoding);
+        let mut aux = acyclic::AuxVars::new(&encoding);
+        let mut lazy = acyclic::LazyStats::default();
+        let refuted = loop {
+            match solver.solve(&[], &signal) {
+                SolveResult::Unsat => break true,
+                SolveResult::Sat
+                    if acyclic::refine(&encoding, &index, &mut solver, &mut aux, &mut lazy) > 0 => {
+                }
+                _ => break false,
+            }
+        };
+        solver.close_proof();
+        drop(solver);
+        let used = if refuted {
+            Some(frat::refutation_originals(&path))
+        } else {
+            None
+        };
+        let _ = std::fs::remove_file(&path);
+        let Some(used) = used.transpose()? else {
+            return Ok(None);
+        };
+        let mut core = std::collections::BTreeSet::new();
+        for clause in &used {
+            if let [lit] = clause.as_slice() {
+                if let Some(&position) = owner.get(&lit.abs()) {
+                    core.insert(position);
+                }
+            }
+        }
+        if config.timing {
+            // The timing rule orders a given torch after its support: a
+            // clause that only exists because the cell is given.
+            for clause in &used {
+                for lit in clause {
+                    if let Some(&position) = owner.get(&lit.abs()) {
+                        if config.given_signals.contains_key(&position) {
+                            core.insert(position);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(Some(core))
+    }
+
     pub fn place(
         &self,
         config: &ExactPlacerConfig,
+    ) -> eyre::Result<(ExactOutcome, ExactPlacerStats)> {
+        self.place_with_worker_dispatch(config, true)
+    }
+
+    fn place_with_worker_dispatch(
+        &self,
+        config: &ExactPlacerConfig,
+        inline_single_worker: bool,
     ) -> eyre::Result<(ExactOutcome, ExactPlacerStats)> {
         let encode_started = Instant::now();
         let encoding = Encoding::build(&self.netlist, config)?;
@@ -445,25 +598,35 @@ impl ExactLocalPlacer {
             incumbent: incumbent.as_ref(),
         };
         let workers = config.workers.max(1);
-        let results = std::thread::scope(|scope| {
-            let handles = (0..workers)
-                .map(|worker| {
-                    let encoding = &encoding;
-                    let shared = &shared;
-                    scope.spawn(move || {
-                        let result = self.run_worker(encoding, config, worker, shared);
-                        if !matches!(result, WorkerResult::Unknown(_)) {
-                            shared.stop.store(true, Ordering::Relaxed);
-                        }
-                        result
+        let results = if workers == 1 && inline_single_worker {
+            // A single worker has no portfolio to race; avoid spawning and
+            // joining a thread for each small construction/compaction attempt.
+            let result = self.run_worker(&encoding, config, 0, &shared);
+            if !matches!(result, WorkerResult::Unknown(_)) {
+                shared.stop.store(true, Ordering::Relaxed);
+            }
+            vec![result]
+        } else {
+            std::thread::scope(|scope| {
+                let handles = (0..workers)
+                    .map(|worker| {
+                        let encoding = &encoding;
+                        let shared = &shared;
+                        scope.spawn(move || {
+                            let result = self.run_worker(encoding, config, worker, shared);
+                            if !matches!(result, WorkerResult::Unknown(_)) {
+                                shared.stop.store(true, Ordering::Relaxed);
+                            }
+                            result
+                        })
                     })
-                })
-                .collect::<Vec<_>>();
-            handles
-                .into_iter()
-                .map(|handle| handle.join().expect("exact placer worker panicked"))
-                .collect::<Vec<_>>()
-        });
+                    .collect::<Vec<_>>();
+                handles
+                    .into_iter()
+                    .map(|handle| handle.join().expect("exact placer worker panicked"))
+                    .collect::<Vec<_>>()
+            })
+        };
         stats.solve_time = solve_started.elapsed();
         stats.refinements = *refinements.lock().unwrap();
         let lazy = *lazy.lock().unwrap();
@@ -515,10 +678,14 @@ impl ExactLocalPlacer {
             return self.run_core_guided(encoding, config, worker, shared);
         }
         let seed = worker_seed(config, worker);
+        let mut profile = SearchProfile::new(worker, seed);
         let mut solver = SatSolver::new(seed);
         // Diversify the portfolio: sparse-first (phase 0) and stable-mode variants.
         solver.set_option("phase", i32::from(worker % 2 == 1));
         solver.set_option("stabilizeonly", i32::from(worker % 4 >= 2));
+        for (name, &value) in &config.tuning.solver_options {
+            solver.set_option(name, value);
+        }
         solver.add_cnf(&encoding.cnf);
         let mut signal = StopSignal {
             stop: shared.stop,
@@ -553,7 +720,19 @@ impl ExactLocalPlacer {
                     }
                 }
             }
-            match solver.solve(&assumptions, &signal) {
+            let phase_started = profile.enabled.then(Instant::now);
+            let result = solver.solve(&assumptions, &signal);
+            if let Some(started) = phase_started {
+                profile.sat += started.elapsed();
+            }
+            profile.calls += 1;
+            if profile.enabled && result == SolveResult::Sat && profile.calls == 1 {
+                eprintln!(
+                    "SEARCH_FIRST_SAT worker={worker} seed={seed} elapsed={:?}",
+                    profile.sat
+                );
+            }
+            match result {
                 SolveResult::Unsat => {
                     if let Some(incumbent) = shared.incumbent {
                         if incumbent.cost.load(Ordering::Relaxed) != i64::MAX {
@@ -587,9 +766,18 @@ impl ExactLocalPlacer {
                 total.feedback_cuts += worker_lazy.feedback_cuts;
                 continue;
             }
+            let phase_started = profile.enabled.then(Instant::now);
             let decoded = verify::decode(encoding, &solver, &self.netlist);
             let world = verify::build_world(config.dim, &decoded.kinds);
-            match verify::verify(&self.netlist, &decoded, &world, &config.tuning) {
+            if let Some(started) = phase_started {
+                profile.decode += started.elapsed();
+            }
+            let phase_started = profile.enabled.then(Instant::now);
+            let verified = verify::verify(&self.netlist, &decoded, &world, &config.tuning);
+            if let Some(started) = phase_started {
+                profile.verify += started.elapsed();
+            }
+            match verified {
                 Ok(()) => {
                     let cost = encoding
                         .objective
@@ -602,6 +790,9 @@ impl ExactLocalPlacer {
                     }
                 }
                 Err(failure) => {
+                    if profile.enabled {
+                        *profile.failures.entry(failure.message.clone()).or_default() += 1;
+                    }
                     tracing::debug!(?failure, "exact placer layout rejected by simulator");
                     if let Ok(directory) = std::env::var("EXACT_DUMP_REJECTIONS") {
                         let diagnosis = verify::diagnose(
@@ -675,6 +866,9 @@ impl ExactLocalPlacer {
         let incumbent = shared.incumbent.expect("optimize shares an incumbent");
         let seed = worker_seed(config, worker);
         let mut solver = SatSolver::new(seed);
+        for (name, &value) in &config.tuning.solver_options {
+            solver.set_option(name, value);
+        }
         solver.add_cnf(&encoding.cnf);
         let signal = StopSignal {
             stop: shared.stop,
@@ -848,7 +1042,12 @@ impl ExactLocalPlacer {
             .unwrap_or_default();
         let rcell = verify::to_rcell(&self.name, dim, &self.netlist, decoded);
         // Store settled torch states, so pasting the cell starts stable.
-        let world = verify::settled_world(&world, &config.tuning).unwrap_or(world);
+        let settled = if self.netlist.state.is_empty() {
+            verify::settled_world(&world, &config.tuning)
+        } else {
+            verify::settled_sequential_world(&world, &self.netlist, decoded, &config.tuning)
+        };
+        let world = settled.unwrap_or(world);
         ExactPlacement {
             placed: PlacedWorld {
                 world,
@@ -943,5 +1142,35 @@ impl ExactLocalPlacer {
             ExactOutcome::Placed(placement) => (Some(*placement), optimal, stats),
             _ => (None, false, stats),
         })
+    }
+}
+
+// Per-worker elapsed phase totals: concurrent workers must not be summed as wall time.
+#[derive(Default)]
+struct SearchProfile {
+    enabled: bool,
+    worker: usize,
+    seed: u32,
+    sat: Duration,
+    decode: Duration,
+    verify: Duration,
+    calls: usize,
+    failures: std::collections::BTreeMap<String, usize>,
+}
+impl SearchProfile {
+    fn new(worker: usize, seed: u32) -> Self {
+        let mut profile = Self::default();
+        profile.enabled = std::env::var_os("EXACT_PROFILE").is_some();
+        profile.worker = worker;
+        profile.seed = seed;
+        profile
+    }
+}
+impl Drop for SearchProfile {
+    fn drop(&mut self) {
+        if self.enabled {
+            eprintln!("SEARCH_PROFILE worker={} seed={} sat={:?} decode={:?} verify={:?} calls={} failures={:?}",
+                self.worker, self.seed, self.sat, self.decode, self.verify, self.calls, self.failures);
+        }
     }
 }

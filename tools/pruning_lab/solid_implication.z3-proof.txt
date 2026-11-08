@@ -1,0 +1,62 @@
+mp(mp(mp(asserted(Implies(And(feeds, source), target)),
+         rewrite(Implies(And(feeds, source), target) ==
+                 Or(target, Not(And(feeds, source)))),
+         Or(target, Not(And(feeds, source)))),
+      monotonicity(trans(monotonicity(rewrite(And(feeds,
+                                        source) ==
+                                        Not(Or(Not(feeds),
+                                        Not(source)))),
+                                      Not(And(feeds, source)) ==
+                                      Not(Not(Or(Not(feeds),
+                                        Not(source))))),
+                         rewrite(Not(Not(Or(Not(feeds),
+                                        Not(source)))) ==
+                                 Or(Not(feeds), Not(source))),
+                         Not(And(feeds, source)) ==
+                         Or(Not(feeds), Not(source))),
+                   Or(target, Not(And(feeds, source))) ==
+                   Or(target, Or(Not(feeds), Not(source)))),
+      Or(target, Or(Not(feeds), Not(source)))),
+   trans(monotonicity(iff-false(and-elim(asserted(And(feeds,
+                                        source,
+                                        Not(target))),
+                                        Not(target)),
+                                target == False),
+                      monotonicity(monotonicity(iff-true(and-elim(asserted(And(feeds,
+                                        source,
+                                        Not(target))),
+                                        feeds),
+                                        feeds == True),
+                                        Not(feeds) ==
+                                        Not(True)),
+                                   monotonicity(iff-true(and-elim(asserted(And(feeds,
+                                        source,
+                                        Not(target))),
+                                        source),
+                                        source == True),
+                                        Not(source) ==
+                                        Not(True)),
+                                   Or(Not(feeds),
+                                      Not(source)) ==
+                                   Or(Not(True), Not(True))),
+                      Or(target,
+                         Or(Not(feeds), Not(source))) ==
+                      Or(False, Or(Not(True), Not(True)))),
+         trans(monotonicity(trans(monotonicity(rewrite(Not(True) ==
+                                        False),
+                                        rewrite(Not(True) ==
+                                        False),
+                                        Or(Not(True),
+                                        Not(True)) ==
+                                        Or(False, False)),
+                                  rewrite(Or(False, False) ==
+                                        False),
+                                  Or(Not(True), Not(True)) ==
+                                  False),
+                            Or(False,
+                               Or(Not(True), Not(True))) ==
+                            Or(False, False)),
+               rewrite(Or(False, False) == False),
+               Or(False, Or(Not(True), Not(True))) == False),
+         Or(target, Or(Not(feeds), Not(source))) == False),
+   False)

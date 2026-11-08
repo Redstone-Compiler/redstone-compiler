@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use super::encode::CellKind;
 use super::layout::{ExactLayout, OutputPolicy};
 use super::{ExactLocalPlacer, ExactOutcome, ExactPlacement, ExactPlacerConfig, ExactTuning};
-use crate::world::position::Position;
+use crate::world::position::{DimSize, Position};
 
 #[derive(Debug, Clone)]
 pub struct CompactionConfig {
@@ -20,7 +20,7 @@ pub struct CompactionConfig {
     pub window_radius: usize,
     /// Wider windows tried once no seam can be repaired at the current radius.
     pub max_window_radius: usize,
-    /// After shrinking, re-solve sliding windows with one block fewer.
+    /// Minimize deletion subsets first, then re-solve sliding windows after shrinking.
     pub minimize_blocks: bool,
     /// Minimize each block-reduction window's cost in one solve (`optimize`)
     /// instead of asking for one block fewer per attempt (rsdsl model only).
@@ -45,6 +45,24 @@ pub struct CompactionConfig {
     /// same window, so repairs (which only have to fit) do not add dead
     /// blocks. `None` keeps the repair as found.
     pub repair_optimize: Option<Duration>,
+    /// When a slice removal's window is proven infeasible, ask which fixed
+    /// cells within `core_shell` of it the proof needs
+    /// (`ExactLocalPlacer::proof_core`), free those too, and try again, up to
+    /// `core_expansions` times. A proof that needs none of them rules the
+    /// slice out until the layout changes: every wider window up to
+    /// `core_shell` fails too.
+    pub core_guided: bool,
+    pub core_expansions: usize,
+    /// How far (in steps between neighboring cells) from the free cells the
+    /// core may reach. The cells further out stay folded units, which keeps
+    /// the core solve as small as the window's own.
+    pub core_shell: usize,
+    /// Free at most this many cells; a larger core is not tried. Windows
+    /// that free more rarely finish (full adder: 21-60 freed cells timed
+    /// out 36 times of 58).
+    pub core_max_freed: usize,
+    /// Time for each core solve, which runs on one thread.
+    pub core_time_limit: Duration,
     /// Slice removals per round before block reduction gets a turn. A long
     /// constructed layout can otherwise spend the whole budget removing
     /// slices (the 2-bit adder did, and kept its dead blocks). `None` (the
@@ -105,6 +123,11 @@ impl Default for CompactionConfig {
             given_outside_signals: true,
             repair_optimize: Some(Duration::from_secs(5)),
             max_removals_per_round: None,
+            core_guided: false,
+            core_expansions: 3,
+            core_shell: 2,
+            core_max_freed: 20,
+            core_time_limit: Duration::from_secs(5),
             model_params: BTreeMap::new(),
             max_refinements: 8,
             tuning: ExactTuning::default(),
@@ -176,7 +199,7 @@ pub struct CompactionReport {
     pub rounds: usize,
     /// Every window solve by `(phase, outcome)`: phases `remove` (slice
     /// removal repairs), `repair` (minimizing a repair), `reduce` (block
-    /// reduction), `delay` and `delay-repair` (path shortening), `signals`;
+    /// reduction), `prune` (whole-layout deletion minimization), `delay` and `delay-repair` (path shortening), `signals`;
     /// outcomes `placed`, `infeasible` (proven), `unknown` (out of time),
     /// `error` (not encodable), and for minimization `improved`,
     /// `improved-optimal`, `optimal` (proven nothing smaller).
@@ -194,6 +217,65 @@ fn axis_name(axis: usize) -> &'static str {
 }
 
 impl ExactLocalPlacer {
+    /// Minimize all deletion subsets in one exact optimization. Positions,
+    /// kinds of retained blocks, and I/O pins stay fixed. Every accepted
+    /// subset passes the normal full simulator verification. `stats.optimal`
+    /// proves minimality only within these subsets, not among relocated layouts.
+    pub fn minimize_existing(
+        &self,
+        layout: &ExactLayout,
+        config: &ExactPlacerConfig,
+    ) -> eyre::Result<(ExactOutcome, super::ExactPlacerStats)> {
+        eyre::ensure!(
+            config.dim == layout.dim,
+            "layout and search dimensions differ"
+        );
+        eyre::ensure!(
+            config.given_signals.is_empty(),
+            "deletion minimization must rejustify all signals"
+        );
+        let mut exact = config.clone();
+        exact.optimize = true;
+        for (name, value) in [("block_cost", 1), ("repeater_cost", 0), ("torch_cost", 0)] {
+            exact
+                .model_params
+                .insert(name.into(), rsdsl::IValue::Int(value));
+        }
+        for (at, kind) in &exact.fixed_cells {
+            eyre::ensure!(
+                layout.cells.get(at).copied().unwrap_or(CellKind::Air) == *kind,
+                "fixed cell {at:?} would replace an existing kind"
+            );
+        }
+        exact.box_symmetry = None;
+        exact.removable_cells.clear();
+        for (name, position, attach) in &layout.inputs {
+            exact
+                .input_sites
+                .insert(name.clone(), vec![(*position, *attach)]);
+        }
+        for (name, position) in &layout.outputs {
+            exact.output_sites.insert(name.clone(), vec![*position]);
+        }
+        for x in 0..layout.dim.0 {
+            for y in 0..layout.dim.1 {
+                for z in 0..layout.dim.2 {
+                    let at = Position(x, y, z);
+                    let kind = layout.cells.get(&at).copied().unwrap_or(CellKind::Air);
+                    if exact.fixed_cells.contains_key(&at) {
+                        continue;
+                    }
+                    if matches!(kind, CellKind::Air | CellKind::Switch(_)) {
+                        exact.fixed_cells.insert(at, kind);
+                    } else {
+                        exact.removable_cells.insert(at, kind);
+                    }
+                }
+            }
+        }
+        self.place(&exact)
+    }
+
     /// Repeatedly removes the slice whose repair succeeds, emptiest first,
     /// widening the repair window when stuck, until no single-slice removal
     /// can be repaired within the limits. Then optionally trades blocks away,
@@ -218,6 +300,51 @@ impl ExactLocalPlacer {
                 .timing()
                 .map(|timing| timing.outputs.into_iter().collect())
                 .unwrap_or_default();
+        }
+        if config.minimize_blocks && !expired() {
+            let mut exact = self.window_config(&layout, 1, (0, layout.dim.1), None, config)?;
+            if let Some(limit) = config.time_limit {
+                exact.time_limit = Some(
+                    config
+                        .attempt_time_limit
+                        .min(limit.saturating_sub(started.elapsed())),
+                );
+            }
+            let attempt_started = Instant::now();
+            report.attempts += 1;
+            match self.minimize_existing(&layout, &exact) {
+                Ok((ExactOutcome::Placed(placement), stats)) => {
+                    let improved = placement.block_count < layout.block_count();
+                    let outcome = match (improved, stats.optimal) {
+                        (true, true) => "improved-optimal",
+                        (true, false) => "improved",
+                        (false, true) => "optimal",
+                        (false, false) => "placed",
+                    };
+                    record_attempt("prune", outcome, attempt_started, Some(&stats));
+                    if improved {
+                        super::progress::record_frame(
+                            config.progress.as_deref(),
+                            &self.name,
+                            "prune existing blocks",
+                            &placement,
+                        );
+                        layout = ExactLayout::from_placement(layout.dim, &placement);
+                        best = Some(*placement);
+                        report.block_reductions += 1;
+                    }
+                }
+                Ok((ExactOutcome::Infeasible, stats)) => {
+                    record_attempt("prune", "infeasible", attempt_started, Some(&stats))
+                }
+                Ok((ExactOutcome::Unknown { .. }, stats)) => {
+                    record_attempt("prune", "unknown", attempt_started, Some(&stats))
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "deletion minimization failed; retaining layout");
+                    record_attempt("prune", "error", attempt_started, None);
+                }
+            }
         }
         if config.given_outside_signals && layout.signals.is_empty() {
             self.read_signals(&mut layout, config);
@@ -267,6 +394,9 @@ impl ExactLocalPlacer {
     ) {
         let mut radius = config.window_radius;
         let mut removals = 0;
+        // Removals proven impossible whatever the cells outside the window
+        // are, for the current layout (cleared when it changes).
+        let mut hopeless = std::collections::BTreeSet::new();
         'outer: loop {
             if config
                 .max_removals_per_round
@@ -294,14 +424,26 @@ impl ExactLocalPlacer {
                     if expired() {
                         break 'outer;
                     }
+                    if hopeless.contains(&(axis, index)) {
+                        continue;
+                    }
                     let Some(cut) = layout.without_slice(axis, index) else {
                         continue;
                     };
                     report.attempts += 1;
                     let window = (index.saturating_sub(radius), index + radius);
-                    if let Some(mut placement) =
-                        self.resolve_window("remove", &cut, axis, window, None, config)
-                    {
+                    let none = std::collections::BTreeSet::new();
+                    let (mut found, outcome) = self
+                        .resolve_window_freeing("remove", &cut, axis, window, None, config, &none);
+                    if found.is_none() && outcome == "infeasible" && config.core_guided {
+                        let (retry, impossible) =
+                            self.core_guided_removal(&cut, axis, window, config);
+                        found = retry;
+                        if impossible {
+                            hopeless.insert((axis, index));
+                        }
+                    }
+                    if let Some(mut placement) = found {
                         if let Some(budget) = config.repair_optimize {
                             // A repair only has to fit; trade its dead wires
                             // away while the window is still the one solved.
@@ -340,6 +482,7 @@ impl ExactLocalPlacer {
                         report.removed.push((axis, index));
                         removals += 1;
                         radius = config.window_radius;
+                        hopeless.clear();
                         continue 'outer;
                     }
                 }
@@ -637,13 +780,90 @@ impl ExactLocalPlacer {
         max_blocks: Option<usize>,
         config: &CompactionConfig,
     ) -> Option<ExactPlacement> {
-        self.try_resolve_window(phase, layout, axis, window, max_blocks, config)
+        let none = std::collections::BTreeSet::new();
+        self.resolve_window_freeing(phase, layout, axis, window, max_blocks, config, &none)
+            .0
+    }
+
+    /// Like `resolve_window`, with the cells in `freed` free as well, and
+    /// the outcome's name (`placed`, `infeasible`, `unknown`, `error`).
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_window_freeing(
+        &self,
+        phase: &'static str,
+        layout: &ExactLayout,
+        axis: usize,
+        window: (usize, usize),
+        max_blocks: Option<usize>,
+        config: &CompactionConfig,
+        freed: &std::collections::BTreeSet<Position>,
+    ) -> (Option<ExactPlacement>, &'static str) {
+        self.try_resolve_window(phase, layout, axis, window, max_blocks, config, freed)
             .unwrap_or_else(|error| {
                 tracing::debug!(axis, ?window, %error, "compaction window rejected");
-                None
+                (None, "error")
             })
     }
 
+    /// A slice removal whose window was proven infeasible: frees the fixed
+    /// cells its proof needs and tries again, up to `core_expansions`
+    /// times. Returns the repair if one was found, and whether the removal
+    /// is impossible whatever the cells outside the window are.
+    fn core_guided_removal(
+        &self,
+        cut: &ExactLayout,
+        axis: usize,
+        window: (usize, usize),
+        config: &CompactionConfig,
+    ) -> (Option<ExactPlacement>, bool) {
+        let mut freed = std::collections::BTreeSet::new();
+        for _ in 0..config.core_expansions {
+            let started = Instant::now();
+            let core = self
+                .window_config_freeing(cut, axis, window, None, config, &freed)
+                .and_then(|mut exact| {
+                    exact.soft_fixed_cells = shell(&exact, config.core_shell);
+                    self.proof_core(&exact, config.core_time_limit)
+                });
+            let core = match core {
+                Ok(Some(core)) => core,
+                Ok(None) => {
+                    record_attempt("core", "undecided", started, None);
+                    return (None, false);
+                }
+                Err(error) => {
+                    tracing::debug!(axis, ?window, %error, "core query rejected");
+                    record_attempt("core", "error", started, None);
+                    return (None, false);
+                }
+            };
+            if core.is_empty() {
+                // The proof needs no shell cell: changing them cannot help.
+                record_attempt("core", "impossible", started, None);
+                return (None, true);
+            }
+            record_attempt("core", "cells", started, None);
+            let before = freed.len();
+            freed.extend(core);
+            if freed.len() == before || freed.len() > config.core_max_freed {
+                return (None, false);
+            }
+            tracing::info!(
+                axis,
+                ?window,
+                freed = freed.len(),
+                "compaction frees the core"
+            );
+            let (found, outcome) =
+                self.resolve_window_freeing("remove-core", cut, axis, window, None, config, &freed);
+            if found.is_some() || outcome != "infeasible" {
+                return (found, false);
+            }
+        }
+        (None, false)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn try_resolve_window(
         &self,
         phase: &'static str,
@@ -652,10 +872,11 @@ impl ExactLocalPlacer {
         window: (usize, usize),
         max_blocks: Option<usize>,
         config: &CompactionConfig,
-    ) -> eyre::Result<Option<ExactPlacement>> {
+        freed: &std::collections::BTreeSet<Position>,
+    ) -> eyre::Result<(Option<ExactPlacement>, &'static str)> {
         let started = Instant::now();
         let solved = self
-            .window_config(cut, axis, window, max_blocks, config)
+            .window_config_freeing(cut, axis, window, max_blocks, config, freed)
             .and_then(|exact| self.place(&exact));
         let (outcome, stats) = match solved {
             Ok(solved) => solved,
@@ -670,18 +891,22 @@ impl ExactLocalPlacer {
             ExactOutcome::Unknown { .. } => "unknown",
         };
         record_attempt(phase, name, started, Some(&stats));
-        Ok(match outcome {
-            ExactOutcome::Placed(placement) => Some(*placement),
-            _ => None,
-        })
+        Ok((
+            match outcome {
+                ExactOutcome::Placed(placement) => Some(*placement),
+                _ => None,
+            },
+            name,
+        ))
     }
 
     /// A layout read from RCELL has no solver signals yet: solve it once with
     /// every cell fixed to read them off.
     pub(super) fn read_signals(&self, layout: &mut ExactLayout, config: &CompactionConfig) {
-        match self.try_resolve_window("signals", layout, 1, (0, 0), None, config) {
-            Ok(Some(placement)) => layout.signals = placement.signals.into_iter().collect(),
-            Ok(None) => tracing::warn!("could not read the layout's signals"),
+        let none = std::collections::BTreeSet::new();
+        match self.try_resolve_window("signals", layout, 1, (0, 0), None, config, &none) {
+            Ok((Some(placement), _)) => layout.signals = placement.signals.into_iter().collect(),
+            Ok((None, _)) => tracing::warn!("could not read the layout's signals"),
             Err(error) => tracing::warn!(%error, "could not read the layout's signals"),
         }
     }
@@ -695,6 +920,20 @@ impl ExactLocalPlacer {
         window: (usize, usize),
         max_blocks: Option<usize>,
         config: &CompactionConfig,
+    ) -> eyre::Result<ExactPlacerConfig> {
+        let none = std::collections::BTreeSet::new();
+        self.window_config_freeing(cut, axis, window, max_blocks, config, &none)
+    }
+
+    /// `window_config` with the cells in `freed` left free as well.
+    pub(super) fn window_config_freeing(
+        &self,
+        cut: &ExactLayout,
+        axis: usize,
+        window: (usize, usize),
+        max_blocks: Option<usize>,
+        config: &CompactionConfig,
+        freed: &std::collections::BTreeSet<Position>,
     ) -> eyre::Result<ExactPlacerConfig> {
         let dim = cut.dim;
         let coordinate = |position: Position| if axis == 1 { position.1 } else { position.2 };
@@ -739,7 +978,7 @@ impl ExactLocalPlacer {
             for y in 0..dim.1 {
                 for z in 0..dim.2 {
                     let position = Position(x, y, z);
-                    if in_window(position) {
+                    if in_window(position) || freed.contains(&position) {
                         continue;
                     }
                     let kind = cut.cells.get(&position).copied().unwrap_or(CellKind::Air);
@@ -763,6 +1002,25 @@ impl ExactLocalPlacer {
         }
         Ok(exact)
     }
+}
+
+/// The fixed cells within `distance` steps of a free cell.
+fn shell(exact: &ExactPlacerConfig, distance: usize) -> std::collections::BTreeSet<Position> {
+    let DimSize(dx, dy, dz) = exact.dim;
+    let free = (0..dx)
+        .flat_map(|x| (0..dy).flat_map(move |y| (0..dz).map(move |z| Position(x, y, z))))
+        .filter(|position| !exact.fixed_cells.contains_key(position))
+        .collect::<Vec<_>>();
+    exact
+        .fixed_cells
+        .keys()
+        .copied()
+        .filter(|&Position(x, y, z)| {
+            free.iter().any(|&Position(fx, fy, fz)| {
+                x.abs_diff(fx) + y.abs_diff(fy) + z.abs_diff(fz) <= distance
+            })
+        })
+        .collect()
 }
 
 /// The cells of the slowest path to `output` (empty without one).

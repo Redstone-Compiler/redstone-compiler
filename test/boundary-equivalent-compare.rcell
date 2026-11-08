@@ -1,0 +1,19 @@
+rcell 1;
+cell "boundary-equivalent-compare" size [4, 3, 2] {
+  start settled;
+  glyph "T" = torch on y-;
+  input "a_A" at [0, 1, 1] on z-;
+  output "out_A" at [0, 2, 0];
+  expect "out_A" = ~a_A;
+  plane yz at x=0 {
+    z=1 "...";
+    z=0 ".#T";
+  }
+  input "a_B" at [3, 0, 0] on y+;
+  output "out_B" at [3, 2, 0];
+  expect "out_B" = ~a_B;
+  plane yz at x=3 {
+    z=1 "...";
+    z=0 ".#T";
+  }
+}

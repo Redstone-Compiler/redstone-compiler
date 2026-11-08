@@ -1106,11 +1106,13 @@ fn diagnose_full_adder_construct_and_compact() -> eyre::Result<()> {
 /// Compacts an existing full-adder RCELL (generated or hand-made) further.
 /// Knobs: `RECOMPACT_SOURCE=<rcell path>`, `RECOMPACT_WRITE=<path prefix>`,
 /// `RECOMPACT_CIRCUIT=<name>` (another `circuit_graph` circuit instead of the
-/// full adder), `RECOMPACT_SECONDS`, `RECOMPACT_WORKERS`, `RECOMPACT_RADIUS`,
+/// full adder), `RECOMPACT_SEQ=<name>` (a `sequential_netlist` cell),
+/// `RECOMPACT_SECONDS`, `RECOMPACT_WORKERS`, `RECOMPACT_RADIUS`,
 /// `RECOMPACT_ATTEMPT_SECONDS`, `RECOMPACT_CONTINUE=0` (restart each
 /// block-reduction pass after a gain), `RECOMPACT_ROUNDS=0`,
 /// `RECOMPACT_REDUCTION_AXES=1` (Y windows only), `RECOMPACT_GIVEN=0` (no
-/// given signals outside the window).
+/// given signals outside the window), `RECOMPACT_CORE=1` (core-guided
+/// slice removal).
 #[test]
 #[ignore = "full-adder recompaction measurement; run explicitly with --nocapture"]
 fn recompact_full_adder_rcell() -> eyre::Result<()> {
@@ -1124,20 +1126,28 @@ fn recompact_full_adder_rcell() -> eyre::Result<()> {
     let mut layout = ExactLayout::from_rcell(&document)?;
     // Another circuit's cell keeps its own output names and has no face policy.
     let circuit = std::env::var("RECOMPACT_CIRCUIT").ok();
-    if circuit.is_none() {
+    if circuit.is_none() && std::env::var("RECOMPACT_SEQ").is_err() {
         for (name, _) in layout.outputs.iter_mut() {
             if name == "sum" {
                 *name = "s".to_owned();
             }
         }
     }
-    let graph = match &circuit {
-        Some(circuit) => circuit_graph(circuit)?,
-        None => full_adder_graph("nor9"),
-    };
-    let placer = ExactLocalPlacer::new(&graph)?.with_name(format!(
+    // `RECOMPACT_SEQ=<name>`: a sequential cell (`sequential_netlist`).
+    let sequential = std::env::var("RECOMPACT_SEQ").ok();
+    let placer = match (&sequential, &circuit) {
+        (Some(name), _) => {
+            ExactLocalPlacer::from_netlist(NorNetlist::from_text(sequential_netlist(name)?)?)
+        }
+        (None, Some(circuit)) => ExactLocalPlacer::new(&circuit_graph(circuit)?)?,
+        (None, None) => ExactLocalPlacer::new(&full_adder_graph("nor9"))?,
+    }
+    .with_name(format!(
         "exact-{}",
-        circuit.as_deref().unwrap_or("full-adder")
+        sequential
+            .as_deref()
+            .or(circuit.as_deref())
+            .unwrap_or("full-adder")
     ));
     let compaction = CompactionConfig {
         workers: env_usize("RECOMPACT_WORKERS", 8),
@@ -1147,7 +1157,7 @@ fn recompact_full_adder_rcell() -> eyre::Result<()> {
         time_limit: Some(Duration::from_secs(
             env_usize("RECOMPACT_SECONDS", 1200) as u64
         )),
-        output_policies: match circuit {
+        output_policies: match circuit.as_ref().or(sequential.as_ref()) {
             Some(_) => BTreeMap::new(),
             None => [("s".to_owned(), OutputPolicy::MaxYFace)]
                 .into_iter()
@@ -1158,6 +1168,15 @@ fn recompact_full_adder_rcell() -> eyre::Result<()> {
         repair_optimize: repair_optimize_from_env("RECOMPACT_REPAIR_OPTIMIZE"),
         max_removals_per_round: removals_per_round_from_env("RECOMPACT_REMOVALS_PER_ROUND"),
         repeat_rounds: std::env::var("RECOMPACT_ROUNDS").as_deref() != Ok("0"),
+        core_guided: std::env::var("RECOMPACT_CORE").as_deref() == Ok("1"),
+        core_shell: std::env::var("RECOMPACT_CORE_SHELL")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(2),
+        core_max_freed: std::env::var("RECOMPACT_CORE_MAX_FREED")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(20),
         reduction_axes: match std::env::var("RECOMPACT_REDUCTION_AXES").as_deref() {
             Ok("1") => vec![1],
             _ => vec![1, 2],
@@ -1170,6 +1189,7 @@ fn recompact_full_adder_rcell() -> eyre::Result<()> {
         layout.cells.len()
     );
     let (compacted, best, report) = placer.compact(layout, &compaction)?;
+    print_attempt_times("RECOMPACT", &report);
     println!(
         "RECOMPACT done dim={:?} cells={} removed={:?} reductions={} attempts={} elapsed={:?}",
         compacted.dim,
@@ -1182,6 +1202,10 @@ fn recompact_full_adder_rcell() -> eyre::Result<()> {
     if let (Some(placement), Ok(prefix)) = (best, std::env::var("RECOMPACT_WRITE")) {
         std::fs::write(format!("{prefix}.rcell"), placement.rcell.to_string())?;
         crate::nbt::NBTRoot::from(&placement.placed.world).save(format!("{prefix}.nbt"));
+        std::fs::write(
+            format!("{prefix}.outputs.json"),
+            serde_json::to_string_pretty(&placement.rcell.interface_json())?,
+        )?;
         println!(
             "RECOMPACT wrote {prefix}.rcell blocks={}",
             placement.block_count
@@ -2279,6 +2303,9 @@ fn diagnose_construct_circuit() -> eyre::Result<()> {
                 .collect::<Vec<_>>(),
             report.elapsed
         );
+        if let Ok(prefix) = std::env::var("CIRCUIT_WRITE_CONSTRUCTED") {
+            std::fs::write(format!("{prefix}.rcell"), placement.rcell.to_string())?;
+        }
         let compaction = CompactionConfig {
             seed,
             time_limit: Some(Duration::from_secs(
@@ -2288,6 +2315,7 @@ fn diagnose_construct_circuit() -> eyre::Result<()> {
             repair_optimize: repair_optimize_from_env("CIRCUIT_REPAIR_OPTIMIZE"),
             progress: std::env::var("CIRCUIT_PROGRESS").ok().map(Into::into),
             timing: std::env::var("CIRCUIT_TIMING").as_deref() == Ok("1"),
+            core_guided: std::env::var("CIRCUIT_CORE").as_deref() == Ok("1"),
             workers: env_usize("CIRCUIT_WORKERS", 8),
             ..Default::default()
         };
@@ -3805,6 +3833,809 @@ fn synthesis_truth_tables_follow_precedence() -> eyre::Result<()> {
     Ok(())
 }
 
+/// Sequential cells as NOR netlists with their state nets
+/// (`NorNetlist::from_text`).
+fn sequential_netlist(circuit: &str) -> eyre::Result<&'static str> {
+    Ok(match circuit {
+        // Set-reset latch: two cross-coupled NORs.
+        "rs-latch" => "state(q); out(q); q=NOR(r,nq); nq=NOR(s,q)",
+        "rs-latch-both" => "state(q); out(q,nq); q=NOR(r,nq); nq=NOR(s,q)",
+        // D latch: the set-reset core, set by `d & en`, reset by `~d & en`.
+        "d-latch" => {
+            "state(q); out(q); nd=NOR(d); nen=NOR(en); s=NOR(nd,nen); r=NOR(d,nen); \
+             q=NOR(r,nq); nq=NOR(s,q)"
+        }
+        // Falling-edge flip-flop: the multiplexer D latch above as the
+        // master (`m`, open while `clk` is on), and a slave open while it is
+        // off that shares the master's `NOR(m, clk)`. Six torches.
+        "dff-neg" => {
+            "state(m,q); out(q); nen=NOR(clk); a=NOR(d,nen); b=NOR(m,clk); m=NOR(a,b); \
+             f=NOR(q,nen); q=NOR(b,f)"
+        }
+        // D latch as a multiplexer: `q = en ? d : q`, four torches.
+        "d-latch-mux" => "state(q); out(q); nen=NOR(en); a=NOR(d,nen); b=NOR(q,en); q=NOR(a,b)",
+        // Master-slave flip-flop from two multiplexer latches, which share
+        // `NOR(m, nclk)`: six torches.
+        "dff-mux" => {
+            "state(m,q); out(q); nclk=NOR(clk); a=NOR(d,clk); b=NOR(m,nclk); m=NOR(a,b); \
+             c=NOR(q,clk); q=NOR(b,c)"
+        }
+        // Master-slave D flip-flop on the rising edge: the master follows
+        // `d` while `clk` is off, the slave copies the master while it is on.
+        "dff" => {
+            "state(m,q); out(q); nd=NOR(d); nclk=NOR(clk); ms=NOR(nd,clk); mr=NOR(d,clk); \
+             m=NOR(mr,nm); nm=NOR(ms,m); ss=NOR(nm,nclk); sr=NOR(m,nclk); \
+             q=NOR(sr,nq); nq=NOR(ss,q)"
+        }
+        other => eyre::bail!("no sequential netlist for {other}"),
+    })
+}
+
+/// The latch netlists settle where a latch does: a set-reset latch holds
+/// either value with both inputs off and has one state otherwise, and the
+/// flip-flop's slave follows its master only while the clock is on.
+#[test]
+fn sequential_netlists_settle_like_latches() -> eyre::Result<()> {
+    let latch = NorNetlist::from_text(sequential_netlist("rs-latch")?)?;
+    assert_eq!(latch.input_names(), ["r", "s"]);
+    assert_eq!(latch.case_bits(), 3);
+    // Case bits: r, s, then the stored q.
+    let cases = |mask: u64| {
+        (0..64)
+            .filter(|&case| mask & 1 << case != 0)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        cases(latch.valid_cases()),
+        [0b000, 0b001, 0b011, 0b100, 0b110]
+    );
+    assert_eq!(latch.next_state(0b10, 0), Some(1), "set");
+    assert_eq!(latch.next_state(0b01, 1), Some(0), "reset");
+    assert_eq!(latch.next_state(0b00, 1), Some(1), "hold");
+    let read = NorNetlist::from_text(&latch.to_text())?;
+    assert_eq!(read.to_text(), latch.to_text());
+
+    let dff = NorNetlist::from_text(sequential_netlist("dff")?)?;
+    assert_eq!(dff.input_names(), ["clk", "d"]);
+    // Case bits: clk, d, m, q. Eight settled cases.
+    assert_eq!(dff.valid_cases().count_ones(), 8);
+    // The clock rises with d = 1 and the master holding 1: q becomes 1.
+    let (m, q) = (1, 2);
+    assert_eq!(dff.next_state(0b11, m), Some(m | q));
+    // While the clock is on, d does not reach the master.
+    assert_eq!(dff.next_state(0b01, 0), Some(0));
+    let plan = super::verify::SequentialPlan::new(&dff).map_err(|e| eyre::eyre!(e))?;
+    assert!(plan.homing.len() <= 3, "{:?}", plan.homing);
+    Ok(())
+}
+
+/// The repository's hand-made set-reset latch (`sequential/layout.rs`,
+/// 8x6x3: two wall torches on their supports, each feeding the other's
+/// support over a dust loop) with levers for its dust inputs. It works in
+/// the simulator, so the model must accept it: every block is fixed and the
+/// solver only labels classes, ranks, and stages. An unsatisfiable answer
+/// prints the cells in the core.
+#[test]
+fn model_accepts_hand_rs_latch() -> eyre::Result<()> {
+    use super::encode::{Encoding, TORCH_ATTACH};
+    use super::solver::{SatSolver, SolveResult, StopSignal};
+    let netlist = NorNetlist::from_text(sequential_netlist("rs-latch")?)?;
+    let mut cells = BTreeMap::new();
+    let p = |x, y, z| Position(x, y, z);
+    // Levers on the floor, each beside an input dust that points into a support.
+    for (lever, dust) in [(p(0, 2, 1), p(1, 2, 1)), (p(6, 2, 1), p(5, 2, 1))] {
+        cells.insert(lever, CellKind::Switch(Direction::Bottom));
+        cells.insert(lever.down().unwrap(), CellKind::Solid);
+        cells.insert(dust, CellKind::Dust);
+        cells.insert(dust.down().unwrap(), CellKind::Solid);
+    }
+    cells.insert(p(2, 2, 1), CellKind::Solid);
+    cells.insert(p(4, 2, 1), CellKind::Solid);
+    cells.insert(p(2, 1, 1), CellKind::Torch(Direction::North));
+    cells.insert(p(4, 3, 1), CellKind::Torch(Direction::South));
+    for dust in [
+        p(2, 0, 1),
+        p(3, 0, 1),
+        p(4, 0, 1),
+        p(4, 1, 1),
+        p(4, 4, 1),
+        p(3, 4, 1),
+        p(2, 4, 1),
+        p(2, 3, 1),
+    ] {
+        cells.insert(dust, CellKind::Dust);
+        cells.insert(dust.down().unwrap(), CellKind::Solid);
+    }
+    let mut config = ExactPlacerConfig::new(DimSize(8, 6, 3))
+        .with_input_site("r", p(0, 2, 1), Direction::Bottom)
+        .with_input_site("s", p(6, 2, 1), Direction::Bottom)
+        .with_output_sites("q", [p(2, 1, 1)]);
+    config.workers = 1;
+    let encoding = Encoding::build(&netlist, &config)?;
+    let mut described = Vec::new();
+    for cell in 0..encoding.geometry.len() {
+        let position = encoding.geometry.position(cell);
+        let kind = cells.get(&position).copied().unwrap_or(CellKind::Air);
+        let lit = match kind {
+            CellKind::Air => encoding.air[cell],
+            CellKind::Solid => encoding.solid[cell],
+            CellKind::Dust => encoding.dust[cell],
+            CellKind::Torch(attach) => {
+                encoding.torch[cell][TORCH_ATTACH.iter().position(|&d| d == attach).unwrap()]
+            }
+            CellKind::Repeater(_) => unreachable!(),
+            CellKind::Switch(attach) => {
+                encoding
+                    .switches
+                    .iter()
+                    .find(|site| site.cell == cell && site.attach == attach)
+                    .unwrap()
+                    .lit
+            }
+        };
+        described.push((lit, position, kind));
+    }
+    let mut solver = SatSolver::new(1);
+    solver.add_cnf(&encoding.cnf);
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let signal = StopSignal {
+        stop: &stop,
+        deadline: Some(Instant::now() + Duration::from_secs(60)),
+        restart: None,
+    };
+    let lits = described.iter().map(|(lit, ..)| *lit).collect::<Vec<_>>();
+    let result = solver.solve(&lits, &signal);
+    let core = described
+        .iter()
+        .filter(|(lit, ..)| result == SolveResult::Unsat && solver.failed(*lit))
+        .map(|(_, position, kind)| format!("{position:?}={kind:?}"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        result,
+        SolveResult::Sat,
+        "model rejects the hand latch; core: {core:?}"
+    );
+    // The whole pipeline, with every cell fixed: solve, then verify the
+    // latch in the simulator.
+    let placer = ExactLocalPlacer::from_netlist(netlist);
+    let mut fixed = config.clone();
+    for cell in 0..encoding.geometry.len() {
+        let position = encoding.geometry.position(cell);
+        let kind = cells.get(&position).copied().unwrap_or(CellKind::Air);
+        fixed.fixed_cells.insert(position, kind);
+    }
+    fixed.time_limit = Some(Duration::from_secs(60));
+    let direct = Encoding::build(placer.netlist(), &fixed)?;
+    let mut direct_solver = SatSolver::new(1);
+    direct_solver.add_cnf(&direct.cnf);
+    eprintln!("fixed CNF alone: {:?}", direct_solver.solve(&[], &signal));
+    let (outcome, stats) = placer.place(&fixed)?;
+    assert!(
+        matches!(outcome, ExactOutcome::Placed(_)),
+        "{outcome:?} after {} refinements",
+        stats.refinements
+    );
+    Ok(())
+}
+
+/// With its loop cut at the state net, the set-reset latch fits 2x3x3 in
+/// 8 blocks (two torches, two repeaters crossing over, and their blocks),
+/// proven to be the fewest, and the simulator accepts it in every settled
+/// case and every single input change.
+#[test]
+fn rs_latch_places_in_eight_blocks() -> eyre::Result<()> {
+    let netlist = NorNetlist::from_text(sequential_netlist("rs-latch")?)?;
+    let placer = ExactLocalPlacer::from_netlist(netlist);
+    let mut config = ExactPlacerConfig::new(DimSize(2, 3, 3));
+    config.workers = 4;
+    config.optimize = true;
+    config.time_limit = Some(Duration::from_secs(120));
+    let (outcome, stats) = placer.place(&config)?;
+    let ExactOutcome::Placed(placement) = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert_eq!(placement.block_count, 8);
+    assert!(stats.optimal);
+    Ok(())
+}
+
+/// A refutation's core names the fixed cell that breaks a layout, and the
+/// core alone keeps the instance infeasible.
+#[test]
+fn proof_core_names_the_broken_cell() -> eyre::Result<()> {
+    let netlist = NorNetlist::from_text("o=NOR(a,b)")?;
+    let placer = ExactLocalPlacer::from_netlist(netlist);
+    let dim = DimSize(2, 3, 3);
+    let mut config = ExactPlacerConfig::new(dim);
+    config.time_limit = Some(Duration::from_secs(60));
+    let (outcome, _) = placer.place(&config)?;
+    let ExactOutcome::Placed(placement) = outcome else {
+        panic!("{outcome:?}");
+    };
+    let kinds = placement.cells.iter().copied().collect::<BTreeMap<_, _>>();
+    let (&torch, _) = kinds
+        .iter()
+        .find(|(_, kind)| matches!(kind, CellKind::Torch(_)))
+        .expect("a NOR needs a torch");
+    let layout = ExactLayout::from_placement(dim, &placement);
+    let mut broken = ExactPlacerConfig::new(dim);
+    for (name, position, attach) in &layout.inputs {
+        broken = broken.with_input_site(name.clone(), *position, *attach);
+    }
+    for x in 0..dim.0 {
+        for y in 0..dim.1 {
+            for z in 0..dim.2 {
+                let position = Position(x, y, z);
+                let kind = kinds.get(&position).copied().unwrap_or(CellKind::Air);
+                broken.fixed_cells.insert(position, kind);
+            }
+        }
+    }
+    broken.fixed_cells.insert(torch, CellKind::Air);
+    broken.soft_fixed_cells = broken.fixed_cells.keys().copied().collect();
+    let core = placer
+        .proof_core(&broken, Duration::from_secs(60))?
+        .expect("the broken layout is infeasible");
+    assert!(core.contains(&torch), "{core:?}");
+    let mut only_core = broken.clone();
+    only_core.fixed_cells.clear();
+    only_core.soft_fixed_cells.clear();
+    only_core.time_limit = Some(Duration::from_secs(60));
+    for position in &core {
+        only_core
+            .fixed_cells
+            .insert(*position, broken.fixed_cells[position]);
+    }
+    let (outcome, _) = placer.place(&only_core)?;
+    assert!(matches!(outcome, ExactOutcome::Infeasible), "{outcome:?}");
+    Ok(())
+}
+
+/// Pastes a latch fixture from its NBT, which stores a settled state with
+/// every input off and `q` off, and pulls its levers one step at a time:
+/// each step sets inputs and expects `q`.
+fn run_latch_fixture(stem: &str, steps: &[(&[(&str, bool)], bool)]) -> eyre::Result<()> {
+    use crate::world::simulator::{Simulator, MANUAL_INPUT_IDLE_CYCLES};
+    let document: crate::physical_cell::PhysicalCellDocument =
+        std::fs::read_to_string(format!("test/{stem}.rcell"))?.parse()?;
+    let world = crate::nbt::NBTRoot::from_nbt_bytes(&std::fs::read(format!("test/{stem}.nbt"))?)?
+        .to_world();
+    let mut simulator =
+        Simulator::from_preserving_torch_states_with_limits_and_trace(&world, 256, 50_000, 0)
+            .map_err(|error| eyre::eyre!("{}", error.message()))?;
+    let input = |name: &str| {
+        document
+            .inputs
+            .iter()
+            .find(|input| input.name == name)
+            .unwrap()
+            .position
+    };
+    let q = document
+        .outputs
+        .iter()
+        .find(|output| output.name == "q")
+        .unwrap()
+        .position;
+    assert!(
+        !simulator.world()[q].kind.is_powered(),
+        "{stem}: q starts off"
+    );
+    for (index, (inputs, expected)) in steps.iter().enumerate() {
+        simulator.advance_idle_cycles(MANUAL_INPUT_IDLE_CYCLES)?;
+        let states = inputs.iter().map(|&(name, on)| (input(name), on)).collect();
+        simulator.change_state_with_limits(states, 256, 50_000)?;
+        assert_eq!(
+            simulator.world()[q].kind.is_powered(),
+            *expected,
+            "{stem}: q after step {index} {inputs:?}"
+        );
+        for (position, block) in simulator.world().iter_block() {
+            assert!(
+                !(block.kind.is_torch() && simulator.is_torch_burned_out(position)),
+                "{stem}: torch at {position:?} burned out at step {index}"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The 8-block set-reset latch (`test/rs-latch-exact-2x3x3`) sets, holds,
+/// and resets when pasted from its NBT.
+#[test]
+fn exact_rs_latch_fixture_sets_holds_and_resets() -> eyre::Result<()> {
+    run_latch_fixture(
+        "rs-latch-exact-2x3x3",
+        &[
+            (&[("s", true)], true),
+            (&[("s", false)], true),
+            (&[("r", true)], false),
+            (&[("r", false)], false),
+            (&[("s", true)], true),
+            (&[("r", true)], false),
+            (&[("s", false)], false),
+            (&[("r", false)], false),
+        ],
+    )
+}
+
+/// The 16-block D latch (`test/d-latch-exact-2x3x4`, a multiplexer of four
+/// torches) follows `d` while `en` is on and holds while it is off.
+#[test]
+fn exact_d_latch_fixture_follows_and_holds() -> eyre::Result<()> {
+    run_latch_fixture(
+        "d-latch-exact-2x3x4",
+        &[
+            (&[("d", true)], false),
+            (&[("en", true)], true),
+            (&[("d", false)], false),
+            (&[("d", true)], true),
+            (&[("en", false)], true),
+            (&[("d", false)], true),
+            (&[("en", true)], false),
+            (&[("en", false)], false),
+            (&[("d", true)], false),
+        ],
+    )
+}
+
+/// The falling-edge flip-flop (`test/dff-exact-2x6x4`, 29 blocks, six
+/// torches) changes `q` only when `clk` falls, to the `d` it saw while `clk`
+/// was on. It was placed with the D latch fixture fixed as its master
+/// (`SEQ_FIX_RCELL`, 39 blocks), then compacted with nothing fixed
+/// (`RECOMPACT_SEQ=dff-neg`). Without that hint, one solve finds no
+/// flip-flop in 30 minutes (`docs/sequential_exact_cells.md`).
+#[test]
+fn exact_falling_edge_flip_flop_fixture_samples_on_the_falling_edge() -> eyre::Result<()> {
+    run_latch_fixture(
+        "dff-exact-2x6x4",
+        &[
+            (&[("d", true)], false),
+            (&[("clk", true)], false),
+            (&[("clk", false)], true),
+            (&[("d", false)], true),
+            (&[("clk", true)], true),
+            (&[("d", true)], true),
+            (&[("d", false)], true),
+            (&[("clk", false)], false),
+            (&[("d", true)], false),
+        ],
+    )
+}
+
+/// Cold global solve: no fixed cells, input sites, or preplaced latch.
+/// Independently exercise the exported NBT, not the solver's assignment.
+#[test]
+fn exact_global_dff_fixture_survives_2048_single_input_changes() -> eyre::Result<()> {
+    check_global_dff_stress("dff-global-2x7x4")
+}
+
+fn check_global_dff_stress(stem: &str) -> eyre::Result<()> {
+    let mut clk = false;
+    let mut d = false;
+    let mut q = false;
+    let mut rng = 0x7284_9123_u64;
+    let mut steps = Vec::new();
+    for _ in 0..2048 {
+        rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let input = if rng >> 63 == 0 {
+            d = !d;
+            ("d", d)
+        } else {
+            clk = !clk;
+            if !clk {
+                q = d;
+            }
+            ("clk", clk)
+        };
+        steps.push((vec![input], q));
+    }
+    let borrowed: Vec<_> = steps
+        .iter()
+        .map(|(inputs, q)| (inputs.as_slice(), *q))
+        .collect();
+    run_latch_fixture(stem, &borrowed)
+}
+
+/// Recheck the result against the original model, without the search-only
+/// six-gate/fanin rules. Fixing here validates a found result; it is not discovery.
+#[test]
+fn exact_global_dff_fixture_satisfies_original_model() -> eyre::Result<()> {
+    check_global_dff_model("dff-global-2x7x4", 45)
+}
+
+fn check_global_dff_model(stem: &str, expected_blocks: usize) -> eyre::Result<()> {
+    let document: crate::physical_cell::PhysicalCellDocument =
+        std::fs::read_to_string(format!("test/{stem}.rcell"))?.parse()?;
+    let build = document.build()?;
+    let placer =
+        ExactLocalPlacer::from_netlist(NorNetlist::from_text(sequential_netlist("dff-neg")?)?);
+    let mut config = ExactPlacerConfig::new(document.size);
+    config.rank_levels = 8;
+    config.stage_levels = 8;
+    config.box_symmetry = None;
+    config.time_limit = Some(Duration::from_secs(20));
+    for x in 0..document.size.0 {
+        for y in 0..document.size.1 {
+            for z in 0..document.size.2 {
+                let at = Position(x, y, z);
+                config.fixed_cells.insert(at, manual_kind(&build.world[at]));
+            }
+        }
+    }
+    for input in &document.inputs {
+        config = config.with_input_site(
+            input.name.clone(),
+            input.position,
+            build.world[input.position].direction,
+        );
+    }
+    for output in &document.outputs {
+        config
+            .output_sites
+            .insert(output.name.clone(), vec![output.position]);
+    }
+    let (outcome, _) = placer.place(&config)?;
+    let ExactOutcome::Placed(placement) = outcome else {
+        panic!("{outcome:?}")
+    };
+    assert_eq!(placement.block_count, expected_blocks);
+    Ok(())
+}
+
+#[test]
+#[ignore = "diagnose the viewer repeater at NBT (1,1,0), preserving the original fixture"]
+fn diagnose_global_dff_repeater_removal() -> eyre::Result<()> {
+    probe_global_dff_repeaters(false)
+}
+
+#[test]
+#[ignore = "remove NBT (2,3,0) in addition to the already removed (1,1,0)"]
+fn diagnose_global_dff_second_repeater_removal() -> eyre::Result<()> {
+    probe_global_dff_repeaters(true)
+}
+
+/// Verify a cold-search artifact against the original model and 2,048 NBT transitions.
+#[test]
+#[ignore = "set DFF_VERIFY_STEM to an exported RCELL/NBT prefix relative to test/"]
+fn verify_dff_search_artifact() -> eyre::Result<()> {
+    let stem = std::env::var("DFF_VERIFY_STEM")?;
+    let document: crate::physical_cell::PhysicalCellDocument =
+        std::fs::read_to_string(format!("test/{stem}.rcell"))?.parse()?;
+    let layout = ExactLayout::from_rcell(&document)?;
+    check_global_dff_stress(&stem)?;
+    check_global_dff_model(&stem, layout.block_count())?;
+    println!(
+        "DFF independently verified {} blocks, 2048 transitions: {stem}",
+        layout.block_count()
+    );
+    Ok(())
+}
+
+#[test]
+fn minimize_global_dff_automatically() -> eyre::Result<()> {
+    let document: crate::physical_cell::PhysicalCellDocument =
+        std::fs::read_to_string("test/dff-global-2x7x4.rcell")?.parse()?;
+    let layout = ExactLayout::from_rcell(&document)?;
+    let placer =
+        ExactLocalPlacer::from_netlist(NorNetlist::from_text(sequential_netlist("dff-neg")?)?);
+    let mut config = ExactPlacerConfig::new(layout.dim);
+    config.rank_levels = 8;
+    config.stage_levels = 8;
+    config.workers = 4;
+    config.max_refinements = 2000;
+    config.time_limit = Some(Duration::from_secs(120));
+    let start = Instant::now();
+    let (outcome, stats) = placer.minimize_existing(&layout, &config)?;
+    let elapsed = start.elapsed();
+    let ExactOutcome::Placed(placement) = outcome else {
+        panic!("{outcome:?}")
+    };
+    assert!(
+        placement.block_count <= 43,
+        "must recover at least the known deletions automatically"
+    );
+    for (at, kind) in &placement.cells {
+        assert_eq!(
+            layout.cells.get(at),
+            Some(kind),
+            "must only remove, never move or replace"
+        );
+    }
+    // Disable geometric/window rewrites to isolate the default compaction prepass.
+    let compact_config = super::compact::CompactionConfig {
+        axes: vec![],
+        reduction_axes: vec![],
+        repeat_rounds: false,
+        rank_levels: 8,
+        stage_levels: 8,
+        workers: 4,
+        max_refinements: 2000,
+        ..Default::default()
+    };
+    let (compacted, _, report) = placer.compact(layout.clone(), &compact_config)?;
+    assert_eq!(compacted.block_count(), placement.block_count);
+    assert!(report
+        .attempt_times
+        .contains_key(&("prune", "improved-optimal")));
+    let minimized_layout = ExactLayout::from_placement(layout.dim, &placement);
+    assert_eq!(minimized_layout.inputs, layout.inputs);
+    assert_eq!(minimized_layout.outputs, layout.outputs);
+    let out = std::path::Path::new("target/dff-automatic");
+    std::fs::create_dir_all(out)?;
+    std::fs::write(out.join("optimized.rcell"), placement.rcell.to_string())?;
+    crate::nbt::NBTRoot::from(&placement.placed.world).save(out.join("optimized.nbt"));
+    std::fs::write(
+        out.join("optimized.outputs.json"),
+        serde_json::to_vec_pretty(&placement.rcell.interface_json())?,
+    )?;
+    check_global_dff_stress("../target/dff-automatic/optimized")?;
+    check_global_dff_model("../target/dff-automatic/optimized", placement.block_count)?;
+    std::fs::write(
+        out.join("result.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "before":layout.block_count(),"after":placement.block_count,"optimal_deletion_subset":stats.optimal,
+            "seconds":elapsed.as_secs_f64(),"improvements":stats.improvements,"refinements":stats.refinements,
+            "stress_transitions":2048,"original_model_verified":true
+        }))?,
+    )?;
+    println!("AUTO DFF {} -> {} blocks, subset_optimal={} elapsed={elapsed:?} improvements={} refinements={}",
+        layout.block_count(),placement.block_count,stats.optimal,stats.improvements,stats.refinements);
+    assert!(
+        stats.optimal,
+        "incomplete optimization must not be presented as minimal"
+    );
+    Ok(())
+}
+
+fn probe_global_dff_repeaters(second: bool) -> eyre::Result<()> {
+    let directory = if second {
+        "target/dff-second-repeater-probe"
+    } else {
+        "target/dff-repeater-probe"
+    };
+    let out = std::path::Path::new(directory);
+    std::fs::create_dir_all(out)?;
+    let source = std::fs::read_to_string("test/dff-global-2x7x4.rcell")?;
+    assert_eq!(source.matches("z=1 \"#T##U..\"").count(), 1);
+    let mut source = source.replace("z=1 \"#T##U..\"", "z=1 \"#.##U..\"");
+    if second {
+        assert_eq!(source.matches("z=3 \".rT.#VW\"").count(), 1);
+        source = source.replace("z=3 \".rT.#VW\"", "z=3 \".r..#VW\"");
+    }
+    std::fs::write(out.join("removed.rcell"), source)?;
+    let original =
+        crate::nbt::NBTRoot::from_nbt_bytes(&std::fs::read("test/dff-global-2x7x4.nbt")?)?
+            .to_world();
+    let mut world = crate::world::World3D::new(original.size);
+    for (position, block) in original.blocks {
+        world[position] = block;
+    }
+    let at = Position(0, 1, 1); // viewer NBT uses (y,z,x)
+    assert!(world[at].kind.is_repeater());
+    world[at] = crate::world::block::Block::default();
+    if second {
+        let at = Position(0, 2, 3); // NBT (2,3,0)
+        assert!(world[at].kind.is_repeater());
+        world[at] = crate::world::block::Block::default();
+    }
+    crate::nbt::NBTRoot::from(&world).save(out.join("removed.nbt"));
+    let stem = format!("../{directory}/removed");
+    check_global_dff_stress(&stem)?;
+    println!("Removed repeater: 2048 input transitions passed");
+    check_global_dff_model(&stem, if second { 43 } else { 44 })?;
+    println!("Removed repeater: original static model and full sequential verifier passed");
+    Ok(())
+}
+
+/// Places a sequential cell in the smallest box of `SEQ_DIMS` that holds
+/// it (comma-separated `XxYxZ`, `2x4x3,2x4x4,2x5x4,2x6x4,2x6x5`), with the
+/// fewest blocks (`SEQ_OPTIMIZE=0` takes the first layout):
+/// `SEQ_CIRCUIT=rs-latch|rs-latch-both|d-latch|d-latch-mux|dff|dff-mux|dff-neg` (or
+/// `SEQ_NETLIST=` text),
+/// `SEQ_SECONDS` (120) per box, `SEQ_WORKERS` (8), `SEQ_ALL=1` to try every
+/// box, `SEQ_REFINEMENTS` (2000) simulator rejections per worker, `SEQ_SYM`
+/// (`off`, `1`, or `torches,length,x`) for the box-mirror rule, `SEQ_SEED`,
+/// `SEQ_WRITE=<prefix>` for `.rcell`, `.nbt` (in its first settled case with
+/// the inputs off) and `.outputs.json`, `SEQ_MODEL_FILE` for another
+/// model:
+/// `cargo test --release --lib explore_sequential_cells -- --ignored --nocapture`.
+#[test]
+#[ignore = "experiment; run explicitly with --nocapture"]
+fn explore_sequential_cells() -> eyre::Result<()> {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_test_writer()
+        .try_init();
+    let circuit = std::env::var("SEQ_CIRCUIT").unwrap_or_else(|_| "rs-latch".to_owned());
+    let text = match std::env::var("SEQ_NETLIST") {
+        Ok(text) => text,
+        Err(_) => sequential_netlist(&circuit)?.to_owned(),
+    };
+    let netlist = NorNetlist::from_text(&text)?;
+    let plan = super::verify::SequentialPlan::new(&netlist).map_err(|e| eyre::eyre!(e))?;
+    let valid = netlist.valid_cases();
+    println!(
+        "SEQ {circuit} inputs={:?} state={:?} torches={} settled cases={:?} homing={:?}",
+        netlist.input_names(),
+        netlist
+            .state
+            .iter()
+            .map(|&net| netlist.nets[net].name.as_str())
+            .collect::<Vec<_>>(),
+        netlist.gates().count(),
+        (0..64)
+            .filter(|&case| valid & 1 << case != 0)
+            .map(|case| format!("{case:0width$b}", width = netlist.case_bits()))
+            .collect::<Vec<_>>(),
+        plan.homing
+    );
+    let placer = ExactLocalPlacer::from_netlist(netlist).with_name(format!("exact-{circuit}"));
+    let dims =
+        std::env::var("SEQ_DIMS").unwrap_or_else(|_| "2x4x3,2x4x4,2x5x4,2x6x4,2x6x5".to_owned());
+    for dim in dims.split(',') {
+        let size = dim
+            .split('x')
+            .map(|value| value.trim().parse::<usize>())
+            .collect::<Result<Vec<_>, _>>()?;
+        let [x, y, z] = size[..] else {
+            eyre::bail!("SEQ_DIMS entries are XxYxZ: {dim}");
+        };
+        let mut config = ExactPlacerConfig::new(DimSize(x, y, z));
+        config.workers = env_usize("SEQ_WORKERS", 8);
+        config.time_limit = Some(Duration::from_secs(env_usize("SEQ_SECONDS", 120) as u64));
+        config.optimize = std::env::var("SEQ_OPTIMIZE").as_deref() != Ok("0");
+        config.model_file = std::env::var("SEQ_MODEL_FILE").ok().map(Into::into);
+        // `SEQ_SYM=off`, `1` (filled cells), or a comma list of `torches`,
+        // `length`, `x`; unset keeps the default.
+        if let Ok(value) = std::env::var("SEQ_SYM") {
+            config.box_symmetry = (value != "off").then(|| BoxSymmetry {
+                torches: value.contains("torches"),
+                length_first: value.contains("length"),
+                x_only: value.split(',').any(|part| part == "x"),
+            });
+        }
+        config.seed = env_usize("SEQ_SEED", 1) as u32;
+        if let Ok(options) = std::env::var("SEQ_SOLVER_OPTIONS") {
+            for option in options.split(',').filter(|s| !s.is_empty()) {
+                let (name, value) = option
+                    .split_once('=')
+                    .ok_or_else(|| eyre::eyre!("expected name=value"))?;
+                config
+                    .tuning
+                    .solver_options
+                    .insert(name.into(), value.parse()?);
+            }
+        }
+        config.rank_levels = env_usize("SEQ_RANK", config.rank_levels);
+        config.stage_levels = env_usize("SEQ_STAGE", config.stage_levels);
+        config.model_params = model_params_from_env("SEQ_MODEL_PARAMS");
+        // Latch layouts that are consistent in every settled case can still
+        // fail a transition, so the simulator rejects many more of them.
+        config.max_refinements = env_usize("SEQ_REFINEMENTS", 2000);
+        // `SEQ_FIX=x,y,z=solid|dust|torch:<dir>;...` fixes cells, as hints.
+        if let Ok(fixes) = std::env::var("SEQ_FIX") {
+            for fix in fixes.split(';').filter(|fix| !fix.is_empty()) {
+                let (at, kind) = fix
+                    .split_once('=')
+                    .ok_or_else(|| eyre::eyre!("SEQ_FIX entries are x,y,z=kind"))?;
+                let at = at
+                    .split(',')
+                    .map(|value| value.trim().parse::<usize>())
+                    .collect::<Result<Vec<_>, _>>()?;
+                let direction = |name: &str| match name {
+                    "north" => Direction::North,
+                    "south" => Direction::South,
+                    "east" => Direction::East,
+                    "west" => Direction::West,
+                    _ => Direction::Bottom,
+                };
+                let kind = match kind.split_once(':') {
+                    Some(("torch", d)) => CellKind::Torch(direction(d)),
+                    _ if kind == "solid" => CellKind::Solid,
+                    _ if kind == "dust" => CellKind::Dust,
+                    _ => CellKind::Air,
+                };
+                config
+                    .fixed_cells
+                    .insert(Position(at[0], at[1], at[2]), kind);
+            }
+        }
+        // `SEQ_FIX_RCELL=<rcell>` fixes a placed cell's blocks as hints, at
+        // `SEQ_FIX_OFFSET` (`x,y,z`), its inputs renamed by `SEQ_FIX_RENAME`
+        // (`old=new,...`); a renamed lever becomes that input's only site.
+        if let Ok(path) = std::env::var("SEQ_FIX_RCELL") {
+            let document: crate::physical_cell::PhysicalCellDocument =
+                std::fs::read_to_string(&path)?.parse()?;
+            let build = document.build()?;
+            let offset = std::env::var("SEQ_FIX_OFFSET")
+                .unwrap_or_else(|_| "0,0,0".to_owned())
+                .split(',')
+                .map(|value| value.trim().parse::<usize>())
+                .collect::<Result<Vec<_>, _>>()?;
+            let renames = std::env::var("SEQ_FIX_RENAME").unwrap_or_default();
+            let rename = |name: &str| {
+                renames
+                    .split(',')
+                    .filter_map(|pair| pair.split_once('='))
+                    .find(|(old, _)| *old == name)
+                    .map_or(name.to_owned(), |(_, new)| new.to_owned())
+            };
+            let at = |position: Position| {
+                Position(
+                    position.0 + offset[0],
+                    position.1 + offset[1],
+                    position.2 + offset[2],
+                )
+            };
+            for (position, block) in build.world.iter_block() {
+                let kind = manual_kind(&block);
+                if kind != CellKind::Air {
+                    config.fixed_cells.insert(at(position), kind);
+                }
+            }
+            for input in &document.inputs {
+                let attach = build.world[input.position].direction;
+                config = config.with_input_site(rename(&input.name), at(input.position), attach);
+            }
+        }
+        println!("SEQ search rank={} stage={} fixed={} inputs_fixed={} optimize={} seed={} workers={} model_params={:?}",
+            config.rank_levels, config.stage_levels, config.fixed_cells.len(), config.input_sites.len(),
+            config.optimize, config.seed, config.workers, config.model_params);
+        let started = Instant::now();
+        let (outcome, stats) = placer.place(&config)?;
+        let seconds = started.elapsed().as_secs_f64();
+        println!("SEQ stats vars={} clauses={} encode={:?} solve={:?} loops={} feedback={} refinements={}",
+            stats.variables, stats.clauses, stats.encode_time, stats.solve_time,
+            stats.loop_formulas, stats.feedback_cuts, stats.refinements);
+        match outcome {
+            ExactOutcome::Placed(mut placement) => {
+                if std::env::var("SEQ_PRUNE").as_deref() != Ok("0") {
+                    let layout = ExactLayout::from_placement(config.dim, &placement);
+                    let mut prune_config = config.clone();
+                    prune_config.time_limit = Some(Duration::from_secs(
+                        std::env::var("SEQ_PRUNE_SECONDS").ok()
+                            .and_then(|s| s.parse().ok()).unwrap_or(30),
+                    ));
+                    let (pruned, prune_stats) = placer.minimize_existing(&layout, &prune_config)?;
+                    match pruned {
+                        ExactOutcome::Placed(candidate) => {
+                            println!("SEQ automatic prune {} -> {} blocks, subset_optimal={}",
+                                placement.block_count, candidate.block_count, prune_stats.optimal);
+                            if candidate.block_count <= placement.block_count {
+                                placement = candidate;
+                            }
+                        }
+                        other => println!("SEQ automatic prune {other:?}; retaining verified discovery"),
+                    }
+                }
+                println!(
+                    "SEQ placed {dim}: {} blocks, discovery_optimal={} discovery_refinements={} (discovery {seconds:.1}s)\n{}",
+                    placement.block_count, stats.optimal, stats.refinements, placement.rcell
+                );
+                if let Ok(prefix) = std::env::var("SEQ_WRITE") {
+                    std::fs::write(format!("{prefix}.rcell"), placement.rcell.to_string())?;
+                    crate::nbt::NBTRoot::from(&placement.placed.world)
+                        .save(format!("{prefix}.nbt"));
+                    std::fs::write(
+                        format!("{prefix}.outputs.json"),
+                        serde_json::to_string_pretty(&placement.rcell.interface_json())?,
+                    )?;
+                }
+                if std::env::var("SEQ_ALL").as_deref() != Ok("1") {
+                    break;
+                }
+            }
+            ExactOutcome::Infeasible => println!("SEQ infeasible {dim} ({seconds:.1}s)"),
+            ExactOutcome::Unknown { last_rejection } => println!(
+                "SEQ unknown {dim} refinements={} last rejection {last_rejection:?} ({seconds:.1}s)",
+                stats.refinements
+            ),
+        }
+    }
+    Ok(())
+}
+
 /// The 8-gate full adder an e-graph found (`docs/egraph_netlists.md`), with
 /// NORs of up to four signals.
 const WIDE_FULL_ADDER: &str = "g3=NOR(a,b); g4=NOR(a,cin,g3); g5=NOR(b,cin,g3); \
@@ -3913,5 +4744,85 @@ fn synthesize_buildable_circuits() -> eyre::Result<()> {
             netlist.to_text()
         );
     }
+    Ok(())
+}
+
+/// Exhaust complete tiny physical-layout sets, not just a few successful solves.
+#[test]
+fn canonical_source_ranks_preserve_small_layout_sets() -> eyre::Result<()> {
+    for (expr, dim) in [
+        ("~a", DimSize(1, 3, 2)),
+        ("~a", DimSize(1, 4, 2)),
+        ("~(a|b)", DimSize(1, 4, 2)),
+    ] {
+        let placer = ExactLocalPlacer::new(&graph(&[("out", expr)]))?;
+        let mut sets = Vec::new();
+        for enabled in [false, true] {
+            let mut config = ExactPlacerConfig::new(dim);
+            config.box_symmetry = None;
+            config.rank_levels = 4;
+            config.stage_levels = 4;
+            config.model_params.insert(
+                "canonical_source_ranks".into(),
+                rsdsl::IValue::Bool(enabled),
+            );
+            let encoding = Encoding::build(placer.netlist(), &config)?;
+            let mut solver = SatSolver::new(11);
+            solver.add_cnf(&encoding.cnf);
+            let stop = AtomicBool::new(false);
+            let signal = StopSignal {
+                stop: &stop,
+                deadline: Some(Instant::now() + Duration::from_secs(30)),
+                restart: None,
+            };
+            let mut layouts = BTreeSet::new();
+            loop {
+                match solver.solve(&[], &signal) {
+                    SolveResult::Unsat => break,
+                    SolveResult::Interrupted => {
+                        panic!("enumeration did not finish: {expr} enabled={enabled}")
+                    }
+                    SolveResult::Sat => {
+                        let (kinds, lits) = verify::decode_kinds(&encoding, &solver);
+                        layouts.insert(kinds);
+                        solver.add_clause(&lits.into_iter().map(|lit| -lit).collect::<Vec<_>>());
+                    }
+                }
+            }
+            assert!(!layouts.is_empty());
+            if expr == "~a" && dim == DimSize(1, 4, 2) {
+                assert!(layouts.iter().any(|kinds| kinds
+                    .iter()
+                    .any(|kind| matches!(kind, CellKind::Repeater(_)))));
+            }
+            println!(
+                "RANK PARITY {expr} enabled={enabled}: {} layouts",
+                layouts.len()
+            );
+            sets.push(layouts);
+        }
+        assert_eq!(
+            sets[0], sets[1],
+            "{expr}: normalization changed physical layouts"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn dff_fast_model_disabled_matches_original_cnf() -> eyre::Result<()> {
+    let netlist = NorNetlist::from_text(sequential_netlist("dff-neg")?)?;
+    let mut config = ExactPlacerConfig::new(DimSize(2, 7, 4));
+    config.box_symmetry = None;
+    config.rank_levels = 8;
+    config.stage_levels = 8;
+    config.model_file = Some("docs/rsdsl/dff_global_six_gate.rsdsl".into());
+    let original = Encoding::build(&netlist, &config)?;
+    config.model_file = Some("docs/rsdsl/dff_global_fast.rsdsl".into());
+    config
+        .model_params
+        .insert("canonical_source_ranks".into(), rsdsl::IValue::Bool(false));
+    let disabled = Encoding::build(&netlist, &config)?;
+    assert_eq!(original.cnf.literals(), disabled.cnf.literals());
     Ok(())
 }

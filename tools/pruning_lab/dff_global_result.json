@@ -1,0 +1,44 @@
+{
+  "circuit": "dff-neg",
+  "edge": "falling",
+  "dimensions": [
+    2,
+    7,
+    4
+  ],
+  "blocks_excluding_switches": 45,
+  "switches": 2,
+  "torches": 6,
+  "fixed_cells": 0,
+  "fixed_input_sites": 0,
+  "initial_layout": null,
+  "seed": 11,
+  "workers": 4,
+  "rank_levels": 8,
+  "stage_levels": 8,
+  "box_symmetry": false,
+  "optimize": false,
+  "seconds": 163.52869475,
+  "encode_seconds": 0.170843292,
+  "solve_seconds": 163.357851458,
+  "refinements_all_workers": 2001,
+  "model": "docs/rsdsl/dff_global_six_gate.rsdsl",
+  "artifact": "test/dff-global-2x7x4",
+  "search_constraints": [
+    "exactly one torch for each of six logical gates",
+    "explicit original gate fanins",
+    "redundant wire-class equality and torch-complement implications"
+  ],
+  "hashes": {
+    "docs/rsdsl/dff_global_six_gate.rsdsl": "88ae97618eae1c4c6ff09cfe961d5ad20129c0ef6bda046c1b54af2cd3e9b178",
+    "test/dff-global-2x7x4.nbt": "780d975112a71d6a249e6c5192e38b2c63d0ddd8390ace07704287e9f14a666d",
+    "test/dff-global-2x7x4.rcell": "d3816dd77c22ad87778ebd0e94eaa2f3e57b66d7c978d35b13b9db0fa06b4299"
+  },
+  "verification": {
+    "pipeline_sequential": "passed",
+    "exported_nbt_single_input_changes": 2048,
+    "exported_nbt_stress": "passed",
+    "original_model_with_found_geometry_fixed": "passed",
+    "release_test_count": 2
+  }
+}

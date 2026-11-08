@@ -1,0 +1,866 @@
+{
+  "z3": "5.3.3",
+  "model_sha256": "1ac2de3341256496f20edda514c91ee195208f3c64e80a9a548af5ef131b4ac6",
+  "schema": {
+    "solid_implication": {
+      "result": "unsat"
+    },
+    "wire_equivalence": {
+      "result": "unsat"
+    },
+    "unsafe_ignore_cut": {
+      "result": "sat",
+      "witness": {
+        "feeds": "True",
+        "cut": "True",
+        "source": "True",
+        "target": "False",
+        "strong": "False"
+      }
+    },
+    "unsafe_use_total_block_power": {
+      "result": "sat",
+      "witness": {
+        "feeds": "True",
+        "cut": "False",
+        "source": "True",
+        "target": "False",
+        "strong": "False"
+      }
+    }
+  },
+  "records": [
+    {
+      "instance": "inv",
+      "variant": "base",
+      "variables": 477,
+      "clauses": 2242,
+      "ground_s": 0.005761958999999997,
+      "runs": [
+        {
+          "seed": 1,
+          "result": "sat",
+          "load_s": 0.0013262080000000023,
+          "solve_s": 0.0017773749999999977,
+          "conflicts": 16
+        },
+        {
+          "seed": 2,
+          "result": "sat",
+          "load_s": 0.001244000000000002,
+          "solve_s": 0.00176925,
+          "conflicts": 30
+        },
+        {
+          "seed": 3,
+          "result": "sat",
+          "load_s": 0.001253375000000001,
+          "solve_s": 0.0017057919999999976,
+          "conflicts": 19
+        },
+        {
+          "seed": 4,
+          "result": "sat",
+          "load_s": 0.0012456670000000024,
+          "solve_s": 0.0017208749999999967,
+          "conflicts": 16
+        },
+        {
+          "seed": 5,
+          "result": "sat",
+          "load_s": 0.0012437090000000026,
+          "solve_s": 0.0016982079999999997,
+          "conflicts": 17
+        }
+      ]
+    },
+    {
+      "instance": "inv",
+      "variant": "prove_solid_implication",
+      "variables": 626,
+      "clauses": 2527,
+      "ground_s": 0.005447124999999997,
+      "runs": [
+        {
+          "seed": 1,
+          "result": "unsat",
+          "load_s": 0.0013996250000000016,
+          "solve_s": 0.003121708000000001,
+          "conflicts": 207
+        }
+      ]
+    },
+    {
+      "instance": "inv",
+      "variant": "solid_implication",
+      "variables": 477,
+      "clauses": 2518,
+      "ground_s": 0.005420792000000008,
+      "runs": [
+        {
+          "seed": 1,
+          "result": "sat",
+          "load_s": 0.0013046669999999955,
+          "solve_s": 0.001885333000000003,
+          "conflicts": 26
+        },
+        {
+          "seed": 2,
+          "result": "sat",
+          "load_s": 0.0013209999999999993,
+          "solve_s": 0.002049000000000002,
+          "conflicts": 69
+        },
+        {
+          "seed": 3,
+          "result": "sat",
+          "load_s": 0.0013379160000000015,
+          "solve_s": 0.0018194169999999968,
+          "conflicts": 13
+        },
+        {
+          "seed": 4,
+          "result": "sat",
+          "load_s": 0.001339290999999996,
+          "solve_s": 0.001805375000000005,
+          "conflicts": 12
+        },
+        {
+          "seed": 5,
+          "result": "sat",
+          "load_s": 0.0013171669999999976,
+          "solve_s": 0.0018357080000000053,
+          "conflicts": 26
+        }
+      ]
+    },
+    {
+      "instance": "inv",
+      "variant": "prove_wire_equivalence",
+      "variables": 585,
+      "clauses": 2454,
+      "ground_s": 0.005643041000000015,
+      "runs": [
+        {
+          "seed": 1,
+          "result": "unsat",
+          "load_s": 0.0013006669999999984,
+          "solve_s": 0.002446625000000001,
+          "conflicts": 142
+        }
+      ]
+    },
+    {
+      "instance": "inv",
+      "variant": "wire_equivalence",
+      "variables": 477,
+      "clauses": 2642,
+      "ground_s": 0.00594262500000009,
+      "runs": [
+        {
+          "seed": 1,
+          "result": "sat",
+          "load_s": 0.0013667919999999986,
+          "solve_s": 0.0018589160000000021,
+          "conflicts": 17
+        },
+        {
+          "seed": 2,
+          "result": "sat",
+          "load_s": 0.0013544590000000023,
+          "solve_s": 0.001968582999999996,
+          "conflicts": 36
+        },
+        {
+          "seed": 3,
+          "result": "sat",
+          "load_s": 0.0013489999999999995,
+          "solve_s": 0.001863666,
+          "conflicts": 14
+        },
+        {
+          "seed": 4,
+          "result": "sat",
+          "load_s": 0.001337125000000005,
+          "solve_s": 0.0018508749999999949,
+          "conflicts": 14
+        },
+        {
+          "seed": 5,
+          "result": "sat",
+          "load_s": 0.0013593330000000008,
+          "solve_s": 0.0019260420000000028,
+          "conflicts": 17
+        }
+      ]
+    },
+    {
+      "instance": "inv",
+      "variant": "both",
+      "variables": 477,
+      "clauses": 2918,
+      "ground_s": 0.005814665999999913,
+      "runs": [
+        {
+          "seed": 1,
+          "result": "sat",
+          "load_s": 0.0014284999999999992,
+          "solve_s": 0.0020171670000000003,
+          "conflicts": 20
+        },
+        {
+          "seed": 2,
+          "result": "sat",
+          "load_s": 0.001407791000000002,
+          "solve_s": 0.0022872919999999963,
+          "conflicts": 79
+        },
+        {
+          "seed": 3,
+          "result": "sat",
+          "load_s": 0.0014184999999999962,
+          "solve_s": 0.0021274170000000064,
+          "conflicts": 44
+        },
+        {
+          "seed": 4,
+          "result": "sat",
+          "load_s": 0.001480374999999999,
+          "solve_s": 0.0020588750000000017,
+          "conflicts": 15
+        },
+        {
+          "seed": 5,
+          "result": "sat",
+          "load_s": 0.0014437919999999993,
+          "solve_s": 0.002034750000000002,
+          "conflicts": 26
+        }
+      ]
+    },
+    {
+      "instance": "inv_tight",
+      "variant": "base",
+      "variables": 488,
+      "clauses": 2266,
+      "ground_s": 0.005660957999999994,
+      "runs": [
+        {
+          "seed": 1,
+          "result": "unsat",
+          "load_s": 0.0012418750000000034,
+          "solve_s": 0.0017757499999999996,
+          "conflicts": 45
+        },
+        {
+          "seed": 2,
+          "result": "unsat",
+          "load_s": 0.0013110419999999984,
+          "solve_s": 0.002004249999999999,
+          "conflicts": 50
+        },
+        {
+          "seed": 3,
+          "result": "unsat",
+          "load_s": 0.001260749999999998,
+          "solve_s": 0.001728041999999999,
+          "conflicts": 38
+        },
+        {
+          "seed": 4,
+          "result": "unsat",
+          "load_s": 0.0012516249999999993,
+          "solve_s": 0.0017440000000000025,
+          "conflicts": 25
+        },
+        {
+          "seed": 5,
+          "result": "unsat",
+          "load_s": 0.0012524590000000044,
+          "solve_s": 0.0017289999999999944,
+          "conflicts": 32
+        }
+      ]
+    },
+    {
+      "instance": "inv_tight",
+      "variant": "prove_solid_implication",
+      "variables": 637,
+      "clauses": 2551,
+      "ground_s": 0.005900000000000016,
+      "runs": [
+        {
+          "seed": 1,
+          "result": "unsat",
+          "load_s": 0.0013509169999999966,
+          "solve_s": 0.002035000000000002,
+          "conflicts": 47
+        }
+      ]
+    },
+    {
+      "instance": "inv_tight",
+      "variant": "solid_implication",
+      "variables": 488,
+      "clauses": 2542,
+      "ground_s": 0.005810000000000093,
+      "runs": [
+        {
+          "seed": 1,
+          "result": "unsat",
+          "load_s": 0.001321832999999998,
+          "solve_s": 0.0019156250000000041,
+          "conflicts": 45
+        },
+        {
+          "seed": 2,
+          "result": "unsat",
+          "load_s": 0.001326958000000003,
+          "solve_s": 0.0020104169999999935,
+          "conflicts": 55
+        },
+        {
+          "seed": 3,
+          "result": "unsat",
+          "load_s": 0.0013645410000000004,
+          "solve_s": 0.0018774999999999972,
+          "conflicts": 30
+        },
+        {
+          "seed": 4,
+          "result": "unsat",
+          "load_s": 0.0013310410000000016,
+          "solve_s": 0.0018689169999999977,
+          "conflicts": 30
+        },
+        {
+          "seed": 5,
+          "result": "unsat",
+          "load_s": 0.001315249999999997,
+          "solve_s": 0.0018664580000000014,
+          "conflicts": 30
+        }
+      ]
+    },
+    {
+      "instance": "inv_tight",
+      "variant": "prove_wire_equivalence",
+      "variables": 596,
+      "clauses": 2478,
+      "ground_s": 0.0058715000000000295,
+      "runs": [
+        {
+          "seed": 1,
+          "result": "unsat",
+          "load_s": 0.0013187079999999983,
+          "solve_s": 0.0018322919999999993,
+          "conflicts": 17
+        }
+      ]
+    },
+    {
+      "instance": "inv_tight",
+      "variant": "wire_equivalence",
+      "variables": 488,
+      "clauses": 2666,
+      "ground_s": 0.005870832999999909,
+      "runs": [
+        {
+          "seed": 1,
+          "result": "unsat",
+          "load_s": 0.0013590410000000018,
+          "solve_s": 0.0019753750000000014,
+          "conflicts": 48
+        },
+        {
+          "seed": 2,
+          "result": "unsat",
+          "load_s": 0.0013542920000000035,
+          "solve_s": 0.0020192079999999946,
+          "conflicts": 50
+        },
+        {
+          "seed": 3,
+          "result": "unsat",
+          "load_s": 0.0013631249999999963,
+          "solve_s": 0.001960334000000001,
+          "conflicts": 38
+        },
+        {
+          "seed": 4,
+          "result": "unsat",
+          "load_s": 0.0013673330000000018,
+          "solve_s": 0.001872874999999996,
+          "conflicts": 25
+        },
+        {
+          "seed": 5,
+          "result": "unsat",
+          "load_s": 0.0013597919999999986,
+          "solve_s": 0.0019687500000000052,
+          "conflicts": 34
+        }
+      ]
+    },
+    {
+      "instance": "inv_tight",
+      "variant": "both",
+      "variables": 488,
+      "clauses": 2942,
+      "ground_s": 0.006089500000000081,
+      "runs": [
+        {
+          "seed": 1,
+          "result": "unsat",
+          "load_s": 0.0014072500000000022,
+          "solve_s": 0.0021477919999999956,
+          "conflicts": 45
+        },
+        {
+          "seed": 2,
+          "result": "unsat",
+          "load_s": 0.0014496659999999988,
+          "solve_s": 0.002127250000000004,
+          "conflicts": 55
+        },
+        {
+          "seed": 3,
+          "result": "unsat",
+          "load_s": 0.0013891250000000015,
+          "solve_s": 0.002022916999999999,
+          "conflicts": 30
+        },
+        {
+          "seed": 4,
+          "result": "unsat",
+          "load_s": 0.0014160829999999985,
+          "solve_s": 0.002014459000000003,
+          "conflicts": 30
+        },
+        {
+          "seed": 5,
+          "result": "unsat",
+          "load_s": 0.0014341250000000014,
+          "solve_s": 0.002061792,
+          "conflicts": 30
+        }
+      ]
+    },
+    {
+      "instance": "nor",
+      "variant": "base",
+      "variables": 3655,
+      "clauses": 18020,
+      "ground_s": 0.013397874999999893,
+      "runs": [
+        {
+          "seed": 1,
+          "result": "sat",
+          "load_s": 0.006578208000000002,
+          "solve_s": 0.10450404199999999,
+          "conflicts": 4792
+        },
+        {
+          "seed": 2,
+          "result": "sat",
+          "load_s": 0.006588500000000001,
+          "solve_s": 0.038794875,
+          "conflicts": 900
+        },
+        {
+          "seed": 3,
+          "result": "sat",
+          "load_s": 0.006582042,
+          "solve_s": 0.05464825,
+          "conflicts": 1921
+        },
+        {
+          "seed": 4,
+          "result": "sat",
+          "load_s": 0.006723332999999998,
+          "solve_s": 0.038905167000000004,
+          "conflicts": 838
+        },
+        {
+          "seed": 5,
+          "result": "sat",
+          "load_s": 0.006624999999999999,
+          "solve_s": 0.033564958000000006,
+          "conflicts": 427
+        }
+      ]
+    },
+    {
+      "instance": "nor",
+      "variant": "prove_solid_implication",
+      "variables": 5221,
+      "clauses": 21087,
+      "ground_s": 0.016097165999999774,
+      "runs": [
+        {
+          "seed": 1,
+          "result": "unsat",
+          "load_s": 0.0078755,
+          "solve_s": 1.420084334,
+          "conflicts": 36195
+        }
+      ]
+    },
+    {
+      "instance": "nor",
+      "variant": "solid_implication",
+      "variables": 3655,
+      "clauses": 21668,
+      "ground_s": 0.015933208999999948,
+      "runs": [
+        {
+          "seed": 1,
+          "result": "sat",
+          "load_s": 0.007627957999999997,
+          "solve_s": 0.038682458999999995,
+          "conflicts": 558
+        },
+        {
+          "seed": 2,
+          "result": "sat",
+          "load_s": 0.007732916999999999,
+          "solve_s": 0.034742875000000006,
+          "conflicts": 194
+        },
+        {
+          "seed": 3,
+          "result": "sat",
+          "load_s": 0.0077169579999999995,
+          "solve_s": 0.013353957999999999,
+          "conflicts": 73
+        },
+        {
+          "seed": 4,
+          "result": "sat",
+          "load_s": 0.007682416000000001,
+          "solve_s": 0.042668417,
+          "conflicts": 875
+        },
+        {
+          "seed": 5,
+          "result": "sat",
+          "load_s": 0.0077027089999999986,
+          "solve_s": 0.043726875,
+          "conflicts": 885
+        }
+      ]
+    },
+    {
+      "instance": "nor",
+      "variant": "prove_wire_equivalence",
+      "variables": 5523,
+      "clauses": 21717,
+      "ground_s": 0.017597250000000564,
+      "runs": [
+        {
+          "seed": 1,
+          "result": "unsat",
+          "load_s": 0.00807325,
+          "solve_s": 0.156304625,
+          "conflicts": 4718
+        }
+      ]
+    },
+    {
+      "instance": "nor",
+      "variant": "wire_equivalence",
+      "variables": 3655,
+      "clauses": 25412,
+      "ground_s": 0.017849000000000004,
+      "runs": [
+        {
+          "seed": 1,
+          "result": "sat",
+          "load_s": 0.008980083,
+          "solve_s": 0.03554812500000001,
+          "conflicts": 212
+        },
+        {
+          "seed": 2,
+          "result": "sat",
+          "load_s": 0.008638624999999997,
+          "solve_s": 0.057985166,
+          "conflicts": 1777
+        },
+        {
+          "seed": 3,
+          "result": "sat",
+          "load_s": 0.008694041000000003,
+          "solve_s": 0.04680662499999999,
+          "conflicts": 987
+        },
+        {
+          "seed": 4,
+          "result": "sat",
+          "load_s": 0.008483333,
+          "solve_s": 0.04186912500000001,
+          "conflicts": 715
+        },
+        {
+          "seed": 5,
+          "result": "sat",
+          "load_s": 0.008564999999999996,
+          "solve_s": 0.040923584000000006,
+          "conflicts": 659
+        }
+      ]
+    },
+    {
+      "instance": "nor",
+      "variant": "both",
+      "variables": 3655,
+      "clauses": 29060,
+      "ground_s": 0.020155792000000616,
+      "runs": [
+        {
+          "seed": 1,
+          "result": "sat",
+          "load_s": 0.009680583,
+          "solve_s": 0.041596084000000005,
+          "conflicts": 439
+        },
+        {
+          "seed": 2,
+          "result": "sat",
+          "load_s": 0.009798583000000003,
+          "solve_s": 0.052778666999999994,
+          "conflicts": 1292
+        },
+        {
+          "seed": 3,
+          "result": "sat",
+          "load_s": 0.009689084,
+          "solve_s": 0.048919,
+          "conflicts": 923
+        },
+        {
+          "seed": 4,
+          "result": "sat",
+          "load_s": 0.009628959000000003,
+          "solve_s": 0.044282832999999994,
+          "conflicts": 681
+        },
+        {
+          "seed": 5,
+          "result": "sat",
+          "load_s": 0.009833165999999997,
+          "solve_s": 0.045257542,
+          "conflicts": 740
+        }
+      ]
+    },
+    {
+      "instance": "rs_latch",
+      "variant": "base",
+      "variables": 5577,
+      "clauses": 24962,
+      "ground_s": 0.017803708999999834,
+      "runs": [
+        {
+          "seed": 1,
+          "result": "sat",
+          "load_s": 0.009760166999999997,
+          "solve_s": 0.228765625,
+          "conflicts": 8806
+        },
+        {
+          "seed": 2,
+          "result": "sat",
+          "load_s": 0.009642541999999997,
+          "solve_s": 1.430035291,
+          "conflicts": 45402
+        },
+        {
+          "seed": 3,
+          "result": "sat",
+          "load_s": 0.009592832999999999,
+          "solve_s": 0.434134209,
+          "conflicts": 16909
+        },
+        {
+          "seed": 4,
+          "result": "sat",
+          "load_s": 0.009679874999999998,
+          "solve_s": 0.5610174170000001,
+          "conflicts": 19212
+        },
+        {
+          "seed": 5,
+          "result": "sat",
+          "load_s": 0.009585875,
+          "solve_s": 0.167911375,
+          "conflicts": 7118
+        }
+      ]
+    },
+    {
+      "instance": "rs_latch",
+      "variant": "prove_solid_implication",
+      "variables": 9387,
+      "clauses": 32517,
+      "ground_s": 0.02444045800000083,
+      "runs": [
+        {
+          "seed": 1,
+          "result": "unsat",
+          "load_s": 0.018712667000000002,
+          "solve_s": 14.170534,
+          "conflicts": 227779
+        }
+      ]
+    },
+    {
+      "instance": "rs_latch",
+      "variant": "solid_implication",
+      "variables": 9273,
+      "clauses": 34778,
+      "ground_s": 0.02539300000000111,
+      "runs": [
+        {
+          "seed": 1,
+          "result": "sat",
+          "load_s": 0.014459415999999996,
+          "solve_s": 1.42138525,
+          "conflicts": 44687
+        },
+        {
+          "seed": 2,
+          "result": "sat",
+          "load_s": 0.014383624999999997,
+          "solve_s": 0.078324333,
+          "conflicts": 1437
+        },
+        {
+          "seed": 3,
+          "result": "sat",
+          "load_s": 0.014406499999999996,
+          "solve_s": 0.113833125,
+          "conflicts": 3464
+        },
+        {
+          "seed": 4,
+          "result": "sat",
+          "load_s": 0.014316708000000004,
+          "solve_s": 1.1004851249999998,
+          "conflicts": 36279
+        },
+        {
+          "seed": 5,
+          "result": "sat",
+          "load_s": 0.014612917,
+          "solve_s": 1.2903895,
+          "conflicts": 39267
+        }
+      ]
+    },
+    {
+      "instance": "rs_latch",
+      "variant": "prove_wire_equivalence",
+      "variables": 10193,
+      "clauses": 34331,
+      "ground_s": 0.029189625000000774,
+      "runs": [
+        {
+          "seed": 1,
+          "result": "unsat",
+          "load_s": 0.015027292000000001,
+          "solve_s": 0.488618,
+          "conflicts": 10061
+        }
+      ]
+    },
+    {
+      "instance": "rs_latch",
+      "variant": "wire_equivalence",
+      "variables": 10017,
+      "clauses": 33938,
+      "ground_s": 0.030173125000001022,
+      "runs": [
+        {
+          "seed": 1,
+          "result": "sat",
+          "load_s": 0.015101916,
+          "solve_s": 0.65969475,
+          "conflicts": 22993
+        },
+        {
+          "seed": 2,
+          "result": "sat",
+          "load_s": 0.014705833000000001,
+          "solve_s": 0.362182375,
+          "conflicts": 13019
+        },
+        {
+          "seed": 3,
+          "result": "sat",
+          "load_s": 0.014492875000000002,
+          "solve_s": 0.884755875,
+          "conflicts": 29660
+        },
+        {
+          "seed": 4,
+          "result": "sat",
+          "load_s": 0.014452333000000001,
+          "solve_s": 0.810102042,
+          "conflicts": 27735
+        },
+        {
+          "seed": 5,
+          "result": "sat",
+          "load_s": 0.014442083000000001,
+          "solve_s": 0.8220336669999999,
+          "conflicts": 29025
+        }
+      ]
+    },
+    {
+      "instance": "rs_latch",
+      "variant": "both",
+      "variables": 10853,
+      "clauses": 40894,
+      "ground_s": 0.03658320799999615,
+      "runs": [
+        {
+          "seed": 1,
+          "result": "sat",
+          "load_s": 0.016170709,
+          "solve_s": 0.09014883300000001,
+          "conflicts": 1716
+        },
+        {
+          "seed": 2,
+          "result": "sat",
+          "load_s": 0.016669334,
+          "solve_s": 0.373795541,
+          "conflicts": 12926
+        },
+        {
+          "seed": 3,
+          "result": "sat",
+          "load_s": 0.016600208999999998,
+          "solve_s": 0.546218041,
+          "conflicts": 19331
+        },
+        {
+          "seed": 4,
+          "result": "sat",
+          "load_s": 0.016294207999999998,
+          "solve_s": 0.624110584,
+          "conflicts": 20323
+        },
+        {
+          "seed": 5,
+          "result": "sat",
+          "load_s": 0.016305292000000002,
+          "solve_s": 0.46064975,
+          "conflicts": 16896
+        }
+      ]
+    }
+  ]
+}

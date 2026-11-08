@@ -30,6 +30,11 @@ extern "C" {
         state: *mut c_void,
         terminate: Option<extern "C" fn(*mut c_void) -> c_int>,
     );
+    fn ccadical_trace_proof(solver: *mut CCaDiCaL, file: *mut c_void, name: *const c_char)
+        -> c_int;
+    fn ccadical_close_proof(solver: *mut CCaDiCaL);
+    fn fopen(path: *const c_char, mode: *const c_char) -> *mut c_void;
+    fn fclose(file: *mut c_void) -> c_int;
 }
 
 /// Stops a running search when another worker succeeds or the deadline passes.
@@ -62,6 +67,8 @@ extern "C" fn terminate_callback(state: *mut c_void) -> c_int {
 
 pub(super) struct SatSolver {
     raw: *mut CCaDiCaL,
+    /// The C stream a proof is traced to (`trace_frat`), or null.
+    proof: *mut c_void,
 }
 
 // The solver is used from one thread at a time.
@@ -78,7 +85,10 @@ impl SatSolver {
     pub(super) fn new(seed: u32) -> Self {
         // SAFETY: plain constructor from the bundled C API.
         let raw = unsafe { ccadical_init() };
-        let solver = Self { raw };
+        let solver = Self {
+            raw,
+            proof: std::ptr::null_mut(),
+        };
         solver.set_option("seed", seed as i32);
         solver
     }
@@ -139,9 +149,53 @@ impl SatSolver {
     }
 }
 
+impl SatSolver {
+    /// Traces the proof to `path` in FRAT with antecedents: every original
+    /// clause with its id (`o`), and every derived clause with the ids it
+    /// was derived from (`a ... l ...`). Only right after `new`.
+    pub(super) fn trace_frat(&mut self, path: &std::path::Path) -> eyre::Result<()> {
+        eyre::ensure!(self.proof.is_null(), "the proof is already traced");
+        self.set_option("frat", 1);
+        self.set_option("binary", 0);
+        let name = CString::new(path.to_string_lossy().as_bytes())?;
+        let mode = CString::new("w").expect("no NUL");
+        // SAFETY: NUL-terminated path and mode.
+        let file = unsafe { fopen(name.as_ptr(), mode.as_ptr()) };
+        eyre::ensure!(
+            !file.is_null(),
+            "cannot write a proof to {}",
+            path.display()
+        );
+        // SAFETY: the solver is still configuring and `file` stays open
+        // until `close_proof` or drop; CaDiCaL does not close it.
+        unsafe { ccadical_trace_proof(self.raw, file, name.as_ptr()) };
+        self.proof = file;
+        Ok(())
+    }
+
+    /// Flushes and closes the traced proof.
+    pub(super) fn close_proof(&mut self) {
+        if self.proof.is_null() {
+            return;
+        }
+        // SAFETY: a proof is traced to `self.proof`, which is closed once.
+        unsafe {
+            ccadical_close_proof(self.raw);
+            fclose(self.proof);
+        }
+        self.proof = std::ptr::null_mut();
+    }
+}
+
 impl Drop for SatSolver {
     fn drop(&mut self) {
-        // SAFETY: the pointer was created by `ccadical_init` and is released once.
-        unsafe { ccadical_release(self.raw) };
+        // SAFETY: the pointer was created by `ccadical_init` and is released
+        // once, before the proof stream it may still write to.
+        unsafe {
+            ccadical_release(self.raw);
+            if !self.proof.is_null() {
+                fclose(self.proof);
+            }
+        }
     }
 }

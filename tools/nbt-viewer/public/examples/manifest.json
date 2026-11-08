@@ -54,6 +54,46 @@
   },
   {
     "kind": "nbt",
+    "name": "boundary-dust-compare.nbt",
+    "file": "boundary-dust-compare.nbt",
+    "path": "examples/boundary-dust-compare.nbt",
+    "size": 260,
+    "outputsPath": "examples/boundary-dust-compare.outputs.json"
+  },
+  {
+    "kind": "nbt",
+    "name": "boundary-equivalent-a.nbt",
+    "file": "boundary-equivalent-a.nbt",
+    "path": "examples/boundary-equivalent-a.nbt",
+    "size": 202,
+    "outputsPath": "examples/boundary-equivalent-a.outputs.json"
+  },
+  {
+    "kind": "nbt",
+    "name": "boundary-equivalent-b.nbt",
+    "file": "boundary-equivalent-b.nbt",
+    "path": "examples/boundary-equivalent-b.nbt",
+    "size": 203,
+    "outputsPath": "examples/boundary-equivalent-b.outputs.json"
+  },
+  {
+    "kind": "nbt",
+    "name": "boundary-equivalent-compare.nbt",
+    "file": "boundary-equivalent-compare.nbt",
+    "path": "examples/boundary-equivalent-compare.nbt",
+    "size": 233,
+    "outputsPath": "examples/boundary-equivalent-compare.outputs.json"
+  },
+  {
+    "kind": "nbt",
+    "name": "boundary-torch-compare.nbt",
+    "file": "boundary-torch-compare.nbt",
+    "path": "examples/boundary-torch-compare.nbt",
+    "size": 229,
+    "outputsPath": "examples/boundary-torch-compare.outputs.json"
+  },
+  {
+    "kind": "nbt",
     "name": "counter-global-placement-bbox.nbt",
     "file": "counter-global-placement-bbox.nbt",
     "path": "examples/counter-global-placement-bbox.nbt",
@@ -98,10 +138,26 @@
   },
   {
     "kind": "nbt",
+    "name": "d-latch-exact-2x3x4.nbt",
+    "file": "d-latch-exact-2x3x4.nbt",
+    "path": "examples/d-latch-exact-2x3x4.nbt",
+    "size": 334,
+    "outputsPath": "examples/d-latch-exact-2x3x4.outputs.json"
+  },
+  {
+    "kind": "nbt",
     "name": "d-latch.nbt",
     "file": "d-latch.nbt",
     "path": "examples/d-latch.nbt",
     "size": 597
+  },
+  {
+    "kind": "nbt",
+    "name": "dff-exact-2x6x4.nbt",
+    "file": "dff-exact-2x6x4.nbt",
+    "path": "examples/dff-exact-2x6x4.nbt",
+    "size": 445,
+    "outputsPath": "examples/dff-exact-2x6x4.outputs.json"
   },
   {
     "kind": "nbt",
@@ -274,6 +330,14 @@
   },
   {
     "kind": "nbt",
+    "name": "rs-latch-exact-2x3x3.nbt",
+    "file": "rs-latch-exact-2x3x3.nbt",
+    "path": "examples/rs-latch-exact-2x3x3.nbt",
+    "size": 286,
+    "outputsPath": "examples/rs-latch-exact-2x3x3.outputs.json"
+  },
+  {
+    "kind": "nbt",
     "name": "rs-latch.nbt",
     "file": "rs-latch.nbt",
     "path": "examples/rs-latch.nbt",
@@ -341,5 +405,37 @@
     "file": "xor.nbt",
     "path": "examples/xor.nbt",
     "size": 581
+  },
+  {
+    "kind": "nbt",
+    "name": "dff-global-2x7x4.nbt",
+    "file": "dff-global-2x7x4.nbt",
+    "path": "examples/dff-global-2x7x4.nbt",
+    "size": 536,
+    "outputsPath": "examples/dff-global-2x7x4.outputs.json"
+  },
+  {
+    "kind": "nbt",
+    "name": "dff-global-44blocks.nbt",
+    "file": "dff-global-44blocks.nbt",
+    "path": "examples/dff-global-44blocks.nbt",
+    "size": 510,
+    "outputsPath": "examples/dff-global-44blocks.outputs.json"
+  },
+  {
+    "kind": "nbt",
+    "name": "dff-global-43blocks.nbt",
+    "file": "dff-global-43blocks.nbt",
+    "path": "examples/dff-global-43blocks.nbt",
+    "size": 507,
+    "outputsPath": "examples/dff-global-43blocks.outputs.json"
+  },
+  {
+    "kind": "nbt",
+    "name": "dff-global-optimized.nbt",
+    "file": "dff-global-optimized.nbt",
+    "path": "examples/dff-global-optimized.nbt",
+    "size": 500,
+    "outputsPath": "examples/dff-global-optimized.outputs.json"
   }
 ]

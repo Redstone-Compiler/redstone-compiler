@@ -1,0 +1,218 @@
+{
+  "configuration": {
+    "circuit": "dff-neg",
+    "dimensions": [
+      2,
+      7,
+      4
+    ],
+    "workers": 4,
+    "rank": 8,
+    "stage": 8,
+    "fixed_cells": 0,
+    "fixed_input_sites": 0,
+    "initial_layout": null,
+    "post_minimization": false
+  },
+  "baseline": {
+    "historical_seconds": 163.52869475,
+    "remeasured_seconds": 144.51170475,
+    "seed": 11,
+    "encode_seconds": 0.177326708,
+    "solve_seconds": 144.334378042,
+    "variables": 47301,
+    "clauses": 225671,
+    "blocks": 45
+  },
+  "accepted_change": "canonical source ranks; canonical Air/Switch stage",
+  "normalization": {
+    "seed11_seconds": [
+      43.410156374,
+      43.79
+    ],
+    "variables": 47301,
+    "clauses": 226813,
+    "blocks": 42,
+    "other_seeds": {
+      "12": "unknown at 120s",
+      "13": "unknown at 120s"
+    }
+  },
+  "verification": {
+    "original_model": true,
+    "nbt_input_changes": 2048,
+    "small_complete_layout_counts": [
+      136,
+      1206,
+      100
+    ],
+    "disabled_model_identical_cnf": true,
+    "related_release_tests_passed": true
+  },
+  "trials": [
+    {
+      "seed": 11,
+      "options": "chrono=0",
+      "exit_code": 0,
+      "placed": false,
+      "limit_s": 60,
+      "log": "target/dff-search-bench/no-chrono/11.log",
+      "variables": 47301,
+      "clauses": 225671,
+      "solve": "60.005280417s",
+      "refinements": 0,
+      "experiment": "no-chrono"
+    },
+    {
+      "seed": 11,
+      "options": "",
+      "model": "target/dff-wire-compact.rsdsl",
+      "params": "",
+      "exit_code": 0,
+      "placed": false,
+      "limit_s": 60,
+      "log": "target/dff-search-bench/wire-compact/11.log",
+      "variables": 47301,
+      "clauses": 195591,
+      "solve": "60.003084458s",
+      "refinements": 2001,
+      "experiment": "wire-compact"
+    },
+    {
+      "seed": 11,
+      "options": "",
+      "model": "target/dff-clock-sym.rsdsl",
+      "params": "",
+      "exit_code": 0,
+      "placed": false,
+      "limit_s": 60,
+      "log": "target/dff-search-bench/clock-sym/11.log",
+      "variables": 46240,
+      "clauses": 219441,
+      "solve": "60.0033145s",
+      "refinements": 1,
+      "experiment": "clock-sym"
+    },
+    {
+      "seed": 11,
+      "options": "",
+      "model": "docs/rsdsl/dff_global_six_gate.rsdsl",
+      "params": "symmetry_breaking=true",
+      "exit_code": 0,
+      "placed": false,
+      "limit_s": 60,
+      "log": "target/dff-search-bench/auxiliary-sym/11.log",
+      "variables": 48383,
+      "clauses": 228987,
+      "solve": "60.002397167s",
+      "refinements": 2001,
+      "experiment": "auxiliary-sym"
+    },
+    {
+      "seed": 11,
+      "options": "stabilizeonly=1,phase=1",
+      "model": "docs/rsdsl/dff_global_six_gate.rsdsl",
+      "params": "",
+      "exit_code": 0,
+      "placed": false,
+      "limit_s": 90,
+      "log": "target/dff-search-bench/stable-positive/11.log",
+      "variables": 47301,
+      "clauses": 225671,
+      "solve": "90.0027745s",
+      "refinements": 0,
+      "experiment": "stable-positive"
+    },
+    {
+      "seed": 11,
+      "options": "",
+      "model": "target/dff-pairwise.rsdsl",
+      "params": "",
+      "exit_code": 0,
+      "placed": false,
+      "limit_s": 60,
+      "log": "target/dff-search-bench/pairwise/11.log",
+      "variables": 46971,
+      "clauses": 233927,
+      "solve": "60.002657s",
+      "refinements": 0,
+      "experiment": "pairwise"
+    },
+    {
+      "seed": 11,
+      "options": "",
+      "model": "target/dff-source-ranks.rsdsl",
+      "params": "",
+      "exit_code": 0,
+      "placed": true,
+      "limit_s": 60,
+      "log": "target/dff-search-bench/source-ranks/11.log",
+      "blocks": 42,
+      "discovery_s": 43.4,
+      "variables": 47301,
+      "clauses": 226813,
+      "solve": "43.248845208s",
+      "refinements": 2001,
+      "experiment": "source-ranks"
+    },
+    {
+      "seed": 11,
+      "options": "",
+      "model": "docs/rsdsl/dff_global_fast.rsdsl",
+      "params": "",
+      "exit_code": 0,
+      "placed": true,
+      "limit_s": 120,
+      "log": "target/dff-search-bench/ranks-repeat/11.log",
+      "blocks": 42,
+      "discovery_s": 43.8,
+      "variables": 47301,
+      "clauses": 226813,
+      "solve": "43.610331083s",
+      "refinements": 2001,
+      "experiment": "ranks-repeat"
+    },
+    {
+      "seed": 12,
+      "options": "",
+      "model": "docs/rsdsl/dff_global_fast.rsdsl",
+      "params": "",
+      "exit_code": 0,
+      "placed": false,
+      "limit_s": 120,
+      "log": "target/dff-search-bench/ranks-repeat/12.log",
+      "variables": 47301,
+      "clauses": 226813,
+      "solve": "120.026644208s",
+      "refinements": 0,
+      "experiment": "ranks-repeat"
+    },
+    {
+      "seed": 13,
+      "options": "",
+      "model": "docs/rsdsl/dff_global_fast.rsdsl",
+      "params": "",
+      "exit_code": 0,
+      "placed": false,
+      "limit_s": 120,
+      "log": "target/dff-search-bench/ranks-repeat/13.log",
+      "variables": 47301,
+      "clauses": 226813,
+      "solve": "120.003095375s",
+      "refinements": 0,
+      "experiment": "ranks-repeat"
+    }
+  ],
+  "hashes": {
+    "docs/rsdsl/dff_global_six_gate.rsdsl": "88ae97618eae1c4c6ff09cfe961d5ad20129c0ef6bda046c1b54af2cd3e9b178",
+    "docs/rsdsl/dff_global_fast.rsdsl": "3c2d0dc25c1d1420246a4b6e9cd5fe8d87bda24bab8d7f98c87b063948ff0f4c",
+    "test/dff-global-fast-2x7x4.nbt": "501cd4ae54eb9af6b1868648e9458fdbe7cb5c6ea1b279bed5a62c4feedc241e"
+  },
+  "limitations": [
+    "Speedup established for seed 11 only.",
+    "Seeds 12 and 13 were not compared against their own baseline; no speedup claimed.",
+    "Short regression tests ran during additional-seed robustness probes.",
+    "Original six-gate topology restriction unchanged.",
+    "Times exclude Rust compilation."
+  ]
+}

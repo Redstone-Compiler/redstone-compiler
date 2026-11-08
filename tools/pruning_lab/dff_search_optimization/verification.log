@@ -1,0 +1,6 @@
+
+running 1 test
+DFF independently verified 42 blocks, 2048 transitions: ../target/dff-search-bench/ranks-repeat/11
+test transform::place_and_route::local_placer::exact::tests::verify_dff_search_artifact ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 439 filtered out; finished in 0.03s

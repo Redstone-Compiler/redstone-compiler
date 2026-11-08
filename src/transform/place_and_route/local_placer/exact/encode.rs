@@ -50,6 +50,9 @@ pub(super) struct SignalClass {
     pub(super) function: u64,
     pub(super) complement: Option<usize>,
     pub(super) input: Option<NetId>,
+    /// The stored value of this state net, read past its cut
+    /// (`NorNetlist::state`).
+    pub(super) stored: Option<NetId>,
 }
 
 impl SignalClass {
@@ -58,10 +61,13 @@ impl SignalClass {
     }
 }
 
-/// Unpowered, every net function, and every complement, without duplicates.
+/// Unpowered, every net function, every state net's stored value, and every
+/// complement, without duplicates. Cases cover the inputs and the stored
+/// state (`NorNetlist::case_bits`), so a state net's own class is its next
+/// value.
 pub(super) fn vocabulary(netlist: &NorNetlist) -> Vec<SignalClass> {
     let values = netlist.net_values();
-    let cases = 1usize << netlist.input_names().len();
+    let cases = 1usize << netlist.case_bits();
     let full = if cases >= 64 {
         u64::MAX
     } else {
@@ -73,11 +79,18 @@ pub(super) fn vocabulary(netlist: &NorNetlist) -> Vec<SignalClass> {
             .enumerate()
             .fold(0u64, |mask, (case, &on)| mask | (u64::from(on) << case))
     };
+    let inputs = netlist.input_names().len();
+    let stored = |index: usize| {
+        (0..cases)
+            .filter(|case| case >> (inputs + index) & 1 == 1)
+            .fold(0u64, |mask, case| mask | 1 << case)
+    };
     let mut classes = vec![SignalClass {
         name: "unpowered".to_owned(),
         function: 0,
         complement: None,
         input: None,
+        stored: None,
     }];
     let add = |classes: &mut Vec<SignalClass>, name: String, function: u64| {
         if function == 0 || function == full {
@@ -91,10 +104,18 @@ pub(super) fn vocabulary(netlist: &NorNetlist) -> Vec<SignalClass> {
             function,
             complement: None,
             input: None,
+            stored: None,
         });
     };
     for (net, vector) in values.iter().enumerate() {
         add(&mut classes, netlist.nets[net].name.clone(), mask(vector));
+    }
+    for (index, &net) in netlist.state.iter().enumerate() {
+        add(
+            &mut classes,
+            format!("{}_stored", netlist.nets[net].name),
+            stored(index),
+        );
     }
     for (net, vector) in values.iter().enumerate() {
         add(
@@ -115,6 +136,12 @@ pub(super) fn vocabulary(netlist: &NorNetlist) -> Vec<SignalClass> {
             if let Some(class) = classes.iter_mut().find(|class| class.function == function) {
                 class.input = Some(net);
             }
+        }
+    }
+    for (index, &net) in netlist.state.iter().enumerate() {
+        let function = stored(index);
+        if let Some(class) = classes.iter_mut().find(|class| class.function == function) {
+            class.stored = Some(net);
         }
     }
     classes
@@ -192,6 +219,9 @@ pub(super) struct Encoding {
     pub(super) cnf: Cnf,
     pub(super) classes: Vec<SignalClass>,
     pub(super) cases: usize,
+    /// The cut of each state net (`NorNetlist::state`): its next-value class
+    /// and its stored-value class.
+    pub(super) cuts: Vec<(usize, usize)>,
     pub(super) air: Vec<Lit>,
     pub(super) solid: Vec<Lit>,
     pub(super) dust: Vec<Lit>,

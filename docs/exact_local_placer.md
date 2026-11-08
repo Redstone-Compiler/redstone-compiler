@@ -726,3 +726,152 @@ CIRCUIT=full-adder CIRCUIT_COMPACT_SECONDS=600 CIRCUIT_SNAPSHOT=target/full-adde
 # copy target/full-adder.rsnap to tools/nbt-viewer/public/progress/ and open
 # http://localhost:5173/?snapshot=progress/full-adder.rsnap
 ```
+
+## Box-mirror symmetry breaking (2026-10-10)
+
+The model's rules do not tell east from west or north from south. A layout
+mirrored along x or y is therefore a layout too, as long as the instance
+places nothing asymmetrically. `ExactPlacerConfig::box_symmetry` adds the
+lex-leader constraint for the x, y, and xy mirrors:
+
+- It compares the layout with each mirror image, cell by cell in one fixed
+  order.
+- It keeps a lexicographically least layout of each mirror family (rule
+  "대칭 제거: 상자를 뒤집은 배치 가운데 사전순으로 앞선 것만", facts `mirror`).
+- Every family keeps a member, so the fewest blocks and every infeasibility
+  proof are unchanged.
+- It applies only to a symmetric instance: default input and output sites,
+  nothing fixed or given, no carry, no driving outputs. Otherwise the facts
+  stay empty. Construction and compaction windows are never symmetric.
+
+`BoxSymmetry` picks:
+
+- what is compared: filled cells, or torch positions (`torches`);
+- the order: height first, or length first (`length_first`);
+- the mirrors: all three, or x only (`x_only`).
+
+Five instances, three seeds each, the five settings of one seed running
+together with 3 workers each (`SEQ_SYM`, `SEQ_SEED`). Geometric mean
+seconds:
+
+| Instance | Off | Filled | **Torches** | Length first | x only |
+| --- | --- | --- | --- | --- | --- |
+| set-reset latch, optimum 8 in 2x4x4 | 106 | 72 | **76** | 79 | 78 |
+| 2:1 mux, optimum 11 in 2x4x3 | 188 | 151 | **153** | 139 | 176 |
+| D latch (6 torches), no layout in 2x4x3 | 69 | 77 | **64** | 93 | 65 |
+| half adder (5 torches), no layout in 2x3x4 | 184 | 192 | **130** | 188 | 189 |
+| D latch (multiplexer), no layout in 2x4x3 | 81 | 89 | **84** | 78 | 82 |
+| all five, against off | 1 | 0.93 | **0.83** | 0.94 | 0.93 |
+
+- Comparing filled cells speeds up the optimum proofs but slows the
+  infeasibility proofs.
+- Comparing torch positions does both: 17% faster overall, never more than
+  4% slower, and the half adder's proof is 30% faster.
+- It is the default (`box_symmetry` is torches, all mirrors, height first);
+  `None` turns it off.
+- After the change, the exact placer's unit tests ran in 17.5 s instead of
+  about 40 s.
+
+## Core-guided slice removal (2026-10-11): it does not pay
+
+A slice removal's window is solved with every cell outside it fixed, and
+most removals come back infeasible. The Benders idea: ask which of those
+fixed cells the proof needs, free only those, and solve again. A proof that
+needs none of them rules the removal out.
+
+`CompactionConfig::core_guided` (off by default) does this:
+
+- After an infeasible removal, the fixed cells within `core_shell` (2) steps
+  of the window become soft cells (fact `soft`).
+- `ExactLocalPlacer::proof_core` names the soft cells the proof needs.
+- Those cells are freed and the window is solved again, up to
+  `core_expansions` (3) times and `core_max_freed` (20) cells.
+- An empty core marks the removal hopeless until the layout changes.
+
+### First try: guards and assumptions
+
+Each soft cell's requires got a guard, and the solve assumed every guard,
+so the failed assumptions would be the core. It cost too much:
+
+| Core query | Guards | Clauses | Result |
+| --- | --- | --- | --- |
+| every outside cell, soundness guarded too, one solve | 300-320 | 830 000 | satisfiable in 0.5 s, all 332 queries |
+| the same with lazy acyclicity | 300-320 | 830 000 | no answer in 20 s |
+| shell of 2 steps | 40-80 | 165 000-305 000 | no answer in 20 s, all 6 |
+| shell of 1 step | 20-40 | 110 000-230 000 | no answer in 20 s, 4 of 5 |
+
+- With every cell fixed, the same windows are proven infeasible in 1-3 s
+  on average.
+- **The single solve** got layouts whose torches feed their own support:
+  acyclicity is added lazily. The query now runs the lazy loop.
+- **A guarded require is not a unit.** The grounder folds fixed units into
+  every later rule, so constraints among fixed cells never reach the solver
+  (`exact_placer.rsdsl`, "고정된 칸"). Each guarded cell brings its
+  constraints back, and the solver then proves the same infeasibility under
+  assumptions, more than 10 times slower.
+
+### Second try: read the core from the proof
+
+The proof itself says which clauses it used, so the units can stay units:
+
+- **The proof.** `SatSolver::trace_frat` traces CaDiCaL's proof in FRAT
+  with antecedents. Every original clause comes with its id, including the
+  lazy acyclicity clauses added between solves. Every derived clause lists
+  the clauses it was derived from.
+- **The core.** `frat::refutation_originals` follows the empty clause back
+  to the original clauses it rests on. The soft cells with a unit clause
+  among them are the core.
+- **Unfolded units.** The soft cells' requires sit in an rsdsl `@nofold`
+  rule ("물러설 수 있는 고정 칸"). Their units stay plain unit clauses: no
+  guard, and no folding, not even by the final unit propagation. Every other
+  fixed cell still folds away.
+- **Timing.** With timing on, a given torch's ordering clause also exists
+  only because the cell is given, so given soft cells in any used clause
+  count too.
+- **Test.** `proof_core_names_the_broken_cell` replaces a placed NOR's torch
+  with air. The core names that cell, and fixing only the core keeps the
+  instance infeasible.
+
+The query is cheap now:
+
+- Single-threaded, a proof takes 0.03-10 s and writes 10-180 MB; reading it
+  takes under 0.3 s.
+- A first version left every fixed cell unfolded (`no_fold`). Its cores held
+  209-286 of 300 cells: the root-level propagation derived the boundary
+  signals through the whole fixed circuit. With only the shell unfolded,
+  cores held 1-79 of its 40-81 cells.
+
+The cores are still too broad to help. On the three full adder layouts, the
+retries without the 20-cell cap went:
+
+| Cells freed | Retries | Placed | No answer in 20 s | Time |
+| --- | --- | --- | --- | --- |
+| 1-20 | 27 | 3 | 0 | 19 s |
+| 21-40 | 37 | 1 | 21 | 515 s |
+| 41-60 | 21 | 6 | 15 | 352 s |
+| more | 28 | 0 | 28 | 566 s |
+
+Recompaction for 600 s, 6 workers, each pair of runs at the same time
+(`RECOMPACT_CORE=1`):
+
+| Seed | Off (two runs) | On | On, at most 20 cells freed |
+| --- | --- | --- | --- |
+| 1 | 2x11x10, 163 blocks; 2x11x10, 165 | 2x14x10, 206 | 2x13x10, 189 |
+| 2 | 2x9x9, 104; 2x10x6, 60 | 2x13x10, 156 | 2x10x7, 98 |
+| 3 | 2x12x10, 103; 2x10x10, 99 | 2x13x10, 166 | 2x11x10, 117 |
+
+- **Removing a slice fails across the whole cross-section.** Every wire
+  through the slice has to be reconnected, so the proof needs most of the
+  boundary. Small cores rarely hold a fix: with the cap, 4 of 89 retries
+  placed the removal.
+- **The queries cost up to a third of the budget.** Core solves took
+  90-190 s per run, and every run with cores ended larger than the run
+  beside it.
+- **Seeds vary a lot.** Seed 2's two runs without cores ended at 104 and 60
+  blocks. The 60-block run, 2x10x6, ties the smallest full adder in blocks
+  (2x8x8, 60, from the pipeline with fixed faces).
+
+`core_guided` stays off. `proof_core` remains as a tool: it explains an
+infeasible instance cheaply when the cause is local, such as a hand-edited
+cell or a fixed sub-cell (the flip-flop's master latch,
+`sequential_exact_cells.md`).

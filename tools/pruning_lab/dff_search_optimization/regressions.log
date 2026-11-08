@@ -1,0 +1,55 @@
+TEST canonical_source_ranks_preserve_small_layout_sets
+
+running 1 test
+test transform::place_and_route::local_placer::exact::tests::canonical_source_ranks_preserve_small_layout_sets ... RANK PARITY ~a enabled=false: 136 layouts
+RANK PARITY ~a enabled=true: 136 layouts
+RANK PARITY ~a enabled=false: 1206 layouts
+RANK PARITY ~a enabled=true: 1206 layouts
+RANK PARITY ~(a|b) enabled=false: 100 layouts
+RANK PARITY ~(a|b) enabled=true: 100 layouts
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 439 filtered out; finished in 0.10s
+
+TEST dff_fast_model_disabled_matches_original_cnf
+
+running 1 test
+test transform::place_and_route::local_placer::exact::tests::dff_fast_model_disabled_matches_original_cnf ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 439 filtered out; finished in 0.33s
+
+TEST minimize_global_dff_automatically
+
+running 1 test
+test transform::place_and_route::local_placer::exact::tests::minimize_global_dff_automatically ... AUTO DFF 45 -> 33 blocks, subset_optimal=true elapsed=67.048125ms improvements=3 refinements=0
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 439 filtered out; finished in 0.16s
+
+TEST exact_placer_builds_
+
+running 4 tests
+test transform::place_and_route::local_placer::exact::tests::exact_placer_builds_a_verified_inverter ... ok
+test transform::place_and_route::local_placer::exact::tests::exact_placer_builds_a_verified_nor_gate ... ok
+test transform::place_and_route::local_placer::exact::tests::exact_placer_builds_a_verified_xor ... ok
+test transform::place_and_route::local_placer::exact::tests::exact_placer_builds_verified_and_and_or_gates ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 436 filtered out; finished in 10.21s
+
+TEST optimize_
+
+running 5 tests
+test transform::logic::tests::optimize_cse_merges_commutative_or_nodes ... ok
+test transform::logic::tests::optimize_cse_merges_duplicate_not_nodes ... ok
+test transform::logic::tests::optimize_cse_rewrites_outputs_to_representative ... ok
+test transform::place_and_route::local_placer::exact::tests::optimize_finds_and_proves_the_cheapest_layout ... ok
+test transform::place_and_route::local_placer::exact::tests::optimize_uses_the_model_cost_weights ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 435 filtered out; finished in 0.07s
+
+
+running 1 test
+DFF independently verified 42 blocks, 2048 transitions: ../target/dff-search-bench/ranks-repeat/11
+test transform::place_and_route::local_placer::exact::tests::verify_dff_search_artifact ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 439 filtered out; finished in 0.03s
