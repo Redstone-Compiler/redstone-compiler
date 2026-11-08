@@ -216,8 +216,27 @@ fn main() -> eyre::Result<()> {
         logical.lower_to_routable_with_bit_mapping_limits(gates, boundary_inputs)?
     };
     std::fs::write(dir.join("routable.rcir"), routable.to_string())?;
+    let exact = if std::env::var_os("EXACT_CANDIDATES").is_some() {
+        let dims = std::env::var("EXACT_BOX")
+            .unwrap_or("3x5x3".into())
+            .split('x')
+            .map(str::parse::<usize>)
+            .collect::<Result<Vec<_>, _>>()?;
+        ensure!(
+            dims.len() == 3 && dims.iter().all(|&d| d > 0),
+            "EXACT_BOX must be positive XxYxZ"
+        );
+        Some(redstone_compiler::transform::place_and_route::global_pnr::candidate::ExactCandidateConfig {
+            search_box:[dims[0],dims[1],dims[2]],
+            time_limit_ms:std::env::var("EXACT_MS").unwrap_or("5000".into()).parse()?,
+            ..Default::default()
+        })
+    } else {
+        None
+    };
     let mut config = GlobalPnrConfig {
         candidate: UnitCandidateConfig {
+            exact,
             nary_stagger_inputs: std::env::var_os("NARY_STAGGER").is_some(),
             verified_nary_cells: std::env::var_os("BIT_NARY").is_some()
                 || std::env::var_os("BIT_EXPANDED").is_some()
@@ -238,13 +257,19 @@ fn main() -> eyre::Result<()> {
             ..Default::default()
         }
         .into(),
-        candidate_cache_dir: Some(dir.join("candidate-cache")),
+        candidate_cache_dir: Some(
+            std::env::var_os("PNR_CANDIDATE_CACHE")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| dir.join("candidate-cache")),
+        ),
         ..Default::default()
     };
     config.search =
         redstone_compiler::transform::place_and_route::global_pnr::policy::GlobalPnrPreset::Fast
             .search_config();
-    config.placement.max_attempts = 4;
+    config.placement.max_attempts = std::env::var("PNR_ATTEMPTS")
+        .unwrap_or("4".into())
+        .parse()?;
     config.placement.spacing = std::env::var("PNR_SPACING").unwrap_or("4".into()).parse()?;
     if std::env::var_os("PNR_LAYERED").is_some() {
         use redstone_compiler::transform::place_and_route::global_pnr::policy::{
@@ -253,9 +278,18 @@ fn main() -> eyre::Result<()> {
         config.search.policies.placement_heuristics =
             vec![PlacementHeuristic::Layered3D(LayeredPlacementConfig {
                 layers: 2,
-                layer_spacing: 6,
+                layer_spacing: std::env::var("PNR_LAYER_SPACING")
+                    .unwrap_or("6".into())
+                    .parse()?,
                 assignment: LayerAssignmentStrategy::NetAware,
             })];
+    }
+    if std::env::var_os("PNR_FREE3D").is_some() {
+        use redstone_compiler::transform::place_and_route::global_pnr::policy::{
+            Free3DPlacementConfig, PlacementHeuristic,
+        };
+        config.search.policies.placement_heuristics =
+            vec![PlacementHeuristic::Free3D(Free3DPlacementConfig::default())];
     }
     config.search.policies.net_order_strategies = vec![
         redstone_compiler::transform::place_and_route::global_pnr::router::NetOrderStrategy::Criticality,
@@ -265,7 +299,9 @@ fn main() -> eyre::Result<()> {
     if std::env::var_os("PNR_PIN_ACCESS").is_some() {
         config.search.policies.net_order_strategies = vec![redstone_compiler::transform::place_and_route::global_pnr::router::NetOrderStrategy::PinAccess];
     }
-    config.search.budget.max_layout_combinations = 1;
+    config.search.budget.max_layout_combinations = std::env::var("PNR_LAYOUT_COMBINATIONS")
+        .unwrap_or("1".into())
+        .parse()?;
     config.verifier = Some(verify_candidate);
     if let Ok(value) = std::env::var("PNR_MAX_STEPS") {
         config.routing.max_route_steps = value.parse()?;
@@ -288,6 +324,9 @@ fn main() -> eyre::Result<()> {
     let start = Instant::now();
     let result = place_and_route_routable_design_with_visualization(&routable, &config)?;
     let elapsed = start.elapsed();
+    std::fs::write(dir.join("selected-candidates.json"), serde_json::to_string_pretty(&result.selected_candidates.iter().map(|c| serde_json::json!({
+        "module":c.module_name,"blocks":c.cost.block_count,"bbox_volume":c.cost.bbox_volume,"footprint":c.cost.bbox_footprint,"height":c.cost.bbox_height,"exact_core":c.exact_core
+    })).collect::<Vec<_>>())?)?;
     std::fs::write(
         dir.join("pnr-config.json"),
         serde_json::to_string_pretty(&result.config_snapshot)?,
@@ -377,6 +416,7 @@ fn main() -> eyre::Result<()> {
         }
     }
     let summary = serde_json::json!({
+        "exact_selected":result.selected_candidates.iter().filter(|c|c.exact_core.is_some()).count(),
         "compile_ms":elapsed.as_millis(),"blocks":world.blocks.len(),
         "static_cases":states,"driven_cases":cases,
         "ordered_transitions":states * states,"nbt_roundtrip":true,

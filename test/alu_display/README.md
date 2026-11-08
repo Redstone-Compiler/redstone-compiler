@@ -27,6 +27,8 @@ PNR_ASTAR_EXPANSIONS=20000 PNR_MAX_STEPS=256 \
 
 ## Unsigned 가산기 물리 실험
 
+Exact SAT 셀 후보와 자유3D를 함께 사용하는 decoder는4,187블록,36×64×56이며 모든256개 전이를 통과했다. 같은 자유3D에서 recipe만 쓰는 대조군은4,312블록이다. 재현 명령, cold 시간과 메모리 상태를 정규화하는 cache 계약은 [Exact 전역 후보 실험](../../docs/exact_global_candidates.md)에 있다.
+
 `adder_nbt`는 Verilog `{1'b0,a}+{1'b0,b}`에서 시작해 Logical IR, associative cell mapping, 전역 배치/배선, NBT 내보내기까지 실행한다. `1`, `2`, `4`, `8` bit를 받는다. 검증 정답은 graph 평가가 아닌 독립 정수 덧셈 `a+b`다.
 
 작동을 확인한 설정은 local box `10x10x5`, ranked beam `256`, A* expansion budget `20,000`, 예약된 입출력 diode와 verified n-ary cell이다. seed를 바꾸어 얻은 결과가 아니다. 기본 `8x8x4` box에서는 XOR의 출력 diode escape 확보가 실패할 수 있으므로 아래 설정을 명시한다.

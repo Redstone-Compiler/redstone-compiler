@@ -461,5 +461,21 @@
     "path": "examples/alu-display-decoder-digit-verified.nbt",
     "size": 17926,
     "outputsPath": "examples/alu-display-decoder-digit-verified.outputs.json"
+  },
+  {
+    "kind": "nbt",
+    "name": "alu-display-decoder-layered-verified.nbt",
+    "file": "alu-display-decoder-layered-verified.nbt",
+    "path": "examples/alu-display-decoder-layered-verified.nbt",
+    "size": 17673,
+    "outputsPath": "examples/alu-display-decoder-layered-verified.outputs.json"
+  },
+  {
+    "kind": "nbt",
+    "name": "alu-display-decoder-exact-verified.nbt",
+    "file": "alu-display-decoder-exact-verified.nbt",
+    "path": "examples/alu-display-decoder-exact-verified.nbt",
+    "size": 15031,
+    "outputsPath": "examples/alu-display-decoder-exact-verified.outputs.json"
   }
 ]

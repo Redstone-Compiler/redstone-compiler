@@ -67,3 +67,9 @@ Verilog에서 시작해 공통 lowering/PnR/NBT 경로로 2/4/8bit 가산기를 
 release mode만 사용한다. 최종 `cargo test --release --workspace --all-targets`는 core444개 통과/실패0/ignored56개(216.54초)와 workspace 및 integration 검사를 통과했다. `PinAccess`, 출력 강도 계약, 직각 repeater, 두 정규화 알림 회귀를 포함한다. workspace native check에는 nbt-sim-wasm도 포함하며 viewer용 WASM release와 viewer production build도 통과했다. 검색이 무거운 ignored 측정을 전부 실행한 결과로 해석하지 않는다.
 
 전체 탐색 trace와 실패 NBT는 기본적으로 저장소에 추가하지 않는다. 작은 RTL/검증 코드와 요약을 남기고 `target/alu-display/`에 IR, NBT, cache, 검증 결과를 생성한다.
+
+## Exact 후보를 연결한 압축
+
+이후 Global PnR에 opt-in Exact SAT 후보 공급을 연결했다. 실제 SAT 셀6개를 채택한36×64×56 NBT는4,187블록이며16개 입력과 모든256개 전이를 통과했다. 기존2층 대비25.7%, 같은 자유3D의 recipe 대조군4,312블록 대비2.9% 감소다. 최초 cold 실행은89.252초로 더 오래 걸렸고, 모델 최적성이나 전반적인 속도 향상을 주장하지 않는다. 입력 어댑터, provenance, 실패 시 recipe fallback과 비교 조건은 [별도 기록](exact_global_candidates.md)에 있다.
+
+Exact 물리 후보의 내부 Cobble/dust 전력 count는 NBT에 저장되지 않으므로, persistent cache의 world 해시를 NBT 왕복으로 정규화했다(cache v13). geometry/포트/reservation/cost와 실제 블록 변조 검증은 유지한다. 실제 mixed-polarity SAT 후보의 캐시 재로딩 후 전이 검증도 통과했다. 이 확장 직후 전체 release workspace는 core447개/실패0/ignored56개와 나머지 검사를 통과했으며, 이후 cache 해시 보정은 별도 회귀로 검사했다.
