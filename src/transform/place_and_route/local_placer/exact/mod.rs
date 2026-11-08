@@ -26,6 +26,8 @@ mod frat;
 mod layout;
 mod netlist;
 mod progress;
+#[cfg(test)]
+mod search_benchmark;
 mod solver;
 mod synthesis;
 #[cfg(test)]
@@ -557,6 +559,14 @@ impl ExactLocalPlacer {
         &self,
         config: &ExactPlacerConfig,
     ) -> eyre::Result<(ExactOutcome, ExactPlacerStats)> {
+        self.place_with_worker_dispatch(config, true)
+    }
+
+    fn place_with_worker_dispatch(
+        &self,
+        config: &ExactPlacerConfig,
+        inline_single_worker: bool,
+    ) -> eyre::Result<(ExactOutcome, ExactPlacerStats)> {
         let encode_started = Instant::now();
         let encoding = Encoding::build(&self.netlist, config)?;
         let mut stats = ExactPlacerStats {
@@ -581,25 +591,35 @@ impl ExactLocalPlacer {
             incumbent: incumbent.as_ref(),
         };
         let workers = config.workers.max(1);
-        let results = std::thread::scope(|scope| {
-            let handles = (0..workers)
-                .map(|worker| {
-                    let encoding = &encoding;
-                    let shared = &shared;
-                    scope.spawn(move || {
-                        let result = self.run_worker(encoding, config, worker, shared);
-                        if !matches!(result, WorkerResult::Unknown(_)) {
-                            shared.stop.store(true, Ordering::Relaxed);
-                        }
-                        result
+        let results = if workers == 1 && inline_single_worker {
+            // A single worker has no portfolio to race; avoid spawning and
+            // joining a thread for each small construction/compaction attempt.
+            let result = self.run_worker(&encoding, config, 0, &shared);
+            if !matches!(result, WorkerResult::Unknown(_)) {
+                shared.stop.store(true, Ordering::Relaxed);
+            }
+            vec![result]
+        } else {
+            std::thread::scope(|scope| {
+                let handles = (0..workers)
+                    .map(|worker| {
+                        let encoding = &encoding;
+                        let shared = &shared;
+                        scope.spawn(move || {
+                            let result = self.run_worker(encoding, config, worker, shared);
+                            if !matches!(result, WorkerResult::Unknown(_)) {
+                                shared.stop.store(true, Ordering::Relaxed);
+                            }
+                            result
+                        })
                     })
-                })
-                .collect::<Vec<_>>();
-            handles
-                .into_iter()
-                .map(|handle| handle.join().expect("exact placer worker panicked"))
-                .collect::<Vec<_>>()
-        });
+                    .collect::<Vec<_>>();
+                handles
+                    .into_iter()
+                    .map(|handle| handle.join().expect("exact placer worker panicked"))
+                    .collect::<Vec<_>>()
+            })
+        };
         stats.solve_time = solve_started.elapsed();
         stats.refinements = *refinements.lock().unwrap();
         let lazy = *lazy.lock().unwrap();

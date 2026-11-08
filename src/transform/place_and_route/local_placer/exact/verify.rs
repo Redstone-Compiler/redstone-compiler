@@ -30,36 +30,51 @@ pub(super) struct Decoded {
     pub(super) kind_lits: Vec<i32>,
 }
 
-pub(super) fn decode(encoding: &Encoding, solver: &SatSolver, netlist: &NorNetlist) -> Decoded {
-    let geometry = encoding.geometry;
-    let mut kinds = Vec::with_capacity(geometry.len());
-    let mut kind_lits = Vec::new();
-    for cell in 0..geometry.len() {
-        let mut chosen = (CellKind::Air, encoding.air[cell]);
-        let mut options = vec![
-            (CellKind::Solid, encoding.solid[cell]),
-            (CellKind::Dust, encoding.dust[cell]),
-        ];
-        for (index, attach) in TORCH_ATTACH.into_iter().enumerate() {
-            options.push((CellKind::Torch(attach), encoding.torch[cell][index]));
-        }
-        for (index, direction) in CARDINALS.into_iter().enumerate() {
-            options.push((
-                CellKind::Repeater(direction),
-                encoding.repeater[cell][index],
-            ));
-        }
-        for site in encoding.switches.iter().filter(|site| site.cell == cell) {
-            options.push((CellKind::Switch(site.attach), site.lit));
-        }
-        for (kind, lit) in options {
-            if !encoding.cnf.is_false(lit) && solver.value(lit) {
-                chosen = (kind, lit);
-            }
-        }
+/// Kind is exactly-one, so Air needs no further queries and a selected
+/// non-Air option ends the scan. Avoid allocating a candidate list per cell.
+pub(super) fn decode_kinds(encoding: &Encoding, solver: &SatSolver) -> (Vec<CellKind>, Vec<i32>) {
+    let cells = encoding.geometry.len();
+    let mut kinds = Vec::with_capacity(cells);
+    let mut kind_lits = Vec::with_capacity(cells);
+    for cell in 0..cells {
+        let air = (CellKind::Air, encoding.air[cell]);
+        let chosen =
+            if solver.value(air.1) {
+                air
+            } else {
+                [
+                    (CellKind::Solid, encoding.solid[cell]),
+                    (CellKind::Dust, encoding.dust[cell]),
+                ]
+                .into_iter()
+                .chain(
+                    TORCH_ATTACH
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, attach)| (CellKind::Torch(attach), encoding.torch[cell][i])),
+                )
+                .chain(CARDINALS.into_iter().enumerate().map(|(i, direction)| {
+                    (CellKind::Repeater(direction), encoding.repeater[cell][i])
+                }))
+                .chain(
+                    encoding
+                        .switches
+                        .iter()
+                        .filter(|site| site.cell == cell)
+                        .map(|site| (CellKind::Switch(site.attach), site.lit)),
+                )
+                .find(|&(_, lit)| !encoding.cnf.is_false(lit) && solver.value(lit))
+                .unwrap_or(air)
+            };
         kinds.push(chosen.0);
         kind_lits.push(chosen.1);
     }
+    (kinds, kind_lits)
+}
+
+pub(super) fn decode(encoding: &Encoding, solver: &SatSolver, netlist: &NorNetlist) -> Decoded {
+    let geometry = encoding.geometry;
+    let (kinds, kind_lits) = decode_kinds(encoding, solver);
     let classes = (0..geometry.len())
         .map(|cell| {
             encoding.class_lits[cell]

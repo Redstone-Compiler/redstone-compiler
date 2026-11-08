@@ -21,6 +21,7 @@
 - Derived pruning lemmas, counterexamples, preservation checks, and Python/Z3 iteration lab: `docs/exact_placer_derived_lemmas.md`; runner: `tools/pruning_lab/run.py`.
 - Exact boundary continuation experiments, unsafe summaries, and lossless MDD compression on tiny circuits: `docs/exact_boundary_representation.md`; runner: `tools/pruning_lab/boundary.py`.
 - Exact Python search iteration, fixed-pin fixtures, and measured native QF_FD AllSAT improvements: `docs/exact_search_iteration.md`; benchmark: `tools/pruning_lab/benchmark_search.py`.
+- Production Rust Kind decoding and single-worker dispatch optimization, A/B measurements and CNF parity: `docs/rust_placer_optimization.md`.
 - Full-adder tiles that chain into n-bit ripple-carry adders (`CarryTiling`): `docs/carry_tiles.md`
 - Critical paths in redstone ticks: static timing, delay bounds, and timing-first construction and compaction: `docs/timing_driven_placement.md`
 - Equivalent NOR netlists from an e-graph (egg) with exact SAT extraction, an experiment record (the code was removed for exact synthesis) that also explains why wide-NOR construction steps time out: `docs/egraph_netlists.md`
