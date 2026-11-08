@@ -1,0 +1,39 @@
+{
+  "format": "redstone-compiler.outputs.v1",
+  "inputs": [
+    {
+      "name": "a_A",
+      "position": [
+        0,
+        1,
+        1
+      ]
+    },
+    {
+      "name": "a_B",
+      "position": [
+        3,
+        0,
+        0
+      ]
+    }
+  ],
+  "outputs": [
+    {
+      "name": "out_A",
+      "position": [
+        0,
+        2,
+        0
+      ]
+    },
+    {
+      "name": "out_B",
+      "position": [
+        3,
+        2,
+        0
+      ]
+    }
+  ]
+}

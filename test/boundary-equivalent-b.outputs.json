@@ -1,0 +1,23 @@
+{
+  "format": "redstone-compiler.outputs.v1",
+  "inputs": [
+    {
+      "name": "a",
+      "position": [
+        0,
+        0,
+        0
+      ]
+    }
+  ],
+  "outputs": [
+    {
+      "name": "out",
+      "position": [
+        0,
+        2,
+        0
+      ]
+    }
+  ]
+}

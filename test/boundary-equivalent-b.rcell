@@ -1,0 +1,12 @@
+rcell 1;
+cell "boundary-equivalent-b" size [1, 3, 2] {
+  start settled;
+  glyph "T" = torch on y-;
+  input "a" at [0, 0, 0] on y+;
+  output "out" at [0, 2, 0];
+  expect "out" = ~a;
+  plane yz at x=0 {
+    z=1 "...";
+    z=0 ".#T";
+  }
+}

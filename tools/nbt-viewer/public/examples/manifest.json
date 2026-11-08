@@ -54,6 +54,46 @@
   },
   {
     "kind": "nbt",
+    "name": "boundary-dust-compare.nbt",
+    "file": "boundary-dust-compare.nbt",
+    "path": "examples/boundary-dust-compare.nbt",
+    "size": 260,
+    "outputsPath": "examples/boundary-dust-compare.outputs.json"
+  },
+  {
+    "kind": "nbt",
+    "name": "boundary-equivalent-a.nbt",
+    "file": "boundary-equivalent-a.nbt",
+    "path": "examples/boundary-equivalent-a.nbt",
+    "size": 202,
+    "outputsPath": "examples/boundary-equivalent-a.outputs.json"
+  },
+  {
+    "kind": "nbt",
+    "name": "boundary-equivalent-b.nbt",
+    "file": "boundary-equivalent-b.nbt",
+    "path": "examples/boundary-equivalent-b.nbt",
+    "size": 203,
+    "outputsPath": "examples/boundary-equivalent-b.outputs.json"
+  },
+  {
+    "kind": "nbt",
+    "name": "boundary-equivalent-compare.nbt",
+    "file": "boundary-equivalent-compare.nbt",
+    "path": "examples/boundary-equivalent-compare.nbt",
+    "size": 233,
+    "outputsPath": "examples/boundary-equivalent-compare.outputs.json"
+  },
+  {
+    "kind": "nbt",
+    "name": "boundary-torch-compare.nbt",
+    "file": "boundary-torch-compare.nbt",
+    "path": "examples/boundary-torch-compare.nbt",
+    "size": 229,
+    "outputsPath": "examples/boundary-torch-compare.outputs.json"
+  },
+  {
+    "kind": "nbt",
     "name": "counter-global-placement-bbox.nbt",
     "file": "counter-global-placement-bbox.nbt",
     "path": "examples/counter-global-placement-bbox.nbt",
