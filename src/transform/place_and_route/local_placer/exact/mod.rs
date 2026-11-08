@@ -81,6 +81,9 @@ pub struct ExactPlacerConfig {
     pub absent_inputs: std::collections::BTreeSet<String>,
     /// Cells whose block kind is fixed.
     pub fixed_cells: BTreeMap<Position, CellKind>,
+    /// Each cell may keep this kind or become Air. Used to minimize an
+    /// existing layout globally over all deletion subsets, without relocating it.
+    pub removable_cells: BTreeMap<Position, CellKind>,
     /// Signal functions (bit per input case) of fixed cells taken from an
     /// earlier verified layout. Their class is fixed and they need no
     /// justification (rank, stage, contributing source) in this solve; the
@@ -232,6 +235,7 @@ impl ExactPlacerConfig {
             observations: None,
             absent_inputs: Default::default(),
             fixed_cells: BTreeMap::new(),
+            removable_cells: BTreeMap::new(),
             given_signals: BTreeMap::new(),
             blocked: Vec::new(),
             rank_levels: 24,

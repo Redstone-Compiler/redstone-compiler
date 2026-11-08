@@ -20,7 +20,7 @@ pub struct CompactionConfig {
     pub window_radius: usize,
     /// Wider windows tried once no seam can be repaired at the current radius.
     pub max_window_radius: usize,
-    /// After shrinking, re-solve sliding windows with one block fewer.
+    /// Minimize deletion subsets first, then re-solve sliding windows after shrinking.
     pub minimize_blocks: bool,
     /// Minimize each block-reduction window's cost in one solve (`optimize`)
     /// instead of asking for one block fewer per attempt (rsdsl model only).
@@ -199,7 +199,7 @@ pub struct CompactionReport {
     pub rounds: usize,
     /// Every window solve by `(phase, outcome)`: phases `remove` (slice
     /// removal repairs), `repair` (minimizing a repair), `reduce` (block
-    /// reduction), `delay` and `delay-repair` (path shortening), `signals`;
+    /// reduction), `prune` (whole-layout deletion minimization), `delay` and `delay-repair` (path shortening), `signals`;
     /// outcomes `placed`, `infeasible` (proven), `unknown` (out of time),
     /// `error` (not encodable), and for minimization `improved`,
     /// `improved-optimal`, `optimal` (proven nothing smaller).
@@ -217,6 +217,65 @@ fn axis_name(axis: usize) -> &'static str {
 }
 
 impl ExactLocalPlacer {
+    /// Minimize all deletion subsets in one exact optimization. Positions,
+    /// kinds of retained blocks, and I/O pins stay fixed. Every accepted
+    /// subset passes the normal full simulator verification. `stats.optimal`
+    /// proves minimality only within these subsets, not among relocated layouts.
+    pub fn minimize_existing(
+        &self,
+        layout: &ExactLayout,
+        config: &ExactPlacerConfig,
+    ) -> eyre::Result<(ExactOutcome, super::ExactPlacerStats)> {
+        eyre::ensure!(
+            config.dim == layout.dim,
+            "layout and search dimensions differ"
+        );
+        eyre::ensure!(
+            config.given_signals.is_empty(),
+            "deletion minimization must rejustify all signals"
+        );
+        let mut exact = config.clone();
+        exact.optimize = true;
+        for (name, value) in [("block_cost", 1), ("repeater_cost", 0), ("torch_cost", 0)] {
+            exact
+                .model_params
+                .insert(name.into(), rsdsl::IValue::Int(value));
+        }
+        for (at, kind) in &exact.fixed_cells {
+            eyre::ensure!(
+                layout.cells.get(at).copied().unwrap_or(CellKind::Air) == *kind,
+                "fixed cell {at:?} would replace an existing kind"
+            );
+        }
+        exact.box_symmetry = None;
+        exact.removable_cells.clear();
+        for (name, position, attach) in &layout.inputs {
+            exact
+                .input_sites
+                .insert(name.clone(), vec![(*position, *attach)]);
+        }
+        for (name, position) in &layout.outputs {
+            exact.output_sites.insert(name.clone(), vec![*position]);
+        }
+        for x in 0..layout.dim.0 {
+            for y in 0..layout.dim.1 {
+                for z in 0..layout.dim.2 {
+                    let at = Position(x, y, z);
+                    let kind = layout.cells.get(&at).copied().unwrap_or(CellKind::Air);
+                    if exact.fixed_cells.contains_key(&at) {
+                        continue;
+                    }
+                    if matches!(kind, CellKind::Air | CellKind::Switch(_)) {
+                        exact.fixed_cells.insert(at, kind);
+                    } else {
+                        exact.removable_cells.insert(at, kind);
+                    }
+                }
+            }
+        }
+        self.place(&exact)
+    }
+
     /// Repeatedly removes the slice whose repair succeeds, emptiest first,
     /// widening the repair window when stuck, until no single-slice removal
     /// can be repaired within the limits. Then optionally trades blocks away,
@@ -241,6 +300,51 @@ impl ExactLocalPlacer {
                 .timing()
                 .map(|timing| timing.outputs.into_iter().collect())
                 .unwrap_or_default();
+        }
+        if config.minimize_blocks && !expired() {
+            let mut exact = self.window_config(&layout, 1, (0, layout.dim.1), None, config)?;
+            if let Some(limit) = config.time_limit {
+                exact.time_limit = Some(
+                    config
+                        .attempt_time_limit
+                        .min(limit.saturating_sub(started.elapsed())),
+                );
+            }
+            let attempt_started = Instant::now();
+            report.attempts += 1;
+            match self.minimize_existing(&layout, &exact) {
+                Ok((ExactOutcome::Placed(placement), stats)) => {
+                    let improved = placement.block_count < layout.block_count();
+                    let outcome = match (improved, stats.optimal) {
+                        (true, true) => "improved-optimal",
+                        (true, false) => "improved",
+                        (false, true) => "optimal",
+                        (false, false) => "placed",
+                    };
+                    record_attempt("prune", outcome, attempt_started, Some(&stats));
+                    if improved {
+                        super::progress::record_frame(
+                            config.progress.as_deref(),
+                            &self.name,
+                            "prune existing blocks",
+                            &placement,
+                        );
+                        layout = ExactLayout::from_placement(layout.dim, &placement);
+                        best = Some(*placement);
+                        report.block_reductions += 1;
+                    }
+                }
+                Ok((ExactOutcome::Infeasible, stats)) => {
+                    record_attempt("prune", "infeasible", attempt_started, Some(&stats))
+                }
+                Ok((ExactOutcome::Unknown { .. }, stats)) => {
+                    record_attempt("prune", "unknown", attempt_started, Some(&stats))
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "deletion minimization failed; retaining layout");
+                    record_attempt("prune", "error", attempt_started, None);
+                }
+            }
         }
         if config.given_outside_signals && layout.signals.is_empty() {
             self.read_signals(&mut layout, config);

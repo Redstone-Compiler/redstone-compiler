@@ -4203,6 +4203,214 @@ fn exact_falling_edge_flip_flop_fixture_samples_on_the_falling_edge() -> eyre::R
     )
 }
 
+/// Cold global solve: no fixed cells, input sites, or preplaced latch.
+/// Independently exercise the exported NBT, not the solver's assignment.
+#[test]
+fn exact_global_dff_fixture_survives_2048_single_input_changes() -> eyre::Result<()> {
+    check_global_dff_stress("dff-global-2x7x4")
+}
+
+fn check_global_dff_stress(stem: &str) -> eyre::Result<()> {
+    let mut clk = false;
+    let mut d = false;
+    let mut q = false;
+    let mut rng = 0x7284_9123_u64;
+    let mut steps = Vec::new();
+    for _ in 0..2048 {
+        rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let input = if rng >> 63 == 0 {
+            d = !d;
+            ("d", d)
+        } else {
+            clk = !clk;
+            if !clk {
+                q = d;
+            }
+            ("clk", clk)
+        };
+        steps.push((vec![input], q));
+    }
+    let borrowed: Vec<_> = steps
+        .iter()
+        .map(|(inputs, q)| (inputs.as_slice(), *q))
+        .collect();
+    run_latch_fixture(stem, &borrowed)
+}
+
+/// Recheck the result against the original model, without the search-only
+/// six-gate/fanin rules. Fixing here validates a found result; it is not discovery.
+#[test]
+fn exact_global_dff_fixture_satisfies_original_model() -> eyre::Result<()> {
+    check_global_dff_model("dff-global-2x7x4", 45)
+}
+
+fn check_global_dff_model(stem: &str, expected_blocks: usize) -> eyre::Result<()> {
+    let document: crate::physical_cell::PhysicalCellDocument =
+        std::fs::read_to_string(format!("test/{stem}.rcell"))?.parse()?;
+    let build = document.build()?;
+    let placer =
+        ExactLocalPlacer::from_netlist(NorNetlist::from_text(sequential_netlist("dff-neg")?)?);
+    let mut config = ExactPlacerConfig::new(document.size);
+    config.rank_levels = 8;
+    config.stage_levels = 8;
+    config.box_symmetry = None;
+    config.time_limit = Some(Duration::from_secs(20));
+    for x in 0..document.size.0 {
+        for y in 0..document.size.1 {
+            for z in 0..document.size.2 {
+                let at = Position(x, y, z);
+                config.fixed_cells.insert(at, manual_kind(&build.world[at]));
+            }
+        }
+    }
+    for input in &document.inputs {
+        config = config.with_input_site(
+            input.name.clone(),
+            input.position,
+            build.world[input.position].direction,
+        );
+    }
+    for output in &document.outputs {
+        config
+            .output_sites
+            .insert(output.name.clone(), vec![output.position]);
+    }
+    let (outcome, _) = placer.place(&config)?;
+    let ExactOutcome::Placed(placement) = outcome else {
+        panic!("{outcome:?}")
+    };
+    assert_eq!(placement.block_count, expected_blocks);
+    Ok(())
+}
+
+#[test]
+#[ignore = "diagnose the viewer repeater at NBT (1,1,0), preserving the original fixture"]
+fn diagnose_global_dff_repeater_removal() -> eyre::Result<()> {
+    probe_global_dff_repeaters(false)
+}
+
+#[test]
+#[ignore = "remove NBT (2,3,0) in addition to the already removed (1,1,0)"]
+fn diagnose_global_dff_second_repeater_removal() -> eyre::Result<()> {
+    probe_global_dff_repeaters(true)
+}
+
+#[test]
+fn minimize_global_dff_automatically() -> eyre::Result<()> {
+    let document: crate::physical_cell::PhysicalCellDocument =
+        std::fs::read_to_string("test/dff-global-2x7x4.rcell")?.parse()?;
+    let layout = ExactLayout::from_rcell(&document)?;
+    let placer =
+        ExactLocalPlacer::from_netlist(NorNetlist::from_text(sequential_netlist("dff-neg")?)?);
+    let mut config = ExactPlacerConfig::new(layout.dim);
+    config.rank_levels = 8;
+    config.stage_levels = 8;
+    config.workers = 4;
+    config.max_refinements = 2000;
+    config.time_limit = Some(Duration::from_secs(120));
+    let start = Instant::now();
+    let (outcome, stats) = placer.minimize_existing(&layout, &config)?;
+    let elapsed = start.elapsed();
+    let ExactOutcome::Placed(placement) = outcome else {
+        panic!("{outcome:?}")
+    };
+    assert!(
+        placement.block_count <= 43,
+        "must recover at least the known deletions automatically"
+    );
+    for (at, kind) in &placement.cells {
+        assert_eq!(
+            layout.cells.get(at),
+            Some(kind),
+            "must only remove, never move or replace"
+        );
+    }
+    // Disable geometric/window rewrites to isolate the default compaction prepass.
+    let compact_config = super::compact::CompactionConfig {
+        axes: vec![],
+        reduction_axes: vec![],
+        repeat_rounds: false,
+        rank_levels: 8,
+        stage_levels: 8,
+        workers: 4,
+        max_refinements: 2000,
+        ..Default::default()
+    };
+    let (compacted, _, report) = placer.compact(layout.clone(), &compact_config)?;
+    assert_eq!(compacted.block_count(), placement.block_count);
+    assert!(report
+        .attempt_times
+        .contains_key(&("prune", "improved-optimal")));
+    let minimized_layout = ExactLayout::from_placement(layout.dim, &placement);
+    assert_eq!(minimized_layout.inputs, layout.inputs);
+    assert_eq!(minimized_layout.outputs, layout.outputs);
+    let out = std::path::Path::new("target/dff-automatic");
+    std::fs::create_dir_all(out)?;
+    std::fs::write(out.join("optimized.rcell"), placement.rcell.to_string())?;
+    crate::nbt::NBTRoot::from(&placement.placed.world).save(out.join("optimized.nbt"));
+    std::fs::write(
+        out.join("optimized.outputs.json"),
+        serde_json::to_vec_pretty(&placement.rcell.interface_json())?,
+    )?;
+    check_global_dff_stress("../target/dff-automatic/optimized")?;
+    check_global_dff_model("../target/dff-automatic/optimized", placement.block_count)?;
+    std::fs::write(
+        out.join("result.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "before":layout.block_count(),"after":placement.block_count,"optimal_deletion_subset":stats.optimal,
+            "seconds":elapsed.as_secs_f64(),"improvements":stats.improvements,"refinements":stats.refinements,
+            "stress_transitions":2048,"original_model_verified":true
+        }))?,
+    )?;
+    println!("AUTO DFF {} -> {} blocks, subset_optimal={} elapsed={elapsed:?} improvements={} refinements={}",
+        layout.block_count(),placement.block_count,stats.optimal,stats.improvements,stats.refinements);
+    assert!(
+        stats.optimal,
+        "incomplete optimization must not be presented as minimal"
+    );
+    Ok(())
+}
+
+fn probe_global_dff_repeaters(second: bool) -> eyre::Result<()> {
+    let directory = if second {
+        "target/dff-second-repeater-probe"
+    } else {
+        "target/dff-repeater-probe"
+    };
+    let out = std::path::Path::new(directory);
+    std::fs::create_dir_all(out)?;
+    let source = std::fs::read_to_string("test/dff-global-2x7x4.rcell")?;
+    assert_eq!(source.matches("z=1 \"#T##U..\"").count(), 1);
+    let mut source = source.replace("z=1 \"#T##U..\"", "z=1 \"#.##U..\"");
+    if second {
+        assert_eq!(source.matches("z=3 \".rT.#VW\"").count(), 1);
+        source = source.replace("z=3 \".rT.#VW\"", "z=3 \".r..#VW\"");
+    }
+    std::fs::write(out.join("removed.rcell"), source)?;
+    let original =
+        crate::nbt::NBTRoot::from_nbt_bytes(&std::fs::read("test/dff-global-2x7x4.nbt")?)?
+            .to_world();
+    let mut world = crate::world::World3D::new(original.size);
+    for (position, block) in original.blocks {
+        world[position] = block;
+    }
+    let at = Position(0, 1, 1); // viewer NBT uses (y,z,x)
+    assert!(world[at].kind.is_repeater());
+    world[at] = crate::world::block::Block::default();
+    if second {
+        let at = Position(0, 2, 3); // NBT (2,3,0)
+        assert!(world[at].kind.is_repeater());
+        world[at] = crate::world::block::Block::default();
+    }
+    crate::nbt::NBTRoot::from(&world).save(out.join("removed.nbt"));
+    let stem = format!("../{directory}/removed");
+    check_global_dff_stress(&stem)?;
+    println!("Removed repeater: 2048 input transitions passed");
+    check_global_dff_model(&stem, if second { 43 } else { 44 })?;
+    println!("Removed repeater: original static model and full sequential verifier passed");
+    Ok(())
+}
+
 /// Places a sequential cell in the smallest box of `SEQ_DIMS` that holds
 /// it (comma-separated `XxYxZ`, `2x4x3,2x4x4,2x5x4,2x6x4,2x6x5`), with the
 /// fewest blocks (`SEQ_OPTIMIZE=0` takes the first layout):
@@ -4271,6 +4479,9 @@ fn explore_sequential_cells() -> eyre::Result<()> {
             });
         }
         config.seed = env_usize("SEQ_SEED", 1) as u32;
+        config.rank_levels = env_usize("SEQ_RANK", config.rank_levels);
+        config.stage_levels = env_usize("SEQ_STAGE", config.stage_levels);
+        config.model_params = model_params_from_env("SEQ_MODEL_PARAMS");
         // Latch layouts that are consistent in every settled case can still
         // fail a transition, so the simulator rejects many more of them.
         config.max_refinements = env_usize("SEQ_REFINEMENTS", 2000);
@@ -4340,13 +4551,38 @@ fn explore_sequential_cells() -> eyre::Result<()> {
                 config = config.with_input_site(rename(&input.name), at(input.position), attach);
             }
         }
+        println!("SEQ search rank={} stage={} fixed={} inputs_fixed={} optimize={} seed={} workers={} model_params={:?}",
+            config.rank_levels, config.stage_levels, config.fixed_cells.len(), config.input_sites.len(),
+            config.optimize, config.seed, config.workers, config.model_params);
         let started = Instant::now();
         let (outcome, stats) = placer.place(&config)?;
         let seconds = started.elapsed().as_secs_f64();
+        println!("SEQ stats vars={} clauses={} encode={:?} solve={:?} loops={} feedback={} refinements={}",
+            stats.variables, stats.clauses, stats.encode_time, stats.solve_time,
+            stats.loop_formulas, stats.feedback_cuts, stats.refinements);
         match outcome {
-            ExactOutcome::Placed(placement) => {
+            ExactOutcome::Placed(mut placement) => {
+                if std::env::var("SEQ_PRUNE").as_deref() != Ok("0") {
+                    let layout = ExactLayout::from_placement(config.dim, &placement);
+                    let mut prune_config = config.clone();
+                    prune_config.time_limit = Some(Duration::from_secs(
+                        std::env::var("SEQ_PRUNE_SECONDS").ok()
+                            .and_then(|s| s.parse().ok()).unwrap_or(30),
+                    ));
+                    let (pruned, prune_stats) = placer.minimize_existing(&layout, &prune_config)?;
+                    match pruned {
+                        ExactOutcome::Placed(candidate) => {
+                            println!("SEQ automatic prune {} -> {} blocks, subset_optimal={}",
+                                placement.block_count, candidate.block_count, prune_stats.optimal);
+                            if candidate.block_count <= placement.block_count {
+                                placement = candidate;
+                            }
+                        }
+                        other => println!("SEQ automatic prune {other:?}; retaining verified discovery"),
+                    }
+                }
                 println!(
-                    "SEQ placed {dim}: {} blocks, optimal={} refinements={} ({seconds:.1}s)\n{}",
+                    "SEQ placed {dim}: {} blocks, discovery_optimal={} discovery_refinements={} (discovery {seconds:.1}s)\n{}",
                     placement.block_count, stats.optimal, stats.refinements, placement.rcell
                 );
                 if let Ok(prefix) = std::env::var("SEQ_WRITE") {

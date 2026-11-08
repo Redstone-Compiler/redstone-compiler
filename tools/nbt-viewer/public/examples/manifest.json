@@ -405,5 +405,37 @@
     "file": "xor.nbt",
     "path": "examples/xor.nbt",
     "size": 581
+  },
+  {
+    "kind": "nbt",
+    "name": "dff-global-2x7x4.nbt",
+    "file": "dff-global-2x7x4.nbt",
+    "path": "examples/dff-global-2x7x4.nbt",
+    "size": 536,
+    "outputsPath": "examples/dff-global-2x7x4.outputs.json"
+  },
+  {
+    "kind": "nbt",
+    "name": "dff-global-44blocks.nbt",
+    "file": "dff-global-44blocks.nbt",
+    "path": "examples/dff-global-44blocks.nbt",
+    "size": 510,
+    "outputsPath": "examples/dff-global-44blocks.outputs.json"
+  },
+  {
+    "kind": "nbt",
+    "name": "dff-global-43blocks.nbt",
+    "file": "dff-global-43blocks.nbt",
+    "path": "examples/dff-global-43blocks.nbt",
+    "size": 507,
+    "outputsPath": "examples/dff-global-43blocks.outputs.json"
+  },
+  {
+    "kind": "nbt",
+    "name": "dff-global-optimized.nbt",
+    "file": "dff-global-optimized.nbt",
+    "path": "examples/dff-global-optimized.nbt",
+    "size": 500,
+    "outputsPath": "examples/dff-global-optimized.outputs.json"
   }
 ]

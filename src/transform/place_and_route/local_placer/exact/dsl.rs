@@ -983,6 +983,25 @@ impl Encoding {
                 bail!("fixed cell {position:?} cannot hold {kind:?}");
             }
         }
+        for (&position, &kind) in &config.removable_cells {
+            ensure!(
+                config.dim.bound_on(position),
+                "removable cell {position:?} is outside the box"
+            );
+            let cell = geometry.index(position);
+            let air = encoding.air[cell];
+            let keep = encoding.kind_lit(cell, kind).unwrap_or(-1);
+            program.add_clause(&[air, keep], "existing cell: keep its kind or remove it");
+            // Explicit exclusions expose the restriction to SAT propagation.
+            for (_, lit) in program
+                .choice_options("Kind", &[cell_value(&geometry, cell)])
+                .expect("every cell has Kind options")
+            {
+                if lit != air && lit != keep {
+                    program.add_clause(&[-lit], "existing cell: no replacement kind");
+                }
+            }
+        }
         for layout in &config.blocked {
             let mut clause = Vec::new();
             let mut excluded = false;

@@ -1,5 +1,12 @@
 # Sequential cells with the exact placer (2026-10-10)
 
+**2026-11-08 update:** a cold whole-DFF solve now succeeds without a fixed
+master latch: 2x7x4, 45 blocks plus two switches, about 163.5 seconds.
+It explicitly constrains the six-gate topology while leaving all physical
+positions and wiring free. See [global_dff_search.md](global_dff_search.md)
+for the preserved model, artifacts, and independent NBT verification.
+The timeout results below are the earlier experiments, not a current impossibility claim.
+
 The exact placer builds compact combinational cells (the 2x8x8 full adder,
 `exact_local_placer.md`). This adds latches and flip-flops: a netlist with
 state, a model that can place a latch's loop, and a simulator check for

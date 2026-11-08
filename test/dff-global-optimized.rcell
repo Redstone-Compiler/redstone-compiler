@@ -1,0 +1,29 @@
+rcell 1;
+cell "exact-local-cell" size [2, 7, 4] {
+  start settled;
+  glyph "P" = torch on x-;
+  glyph "T" = torch on y-;
+  glyph "U" = repeater toward y+ delay 1;
+  glyph "V" = torch on x+;
+  glyph "W" = repeater toward y- delay 1;
+  glyph "X" = torch on z-;
+  glyph "Y" = torch on y+;
+
+  input "clk" at [0, 3, 3] on y+;
+  input "d" at [0, 6, 1] on x+;
+  output "q" at [1, 1, 3];
+
+  plane yz at x=0 {
+    z=3 ".r..#UV";
+    z=2 "r#.r.#.";
+    z=1 "#..#T..";
+  }
+
+  plane yz at x=1 {
+    z=3 ".Y#UPW#";
+    z=2 "..X#.#X";
+    z=1 "rr#rrW#";
+    z=0 "##.###.";
+  }
+
+}
