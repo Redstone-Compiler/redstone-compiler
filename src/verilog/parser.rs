@@ -186,7 +186,7 @@ impl Parser {
         })
     }
 
-    fn parse_named_connections(&mut self) -> eyre::Result<Vec<(String, String)>> {
+    fn parse_named_connections(&mut self) -> eyre::Result<Vec<(String, Expr)>> {
         let mut connections = vec![self.parse_named_connection()?];
         while self.consume(&Token::Comma) {
             connections.push(self.parse_named_connection()?);
@@ -194,20 +194,32 @@ impl Parser {
         Ok(connections)
     }
 
-    fn parse_named_connection(&mut self) -> eyre::Result<(String, String)> {
+    fn parse_named_connection(&mut self) -> eyre::Result<(String, Expr)> {
         if !self.consume(&Token::Dot) {
             eyre::bail!("unsupported Verilog construct: positional instance ports");
         }
         let port = self.expect_ident()?;
         self.expect(Token::LParen)?;
-        let signal = self.parse_signal_name()?;
+        let signal = self.parse_expr()?;
         self.expect(Token::RParen)?;
 
         Ok((port, signal))
     }
 
     fn parse_expr(&mut self) -> eyre::Result<Expr> {
-        self.parse_or()
+        let select = self.parse_or()?;
+        if self.consume(&Token::Question) {
+            let when_true = self.parse_expr()?;
+            self.expect(Token::Colon)?;
+            let when_false = self.parse_expr()?;
+            Ok(Expr::Mux {
+                select: Box::new(select),
+                when_true: Box::new(when_true),
+                when_false: Box::new(when_false),
+            })
+        } else {
+            Ok(select)
+        }
     }
 
     fn parse_or(&mut self) -> eyre::Result<Expr> {
@@ -237,9 +249,9 @@ impl Parser {
     }
 
     fn parse_and(&mut self) -> eyre::Result<Expr> {
-        let mut expr = self.parse_add()?;
+        let mut expr = self.parse_equal()?;
         while self.consume(&Token::And) {
-            let rhs = self.parse_add()?;
+            let rhs = self.parse_equal()?;
             expr = Expr::Binary {
                 op: BinaryOp::And,
                 left: Box::new(expr),
@@ -249,12 +261,45 @@ impl Parser {
         Ok(expr)
     }
 
+    fn parse_equal(&mut self) -> eyre::Result<Expr> {
+        let mut expr = self.parse_compare()?;
+        while self.consume(&Token::Equal) {
+            let right = self.parse_compare()?;
+            expr = Expr::Binary {
+                op: BinaryOp::Equal,
+                left: Box::new(expr),
+                right: Box::new(right),
+            };
+        }
+        Ok(expr)
+    }
+
+    fn parse_compare(&mut self) -> eyre::Result<Expr> {
+        let mut expr = self.parse_add()?;
+        while self.consume(&Token::GreaterEqual) {
+            let right = self.parse_add()?;
+            expr = Expr::Binary {
+                op: BinaryOp::GreaterEqual,
+                left: Box::new(expr),
+                right: Box::new(right),
+            };
+        }
+        Ok(expr)
+    }
+
     fn parse_add(&mut self) -> eyre::Result<Expr> {
         let mut expr = self.parse_unary()?;
-        while self.consume(&Token::Plus) {
+        loop {
+            let op = if self.consume(&Token::Plus) {
+                BinaryOp::Add
+            } else if self.consume(&Token::Minus) {
+                BinaryOp::Sub
+            } else {
+                break;
+            };
             let rhs = self.parse_unary()?;
             expr = Expr::Binary {
-                op: BinaryOp::Add,
+                op,
                 left: Box::new(expr),
                 right: Box::new(rhs),
             };
@@ -273,10 +318,33 @@ impl Parser {
     fn parse_primary(&mut self) -> eyre::Result<Expr> {
         match self.next() {
             Some(Token::Ident(name)) => {
-                let name = self.finish_signal_name(name)?;
-                Ok(Expr::Ident(name))
+                let mut value = Expr::Ident(name);
+                if self.consume(&Token::LBracket) {
+                    let msb = self.expect_number()?;
+                    let lsb = if self.consume(&Token::Colon) {
+                        self.expect_number()?
+                    } else {
+                        msb
+                    };
+                    self.expect(Token::RBracket)?;
+                    value = Expr::Select {
+                        value: Box::new(value),
+                        msb,
+                        lsb,
+                    };
+                }
+                Ok(value)
             }
             Some(Token::Number(value)) => Ok(Expr::Number(value)),
+            Some(Token::SizedNumber { value, width }) => Ok(Expr::SizedNumber { value, width }),
+            Some(Token::LBrace) => {
+                let mut parts = vec![self.parse_expr()?];
+                while self.consume(&Token::Comma) {
+                    parts.push(self.parse_expr()?);
+                }
+                self.expect(Token::RBrace)?;
+                Ok(Expr::Concat(parts))
+            }
             Some(Token::LParen) => {
                 let expr = self.parse_expr()?;
                 self.expect(Token::RParen)?;
@@ -297,16 +365,8 @@ impl Parser {
 
     fn parse_signal_name(&mut self) -> eyre::Result<String> {
         let name = self.expect_ident()?;
-        self.finish_signal_name(name)
-    }
-
-    fn finish_signal_name(&mut self, name: String) -> eyre::Result<String> {
-        if self.consume(&Token::LBracket) {
-            let index = self.expect_number()?;
-            self.expect(Token::RBracket)?;
-            return Ok(format!("{name}_{index}"));
-        }
-
+        eyre::ensure!(self.peek() != Some(&Token::LBracket),
+            "static selects are currently supported only in expressions, not procedural destinations, conditions, or clocks");
         Ok(name)
     }
 
@@ -372,6 +432,47 @@ impl Parser {
 mod tests {
     use super::parse_module;
     use crate::verilog::ast::{AlwaysSensitivity, AlwaysStmt, BinaryOp, Expr, PortDirection};
+
+    #[test]
+    fn rejects_procedural_select_instead_of_aliasing_another_signal() {
+        assert!(parse_module("module m(clk,a,a_0,q); input clk; input [1:0] a; input a_0; output reg q; always @(posedge clk) begin if (a[0]) begin q <= a_0; end end endmodule").is_err());
+    }
+
+    #[test]
+    fn named_input_port_bindings_preserve_expressions() -> eyre::Result<()> {
+        let module = parse_module("module m(a,y); input [7:0] a; output [3:0] y; child u(.x({1'b0,a[6:4]}), .y(y)); endmodule")?;
+        assert!(
+            matches!(&module.instances[0].connections[0].1, Expr::Concat(parts) if parts.len() == 2)
+        );
+        assert!(matches!(&module.instances[0].connections[1].1, Expr::Ident(name) if name == "y"));
+        Ok(())
+    }
+
+    #[test]
+    fn parses_right_associative_mux_and_real_bus_select() -> eyre::Result<()> {
+        let module = parse_module("module m(a,y); input [3:0] a; output [6:0] y; assign y = a == 4'd0 ? 7'h3f : a[0] ? 7'h06 : 7'h00; endmodule")?;
+        let Expr::Mux {
+            select, when_false, ..
+        } = &module.assignments[0].expr
+        else {
+            panic!("expected mux")
+        };
+        assert!(matches!(
+            select.as_ref(),
+            Expr::Binary {
+                op: BinaryOp::Equal,
+                ..
+            }
+        ));
+        let Expr::Mux { select, .. } = when_false.as_ref() else {
+            panic!("expected right associative mux")
+        };
+        assert!(matches!(
+            select.as_ref(),
+            Expr::Select { msb: 0, lsb: 0, .. }
+        ));
+        Ok(())
+    }
 
     #[test]
     fn parses_half_adder_module() -> eyre::Result<()> {

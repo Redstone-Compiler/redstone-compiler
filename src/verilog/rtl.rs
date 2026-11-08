@@ -79,9 +79,22 @@ pub enum RtlAssignKind {
 pub enum RtlExpr {
     Signal(RtlSignalRef),
     Const {
-        value: usize,
+        value: u128,
         width: usize,
     },
+    Select {
+        value: Box<RtlExpr>,
+        msb: usize,
+        lsb: usize,
+    },
+    Concat(Vec<RtlExpr>),
+    Resize {
+        value: Box<RtlExpr>,
+        width: usize,
+    },
+    Equal(Box<RtlExpr>, Box<RtlExpr>),
+    GreaterEqual(Box<RtlExpr>, Box<RtlExpr>),
+    Sub(Box<RtlExpr>, Box<RtlExpr>),
     Not(Box<RtlExpr>),
     Add(Box<RtlExpr>, Box<RtlExpr>),
     Mux {
@@ -105,6 +118,26 @@ pub struct RtlModule {
 }
 
 impl RtlModule {
+    /// Elaborate an unsigned input-port expression in the declared child-port width.
+    /// Output bindings must be checked separately and restricted to named signals.
+    pub fn elaborate_expr(&self, expr: &AstExpr, expected_width: usize) -> eyre::Result<RtlExpr> {
+        eyre::ensure!(
+            (1..=128).contains(&expected_width),
+            "port width must be in 1..=128"
+        );
+        let value = elaborate(
+            expr,
+            Some(expected_width),
+            &self.signal_index,
+            &self.signals,
+        )?;
+        resize(value, expected_width, &self.signals)
+    }
+
+    pub fn expr_width(&self, expr: &RtlExpr) -> eyre::Result<usize> {
+        rtl_expr_width(expr, &self.signals)
+    }
+
     pub fn signal_ref(&self, name: &str) -> eyre::Result<RtlSignalRef> {
         self.signal_index
             .get(name)
@@ -138,11 +171,15 @@ pub fn lower_rtl_module(module: &VerilogModule) -> eyre::Result<RtlModule> {
 
     for declaration in &module.declarations {
         let kind = rtl_signal_kind(declaration.direction)?;
-        let width = declaration
-            .range
-            .as_ref()
-            .map(|range| range.msb.abs_diff(range.lsb) + 1)
-            .unwrap_or(1);
+        let width = if let Some(range) = &declaration.range {
+            eyre::ensure!(
+                range.lsb == 0 && range.msb < 128,
+                "only unsigned packed [N-1:0] vectors of width 1..=128 are supported"
+            );
+            range.msb + 1
+        } else {
+            1
+        };
         for name in &declaration.names {
             if signal_index.contains_key(name) {
                 eyre::bail!("duplicate RTL signal `{name}` in module `{}`", module.name);
@@ -175,7 +212,7 @@ pub fn lower_rtl_module(module: &VerilogModule) -> eyre::Result<RtlModule> {
     let continuous_assigns = module
         .assignments
         .iter()
-        .map(|assignment| lower_continuous_assign(assignment, &signal_index))
+        .map(|assignment| lower_continuous_assign(assignment, &signal_index, &signals))
         .collect::<eyre::Result<Vec<_>>>()?;
 
     let processes = module
@@ -190,7 +227,7 @@ pub fn lower_rtl_module(module: &VerilogModule) -> eyre::Result<RtlModule> {
             };
             Ok(RtlProcess {
                 sensitivity,
-                statements: vec![lower_always_stmt(&always.body, &signal_index)?],
+                statements: vec![lower_always_stmt(&always.body, &signal_index, &signals)?],
             })
         })
         .collect::<eyre::Result<Vec<_>>>()?;
@@ -218,16 +255,23 @@ fn rtl_signal_kind(direction: Option<PortDirection>) -> eyre::Result<RtlSignalKi
 fn lower_continuous_assign(
     assignment: &AstAssignment,
     signal_index: &HashMap<String, RtlSignalId>,
+    signals: &[RtlSignal],
 ) -> eyre::Result<RtlAssign> {
     Ok(RtlAssign {
         output: signal_ref(&assignment.output, signal_index)?,
-        expr: lower_expr(&assignment.expr, signal_index)?,
+        expr: lower_assignment_expr(
+            &assignment.expr,
+            signal_ref(&assignment.output, signal_index)?,
+            signal_index,
+            signals,
+        )?,
     })
 }
 
 fn lower_always_stmt(
     stmt: &AstAlwaysStmt,
     signal_index: &HashMap<String, RtlSignalId>,
+    signals: &[RtlSignal],
 ) -> eyre::Result<RtlStmt> {
     match stmt {
         AstAlwaysStmt::If {
@@ -235,13 +279,18 @@ fn lower_always_stmt(
             then_branch,
         } => Ok(RtlStmt::If {
             condition: signal_expr(condition, signal_index)?,
-            then_branch: vec![lower_always_stmt(then_branch, signal_index)?],
+            then_branch: vec![lower_always_stmt(then_branch, signal_index, signals)?],
             else_branch: Vec::new(),
         }),
         AstAlwaysStmt::NonBlockingAssign { output, data } => Ok(RtlStmt::Assign {
             kind: RtlAssignKind::NonBlocking,
             lhs: signal_ref(output, signal_index)?,
-            rhs: lower_expr(data, signal_index)?,
+            rhs: lower_assignment_expr(
+                data,
+                signal_ref(output, signal_index)?,
+                signal_index,
+                signals,
+            )?,
         }),
     }
 }
@@ -253,7 +302,7 @@ fn lower_expr(
     match expr {
         AstExpr::Ident(name) => signal_expr(name, signal_index),
         AstExpr::Number(value) => Ok(RtlExpr::Const {
-            value: *value,
+            value: *value as u128,
             width: constant_width(*value),
         }),
         AstExpr::Not(expr) => Ok(RtlExpr::Not(Box::new(lower_expr(expr, signal_index)?))),
@@ -261,13 +310,240 @@ fn lower_expr(
             let left = Box::new(lower_expr(left, signal_index)?);
             let right = Box::new(lower_expr(right, signal_index)?);
             Ok(match op {
+                crate::verilog::ast::BinaryOp::Equal => RtlExpr::Equal(left, right),
+                crate::verilog::ast::BinaryOp::GreaterEqual => RtlExpr::GreaterEqual(left, right),
+                crate::verilog::ast::BinaryOp::Sub => RtlExpr::Sub(left, right),
                 crate::verilog::ast::BinaryOp::Add => RtlExpr::Add(left, right),
                 crate::verilog::ast::BinaryOp::And => RtlExpr::And(left, right),
                 crate::verilog::ast::BinaryOp::Xor => RtlExpr::Xor(left, right),
                 crate::verilog::ast::BinaryOp::Or => RtlExpr::Or(left, right),
             })
         }
+        _ => eyre::bail!("extended expression requires typed elaboration"),
     }
+}
+
+// Legacy scalar/counter syntax retains its historical unsized-number behavior.
+// New packed-expression syntax requires explicitly sized constants.
+fn uses_typed_syntax(expr: &AstExpr) -> bool {
+    match expr {
+        AstExpr::Ident(_) | AstExpr::Number(_) => false,
+        AstExpr::Not(value) => uses_typed_syntax(value),
+        AstExpr::Binary { op, left, right } => {
+            matches!(
+                op,
+                crate::verilog::ast::BinaryOp::Equal
+                    | crate::verilog::ast::BinaryOp::GreaterEqual
+                    | crate::verilog::ast::BinaryOp::Sub
+            ) || uses_typed_syntax(left)
+                || uses_typed_syntax(right)
+        }
+        _ => true,
+    }
+}
+
+fn has_unsized_literal(expr: &AstExpr) -> bool {
+    match expr {
+        AstExpr::Number(_) => true,
+        AstExpr::Ident(_) | AstExpr::SizedNumber { .. } => false,
+        AstExpr::Not(value) | AstExpr::Select { value, .. } => has_unsized_literal(value),
+        AstExpr::Binary { left, right, .. } => {
+            has_unsized_literal(left) || has_unsized_literal(right)
+        }
+        AstExpr::Concat(parts) => parts.iter().any(has_unsized_literal),
+        AstExpr::Mux {
+            select,
+            when_true,
+            when_false,
+        } => {
+            has_unsized_literal(select)
+                || has_unsized_literal(when_true)
+                || has_unsized_literal(when_false)
+        }
+    }
+}
+
+fn lower_assignment_expr(
+    expr: &AstExpr,
+    output: RtlSignalRef,
+    index: &HashMap<String, RtlSignalId>,
+    signals: &[RtlSignal],
+) -> eyre::Result<RtlExpr> {
+    if has_unsized_literal(expr) && !uses_typed_syntax(expr) {
+        return lower_expr(expr, index);
+    }
+    let target = signals[output.signal.0].width;
+    let value = elaborate(expr, Some(target), index, signals)?;
+    resize(value, target, signals)
+}
+
+fn rtl_expr_width(expr: &RtlExpr, signals: &[RtlSignal]) -> eyre::Result<usize> {
+    Ok(match expr {
+        RtlExpr::Signal(signal) => {
+            signals
+                .get(signal.signal.0)
+                .ok_or_else(|| eyre::eyre!("unknown RTL signal"))?
+                .width
+        }
+        RtlExpr::Const { width, .. } | RtlExpr::Resize { width, .. } => *width,
+        RtlExpr::Select { msb, lsb, .. } => msb - lsb + 1,
+        RtlExpr::Concat(parts) => parts
+            .iter()
+            .map(|p| rtl_expr_width(p, signals))
+            .collect::<eyre::Result<Vec<_>>>()?
+            .iter()
+            .sum(),
+        RtlExpr::Equal(..) | RtlExpr::GreaterEqual(..) => 1,
+        RtlExpr::Not(value) => rtl_expr_width(value, signals)?,
+        RtlExpr::Sub(a, b)
+        | RtlExpr::Add(a, b)
+        | RtlExpr::And(a, b)
+        | RtlExpr::Or(a, b)
+        | RtlExpr::Xor(a, b) => rtl_expr_width(a, signals)?.max(rtl_expr_width(b, signals)?),
+        RtlExpr::Mux {
+            when_true,
+            when_false,
+            ..
+        } => rtl_expr_width(when_true, signals)?.max(rtl_expr_width(when_false, signals)?),
+    })
+}
+
+fn resize(value: RtlExpr, width: usize, signals: &[RtlSignal]) -> eyre::Result<RtlExpr> {
+    if rtl_expr_width(&value, signals)? == width {
+        Ok(value)
+    } else {
+        Ok(RtlExpr::Resize {
+            value: Box::new(value),
+            width,
+        })
+    }
+}
+
+fn natural_width(
+    expr: &AstExpr,
+    index: &HashMap<String, RtlSignalId>,
+    signals: &[RtlSignal],
+) -> eyre::Result<usize> {
+    let width = match expr {
+        AstExpr::Ident(name) => signals[signal_ref(name, index)?.signal.0].width,
+        AstExpr::Number(_) => eyre::bail!("unsized constants are unsupported in packed expressions; use an explicitly sized literal"),
+        AstExpr::SizedNumber { width, .. } => *width,
+        AstExpr::Select { value, msb, lsb } => {
+            let width = natural_width(value, index, signals)?;
+            eyre::ensure!(lsb <= msb && *msb < width, "static select [{msb}:{lsb}] is outside width {width} or ascending");
+            msb - lsb + 1
+        }
+        AstExpr::Concat(parts) => {
+            eyre::ensure!(!parts.is_empty(), "empty concatenation");
+            parts.iter().map(|p| natural_width(p, index, signals)).collect::<eyre::Result<Vec<_>>>()?.iter().sum()
+        }
+        AstExpr::Not(value) => natural_width(value, index, signals)?,
+        AstExpr::Binary { op, left, right } => {
+            let width = natural_width(left, index, signals)?.max(natural_width(right, index, signals)?);
+            if matches!(op, crate::verilog::ast::BinaryOp::Equal | crate::verilog::ast::BinaryOp::GreaterEqual) { 1 } else { width }
+        }
+        AstExpr::Mux { select, when_true, when_false } => {
+            natural_width(select, index, signals)?;
+            natural_width(when_true, index, signals)?.max(natural_width(when_false, index, signals)?)
+        }
+    };
+    eyre::ensure!(
+        (1..=128).contains(&width),
+        "packed expression width must be in 1..=128, got {width}"
+    );
+    Ok(width)
+}
+
+fn elaborate(
+    expr: &AstExpr,
+    context: Option<usize>,
+    index: &HashMap<String, RtlSignalId>,
+    signals: &[RtlSignal],
+) -> eyre::Result<RtlExpr> {
+    use crate::verilog::ast::BinaryOp;
+    let natural = natural_width(expr, index, signals)?;
+    let width = natural.max(context.unwrap_or(0));
+    let value = match expr {
+        AstExpr::Ident(name) => signal_expr(name, index)?,
+        AstExpr::SizedNumber { value, width } => RtlExpr::Const {
+            value: *value,
+            width: *width,
+        },
+        AstExpr::Number(_) => unreachable!("natural_width rejects unsized literals"),
+        AstExpr::Select { value, msb, lsb } => RtlExpr::Select {
+            value: Box::new(elaborate(value, None, index, signals)?),
+            msb: *msb,
+            lsb: *lsb,
+        },
+        AstExpr::Concat(parts) => RtlExpr::Concat(
+            parts
+                .iter()
+                .map(|p| elaborate(p, None, index, signals))
+                .collect::<eyre::Result<_>>()?,
+        ),
+        AstExpr::Not(value) => RtlExpr::Not(Box::new(resize(
+            elaborate(value, Some(width), index, signals)?,
+            width,
+            signals,
+        )?)),
+        AstExpr::Binary { op, left, right } => {
+            let operand_width = if matches!(op, BinaryOp::Equal | BinaryOp::GreaterEqual) {
+                natural_width(left, index, signals)?.max(natural_width(right, index, signals)?)
+            } else {
+                width
+            };
+            let left = Box::new(resize(
+                elaborate(left, Some(operand_width), index, signals)?,
+                operand_width,
+                signals,
+            )?);
+            let right = Box::new(resize(
+                elaborate(right, Some(operand_width), index, signals)?,
+                operand_width,
+                signals,
+            )?);
+            match op {
+                BinaryOp::Add => RtlExpr::Add(left, right),
+                BinaryOp::And => RtlExpr::And(left, right),
+                BinaryOp::Or => RtlExpr::Or(left, right),
+                BinaryOp::Xor => RtlExpr::Xor(left, right),
+                BinaryOp::Equal => RtlExpr::Equal(left, right),
+                BinaryOp::GreaterEqual => RtlExpr::GreaterEqual(left, right),
+                BinaryOp::Sub => RtlExpr::Sub(left, right),
+            }
+        }
+        AstExpr::Mux {
+            select,
+            when_true,
+            when_false,
+        } => {
+            let mut select = elaborate(select, None, index, signals)?;
+            let select_width = rtl_expr_width(&select, signals)?;
+            if select_width != 1 {
+                select = RtlExpr::Not(Box::new(RtlExpr::Equal(
+                    Box::new(select),
+                    Box::new(RtlExpr::Const {
+                        value: 0,
+                        width: select_width,
+                    }),
+                )));
+            }
+            RtlExpr::Mux {
+                select: Box::new(select),
+                when_true: Box::new(resize(
+                    elaborate(when_true, Some(width), index, signals)?,
+                    width,
+                    signals,
+                )?),
+                when_false: Box::new(resize(
+                    elaborate(when_false, Some(width), index, signals)?,
+                    width,
+                    signals,
+                )?),
+            }
+        }
+    };
+    Ok(value)
 }
 
 fn constant_width(value: usize) -> usize {
@@ -293,6 +569,67 @@ fn signal_ref(
 mod tests {
     use super::*;
     use crate::verilog::parser::parse_module;
+
+    #[test]
+    fn input_port_expression_uses_child_width_context() -> eyre::Result<()> {
+        let ast = parse_module("module m(a); input [7:0] a; child u(.x(a + 8'd1)); endmodule")?;
+        let rtl = lower_rtl_module(&ast)?;
+        let expr = rtl.elaborate_expr(&ast.instances[0].connections[0].1, 9)?;
+        let RtlExpr::Add(left, right) = &expr else {
+            panic!("expected add")
+        };
+        assert_eq!(rtl.expr_width(left)?, 9);
+        assert_eq!(rtl.expr_width(right)?, 9);
+        assert_eq!(rtl.expr_width(&expr)?, 9);
+        Ok(())
+    }
+
+    #[test]
+    fn packed_add_extends_before_arithmetic_and_truncates_after() -> eyre::Result<()> {
+        let rtl = lower("module m(a,b,y,z); input [7:0] a,b; output [8:0] y; output [3:0] z; assign y = a + {1'b0,b}; assign z = a + 8'd1; endmodule")?;
+        assert_eq!(rtl.expr_width(&rtl.continuous_assigns[0].expr)?, 9);
+        let RtlExpr::Add(left, right) = &rtl.continuous_assigns[0].expr else {
+            panic!("expected add")
+        };
+        assert_eq!(rtl.expr_width(left)?, 9);
+        assert_eq!(rtl.expr_width(right)?, 9);
+        let RtlExpr::Resize { value, width: 4 } = &rtl.continuous_assigns[1].expr else {
+            panic!("expected output truncation")
+        };
+        assert_eq!(rtl.expr_width(value)?, 8);
+        Ok(())
+    }
+
+    #[test]
+    fn packed_select_concat_and_multibit_condition_have_explicit_widths() -> eyre::Result<()> {
+        let rtl = lower("module m(a,y); input [7:0] a; output [4:0] y; assign y = a ? {1'b1,a[7:4]} : 5'd0; endmodule")?;
+        let RtlExpr::Mux {
+            select,
+            when_true,
+            when_false,
+        } = &rtl.continuous_assigns[0].expr
+        else {
+            panic!("expected mux")
+        };
+        assert_eq!(rtl.expr_width(select)?, 1);
+        assert_eq!(rtl.expr_width(when_true)?, 5);
+        assert_eq!(rtl.expr_width(when_false)?, 5);
+        assert!(matches!(select.as_ref(), RtlExpr::Not(_)));
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_unsupported_packed_semantics() {
+        for source in [
+            "module m(a,y); input [0:7] a; output y; assign y = a[0]; endmodule",
+            "module m(a,y); input [7:4] a; output y; assign y = a[4]; endmodule",
+            "module m(a,y); input [7:0] a; output y; assign y = a[8]; endmodule",
+            "module m(a,y); input [7:0] a; output y; assign y = a[0:2]; endmodule",
+            "module m(a,y); input [7:0] a; output y; assign y = a == 0; endmodule",
+        ] {
+            assert!(lower(source).is_err(), "unexpectedly accepted {source}");
+        }
+    }
 
     #[test]
     fn lowers_latch_and_clocked_process_shapes() -> eyre::Result<()> {

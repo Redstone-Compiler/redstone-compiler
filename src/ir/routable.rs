@@ -338,8 +338,11 @@ impl RoutableModule {
             let endpoint = Endpoint::SelfPort {
                 port: port.name.clone(),
             };
+            // Bit selection and constant propagation can leave public input
+            // bits unused. They remain in the interface, but need no route.
+            // Every output must still have exactly one driver.
             let connected = match port.direction {
-                RoutablePortDirection::Input => driven_ports.contains(&endpoint),
+                RoutablePortDirection::Input => true,
                 RoutablePortDirection::Output => consumed_ports.contains(&endpoint),
             };
             if !connected {

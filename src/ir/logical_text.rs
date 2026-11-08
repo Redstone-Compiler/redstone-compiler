@@ -150,6 +150,10 @@ fn write_module(output: &mut fmt::Formatter<'_>, module: &LogicalModule) -> fmt:
         }
 
         match &cell.kind {
+            LogicalCellKind::Select { msb, lsb } => {
+                writeln!(output, "    msb = {msb};")?;
+                writeln!(output, "    lsb = {lsb};")?;
+            }
             LogicalCellKind::Dff { edge } | LogicalCellKind::Register { edge, .. } => {
                 writeln!(output, "    edge = {};", edge_name(*edge))?;
             }
@@ -181,11 +185,19 @@ fn cell_width(cell: &LogicalCell, net_widths: &std::collections::HashMap<&str, u
 
 fn pin_rank(kind: &LogicalCellKind, pin: &str) -> usize {
     let order: &[&str] = match kind {
-        LogicalCellKind::Buffer | LogicalCellKind::Not | LogicalCellKind::Inc => &["value"],
+        LogicalCellKind::Buffer
+        | LogicalCellKind::Not
+        | LogicalCellKind::Inc
+        | LogicalCellKind::Select { .. }
+        | LogicalCellKind::Resize { .. } => &["value"],
         LogicalCellKind::And
         | LogicalCellKind::Or
         | LogicalCellKind::Xor
-        | LogicalCellKind::Add => &["lhs", "rhs"],
+        | LogicalCellKind::Add
+        | LogicalCellKind::Equal
+        | LogicalCellKind::GreaterEqual
+        | LogicalCellKind::Sub
+        | LogicalCellKind::Concat => &["lhs", "rhs"],
         LogicalCellKind::Mux => &["select", "when_false", "when_true"],
         LogicalCellKind::DLatch { .. } => &["d", "enable"],
         LogicalCellKind::Dff { .. } | LogicalCellKind::Register { .. } => &["d", "clock"],
@@ -254,6 +266,12 @@ fn operation_name(kind: &LogicalCellKind) -> &'static str {
         LogicalCellKind::Add => "add",
         LogicalCellKind::Inc => "inc",
         LogicalCellKind::Mux => "mux",
+        LogicalCellKind::Equal => "equal",
+        LogicalCellKind::GreaterEqual => "greater_equal",
+        LogicalCellKind::Sub => "sub",
+        LogicalCellKind::Concat => "concat",
+        LogicalCellKind::Select { .. } => "select",
+        LogicalCellKind::Resize { .. } => "resize",
         LogicalCellKind::DLatch { .. } => "d_latch",
         LogicalCellKind::Dff { .. } => "dff",
         LogicalCellKind::Register { .. } => "register",
@@ -396,6 +414,8 @@ impl Parser {
         let mut inputs = Vec::new();
         let mut outputs = Vec::new();
         let mut edge = None;
+        let mut msb = None;
+        let mut lsb = None;
         while !self.consume_symbol('}') {
             if self.consume_keyword("in") {
                 let pin = self.expect_name()?;
@@ -409,6 +429,14 @@ impl Parser {
                 let net = self.expect_name()?;
                 self.expect_symbol(';')?;
                 outputs.push(LogicalOutput { pin, net });
+            } else if self.consume_keyword("msb") {
+                self.expect_symbol('=')?;
+                msb = Some(self.expect_usize()?);
+                self.expect_symbol(';')?;
+            } else if self.consume_keyword("lsb") {
+                self.expect_symbol('=')?;
+                lsb = Some(self.expect_usize()?);
+                self.expect_symbol(';')?;
             } else if self.consume_keyword("edge") {
                 self.expect_symbol('=')?;
                 edge = Some(self.parse_edge()?);
@@ -427,6 +455,15 @@ impl Parser {
             "add" => LogicalCellKind::Add,
             "inc" => LogicalCellKind::Inc,
             "mux" => LogicalCellKind::Mux,
+            "equal" => LogicalCellKind::Equal,
+            "greater_equal" => LogicalCellKind::GreaterEqual,
+            "sub" => LogicalCellKind::Sub,
+            "concat" => LogicalCellKind::Concat,
+            "resize" => LogicalCellKind::Resize { width },
+            "select" => LogicalCellKind::Select {
+                msb: msb.context("select requires msb")?,
+                lsb: lsb.context("select requires lsb")?,
+            },
             "d_latch" => LogicalCellKind::DLatch { width },
             "dff" => {
                 if width != 1 {
@@ -442,6 +479,9 @@ impl Parser {
             },
             other => eyre::bail!("unknown logical operation `logical.{other}`"),
         };
+        if (msb.is_some() || lsb.is_some()) && !matches!(kind, LogicalCellKind::Select { .. }) {
+            eyre::bail!("logical.{operation} does not accept select attributes");
+        }
         if edge.is_some()
             && !matches!(
                 kind,

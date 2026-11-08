@@ -545,7 +545,7 @@ mod tests {
 
     #[test]
     fn counter_source_map_links_all_three_documents() -> eyre::Result<()> {
-        let source = include_str!("../../test/counter.snapshot/counter.v");
+        let source = include_str!("../../test/fixtures/source_map/counter.v");
         let logical = super::super::LogicalDesign::from_verilog_source_named(source, "counter.v")?;
         let routable = logical.lower_to_routable()?;
         let map = build_source_map(
@@ -605,7 +605,7 @@ mod tests {
 
     #[test]
     fn hierarchical_leaf_nodes_keep_definition_level_provenance() -> eyre::Result<()> {
-        let source = include_str!("../../test/d-flip-flop.snapshot/d-flip-flop.v");
+        let source = include_str!("../../test/fixtures/source_map/d-flip-flop.v");
         let logical =
             super::super::LogicalDesign::from_verilog_source_named(source, "d-flip-flop.v")?;
         let routable = logical.lower_to_routable()?;
@@ -643,7 +643,7 @@ mod tests {
 
     #[test]
     fn source_map_separates_instantiation_references_from_provenance() -> eyre::Result<()> {
-        let source = include_str!("../../test/d-flip-flop.snapshot/d-flip-flop.v");
+        let source = include_str!("../../test/fixtures/source_map/d-flip-flop.v");
         let logical =
             super::super::LogicalDesign::from_verilog_source_named(source, "d-flip-flop.v")?;
         let routable = logical.lower_to_routable()?;
