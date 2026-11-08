@@ -179,6 +179,15 @@ pub fn apply_routable_document(
             .candidate_profiles
             .get(profile_name)
             .with_context(|| format!("missing pnr.candidate profile `{profile_name}`"))?;
+        if let Some(exact) = &profile.exact {
+            eyre::ensure!(
+                exact.search_box.iter().all(|v| *v > 0)
+                    && exact.time_limit_ms > 0
+                    && (1..=6).contains(&exact.max_inputs)
+                    && exact.max_logic_nodes > 0,
+                "invalid Exact candidate bounds in `{profile_name}`"
+            );
+        }
         validate_clustering_spec(profile_name, &profile.clustering)?;
         validate_local_search_spec(profile_name, &profile.local_placer)?;
         let mut policy = candidate_policy_from_spec(profile);
@@ -393,6 +402,7 @@ pub fn apply_pnr_spec(spec: &PnrSpec, config: &mut GlobalPnrConfig) -> eyre::Res
 
 pub(super) fn candidate_spec_from_policy(policy: &UnitCandidateConfig) -> CandidateSpec {
     CandidateSpec {
+        exact: policy.exact.clone(),
         search_box: [policy.dim.0, policy.dim.1, policy.dim.2],
         retain: policy.max_candidates,
         combinational_samples: policy.combinational_sampling_limit,
@@ -407,6 +417,7 @@ pub(super) fn candidate_spec_from_policy(policy: &UnitCandidateConfig) -> Candid
 
 fn candidate_policy_from_spec(spec: &CandidateSpec) -> UnitCandidateConfig {
     UnitCandidateConfig {
+        exact: spec.exact.clone(),
         verified_nary_cells: false,
         nary_stagger_inputs: false,
         reserve_combinational_io_diodes: false,
@@ -1099,6 +1110,7 @@ mod tests {
             }],
         };
         let mut original = GlobalPnrConfig::default();
+        original.candidate.default.exact = Some(crate::ir::ExactCandidateSpec::default());
         original.routing.strategy = GlobalRoutingStrategy::AStarBudgeted {
             max_expansions: 20_000,
         };
@@ -1162,6 +1174,11 @@ mod tests {
         assert!(text.contains("strategy astar-budgeted 20000;"));
         assert!(text.contains("max-steps 256;"));
         assert!(text.contains("pin-access"));
+        assert!(text.contains("exact { box [3, 5, 3]; time-limit-ms 5000;"));
+        assert!(text
+            .replace("time-limit-ms 5000", "time-limit-ms 0")
+            .parse::<RoutableDocument>()
+            .is_err());
         assert!(text
             .replace("max-steps 256;", "max-steps 0;")
             .parse::<RoutableDocument>()

@@ -8,13 +8,14 @@ use super::routable::{
 };
 use super::syntax::{tokenize, Token};
 use super::{
-    CandidateSpec, CellFaceSpec, ClusteringSpec, CongestionSpec, Free3dSweepSpec,
-    InputPlacementSpec, LayerAssignmentSpec, LocalAdaptiveSpec, LocalCellContractSpec,
-    LocalObjectiveSpec, LocalPlacerSpec, NetOrderSpec, NotRouteSpec, ObjectiveSpec,
-    PhysicalConstraintSpec, PhysicalRegionSpec, PhysicalSpec, PlacementHeuristicSpec,
-    PlacementSamplingSpec, PlacementScheduleSpec, PlacementSpec, PnrSpec, PortAccessDirectionSpec,
-    PortAccessSpec, PortRef, PreferenceSpec, RoutableDocument, RouteStageSpec, RouteStrategySpec,
-    RouteValidationSpec, RoutingSpec, SamplingSpec, SearchSpec, TorchPlacementSpec,
+    CandidateSpec, CellFaceSpec, ClusteringSpec, CongestionSpec, ExactCandidateSpec,
+    Free3dSweepSpec, InputPlacementSpec, LayerAssignmentSpec, LocalAdaptiveSpec,
+    LocalCellContractSpec, LocalObjectiveSpec, LocalPlacerSpec, NetOrderSpec, NotRouteSpec,
+    ObjectiveSpec, PhysicalConstraintSpec, PhysicalRegionSpec, PhysicalSpec,
+    PlacementHeuristicSpec, PlacementSamplingSpec, PlacementScheduleSpec, PlacementSpec, PnrSpec,
+    PortAccessDirectionSpec, PortAccessSpec, PortRef, PreferenceSpec, RoutableDocument,
+    RouteStageSpec, RouteStrategySpec, RouteValidationSpec, RoutingSpec, SamplingSpec, SearchSpec,
+    TorchPlacementSpec,
 };
 
 impl fmt::Display for RoutableDesign {
@@ -282,6 +283,9 @@ fn write_candidate_body(
     match candidate.combinational_samples {
         Some(value) => writeln!(output, "{indent}combinational-samples {value};")?,
         None => writeln!(output, "{indent}combinational-samples none;")?,
+    }
+    if let Some(exact) = &candidate.exact {
+        writeln!(output, "{indent}exact {{ box [{}, {}, {}]; time-limit-ms {}; max-inputs {}; max-logic-nodes {}; optimize {}; }}", exact.search_box[0], exact.search_box[1], exact.search_box[2], exact.time_limit_ms, exact.max_inputs, exact.max_logic_nodes, exact.optimize)?;
     }
     writeln!(output, "{indent}clustering {{")?;
     write_clustering_body(output, &candidate.clustering, &format!("{indent}  "))?;
@@ -1187,6 +1191,41 @@ impl Parser {
         self.expect_keyword("combinational-samples")?;
         let combinational_samples = self.parse_optional_usize()?;
         self.expect_symbol(';')?;
+        let exact = if self.consume_keyword("exact") {
+            self.expect_symbol('{')?;
+            self.expect_keyword("box")?;
+            let search_box = self.parse_position()?;
+            self.expect_symbol(';')?;
+            self.expect_keyword("time-limit-ms")?;
+            let time_limit_ms = self.expect_u64()?;
+            self.expect_symbol(';')?;
+            self.expect_keyword("max-inputs")?;
+            let max_inputs = self.expect_usize()?;
+            self.expect_symbol(';')?;
+            self.expect_keyword("max-logic-nodes")?;
+            let max_logic_nodes = self.expect_usize()?;
+            self.expect_symbol(';')?;
+            self.expect_keyword("optimize")?;
+            let optimize = self.expect_bool()?;
+            self.expect_symbol(';')?;
+            self.expect_symbol('}')?;
+            eyre::ensure!(
+                search_box.iter().all(|v| *v > 0)
+                    && time_limit_ms > 0
+                    && (1..=6).contains(&max_inputs)
+                    && max_logic_nodes > 0,
+                "invalid exact candidate bounds"
+            );
+            Some(ExactCandidateSpec {
+                search_box,
+                time_limit_ms,
+                max_inputs,
+                max_logic_nodes,
+                optimize,
+            })
+        } else {
+            None
+        };
         let clustering = if self.consume_keyword("clustering") {
             self.parse_clustering_spec()?
         } else {
@@ -1196,6 +1235,7 @@ impl Parser {
         let local_placer = self.parse_local_placer_spec()?;
         self.expect_symbol('}')?;
         Ok(CandidateSpec {
+            exact,
             search_box,
             retain,
             combinational_samples,

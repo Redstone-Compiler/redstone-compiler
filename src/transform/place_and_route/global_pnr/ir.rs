@@ -67,8 +67,22 @@ pub struct LayoutCandidateCost {
     pub port_access_points: usize,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExactCandidateProvenance {
+    pub search_box: [usize; 3],
+    pub core_bbox: [usize; 3],
+    /// Physical occupied blocks, including local input switches.
+    pub core_blocks: usize,
+    /// SAT objective count, excluding local input switches.
+    #[serde(default)]
+    pub core_logic_blocks: usize,
+    pub elapsed_ms: u64,
+    pub optimal: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct LayoutCandidate {
+    pub exact_core: Option<ExactCandidateProvenance>,
     pub module_name: String,
     pub world: World3D,
     pub bbox: BoundingBox,
@@ -117,6 +131,7 @@ impl LayoutCandidate {
         };
 
         Ok(Self {
+            exact_core: None,
             module_name,
             world,
             bbox,

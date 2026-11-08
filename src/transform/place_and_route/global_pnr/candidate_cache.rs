@@ -10,7 +10,7 @@ use crate::nbt::{NBTRoot, ToNBT};
 use crate::world::position::Position;
 use crate::world::World3D;
 
-const CACHE_FORMAT: &str = "redstone-compiler.local-candidate-cache.v10";
+const CACHE_FORMAT: &str = "redstone-compiler.local-candidate-cache.v13";
 
 #[derive(Serialize, Deserialize)]
 struct CacheManifest {
@@ -27,6 +27,8 @@ struct CacheCandidate {
 
 #[derive(Serialize, Deserialize)]
 struct CandidateMetadata {
+    #[serde(default)]
+    exact_core: Option<super::ir::ExactCandidateProvenance>,
     ports: Vec<PhysicalPortDto>,
     blocked_cells: Vec<[usize; 3]>,
 }
@@ -78,6 +80,7 @@ pub(super) fn load(
             .collect();
         let mut candidate = LayoutCandidate::from_world(module_name.to_owned(), world, ports)
             .context("cached candidate contains no blocks")?;
+        candidate.exact_core = metadata.exact_core;
         candidate.blocked_cells = metadata
             .blocked_cells
             .into_iter()
@@ -112,6 +115,7 @@ pub(super) fn store(root: &Path, key: &str, candidates: &[LayoutCandidate]) -> e
             .collect::<Vec<_>>();
         blocked_cells.sort();
         let value = CandidateMetadata {
+            exact_core: candidate.exact_core.clone(),
             ports: candidate
                 .ports
                 .iter()
@@ -163,6 +167,72 @@ mod tests {
     use super::*;
     use crate::world::block::{Block, BlockKind};
     use crate::world::position::DimSize;
+
+    #[test]
+    fn mixed_runtime_power_counters_roundtrip_without_weakening_content_check() -> eyre::Result<()>
+    {
+        use crate::world::block::{BlockKind, Direction};
+        let mut world = World3D::new(DimSize(3, 2, 3));
+        world[Position(0, 0, 0)] = Block {
+            kind: BlockKind::Cobble {
+                on_count: 2,
+                on_base_count: 1,
+            },
+            direction: Direction::None,
+        };
+        world[Position(0, 0, 1)] = Block {
+            kind: BlockKind::Redstone {
+                on_count: 4,
+                state: 3,
+                strength: 8,
+            },
+            direction: Direction::None,
+        };
+        world[Position(1, 0, 0)] = Block {
+            kind: BlockKind::Cobble {
+                on_count: 1,
+                on_base_count: 0,
+            },
+            direction: Direction::None,
+        };
+        world[Position(1, 0, 1)] = Block {
+            kind: BlockKind::Torch { is_on: true },
+            direction: Direction::Bottom,
+        };
+        let candidate = LayoutCandidate::from_world("mixed".into(), world, Vec::new())?;
+        let root = std::env::temp_dir().join(format!(
+            "mixed-power-cache-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos()
+        ));
+        store(&root, "mixed", &[candidate.clone()])?;
+        let loaded = load(&root, "mixed", "mixed")?.unwrap();
+        assert_ne!(
+            candidate.world[Position(0, 0, 0)],
+            loaded[0].world[Position(0, 0, 0)]
+        );
+        assert_eq!(
+            candidate_parity_hash(&candidate),
+            candidate_parity_hash(&loaded[0])
+        );
+        let mut changed = loaded[0].world.clone();
+        changed[Position(2, 0, 0)] = Block {
+            kind: BlockKind::RedstoneBlock,
+            direction: Direction::None,
+        };
+        std::fs::write(
+            root.join("mixed/candidate-000.nbt"),
+            fastnbt::to_bytes(&changed.to_nbt())?,
+        )?;
+        assert!(
+            load(&root, "mixed", "mixed").is_err(),
+            "changed geometry must still fail the manifest hash"
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
 
     #[test]
     fn persistent_candidate_cache_round_trips_and_relabels() -> eyre::Result<()> {

@@ -54,6 +54,8 @@ struct InstanceBindingManifest {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct CandidateMetadata {
+    #[serde(default)]
+    exact_core: Option<super::ir::ExactCandidateProvenance>,
     format: String,
     id: String,
     module_name: String,
@@ -120,6 +122,7 @@ pub(super) fn emit_candidate_library(prepared: &PreparedPnrDesign) -> eyre::Resu
             emit_json(
                 &metadata,
                 CandidateMetadata {
+                    exact_core: candidate.exact_core.clone(),
                     format: "redstone-compiler.candidate.v1".to_owned(),
                     id: id.clone(),
                     module_name: candidate.module_name.clone(),
@@ -256,6 +259,7 @@ pub fn load_prepared_pnr_snapshot(
                 })
                 .collect();
             let mut candidate = LayoutCandidate::from_world(metadata.module_name, world, ports)?;
+            candidate.exact_core = metadata.exact_core;
             candidate.blocked_cells = metadata
                 .blocked_cells
                 .into_iter()
@@ -469,6 +473,14 @@ mod tests {
         let topology = ResolvedPnrTopology::from_routable(&design)?;
         let id = candidate_parity_hash(&candidate);
         let metadata = CandidateMetadata {
+            exact_core: Some(super::super::ir::ExactCandidateProvenance {
+                search_box: [3, 5, 3],
+                core_bbox: [2, 3, 2],
+                core_blocks: 5,
+                core_logic_blocks: 3,
+                elapsed_ms: 862,
+                optimal: true,
+            }),
             format: "redstone-compiler.candidate.v1".into(),
             id: id.clone(),
             module_name: module.name.clone(),
@@ -556,6 +568,7 @@ mod tests {
         };
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].blocked_cells, candidate.blocked_cells);
+        assert_eq!(candidates[0].exact_core, metadata.exact_core);
         assert!(candidates[0]
             .ports
             .iter()
@@ -578,6 +591,7 @@ mod tests {
     #[test]
     fn candidate_metadata_serializes_bbox_and_quality_metrics() {
         let metadata = CandidateMetadata {
+            exact_core: None,
             format: "redstone-compiler.candidate.v1".to_owned(),
             id: "candidate".to_owned(),
             module_name: "adder".to_owned(),

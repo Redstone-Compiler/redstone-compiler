@@ -31,13 +31,19 @@ use crate::world::simulator::Simulator;
 use crate::world::{World, World3D};
 
 mod clustering;
+mod exact;
+mod exact_adapter;
+mod exact_validation;
 mod io_diodes;
 #[cfg(test)]
 mod local_diagnostic;
 pub mod nary;
+pub use crate::ir::ExactCandidateSpec as ExactCandidateConfig;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UnitCandidateConfig {
+    /// Bounded SAT synthesis competes with existing verified recipes; disabled by default.
+    pub exact: Option<ExactCandidateConfig>,
     /// Use verified truth-recognized recipes for 2..8-input single-minterm/maxterm cells.
     pub verified_nary_cells: bool,
     /// Stagger verified recipe inputs to expose separate approach corridors.
@@ -164,6 +170,7 @@ impl DerefMut for CandidatePolicySet {
 impl Default for UnitCandidateConfig {
     fn default() -> Self {
         Self {
+            exact: None,
             verified_nary_cells: false,
             nary_stagger_inputs: false,
             reserve_combinational_io_diodes: false,
@@ -233,6 +240,7 @@ fn generate_routable_module_candidates(
             )
         })
         .collect();
+    let mut exact_candidates = exact::generate(&module.name, &graph, &ports, config, input_mode)?;
     if config.verified_nary_cells
         && config.max_candidates > 0
         && input_mode == CandidateInputMode::ExternalPorts
@@ -258,9 +266,15 @@ fn generate_routable_module_candidates(
                 )
             {
                 tracing::info!(module=%module.name, blocks=candidate.cost.block_count, "using verified semantic n-ary cell");
-                return Ok(vec![candidate]);
+                exact_candidates.push(candidate);
+                exact_candidates.sort_by_key(|c| (c.cost.block_count, c.cost.bbox_volume));
+                exact_candidates.truncate(config.max_candidates);
+                return Ok(exact_candidates);
             }
         }
+    }
+    if !exact_candidates.is_empty() {
+        return Ok(exact_candidates);
     }
     let clustered = clustering::try_generate_clustered_candidates(
         &module.name,
@@ -1459,6 +1473,7 @@ fn downstream_consumer_count(world: &World3D, source: Position) -> usize {
 
 pub fn d_latch_child_candidate_config(local_config: LocalPlacerConfig) -> UnitCandidateConfig {
     UnitCandidateConfig {
+        exact: None,
         verified_nary_cells: false,
         nary_stagger_inputs: false,
         reserve_combinational_io_diodes: false,

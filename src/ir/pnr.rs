@@ -112,7 +112,30 @@ pub struct PnrSpec {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExactCandidateSpec {
+    pub optimize: bool,
+    pub search_box: [usize; 3],
+    pub time_limit_ms: u64,
+    pub max_inputs: usize,
+    pub max_logic_nodes: usize,
+}
+
+impl Default for ExactCandidateSpec {
+    fn default() -> Self {
+        Self {
+            optimize: true,
+            search_box: [3, 5, 3],
+            time_limit_ms: 5_000,
+            max_inputs: 4,
+            max_logic_nodes: 16,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CandidateSpec {
+    #[serde(default)]
+    pub exact: Option<ExactCandidateSpec>,
     pub search_box: [usize; 3],
     pub retain: usize,
     pub combinational_samples: Option<usize>,

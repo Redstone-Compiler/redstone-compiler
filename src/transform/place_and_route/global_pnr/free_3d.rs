@@ -294,6 +294,7 @@ mod tests {
 
     fn candidate(index: usize) -> LayoutCandidate {
         LayoutCandidate {
+            exact_core: None,
             module_name: format!("child_{index}"),
             world: World3D::new(DimSize(1, 1, 1)),
             bbox: BoundingBox {

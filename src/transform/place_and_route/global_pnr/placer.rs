@@ -1600,6 +1600,7 @@ mod tests {
 
     fn test_candidate(module_name: &str, ports: &[(&str, Position)]) -> LayoutCandidate {
         LayoutCandidate {
+            exact_core: None,
             module_name: module_name.to_owned(),
             world: World3D::new(DimSize(1, 1, 1)),
             bbox: BoundingBox {

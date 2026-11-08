@@ -275,7 +275,12 @@ fn debug_parity_hash(value: &impl std::fmt::Debug) -> String {
 }
 
 fn candidate_parity_hash(candidate: &LayoutCandidate) -> String {
-    let mut blocks = candidate.world.iter_block();
+    // Hash the persisted representation. NBT preserves physical block states,
+    // but not simulator-only counters or repeater lock-source bookkeeping.
+    // Applying the real roundtrip also canonicalizes dust shapes exactly as
+    // cache loading does; geometric/port/reservation validation remains intact.
+    let persisted_world = World3D::from(&candidate.world.to_nbt().to_world());
+    let mut blocks = persisted_world.iter_block();
     blocks.sort_by_key(|(position, _)| *position);
     let mut ports = candidate.ports.clone();
     ports.sort_by(|left, right| {
