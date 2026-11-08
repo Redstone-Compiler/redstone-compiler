@@ -166,3 +166,10 @@ cargo test --release --lib minimize_global_dff_automatically -- --nocapture
 [NBT](../test/dff-global-optimized.nbt),
 [입출력](../test/dff-global-optimized.outputs.json).
 viewer 예제 이름은 `dff-global-optimized.nbt`다. 원본 discovery 파일은 보존한다.
+
+
+## 최초 탐색 속도 개선
+
+동일 seed=11 최초 탐색을 약 43~44초로 줄인 보조 순위 정규화와 재현 명령은
+[DFF 탐색 최적화](dff_search_optimization.md)를 참고한다. 이 문서의
+163.5초 기록과 원본 모델·결과는 과거 실행 재현용으로 보존한다.

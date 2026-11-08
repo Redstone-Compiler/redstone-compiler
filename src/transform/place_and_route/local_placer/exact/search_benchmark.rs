@@ -461,3 +461,97 @@ fn benchmark_worker_dispatch() {
     std::fs::create_dir_all(out.parent().unwrap()).unwrap();
     std::fs::write(out, serde_json::to_vec_pretty(&rows).unwrap()).unwrap();
 }
+
+/// Paired cold searches: only canonical_source_ranks differs within each pair.
+#[test]
+#[ignore = "serial multi-seed combinational rank-normalization benchmark"]
+fn benchmark_combinational_source_ranks() -> eyre::Result<()> {
+    use super::{ExactLocalPlacer, ExactOutcome, ExactPlacerConfig};
+    use crate::graph::logic::LogicGraph;
+    use crate::world::position::DimSize;
+    let seeds = [1u32, 2, 3, 11, 23];
+    let seconds: u64 = std::env::var("RANK_BENCH_SECONDS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(15);
+    let workers: usize = std::env::var("RANK_BENCH_WORKERS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(4);
+    let selected = std::env::var("RANK_BENCH_CASES").unwrap_or_default();
+    let label = std::env::var("RANK_BENCH_LABEL").unwrap_or_else(|_| "first".into());
+    let directory = Path::new("target/combinational-ranks").join(label);
+    std::fs::create_dir_all(&directory)?;
+    let cases = [
+        ("inverter", vec![("out", "~a")], DimSize(1, 3, 2)),
+        ("nor", vec![("out", "~(a|b)")], DimSize(1, 4, 2)),
+        ("and", vec![("out", "a&b")], DimSize(2, 4, 3)),
+        ("or", vec![("out", "a|b")], DimSize(2, 4, 3)),
+        ("xor", vec![("out", "a^b")], DimSize(2, 6, 4)),
+        (
+            "half_adder",
+            vec![("sum", "a^b"), ("carry", "a&b")],
+            DimSize(2, 7, 5),
+        ),
+    ];
+    let mut rows = Vec::new();
+    for (case_index, (name, assignments, dim)) in cases.into_iter().enumerate() {
+        if !selected.is_empty() && !selected.split(',').any(|s| s == name) {
+            continue;
+        }
+        let graph = LogicGraph::from_assignments(
+            assignments
+                .into_iter()
+                .map(|(name, expr)| (name.to_owned(), expr.to_owned())),
+        )?
+        .prepare_place()?;
+        let placer = ExactLocalPlacer::new(&graph)?;
+        for (seed_index, seed) in seeds.into_iter().enumerate() {
+            // Alternate which setting gets the first run to reduce ordering bias.
+            let reverse = std::env::var_os("RANK_BENCH_REVERSE").is_some();
+            let order = if ((case_index + seed_index) % 2 == 0) != reverse {
+                [false, true]
+            } else {
+                [true, false]
+            };
+            for enabled in order {
+                let mut config = ExactPlacerConfig::new(dim);
+                config.seed = seed;
+                config.workers = workers;
+                config.optimize = false;
+                config.time_limit = Some(Duration::from_secs(seconds));
+                config.model_params.insert(
+                    "canonical_source_ranks".into(),
+                    rsdsl::IValue::Bool(enabled),
+                );
+                let start = Instant::now();
+                let (outcome, stats) = placer.place(&config)?;
+                let elapsed = start.elapsed().as_secs_f64();
+                let (status, blocks) = match &outcome {
+                    ExactOutcome::Placed(p) => ("placed", Some(p.block_count)),
+                    ExactOutcome::Infeasible => ("infeasible", None),
+                    ExactOutcome::Unknown { .. } => ("unknown", None),
+                };
+                let row = serde_json::json!({
+                    "case":name,"seed":seed,"enabled":enabled,"status":status,
+                    "wall_s":elapsed,"encode_s":stats.encode_time.as_secs_f64(),
+                    "solve_s":stats.solve_time.as_secs_f64(),"blocks":blocks,
+                    "variables":stats.variables,"clauses":stats.clauses,
+                    "refinements":stats.refinements,"winning_seed":stats.winning_seed,
+                    "dim":[dim.0,dim.1,dim.2],"workers":workers,
+                    "rank_levels":config.rank_levels,"stage_levels":config.stage_levels,
+                    "max_refinements":config.max_refinements,"limit_s":seconds,
+                    "box_symmetry":"default","optimize":false,
+                    "last_rejection":match &outcome { ExactOutcome::Unknown { last_rejection } => last_rejection.clone(), _ => None }
+                });
+                println!("RANK_BENCH {row}");
+                rows.push(row);
+                std::fs::write(
+                    directory.join("results.json"),
+                    serde_json::to_vec_pretty(&rows)?,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}

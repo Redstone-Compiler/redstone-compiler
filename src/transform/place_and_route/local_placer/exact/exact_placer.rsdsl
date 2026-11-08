@@ -89,6 +89,8 @@ param torch_cost: int = 0;
 // Rules that remove equivalent duplicates of a layout (sound: every layout
 // keeps at least one representative); they speed up proofs.
 param symmetry_breaking: bool = false;
+// Normalize source ranks without restricting physical layouts.
+param canonical_source_ranks: bool = false;
 // Lower bound on torches needed for the observed functions (each torch is a
 // NOR gate; the host computes it when optimizing). Implied, so it never
 // removes a layout; it only helps prove that cheaper layouts do not exist.
@@ -485,6 +487,18 @@ rule "대칭 제거: 받는 기여가 없으면 순위·단계는 0 (토치 단�
             if stage_levels > 0 {
                 require Stage[c] >= 1 -> fed or Kind[c] is Torch(_);
             }
+        }
+    }
+}
+
+// Source kinds have no incoming Rank inequality: lowering their rank to 0
+// preserves outgoing comparisons. Torches/repeaters still keep their Stage,
+// which orders them after their inputs. Air/switches have no incoming Stage.
+rule "대칭 제거: 전원 시작점의 순위는 0 (공기·스위치는 단계도 0)" {
+    if canonical_source_ranks {
+        forall c: Cell {
+            require Kind[c] is Air | Switch(_,_) | Torch(_) | Repeater(_) -> Rank[c] == 0;
+            require Kind[c] is Air | Switch(_,_) -> Stage[c] == 0;
         }
     }
 }

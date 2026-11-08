@@ -1,0 +1,404 @@
+[
+  {
+    "case": "inverter",
+    "off": {
+      "runs": 5,
+      "solved": 5,
+      "unknown": 0,
+      "infeasible": 0,
+      "median_wall_s": 0.0036555,
+      "median_solved_wall_s": 0.0036555,
+      "median_encode_s": 0.002269208,
+      "median_solve_s": 0.001341583,
+      "mean_par2_s": 0.00478805
+    },
+    "on": {
+      "runs": 5,
+      "solved": 5,
+      "unknown": 0,
+      "infeasible": 0,
+      "median_wall_s": 0.003665833,
+      "median_solved_wall_s": 0.003665833,
+      "median_encode_s": 0.002173125,
+      "median_solve_s": 0.001417042,
+      "mean_par2_s": 0.0039630002
+    },
+    "pairs": [
+      {
+        "seed": 1,
+        "off_status": "placed",
+        "on_status": "placed",
+        "off_wall_s": 0.009894916,
+        "on_wall_s": 0.005176917,
+        "speedup_if_both_solved": 1.9113530311573472
+      },
+      {
+        "seed": 2,
+        "off_status": "placed",
+        "on_status": "placed",
+        "off_wall_s": 0.0036555,
+        "on_wall_s": 0.004415542,
+        "speedup_if_both_solved": 0.8278711877273504
+      },
+      {
+        "seed": 3,
+        "off_status": "placed",
+        "on_status": "placed",
+        "off_wall_s": 0.003769042,
+        "on_wall_s": 0.003665833,
+        "speedup_if_both_solved": 1.0281543103572912
+      },
+      {
+        "seed": 11,
+        "off_status": "placed",
+        "on_status": "placed",
+        "off_wall_s": 0.00350275,
+        "on_wall_s": 0.003429167,
+        "speedup_if_both_solved": 1.0214579809032338
+      },
+      {
+        "seed": 23,
+        "off_status": "placed",
+        "on_status": "placed",
+        "off_wall_s": 0.003118042,
+        "on_wall_s": 0.003127542,
+        "speedup_if_both_solved": 0.9969624708477136
+      }
+    ]
+  },
+  {
+    "case": "nor",
+    "off": {
+      "runs": 5,
+      "solved": 5,
+      "unknown": 0,
+      "infeasible": 0,
+      "median_wall_s": 0.0056475,
+      "median_solved_wall_s": 0.0056475,
+      "median_encode_s": 0.002716417,
+      "median_solve_s": 0.002890333,
+      "mean_par2_s": 0.0058102504
+    },
+    "on": {
+      "runs": 5,
+      "solved": 5,
+      "unknown": 0,
+      "infeasible": 0,
+      "median_wall_s": 0.0079555,
+      "median_solved_wall_s": 0.0079555,
+      "median_encode_s": 0.002851833,
+      "median_solve_s": 0.005026083,
+      "mean_par2_s": 0.008184842
+    },
+    "pairs": [
+      {
+        "seed": 1,
+        "off_status": "placed",
+        "on_status": "placed",
+        "off_wall_s": 0.006237084,
+        "on_wall_s": 0.009448459,
+        "speedup_if_both_solved": 0.6601165332886559
+      },
+      {
+        "seed": 2,
+        "off_status": "placed",
+        "on_status": "placed",
+        "off_wall_s": 0.006031709,
+        "on_wall_s": 0.008337959,
+        "speedup_if_both_solved": 0.7234035331668097
+      },
+      {
+        "seed": 3,
+        "off_status": "placed",
+        "on_status": "placed",
+        "off_wall_s": 0.005629042,
+        "on_wall_s": 0.0079555,
+        "speedup_if_both_solved": 0.7075660863553516
+      },
+      {
+        "seed": 11,
+        "off_status": "placed",
+        "on_status": "placed",
+        "off_wall_s": 0.005505917,
+        "on_wall_s": 0.007398375,
+        "speedup_if_both_solved": 0.7442062615101289
+      },
+      {
+        "seed": 23,
+        "off_status": "placed",
+        "on_status": "placed",
+        "off_wall_s": 0.0056475,
+        "on_wall_s": 0.007783917,
+        "speedup_if_both_solved": 0.7255344577800611
+      }
+    ]
+  },
+  {
+    "case": "and",
+    "off": {
+      "runs": 5,
+      "solved": 5,
+      "unknown": 0,
+      "infeasible": 0,
+      "median_wall_s": 0.034764958,
+      "median_solved_wall_s": 0.034764958,
+      "median_encode_s": 0.012489542,
+      "median_solve_s": 0.022125833,
+      "mean_par2_s": 0.0349430668
+    },
+    "on": {
+      "runs": 5,
+      "solved": 5,
+      "unknown": 0,
+      "infeasible": 0,
+      "median_wall_s": 0.056941541,
+      "median_solved_wall_s": 0.056941541,
+      "median_encode_s": 0.012594084,
+      "median_solve_s": 0.044168209,
+      "mean_par2_s": 0.0567224084
+    },
+    "pairs": [
+      {
+        "seed": 1,
+        "off_status": "placed",
+        "on_status": "placed",
+        "off_wall_s": 0.036203042,
+        "on_wall_s": 0.056941541,
+        "speedup_if_both_solved": 0.6357931549481599
+      },
+      {
+        "seed": 2,
+        "off_status": "placed",
+        "on_status": "placed",
+        "off_wall_s": 0.034215792,
+        "on_wall_s": 0.056487625,
+        "speedup_if_both_solved": 0.6057219081170434
+      },
+      {
+        "seed": 3,
+        "off_status": "placed",
+        "on_status": "placed",
+        "off_wall_s": 0.034957083,
+        "on_wall_s": 0.055917583,
+        "speedup_if_both_solved": 0.6251536837706307
+      },
+      {
+        "seed": 11,
+        "off_status": "placed",
+        "on_status": "placed",
+        "off_wall_s": 0.034764958,
+        "on_wall_s": 0.057160709,
+        "speedup_if_both_solved": 0.6081967597707719
+      },
+      {
+        "seed": 23,
+        "off_status": "placed",
+        "on_status": "placed",
+        "off_wall_s": 0.034574459,
+        "on_wall_s": 0.057104584,
+        "speedup_if_both_solved": 0.605458556531994
+      }
+    ]
+  },
+  {
+    "case": "or",
+    "off": {
+      "runs": 5,
+      "solved": 5,
+      "unknown": 0,
+      "infeasible": 0,
+      "median_wall_s": 0.022259167,
+      "median_solved_wall_s": 0.022259167,
+      "median_encode_s": 0.012344833,
+      "median_solve_s": 0.009824458,
+      "mean_par2_s": 0.0223986252
+    },
+    "on": {
+      "runs": 5,
+      "solved": 5,
+      "unknown": 0,
+      "infeasible": 0,
+      "median_wall_s": 0.023279875,
+      "median_solved_wall_s": 0.023279875,
+      "median_encode_s": 0.012398583,
+      "median_solve_s": 0.010680416,
+      "mean_par2_s": 0.0233244916
+    },
+    "pairs": [
+      {
+        "seed": 1,
+        "off_status": "placed",
+        "on_status": "placed",
+        "off_wall_s": 0.022980125,
+        "on_wall_s": 0.023279875,
+        "speedup_if_both_solved": 0.9871240717572582
+      },
+      {
+        "seed": 2,
+        "off_status": "placed",
+        "on_status": "placed",
+        "off_wall_s": 0.02253875,
+        "on_wall_s": 0.023773292,
+        "speedup_if_both_solved": 0.948070212573
+      },
+      {
+        "seed": 3,
+        "off_status": "placed",
+        "on_status": "placed",
+        "off_wall_s": 0.02211875,
+        "on_wall_s": 0.023614,
+        "speedup_if_both_solved": 0.9366795121538071
+      },
+      {
+        "seed": 11,
+        "off_status": "placed",
+        "on_status": "placed",
+        "off_wall_s": 0.022259167,
+        "on_wall_s": 0.022829333,
+        "speedup_if_both_solved": 0.9750248507041358
+      },
+      {
+        "seed": 23,
+        "off_status": "placed",
+        "on_status": "placed",
+        "off_wall_s": 0.022096334,
+        "on_wall_s": 0.023125958,
+        "speedup_if_both_solved": 0.9554775633511053
+      }
+    ]
+  },
+  {
+    "case": "xor",
+    "off": {
+      "runs": 5,
+      "solved": 0,
+      "unknown": 5,
+      "infeasible": 0,
+      "median_wall_s": 15.034368667,
+      "median_solved_wall_s": null,
+      "median_encode_s": 0.032328834,
+      "median_solve_s": 15.001451083,
+      "mean_par2_s": 30.032421075400002
+    },
+    "on": {
+      "runs": 5,
+      "solved": 5,
+      "unknown": 0,
+      "infeasible": 0,
+      "median_wall_s": 0.212714584,
+      "median_solved_wall_s": 0.212714584,
+      "median_encode_s": 0.032434958,
+      "median_solve_s": 0.178958958,
+      "mean_par2_s": 0.2129693836
+    },
+    "pairs": [
+      {
+        "seed": 1,
+        "off_status": "unknown",
+        "on_status": "placed",
+        "off_wall_s": 15.034368667,
+        "on_wall_s": 0.215191292,
+        "speedup_if_both_solved": null
+      },
+      {
+        "seed": 2,
+        "off_status": "unknown",
+        "on_status": "placed",
+        "off_wall_s": 15.034104833,
+        "on_wall_s": 0.210882625,
+        "speedup_if_both_solved": null
+      },
+      {
+        "seed": 3,
+        "off_status": "unknown",
+        "on_status": "placed",
+        "off_wall_s": 15.035049,
+        "on_wall_s": 0.216621667,
+        "speedup_if_both_solved": null
+      },
+      {
+        "seed": 11,
+        "off_status": "unknown",
+        "on_status": "placed",
+        "off_wall_s": 15.033169709,
+        "on_wall_s": 0.20943675,
+        "speedup_if_both_solved": null
+      },
+      {
+        "seed": 23,
+        "off_status": "unknown",
+        "on_status": "placed",
+        "off_wall_s": 15.037493333,
+        "on_wall_s": 0.212714584,
+        "speedup_if_both_solved": null
+      }
+    ]
+  },
+  {
+    "case": "half_adder",
+    "off": {
+      "runs": 5,
+      "solved": 1,
+      "unknown": 4,
+      "infeasible": 0,
+      "median_wall_s": 15.054257083,
+      "median_solved_wall_s": 13.044015625,
+      "median_encode_s": 0.051862667,
+      "median_solve_s": 15.001997959,
+      "mean_par2_s": 26.650341741600002
+    },
+    "on": {
+      "runs": 5,
+      "solved": 1,
+      "unknown": 4,
+      "infeasible": 0,
+      "median_wall_s": 15.05535075,
+      "median_solved_wall_s": 14.180565416,
+      "median_encode_s": 0.052645917,
+      "median_solve_s": 15.002016875,
+      "mean_par2_s": 26.878360399800002
+    },
+    "pairs": [
+      {
+        "seed": 1,
+        "off_status": "unknown",
+        "on_status": "unknown",
+        "off_wall_s": 15.053362083,
+        "on_wall_s": 15.05535075,
+        "speedup_if_both_solved": null
+      },
+      {
+        "seed": 2,
+        "off_status": "placed",
+        "on_status": "unknown",
+        "off_wall_s": 13.044015625,
+        "on_wall_s": 15.054466833,
+        "speedup_if_both_solved": null
+      },
+      {
+        "seed": 3,
+        "off_status": "unknown",
+        "on_status": "unknown",
+        "off_wall_s": 15.056995,
+        "on_wall_s": 15.056299917,
+        "speedup_if_both_solved": null
+      },
+      {
+        "seed": 11,
+        "off_status": "unknown",
+        "on_status": "unknown",
+        "off_wall_s": 15.054672458,
+        "on_wall_s": 15.055662958,
+        "speedup_if_both_solved": null
+      },
+      {
+        "seed": 23,
+        "off_status": "unknown",
+        "on_status": "placed",
+        "off_wall_s": 15.054257083,
+        "on_wall_s": 14.180565416,
+        "speedup_if_both_solved": null
+      }
+    ]
+  }
+]

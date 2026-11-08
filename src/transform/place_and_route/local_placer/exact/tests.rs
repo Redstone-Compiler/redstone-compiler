@@ -4295,6 +4295,23 @@ fn diagnose_global_dff_second_repeater_removal() -> eyre::Result<()> {
     probe_global_dff_repeaters(true)
 }
 
+/// Verify a cold-search artifact against the original model and 2,048 NBT transitions.
+#[test]
+#[ignore = "set DFF_VERIFY_STEM to an exported RCELL/NBT prefix relative to test/"]
+fn verify_dff_search_artifact() -> eyre::Result<()> {
+    let stem = std::env::var("DFF_VERIFY_STEM")?;
+    let document: crate::physical_cell::PhysicalCellDocument =
+        std::fs::read_to_string(format!("test/{stem}.rcell"))?.parse()?;
+    let layout = ExactLayout::from_rcell(&document)?;
+    check_global_dff_stress(&stem)?;
+    check_global_dff_model(&stem, layout.block_count())?;
+    println!(
+        "DFF independently verified {} blocks, 2048 transitions: {stem}",
+        layout.block_count()
+    );
+    Ok(())
+}
+
 #[test]
 fn minimize_global_dff_automatically() -> eyre::Result<()> {
     let document: crate::physical_cell::PhysicalCellDocument =
@@ -4479,6 +4496,17 @@ fn explore_sequential_cells() -> eyre::Result<()> {
             });
         }
         config.seed = env_usize("SEQ_SEED", 1) as u32;
+        if let Ok(options) = std::env::var("SEQ_SOLVER_OPTIONS") {
+            for option in options.split(',').filter(|s| !s.is_empty()) {
+                let (name, value) = option
+                    .split_once('=')
+                    .ok_or_else(|| eyre::eyre!("expected name=value"))?;
+                config
+                    .tuning
+                    .solver_options
+                    .insert(name.into(), value.parse()?);
+            }
+        }
         config.rank_levels = env_usize("SEQ_RANK", config.rank_levels);
         config.stage_levels = env_usize("SEQ_STAGE", config.stage_levels);
         config.model_params = model_params_from_env("SEQ_MODEL_PARAMS");
@@ -4716,5 +4744,85 @@ fn synthesize_buildable_circuits() -> eyre::Result<()> {
             netlist.to_text()
         );
     }
+    Ok(())
+}
+
+/// Exhaust complete tiny physical-layout sets, not just a few successful solves.
+#[test]
+fn canonical_source_ranks_preserve_small_layout_sets() -> eyre::Result<()> {
+    for (expr, dim) in [
+        ("~a", DimSize(1, 3, 2)),
+        ("~a", DimSize(1, 4, 2)),
+        ("~(a|b)", DimSize(1, 4, 2)),
+    ] {
+        let placer = ExactLocalPlacer::new(&graph(&[("out", expr)]))?;
+        let mut sets = Vec::new();
+        for enabled in [false, true] {
+            let mut config = ExactPlacerConfig::new(dim);
+            config.box_symmetry = None;
+            config.rank_levels = 4;
+            config.stage_levels = 4;
+            config.model_params.insert(
+                "canonical_source_ranks".into(),
+                rsdsl::IValue::Bool(enabled),
+            );
+            let encoding = Encoding::build(placer.netlist(), &config)?;
+            let mut solver = SatSolver::new(11);
+            solver.add_cnf(&encoding.cnf);
+            let stop = AtomicBool::new(false);
+            let signal = StopSignal {
+                stop: &stop,
+                deadline: Some(Instant::now() + Duration::from_secs(30)),
+                restart: None,
+            };
+            let mut layouts = BTreeSet::new();
+            loop {
+                match solver.solve(&[], &signal) {
+                    SolveResult::Unsat => break,
+                    SolveResult::Interrupted => {
+                        panic!("enumeration did not finish: {expr} enabled={enabled}")
+                    }
+                    SolveResult::Sat => {
+                        let (kinds, lits) = verify::decode_kinds(&encoding, &solver);
+                        layouts.insert(kinds);
+                        solver.add_clause(&lits.into_iter().map(|lit| -lit).collect::<Vec<_>>());
+                    }
+                }
+            }
+            assert!(!layouts.is_empty());
+            if expr == "~a" && dim == DimSize(1, 4, 2) {
+                assert!(layouts.iter().any(|kinds| kinds
+                    .iter()
+                    .any(|kind| matches!(kind, CellKind::Repeater(_)))));
+            }
+            println!(
+                "RANK PARITY {expr} enabled={enabled}: {} layouts",
+                layouts.len()
+            );
+            sets.push(layouts);
+        }
+        assert_eq!(
+            sets[0], sets[1],
+            "{expr}: normalization changed physical layouts"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn dff_fast_model_disabled_matches_original_cnf() -> eyre::Result<()> {
+    let netlist = NorNetlist::from_text(sequential_netlist("dff-neg")?)?;
+    let mut config = ExactPlacerConfig::new(DimSize(2, 7, 4));
+    config.box_symmetry = None;
+    config.rank_levels = 8;
+    config.stage_levels = 8;
+    config.model_file = Some("docs/rsdsl/dff_global_six_gate.rsdsl".into());
+    let original = Encoding::build(&netlist, &config)?;
+    config.model_file = Some("docs/rsdsl/dff_global_fast.rsdsl".into());
+    config
+        .model_params
+        .insert("canonical_source_ranks".into(), rsdsl::IValue::Bool(false));
+    let disabled = Encoding::build(&netlist, &config)?;
+    assert_eq!(original.cnf.literals(), disabled.cnf.literals());
     Ok(())
 }

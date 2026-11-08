@@ -201,6 +201,8 @@ impl CarryTiling {
 pub struct ExactTuning {
     /// Seed spacing between portfolio workers (`seed + worker * stride`).
     pub worker_seed_stride: u32,
+    /// CaDiCaL heuristic overrides; do not change the encoded constraints.
+    pub solver_options: BTreeMap<String, i32>,
     /// Simulator cycle limit for each settle during verification.
     pub sim_max_cycles: usize,
     /// Simulator event limit for each settle during verification.
@@ -217,6 +219,7 @@ impl Default for ExactTuning {
     fn default() -> Self {
         Self {
             worker_seed_stride: 7919,
+            solver_options: BTreeMap::new(),
             sim_max_cycles: 256,
             sim_max_events: 50_000,
             torch_bound_max_states: 200_000,
@@ -675,10 +678,14 @@ impl ExactLocalPlacer {
             return self.run_core_guided(encoding, config, worker, shared);
         }
         let seed = worker_seed(config, worker);
+        let mut profile = SearchProfile::new(worker, seed);
         let mut solver = SatSolver::new(seed);
         // Diversify the portfolio: sparse-first (phase 0) and stable-mode variants.
         solver.set_option("phase", i32::from(worker % 2 == 1));
         solver.set_option("stabilizeonly", i32::from(worker % 4 >= 2));
+        for (name, &value) in &config.tuning.solver_options {
+            solver.set_option(name, value);
+        }
         solver.add_cnf(&encoding.cnf);
         let mut signal = StopSignal {
             stop: shared.stop,
@@ -713,7 +720,19 @@ impl ExactLocalPlacer {
                     }
                 }
             }
-            match solver.solve(&assumptions, &signal) {
+            let phase_started = profile.enabled.then(Instant::now);
+            let result = solver.solve(&assumptions, &signal);
+            if let Some(started) = phase_started {
+                profile.sat += started.elapsed();
+            }
+            profile.calls += 1;
+            if profile.enabled && result == SolveResult::Sat && profile.calls == 1 {
+                eprintln!(
+                    "SEARCH_FIRST_SAT worker={worker} seed={seed} elapsed={:?}",
+                    profile.sat
+                );
+            }
+            match result {
                 SolveResult::Unsat => {
                     if let Some(incumbent) = shared.incumbent {
                         if incumbent.cost.load(Ordering::Relaxed) != i64::MAX {
@@ -747,9 +766,18 @@ impl ExactLocalPlacer {
                 total.feedback_cuts += worker_lazy.feedback_cuts;
                 continue;
             }
+            let phase_started = profile.enabled.then(Instant::now);
             let decoded = verify::decode(encoding, &solver, &self.netlist);
             let world = verify::build_world(config.dim, &decoded.kinds);
-            match verify::verify(&self.netlist, &decoded, &world, &config.tuning) {
+            if let Some(started) = phase_started {
+                profile.decode += started.elapsed();
+            }
+            let phase_started = profile.enabled.then(Instant::now);
+            let verified = verify::verify(&self.netlist, &decoded, &world, &config.tuning);
+            if let Some(started) = phase_started {
+                profile.verify += started.elapsed();
+            }
+            match verified {
                 Ok(()) => {
                     let cost = encoding
                         .objective
@@ -762,6 +790,9 @@ impl ExactLocalPlacer {
                     }
                 }
                 Err(failure) => {
+                    if profile.enabled {
+                        *profile.failures.entry(failure.message.clone()).or_default() += 1;
+                    }
                     tracing::debug!(?failure, "exact placer layout rejected by simulator");
                     if let Ok(directory) = std::env::var("EXACT_DUMP_REJECTIONS") {
                         let diagnosis = verify::diagnose(
@@ -835,6 +866,9 @@ impl ExactLocalPlacer {
         let incumbent = shared.incumbent.expect("optimize shares an incumbent");
         let seed = worker_seed(config, worker);
         let mut solver = SatSolver::new(seed);
+        for (name, &value) in &config.tuning.solver_options {
+            solver.set_option(name, value);
+        }
         solver.add_cnf(&encoding.cnf);
         let signal = StopSignal {
             stop: shared.stop,
@@ -1108,5 +1142,35 @@ impl ExactLocalPlacer {
             ExactOutcome::Placed(placement) => (Some(*placement), optimal, stats),
             _ => (None, false, stats),
         })
+    }
+}
+
+// Per-worker elapsed phase totals: concurrent workers must not be summed as wall time.
+#[derive(Default)]
+struct SearchProfile {
+    enabled: bool,
+    worker: usize,
+    seed: u32,
+    sat: Duration,
+    decode: Duration,
+    verify: Duration,
+    calls: usize,
+    failures: std::collections::BTreeMap<String, usize>,
+}
+impl SearchProfile {
+    fn new(worker: usize, seed: u32) -> Self {
+        let mut profile = Self::default();
+        profile.enabled = std::env::var_os("EXACT_PROFILE").is_some();
+        profile.worker = worker;
+        profile.seed = seed;
+        profile
+    }
+}
+impl Drop for SearchProfile {
+    fn drop(&mut self) {
+        if self.enabled {
+            eprintln!("SEARCH_PROFILE worker={} seed={} sat={:?} decode={:?} verify={:?} calls={} failures={:?}",
+                self.worker, self.seed, self.sat, self.decode, self.verify, self.calls, self.failures);
+        }
     }
 }

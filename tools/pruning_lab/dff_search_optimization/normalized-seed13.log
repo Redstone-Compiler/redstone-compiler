@@ -1,0 +1,17 @@
+   Compiling redstone-compiler v0.1.0 (/Users/rollrat/Desktop/redstone-compiler)
+    Finished `release` profile [optimized] target(s) in 16.67s
+     Running unittests src/lib.rs (target/release/deps/redstone_compiler-203304052ee76598)
+
+running 1 test
+SEQ dff-neg inputs=["clk", "d"] state=["m", "q"] torches=6 settled cases=["0000", "0001", "0010", "0111", "1001", "1100", "1110", "1111"] homing=[1, 0]
+SEQ search rank=8 stage=8 fixed=0 inputs_fixed=0 optimize=false seed=13 workers=4 model_params={}
+test transform::place_and_route::local_placer::exact::tests::explore_sequential_cells has been running for over 60 seconds
+SEARCH_PROFILE worker=1 seed=7932 sat=119.972815292s decode=0ns verify=0ns calls=1 failures={}
+SEARCH_PROFILE worker=3 seed=23770 sat=119.97401775s decode=0ns verify=0ns calls=1 failures={}
+SEARCH_PROFILE worker=0 seed=13 sat=119.973506584s decode=0ns verify=0ns calls=1 failures={}
+SEARCH_PROFILE worker=2 seed=15851 sat=119.97391425s decode=0ns verify=0ns calls=1 failures={}
+SEQ stats vars=47301 clauses=226813 encode=181.1135ms solve=120.003095375s loops=0 feedback=0 refinements=0
+SEQ unknown 2x7x4 refinements=0 last rejection None (120.2s)
+test transform::place_and_route::local_placer::exact::tests::explore_sequential_cells ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 439 filtered out; finished in 120.19s

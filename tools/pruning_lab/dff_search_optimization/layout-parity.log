@@ -1,0 +1,14 @@
+   Compiling redstone-compiler v0.1.0 (/Users/rollrat/Desktop/redstone-compiler)
+    Finished `release` profile [optimized] target(s) in 17.40s
+     Running unittests src/lib.rs (target/release/deps/redstone_compiler-203304052ee76598)
+
+running 1 test
+RANK PARITY ~a enabled=false: 136 layouts
+RANK PARITY ~a enabled=true: 136 layouts
+RANK PARITY ~a enabled=false: 1206 layouts
+RANK PARITY ~a enabled=true: 1206 layouts
+RANK PARITY ~(a|b) enabled=false: 100 layouts
+RANK PARITY ~(a|b) enabled=true: 100 layouts
+test transform::place_and_route::local_placer::exact::tests::canonical_source_ranks_preserve_small_layout_sets ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 439 filtered out; finished in 0.11s

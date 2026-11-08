@@ -1,0 +1,29 @@
+{
+  "seeds": [
+    1,
+    2,
+    3,
+    11,
+    23
+  ],
+  "primary_workers": 4,
+  "solver_limit_seconds": 15,
+  "rank_levels": 24,
+  "stage_levels": 24,
+  "box_symmetry": "default torch mirror",
+  "optimize": false,
+  "fixed_cells": 0,
+  "fixed_pins": 0,
+  "initial_layout": null,
+  "measurement": "wall time including encode; Rust compilation excluded",
+  "acceptance": "first layout passing the normal full simulator verifier",
+  "execution": "serial paired off/on runs; order alternated by circuit and seed",
+  "model_sha256": "5198b5d7368e441d3ea145495d04182f4b45fe6b1dd98ca4a95fc34e524f79bd",
+  "revision": "uncommitted source-rank rule relocated into symmetry section",
+  "failure_scoring": "unknown is failure; PAR2 charges 2*limit plus encode, never treats an early failure as speedup",
+  "caveats": [
+    "15 second censored budget; do not treat unknown as infeasible.",
+    "Not a minimum-block or fixed-final-layout benchmark.",
+    "One box per circuit; no universal speedup claim."
+  ]
+}

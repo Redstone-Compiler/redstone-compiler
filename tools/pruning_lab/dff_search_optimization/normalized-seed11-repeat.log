@@ -1,0 +1,49 @@
+   Compiling redstone-compiler v0.1.0 (/Users/rollrat/Desktop/redstone-compiler)
+    Finished `release` profile [optimized] target(s) in 16.13s
+     Running unittests src/lib.rs (target/release/deps/redstone_compiler-203304052ee76598)
+
+running 1 test
+SEQ dff-neg inputs=["clk", "d"] state=["m", "q"] torches=6 settled cases=["0000", "0001", "0010", "0111", "1001", "1100", "1110", "1111"] homing=[1, 0]
+SEQ search rank=8 stage=8 fixed=0 inputs_fixed=0 optimize=false seed=11 workers=4 model_params={}
+SEARCH_FIRST_SAT worker=2 seed=15849 elapsed=39.807662833s
+SEARCH_PROFILE worker=2 seed=15849 sat=40.214602021s decode=15.465284ms verify=636.025778ms calls=2001 failures={"torch burned out after 1 -> 0": 2001}
+SEARCH_FIRST_SAT worker=3 seed=23768 elapsed=43.578472083s
+SEARCH_PROFILE worker=3 seed=23768 sat=43.578472083s decode=13.25µs verify=658.875µs calls=1 failures={}
+SEARCH_PROFILE worker=1 seed=7930 sat=43.57904775s decode=0ns verify=0ns calls=1 failures={}
+SEARCH_PROFILE worker=0 seed=11 sat=43.583071625s decode=0ns verify=0ns calls=1 failures={}
+SEQ stats vars=47301 clauses=226813 encode=180.049458ms solve=43.610331083s loops=0 feedback=0 refinements=2001
+SEQ placed 2x7x4: 42 blocks, discovery_optimal=false discovery_refinements=2001 (discovery 43.8s)
+rcell 1;
+cell "exact-dff-neg" size [2, 7, 4] {
+  start settled;
+  glyph "P" = torch on x-;
+  glyph "T" = torch on y+;
+  glyph "U" = repeater toward y+ delay 1;
+  glyph "V" = torch on y-;
+  glyph "W" = torch on x+;
+  glyph "X" = repeater toward y- delay 1;
+  glyph "Y" = torch on z-;
+
+  input "clk" at [0, 4, 2] on y+;
+  input "d" at [0, 3, 2] on z-;
+  output "q" at [0, 4, 3];
+
+  plane yz at x=0 {
+    z=3 ".#.#WX#";
+    z=2 ".r#..#V";
+    z=1 ".#T#U#r";
+    z=0 "#..####";
+  }
+
+  plane yz at x=1 {
+    z=3 ".r#r#rP";
+    z=2 "T#Y#r#.";
+    z=1 "rX#U#..";
+    z=0 "##.###.";
+  }
+
+}
+
+test transform::place_and_route::local_placer::exact::tests::explore_sequential_cells ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 437 filtered out; finished in 43.79s
