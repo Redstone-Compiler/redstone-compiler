@@ -1,11 +1,11 @@
 use std::cmp;
-use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::ops::{Index, IndexMut};
+use std::sync::Arc;
 
 use block::{Block, BlockKind, Direction, RedstoneState, RedstoneStateType};
 use itertools::Itertools;
-use position::{DimSize, Position, PositionIndex};
+use position::{DimSize, Position};
 
 pub mod block;
 pub mod gate;
@@ -30,15 +30,16 @@ impl World {
 #[derive(Clone, Default)]
 pub struct World3D {
     pub size: DimSize,
-    // z, y, z
-    pub map: Vec<Vec<Vec<Block>>>,
+    // [z][y][x]. Clones share planes and rows. A write detaches only its
+    // plane's row handles and its row's blocks; untouched planes remain shared.
+    pub map: Vec<Arc<Vec<Arc<Vec<Block>>>>>,
 }
 
 impl World3D {
     pub fn new(size: DimSize) -> Self {
         Self {
             size,
-            map: vec![vec![vec![Block::default(); size.0]; size.1]; size.2],
+            map: vec![Arc::new(vec![Arc::new(vec![Block::default(); size.0]); size.1]); size.2],
         }
     }
 
@@ -216,34 +217,17 @@ impl World3D {
 
 impl<'a> From<&'a World> for World3D {
     fn from(value: &'a World) -> Self {
-        let mut block_map: BTreeMap<PositionIndex, &Block> = BTreeMap::default();
-
-        for block in &value.blocks {
-            block_map.insert(block.0.index(&value.size), &block.1);
+        let mut world = Self::new(value.size);
+        // Sparse worlds may contain repeated coordinates: applying in order
+        // preserves the previous last-entry-wins semantics, including Air.
+        for (position, block) in &value.blocks {
+            // Never flatten invalid coordinates: an oversized x could alias a
+            // different valid row in the former linear-index lookup.
+            if value.size.bound_on(*position) {
+                world[*position] = *block;
+            }
         }
-
-        let map: Vec<Vec<Vec<Block>>> = (0..value.size.2)
-            .map(|z| {
-                (0..value.size.1)
-                    .map(|y| {
-                        (0..value.size.0)
-                            .map(|x| {
-                                let pos = PositionIndex(
-                                    x + y * value.size.0 + z * value.size.0 * value.size.1,
-                                );
-
-                                block_map.get(&pos).map(|&&block| block).unwrap_or_default()
-                            })
-                            .collect()
-                    })
-                    .collect()
-            })
-            .collect();
-
-        Self {
-            size: value.size,
-            map,
-        }
+        world
     }
 }
 
@@ -266,7 +250,8 @@ impl Index<Position> for World3D {
 
 impl IndexMut<Position> for World3D {
     fn index_mut(&mut self, index: Position) -> &mut Self::Output {
-        &mut self.map[index.2][index.1][index.0]
+        let plane = Arc::make_mut(&mut self.map[index.2]);
+        &mut Arc::make_mut(&mut plane[index.1])[index.0]
     }
 }
 
@@ -297,5 +282,92 @@ impl Debug for World3D {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod storage_tests {
+    use super::*;
+
+    #[test]
+    fn cloning_shares_planes_and_rows_and_detaches_only_written_regions() {
+        let p = Position(1, 1, 1);
+        let mut original = World3D::new(DimSize(4, 3, 2));
+        original[p].kind = BlockKind::Switch { is_on: false };
+        let mut branch = original.clone();
+        let sibling = original.clone();
+        for z in 0..2 {
+            assert!(Arc::ptr_eq(&original.map[z], &branch.map[z]));
+            for y in 0..3 {
+                assert!(Arc::ptr_eq(&original.map[z][y], &branch.map[z][y]));
+            }
+        }
+        branch[p].kind = BlockKind::Switch { is_on: true };
+        assert!(Arc::ptr_eq(&original.map[0], &branch.map[0]));
+        assert!(!Arc::ptr_eq(&original.map[1], &branch.map[1]));
+        assert!(!Arc::ptr_eq(&original.map[1][1], &branch.map[1][1]));
+        for z in 0..2 {
+            for y in 0..3 {
+                if (z, y) != (1, 1) {
+                    assert!(Arc::ptr_eq(&original.map[z][y], &branch.map[z][y]));
+                }
+            }
+        }
+        assert!(!original[p].kind.is_powered());
+        assert!(!sibling[p].kind.is_powered());
+        assert!(branch[p].kind.is_powered());
+        let detached_plane = Arc::as_ptr(&branch.map[1]);
+        let detached_row = Arc::as_ptr(&branch.map[1][1]);
+        branch[Position(2, 1, 1)].kind = BlockKind::RedstoneBlock;
+        assert_eq!(Arc::as_ptr(&branch.map[1]), detached_plane);
+        assert_eq!(Arc::as_ptr(&branch.map[1][1]), detached_row);
+        assert!(original[Position(2, 1, 1)].kind.is_air());
+        // Mutating the source after the fork must also preserve both branches.
+        original[p].kind = BlockKind::RedstoneBlock;
+        assert_eq!(sibling[p].kind, BlockKind::Switch { is_on: false });
+        assert_eq!(branch[p].kind, BlockKind::Switch { is_on: true });
+    }
+
+    #[test]
+    fn sparse_conversion_keeps_last_duplicates_and_ignores_invalid_coordinates() {
+        let p = Position(1, 1, 1);
+        let q = Position(2, 1, 1);
+        let powered = Block {
+            kind: BlockKind::RedstoneBlock,
+            ..Default::default()
+        };
+        let world = World {
+            size: DimSize(3, 2, 2),
+            blocks: vec![
+                (p, powered),
+                (p, Block::default()),
+                (q, Block::default()),
+                (q, powered),
+                (Position(3, 0, 0), powered), // must not alias (0,1,0)
+                (Position(0, 2, 0), powered), // must not alias (0,0,1)
+                (Position(0, 0, 2), powered),
+                (Position(usize::MAX, usize::MAX, usize::MAX), powered),
+            ],
+        };
+        let dense = World3D::from(&world);
+        assert_eq!(dense.iter_block(), vec![(q, powered)]);
+        assert!(dense[p].kind.is_air());
+        assert!(dense[Position(0, 1, 0)].kind.is_air());
+        assert!(dense[Position(0, 0, 1)].kind.is_air());
+    }
+
+    #[test]
+    fn sparse_world_conversion_and_shared_empty_rows_preserve_coordinates() {
+        let mut empty = World3D::new(DimSize(3, 2, 2));
+        empty[Position(2, 1, 1)].kind = BlockKind::RedstoneBlock;
+        assert_eq!(empty.iter_block().len(), 1);
+        assert!(empty[Position(2, 0, 0)].kind.is_air());
+        let sparse = World::from(&empty);
+        let mut roundtrip = World3D::from(&sparse);
+        assert_eq!(roundtrip.iter_block(), empty.iter_block());
+        let branch = roundtrip.clone();
+        roundtrip[Position(2, 1, 1)] = Block::default();
+        assert!(roundtrip.iter_block().is_empty());
+        assert_eq!(branch.iter_block(), empty.iter_block());
     }
 }
