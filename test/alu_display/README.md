@@ -27,7 +27,7 @@ PNR_ASTAR_EXPANSIONS=20000 PNR_MAX_STEPS=256 \
 
 ## Unsigned 가산기 물리 실험
 
-기존 Exact의 단계별 `construct → compact`를 같은 전체 논리에 적용하는 예제는 `whole_decoder_construct`다. 초기 세 실험과 내장 재시작 시험은 구성 단계에서 중단돼 완성 NBT/압축 결과가 없다. 재시작 후 최대7/28단계까지 진행했다. [설정과 실패 단계](../../docs/whole_decoder_construct.md)를 확인한다.
+전체 decoder도 Exact 구성으로 생성했다. `sh tools/alu_display/whole_decoder_exact.sh FRESH_DIRECTORY`는 일반 Verilog를24-NOR로 내리고 범용 NOR 템플릿의 블록 부분집합을 SAT로 선택해 초기해를 만든다. Global PnR 없이4,132블록/220×7×33 NBT를 생성했고, cold 구성185.937초와16개 입력·256개 전이/NBT 재읽기를 확인했다. fixture는 `nbt/alu-display-decoder-whole-exact.nbt`, 요약은 `whole_decoder_exact_verification.json`이다. 자유로운 단일 SAT 최적해는 아니며 출력은 anywhere-observable이다. [모델 변경·압축·이전 실패 기록](../../docs/whole_decoder_construct.md)을 확인한다.
 
 20개 물리 셀로 나누지 않고 decoder 전체를 하나의 SAT 모델에 넣는 실험은 `whole_decoder_exact` 예제와 [전체 Exact 실험 기록](../../docs/whole_decoder_exact.md)을 참고한다. 기존4,187블록 fixture와 다른 경로이며, 초기 자유 배치 실험은 모두 시간 제한 내 UNKNOWN이었다.
 

@@ -61,6 +61,21 @@ fn save_verify(directory: &Path, placed: &PlacedWorld) -> eyre::Result<serde_jso
         placed.inputs.len() == 4 && placed.outputs.len() == 7,
         "unexpected physical interface"
     );
+    ensure!(
+        placed
+            .inputs
+            .iter()
+            .map(|p| p.name.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            == (0..4).map(|i| format!("digit_{i}")).collect()
+            && placed
+                .outputs
+                .iter()
+                .map(|p| p.name.clone())
+                .collect::<std::collections::BTreeSet<_>>()
+                == (0..7).map(|i| format!("seg_{i}")).collect(),
+        "physical endpoint names must cover every input and segment exactly once"
+    );
     for value in 0..16 {
         let mut sim = Simulator::from_settled_with_limits_and_trace(&world, 4096, 2_000_000, 0)?;
         check(&mut sim, placed, value)?;
@@ -119,6 +134,22 @@ fn main() -> eyre::Result<()> {
         }
     }
     let original = ExactLocalPlacer::new(&graph)?;
+    let original = if let Some(path) = std::env::var_os("CONSTRUCT_NETLIST") {
+        ExactLocalPlacer::from_netlist(redstone_compiler::transform::place_and_route::local_placer::exact::NorNetlist::from_text(&std::fs::read_to_string(path)?)?)
+    } else {
+        original
+    };
+    let original = if std::env::var("CONSTRUCT_FLATTEN_POSITIVE").as_deref() == Ok("1") {
+        ExactLocalPlacer::from_netlist(original.netlist().flatten_positive_logic()?)
+    } else {
+        original
+    };
+    let isolate = std::env::var("CONSTRUCT_ISOLATE_OUTPUTS").as_deref() == Ok("1");
+    let original = if isolate {
+        ExactLocalPlacer::from_netlist(original.netlist().isolate_output_cones()?)
+    } else {
+        original
+    };
     let max_fanin = std::env::var("CONSTRUCT_MAX_FANIN")
         .unwrap_or("0".into())
         .parse::<usize>()?;
@@ -132,6 +163,17 @@ fn main() -> eyre::Result<()> {
     ensure!(
         input_names.len() == 4 && placer.netlist().outputs.len() == 7,
         "unexpected chained interface"
+    );
+    ensure!(
+        input_names == truth.input_names
+            && placer
+                .netlist()
+                .outputs
+                .iter()
+                .map(|(name, _)| name.clone())
+                .collect::<std::collections::BTreeSet<_>>()
+                == (0..7).map(|i| format!("seg_{i}")).collect(),
+        "netlist must expose every decoder endpoint exactly once"
     );
     for mask in 0..16 {
         let mut digit = 0;
@@ -185,6 +227,8 @@ fn main() -> eyre::Result<()> {
         seed: 1,
         step_optimize: None,
         progress: Some(directory.join("construction-progress")),
+        checkpoint: Some(directory.join("checkpoint.json")),
+        resume: std::env::var_os("CONSTRUCT_RESUME").map(PathBuf::from),
         ..Default::default()
     };
     let number = |name: &str, fallback: u64| -> eyre::Result<u64> {
@@ -197,6 +241,41 @@ fn main() -> eyre::Result<()> {
     config.max_restarts = number("CONSTRUCT_RESTARTS", 0)? as usize;
     config.overlap = number("CONSTRUCT_OVERLAP", 1)? as usize;
     config.max_overlap = config.overlap;
+    config.max_overlap = number("CONSTRUCT_MAX_OVERLAP", config.overlap as u64)? as usize;
+    config.window = number("CONSTRUCT_WINDOW", 3)? as usize;
+    config.max_window = number("CONSTRUCT_MAX_WINDOW", 6)? as usize;
+    config.max_backtracks = number("CONSTRUCT_BACKTRACKS", 0)? as usize;
+    config.step_vocabulary = number("CONSTRUCT_STEP_VOCABULARY", 0)? != 0;
+    config.partial_or_vocabulary = number("CONSTRUCT_PARTIAL_ORS", 0)? != 0;
+    config.driving_seams = number("CONSTRUCT_DRIVING_SEAMS", 0)? != 0;
+    config.compress_complements = number("CONSTRUCT_COMPRESS_COMPLEMENTS", 0)? != 0;
+    config.scaffold_seams = number("CONSTRUCT_SCAFFOLD_SEAMS", 0)? != 0;
+    config.seam_pitch = number("CONSTRUCT_SEAM_PITCH", 0)? as usize;
+    config.seam_primary_stride = number("CONSTRUCT_PRIMARY_STRIDE", 1)? as usize;
+    config.gate_scaffold = number("CONSTRUCT_GATE_SCAFFOLD", 0)? != 0;
+    config.gate_batch = number("CONSTRUCT_GATE_BATCH", 1)? as usize;
+    config.rank_levels = number("CONSTRUCT_RANK_LEVELS", 24)? as usize;
+    config.stage_levels = number("CONSTRUCT_STAGE_LEVELS", 24)? as usize;
+    config.tuning.sim_max_cycles = number("CONSTRUCT_SIM_CYCLES", 4096)? as usize;
+    config.tuning.sim_max_events = number("CONSTRUCT_SIM_EVENTS", 2_000_000)? as usize;
+    for (env, parameter) in [
+        ("CONSTRUCT_CANONICAL_RANKS", "canonical_source_ranks"),
+        ("CONSTRUCT_SYMMETRY", "symmetry_breaking"),
+        ("CONSTRUCT_REPEATER_SEAMS", "repeater_driving_outputs"),
+    ] {
+        if let Ok(value) = std::env::var(env) {
+            config
+                .model_params
+                .insert(parameter.into(), rsdsl::IValue::Bool(value == "1"));
+        }
+    }
+    if let Ok(value) = std::env::var("CONSTRUCT_CASE_RANK_LEVELS") {
+        config.model_params.insert(
+            "case_rank_levels".into(),
+            rsdsl::IValue::Int(value.parse()?),
+        );
+    }
+    config.given_frozen_signals = number("CONSTRUCT_GIVEN_SIGNALS", 1)? != 0;
     config.width = number("CONSTRUCT_WIDTH", 4)? as usize;
     config.height = number("CONSTRUCT_HEIGHT", 6)? as usize;
     config.workers = number("CONSTRUCT_WORKERS", 1)? as usize;
@@ -211,6 +290,8 @@ fn main() -> eyre::Result<()> {
     )?));
     let optimize_ms = number("CONSTRUCT_STEP_OPT_MS", 0)?;
     config.step_optimize = (optimize_ms > 0).then(|| Duration::from_millis(optimize_ms));
+    let delete_ms = number("CONSTRUCT_DELETE_MS", 0)?;
+    config.step_delete = (delete_ms > 0).then(|| Duration::from_millis(delete_ms));
     config.gate_order = match std::env::var("CONSTRUCT_ORDER")
         .as_deref()
         .unwrap_or("min-live")
@@ -235,6 +316,11 @@ fn main() -> eyre::Result<()> {
         format!("{config:#?}"),
     )?;
     let mut report = serde_json::json!({"mode":"whole-decoder-construct-compact","output_contract":if output_mode == "anywhere" {"anywhere-observable"} else {"max-y-driving"},"status":"constructing","logical_static_cases":16,"inputs":4,"outputs":7,"nor_gates":nor_gates,"or_nets":or_nets,"construction_steps":nor_gates+or_nets,"max_fanin":max_fanin,"netlist_static_cases":16,"overlap":config.overlap,"width":config.width,"height":config.height,"window":config.window,"max_window":config.max_window,"gate_order":format!("{:?}",config.gate_order),"early_outputs":true,"workers":config.workers,"seed":1,"step_seconds":config.step_time_limit.as_secs(),"construction_budget_seconds":config.restart_after.unwrap().as_secs(),"max_restarts":config.max_restarts,"restart_seed_stride":config.restart_seed_stride,"step_optimize_ms":optimize_ms});
+    report["strategy"] = serde_json::json!({"isolate_outputs":isolate,"flatten_positive":std::env::var("CONSTRUCT_FLATTEN_POSITIVE").as_deref()==Ok("1"),"netlist_override":std::env::var("CONSTRUCT_NETLIST").ok(),"resume":config.resume.as_ref().map(|p|p.display().to_string()),"gate_batch":config.gate_batch,"step_vocabulary":config.step_vocabulary,"partial_ors":config.partial_or_vocabulary,"compress_complements":config.compress_complements,"driving_seams":config.driving_seams,"scaffold_seams":config.scaffold_seams,"given_frozen_signals":config.given_frozen_signals,"delete_ms":delete_ms,"rank_levels":config.rank_levels,"stage_levels":config.stage_levels,"model_params":format!("{:?}",config.model_params)});
+    report["strategy"]["gate_scaffold"] = config.gate_scaffold.into();
+    report["strategy"]["seam_pitch"] = config.seam_pitch.into();
+    report["strategy"]["primary_stride"] = config.seam_primary_stride.into();
+    report["strategy"]["sim_max_cycles"] = config.tuning.sim_max_cycles.into();
     let write_report = |report: &serde_json::Value| -> eyre::Result<()> {
         std::fs::write(
             directory.join("attempt.json"),
@@ -244,22 +330,77 @@ fn main() -> eyre::Result<()> {
     };
     write_report(&report)?;
     let started = Instant::now();
-    let (layout, baseline, construction) = match placer.construct(&config) {
-        Ok(value) => value,
-        Err(error) => {
-            report["status"] = "construction-failed".into();
-            report["error"] = format!("{error:#}").into();
-            report["construct_ms"] = (started.elapsed().as_millis() as u64).into();
-            write_report(&report)?;
-            println!("RESULT {report}");
-            return Ok(());
+    let (layout, baseline) = if let Some(path) = std::env::var_os("CONSTRUCT_COMPACT_ONLY") {
+        let source = PathBuf::from(path);
+        let checkpoint: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(source.join("checkpoint.json"))?)?;
+        ensure!(
+            checkpoint["netlist"].as_str() == Some(placer.netlist().to_text().as_str()),
+            "compact checkpoint netlist mismatch"
+        );
+        let document: redstone_compiler::physical_cell::PhysicalCellDocument = checkpoint["rcell"]
+            .as_str()
+            .context("checkpoint RCELL missing")?
+            .parse()?;
+        let mut layout=redstone_compiler::transform::place_and_route::local_placer::exact::ExactLayout::from_rcell(&document)?;
+        let signals: Vec<([usize; 3], u64)> =
+            serde_json::from_value(checkpoint["signals"].clone())?;
+        layout.signals = signals
+            .into_iter()
+            .map(|([x, y, z], f)| (redstone_compiler::world::position::Position(x, y, z), f))
+            .collect();
+        let interface: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(source.join("constructed/interface.json"))?)?;
+        let world =
+            NBTRoot::from_nbt_bytes(&std::fs::read(source.join("constructed/decoder.nbt"))?)?
+                .to_world();
+        ensure!(
+            world.blocks.iter().all(|(p, _)| layout.dim.bound_on(*p)),
+            "NBT block outside checkpoint bounds"
+        );
+        let mut restored = redstone_compiler::world::World3D::new(layout.dim);
+        for (p, block) in &world.blocks {
+            restored[*p] = *block;
         }
+        let placed = PlacedWorld {
+            world: restored,
+            inputs: serde_json::from_value(interface["inputs"].clone())?,
+            outputs: serde_json::from_value(interface["outputs"].clone())?,
+        };
+        ensure!(
+            placed.world.size == layout.dim,
+            "checkpoint/NBT dimensions differ"
+        );
+        let baseline =
+            redstone_compiler::transform::place_and_route::local_placer::exact::ExactPlacement {
+                block_count: layout.cells.len().saturating_sub(placed.inputs.len()),
+                placed,
+                cells: layout.cells.iter().map(|(p, k)| (*p, *k)).collect(),
+                signals: layout.signals.iter().map(|(p, f)| (*p, *f)).collect(),
+                delays: Default::default(),
+                rcell: document,
+            };
+        report["compact_source"] = source.display().to_string().into();
+        (layout, baseline)
+    } else {
+        let (layout, baseline, construction) = match placer.construct(&config) {
+            Ok(value) => value,
+            Err(error) => {
+                report["status"] = "construction-failed".into();
+                report["error"] = format!("{error:#}").into();
+                report["construct_ms"] = (started.elapsed().as_millis() as u64).into();
+                write_report(&report)?;
+                println!("RESULT {report}");
+                return Ok(());
+            }
+        };
+        report["construct_ms"] = (started.elapsed().as_millis() as u64).into();
+        std::fs::write(
+            directory.join("construction-report.txt"),
+            format!("{construction:#?}"),
+        )?;
+        (layout, baseline)
     };
-    report["construct_ms"] = (started.elapsed().as_millis() as u64).into();
-    std::fs::write(
-        directory.join("construction-report.txt"),
-        format!("{construction:#?}"),
-    )?;
     match save_verify(&directory.join("constructed"), &baseline.placed) {
         Ok(result) => report["constructed"] = result,
         Err(error) => {
@@ -272,6 +413,13 @@ fn main() -> eyre::Result<()> {
     report["status"] = "compacting".into();
     write_report(&report)?;
     let compact = CompactionConfig {
+        minimize_blocks: false,
+        repair_optimize: None,
+        tuning: config.tuning.clone(),
+        rank_levels: config.rank_levels,
+        stage_levels: config.stage_levels,
+        model_params: config.model_params.clone(),
+        extra_signal_functions: layout.signals.values().copied().collect(),
         output_policies: config.output_policies.clone(),
         time_limit: Some(Duration::from_secs(60)),
         attempt_time_limit: Duration::from_secs(5),
@@ -291,12 +439,27 @@ fn main() -> eyre::Result<()> {
                 directory.join("compaction-report.txt"),
                 format!("{details:#?}"),
             )?;
-            let selected = best.as_ref().unwrap_or(&baseline);
+            let improved = best.as_ref().filter(|candidate| {
+                candidate.cells.len() < baseline.cells.len()
+                    || (candidate.cells.len() == baseline.cells.len()
+                        && candidate.placed.world.size.0
+                            * candidate.placed.world.size.1
+                            * candidate.placed.world.size.2
+                            < baseline.placed.world.size.0
+                                * baseline.placed.world.size.1
+                                * baseline.placed.world.size.2)
+            });
+            if let Some(candidate) = &best {
+                let s = candidate.placed.world.size;
+                report["compaction_candidate"] =
+                    serde_json::json!({"blocks":candidate.cells.len(),"dim":[s.0,s.1,s.2]});
+            }
+            let selected = improved.unwrap_or(&baseline);
             match save_verify(&directory.join("compacted"), &selected.placed) {
                 Ok(result) => {
                     report["compacted"] = result;
                     report["status"] = "verified".into();
-                    report["compaction_produced_new_placement"] = best.is_some().into();
+                    report["compaction_produced_new_placement"] = improved.is_some().into();
                 }
                 Err(error) => {
                     report["status"] = "compaction-verification-failed".into();

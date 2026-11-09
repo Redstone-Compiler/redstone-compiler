@@ -517,6 +517,8 @@ rsdsl 2;
 instance inverter_1x3x2 of exact_placer;
 grid Cell = (1, 3, 2);
 domain Class = [off, a, out];
+domain RankedCell = []; // default case_rank_levels=0
+fact rank_cell = [];
 fact on = [(a, 1), (out, 0)];
 fact switch_site = [(c, att, a) for c: Cell, att: Attach];
 param rank_levels = 8;

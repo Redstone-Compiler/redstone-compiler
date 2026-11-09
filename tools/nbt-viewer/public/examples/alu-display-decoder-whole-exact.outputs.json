@@ -1,0 +1,95 @@
+{
+  "inputs": [
+    {
+      "name": "digit_0",
+      "position": [
+        1,
+        39,
+        1
+      ]
+    },
+    {
+      "name": "digit_1",
+      "position": [
+        7,
+        9,
+        1
+      ]
+    },
+    {
+      "name": "digit_2",
+      "position": [
+        13,
+        0,
+        1
+      ]
+    },
+    {
+      "name": "digit_3",
+      "position": [
+        19,
+        19,
+        1
+      ]
+    }
+  ],
+  "outputs": [
+    {
+      "name": "seg_0",
+      "position": [
+        25,
+        106,
+        2
+      ]
+    },
+    {
+      "name": "seg_1",
+      "position": [
+        25,
+        135,
+        4
+      ]
+    },
+    {
+      "name": "seg_2",
+      "position": [
+        4,
+        77,
+        1
+      ]
+    },
+    {
+      "name": "seg_3",
+      "position": [
+        1,
+        215,
+        4
+      ]
+    },
+    {
+      "name": "seg_4",
+      "position": [
+        4,
+        47,
+        1
+      ]
+    },
+    {
+      "name": "seg_5",
+      "position": [
+        25,
+        176,
+        2
+      ]
+    },
+    {
+      "name": "seg_6",
+      "position": [
+        1,
+        205,
+        4
+      ]
+    }
+  ],
+  "format": "redstone-compiler.interface.v1"
+}

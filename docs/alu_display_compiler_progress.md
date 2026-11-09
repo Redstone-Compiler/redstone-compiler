@@ -85,3 +85,7 @@ Verilog를20개 셀로 나누지 않는 `lower_flat_logic_graph()`와 `whole_dec
 기존 Exact `construct → compact`를 호출하는 별도 runner를 추가했다. 정형 셀/Global PnR 없이 같은 전체 논리를 사용하며, 초기 회로를 NBT 전이 검증한 다음 압축하도록 했다.4×높이6은2/28단계, 기본형2×높이10+단계별최소화는6/28단계,2입력OR체인+2×높이24는1/45단계에서 창별 탐색 시간 초과로 중단됐다. 완성 초기 NBT가 없어 compact는 실행하지 않았다. [실험 기록](whole_decoder_construct.md)에 prefix 크기와 완성 회로를 구분했다.
 
 추가 내장 재시작1회 시험은 총232.462초였다. 첫 시도6단계 뒤 막혔던 g103을 두 번째 시도에서 넘어7/28단계까지 진행했지만, seg_4에서 시도별120초 예산이 끝났다. 두 번째 시도의 창6은 실행하지 않았으며 완성 NBT/compact 결과는 여전히 없다. 바깥은 이전 배치를 대부분 고정하는 휴리스틱 순차 구성이고 각 창은 SAT이므로, 재시작에 의한 국소 선택 복구와 전체 최적성은 구분한다.
+
+이후 전체 초기해 생성에 성공했다. 일반 Verilog의 공유 논리를24-NOR로 정리하고, 상보 경계 대표·간격3의 repeater 포트·범용 NOR 템플릿의 SAT 부분집합 탐색을 연결했다. Global PnR 없이 **4,132블록, Minecraft220×7×33**이며 checkpoint 없는 cold 구성185.937초였다. NBT를 다시 읽어16개 정적 입력과256개 모든 전이를 통과했다. 템플릿 밖의 자유로운 동시 배치나 전역 최적성을 뜻하지 않는다.
+
+주요 엔진 병목은 export된 `Cut[Cell,Cell]`의 제곱 개수 materialization이었다. `@internal` 처리, hard Air/given 선택지 특수화, 경우별 순위의 희소 인덱스와 dust OR 전원 증명을 추가했다. soft proof-core와 기존 DFF standalone 모델의 CNF 호환성을 유지한다. 압축은 길이2칸을 줄인 후보에서 블록이 늘어 초기해를 유지한다. 재현 스크립트와 조건은 [전체 Exact 구성 기록](whole_decoder_construct.md)에 있다.
