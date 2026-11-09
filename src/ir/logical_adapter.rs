@@ -100,6 +100,13 @@ impl LogicalDesign {
         super::logical_lowering::lower_with_literal_associative_cells(self, max_arity)
     }
 
+    /// Flatten a combinational design into one shared NOT/OR logic graph.
+    /// No physical partitioning, local candidates, or global routing occurs.
+    /// Sequential cells and outputs remaining constant after folding are rejected.
+    pub fn lower_flat_logic_graph(&self) -> eyre::Result<crate::graph::logic::LogicGraph> {
+        super::logical_lowering::lower_flat_logic_graph(self)
+    }
+
     pub fn to_verilog_modules(&self) -> eyre::Result<Vec<VerilogModule>> {
         self.validate()?;
         self.modules.iter().map(logical_module_to_verilog).collect()

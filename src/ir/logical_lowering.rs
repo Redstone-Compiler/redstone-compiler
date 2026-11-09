@@ -1,5 +1,9 @@
 mod bit_mapping;
 
+pub(crate) fn lower_flat_logic_graph(design: &LogicalDesign) -> eyre::Result<LogicGraph> {
+    bit_mapping::lower_flat_logic_graph(design)
+}
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use eyre::{ContextCompat, WrapErr};

@@ -527,19 +527,9 @@ pub(super) fn lower_with_literal_associative_cells(
     })
 }
 
-fn lower_options(
+fn build_flat_bits(
     design: &LogicalDesign,
-    max_gates: usize,
-    max_inputs: usize,
-    balance: bool,
-    associative_arity: Option<usize>,
-    expand_shared: bool,
-    absorb_literals: bool,
-) -> eyre::Result<RoutableDesign> {
-    eyre::ensure!(
-        max_gates >= 1 && max_inputs >= 2,
-        "bit mapping needs at least one gate and two input ports"
-    );
+) -> eyre::Result<(Builder, Vec<(String, usize)>, Vec<RoutablePort>)> {
     let top = design.module(&design.top).unwrap();
     // Preserve ordinary bus_0 naming, but reserve all declared port names
     // first. Escaped generated names cannot alias a scalar input or output.
@@ -589,7 +579,7 @@ fn lower_options(
         inputs.insert(port.net.clone(), bits);
     }
     let values = builder.module(design, top, inputs)?;
-    let ports = top
+    let ports: Vec<RoutablePort> = top
         .ports
         .iter()
         .flat_map(|port| {
@@ -613,6 +603,90 @@ fn lower_options(
             outputs.push((port_names[&port.name][i].clone(), bit));
         }
     }
+    Ok((builder, outputs, ports))
+}
+
+pub(super) fn lower_flat_logic_graph(design: &LogicalDesign) -> eyre::Result<LogicGraph> {
+    design.validate()?;
+    eyre::ensure!(
+        !design
+            .modules
+            .iter()
+            .any(|m| m.cells.iter().any(|c| c.kind.is_sequential())),
+        "flat logic graph only supports combinational designs"
+    );
+    let (builder, outputs, _) = build_flat_bits(design)?;
+    let live = live_bits(&builder.bits, &outputs);
+    let mut nodes = Vec::new();
+    for (id, bit) in builder.bits.iter().enumerate() {
+        if !live.contains(&id) && !matches!(bit, Bit::Input(_)) {
+            continue;
+        }
+        let kind = match bit {
+            Bit::Input(name) => GraphNodeKind::Input(name.clone()),
+            Bit::Not(_) => GraphNodeKind::Logic(Logic {
+                logic_type: LogicType::Not,
+            }),
+            Bit::And(..) => GraphNodeKind::Logic(Logic {
+                logic_type: LogicType::And,
+            }),
+            Bit::Or(..) => GraphNodeKind::Logic(Logic {
+                logic_type: LogicType::Or,
+            }),
+            Bit::Xor(..) => GraphNodeKind::Logic(Logic {
+                logic_type: LogicType::Xor,
+            }),
+            Bit::Constant(_) => {
+                eyre::bail!("flat logic graph cannot represent a live constant output")
+            }
+        };
+        nodes.push((
+            id,
+            GraphNode {
+                kind,
+                inputs: bit_inputs(bit),
+                ..Default::default()
+            },
+        ));
+    }
+    for (index, (name, input)) in outputs.into_iter().enumerate() {
+        nodes.push((
+            builder.bits.len() + index,
+            GraphNode {
+                kind: GraphNodeKind::Output(name),
+                inputs: vec![input],
+                ..Default::default()
+            },
+        ));
+    }
+    let mut graph = Graph::from_nodes_with_ids(nodes);
+    graph.build_outputs();
+    graph.build_producers();
+    graph.build_consumers();
+    graph.verify()?;
+    let mut transform = crate::transform::logic::LogicGraphTransformer::new(LogicGraph { graph });
+    transform.decompose_xor()?;
+    transform.decompose_and()?;
+    transform.remove_double_neg_expression();
+    transform.optimize_cse()?;
+    Ok(transform.finish())
+}
+
+fn lower_options(
+    design: &LogicalDesign,
+    max_gates: usize,
+    max_inputs: usize,
+    balance: bool,
+    associative_arity: Option<usize>,
+    expand_shared: bool,
+    absorb_literals: bool,
+) -> eyre::Result<RoutableDesign> {
+    eyre::ensure!(
+        max_gates >= 1 && max_inputs >= 2,
+        "bit mapping needs at least one gate and two input ports"
+    );
+    let (mut builder, mut outputs, ports) = build_flat_bits(design)?;
+    let top = design.module(&design.top).unwrap();
     if balance {
         (builder, outputs) = builder.balanced(&outputs);
     }
@@ -937,6 +1011,36 @@ fn lower_options(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn whole_decoder_flat_graph_preserves_all_seven_outputs() -> eyre::Result<()> {
+        let source = format!(
+            "{}\n{}",
+            include_str!("../../../test/alu_display/bcd_to_7seg_minimized.v"),
+            include_str!("../../../test/alu_display/bcd_digit_to_7seg.v")
+        );
+        let design = LogicalDesign::from_verilog_source(&source)?;
+        let graph = design.lower_flat_logic_graph()?;
+        let truth = graph.truth_table()?;
+        assert_eq!(
+            truth.input_names,
+            vec!["digit_0", "digit_1", "digit_2", "digit_3"]
+        );
+        assert_eq!(truth.output_tables.len(), 7);
+        let masks = [
+            0x3f, 0x06, 0x5b, 0x4f, 0x66, 0x6d, 0x7d, 0x07, 0x7f, 0x6f, 0, 0, 0, 0, 0, 0,
+        ];
+        for bit in 0..7 {
+            for value in 0..16 {
+                assert_eq!(
+                    truth.output_tables[&format!("seg_{bit}")][value],
+                    masks[value] & (1 << bit) != 0
+                );
+            }
+        }
+        assert!(graph.nodes.iter().all(|node| matches!(&node.kind, GraphNodeKind::Input(_) | GraphNodeKind::Output(_)) || matches!(&node.kind, GraphNodeKind::Logic(logic) if matches!(logic.logic_type, LogicType::Not | LogicType::Or))));
+        Ok(())
+    }
 
     fn simulate(design: &RoutableDesign, input: &HashMap<String, bool>) -> HashMap<String, bool> {
         let top = design.module(&design.top).unwrap();

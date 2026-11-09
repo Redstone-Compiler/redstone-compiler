@@ -27,6 +27,8 @@ PNR_ASTAR_EXPANSIONS=20000 PNR_MAX_STEPS=256 \
 
 ## Unsigned 가산기 물리 실험
 
+20개 물리 셀로 나누지 않고 decoder 전체를 하나의 SAT 모델에 넣는 실험은 `whole_decoder_exact` 예제와 [전체 Exact 실험 기록](../../docs/whole_decoder_exact.md)을 참고한다. 기존4,187블록 fixture와 다른 경로이며, 초기 자유 배치 실험은 모두 시간 제한 내 UNKNOWN이었다.
+
 Exact SAT 셀 후보와 자유3D를 함께 사용하는 decoder는4,187블록,36×64×56이며 모든256개 전이를 통과했다. 같은 자유3D에서 recipe만 쓰는 대조군은4,312블록이다. 재현 명령, cold 시간과 메모리 상태를 정규화하는 cache 계약은 [Exact 전역 후보 실험](../../docs/exact_global_candidates.md)에 있다.
 
 `adder_nbt`는 Verilog `{1'b0,a}+{1'b0,b}`에서 시작해 Logical IR, associative cell mapping, 전역 배치/배선, NBT 내보내기까지 실행한다. `1`, `2`, `4`, `8` bit를 받는다. 검증 정답은 graph 평가가 아닌 독립 정수 덧셈 `a+b`다.

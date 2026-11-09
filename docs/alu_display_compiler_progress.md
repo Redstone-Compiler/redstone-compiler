@@ -73,3 +73,7 @@ release mode만 사용한다. 최종 `cargo test --release --workspace --all-tar
 이후 Global PnR에 opt-in Exact SAT 후보 공급을 연결했다. 실제 SAT 셀6개를 채택한36×64×56 NBT는4,187블록이며16개 입력과 모든256개 전이를 통과했다. 기존2층 대비25.7%, 같은 자유3D의 recipe 대조군4,312블록 대비2.9% 감소다. 최초 cold 실행은89.252초로 더 오래 걸렸고, 모델 최적성이나 전반적인 속도 향상을 주장하지 않는다. 입력 어댑터, provenance, 실패 시 recipe fallback과 비교 조건은 [별도 기록](exact_global_candidates.md)에 있다.
 
 Exact 물리 후보의 내부 Cobble/dust 전력 count는 NBT에 저장되지 않으므로, persistent cache의 world 해시를 NBT 왕복으로 정규화했다(cache v13). geometry/포트/reservation/cost와 실제 블록 변조 검증은 유지한다. 실제 mixed-polarity SAT 후보의 캐시 재로딩 후 전이 검증도 통과했다. 이 확장 직후 전체 release workspace는 core447개/실패0/ignored56개와 나머지 검사를 통과했으며, 이후 cache 해시 보정은 별도 회귀로 검사했다.
+
+## 디코더 전체 monolithic Exact
+
+Verilog를20개 셀로 나누지 않는 `lower_flat_logic_graph()`와 `whole_decoder_exact` 실험을 추가했다. 입력4개·출력7개·NOR28개를 하나의 SAT 모델로 넣고 독립 mask16개를 먼저 확인한다. 자유핀3개 박스/단일worker30초,5×10×5/4worker60초,입력면고정·출력면제한/4worker60초까지 다섯 시도는 모두 UNKNOWN이었다. encoding은0.2~0.5초였고 simulator refinement는0회여서 최초 SAT witness 탐색이 병목이었다. 성공 NBT가 없으며, 불가능 증명으로 해석하지 않는다. [조건·측정·재현 명령](whole_decoder_exact.md)에 별도로 기록했다.
