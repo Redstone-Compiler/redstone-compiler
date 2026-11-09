@@ -72,6 +72,9 @@ pub struct CompactionConfig {
     pub max_removals_per_round: Option<usize>,
     /// Model params for every window (see `ExactPlacerConfig::model_params`).
     pub model_params: BTreeMap<String, rsdsl::IValue>,
+    /// Auxiliary wire functions used by the starting layout, retained during
+    /// exact repair (for example partial ORs admitted during construction).
+    pub extra_signal_functions: std::collections::BTreeSet<u64>,
     /// Simulator rejections each attempt's workers may hit before giving up.
     pub max_refinements: usize,
     /// Search and verification constants for every attempt.
@@ -129,6 +132,7 @@ impl Default for CompactionConfig {
             core_max_freed: 20,
             core_time_limit: Duration::from_secs(5),
             model_params: BTreeMap::new(),
+            extra_signal_functions: Default::default(),
             max_refinements: 8,
             tuning: ExactTuning::default(),
             attempt_time_limit: Duration::from_secs(20),
@@ -953,6 +957,7 @@ impl ExactLocalPlacer {
         exact.max_refinements = config.max_refinements;
         exact.tuning = config.tuning.clone();
         exact.model_params = config.model_params.clone();
+        exact.extra_signal_functions = config.extra_signal_functions.clone();
         exact.max_blocks = max_blocks;
         if config.timing {
             // `Stage` only has to hold arrival times: the longest path in

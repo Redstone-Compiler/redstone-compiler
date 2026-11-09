@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::io::{self, Write};
 
-use crate::ast::{File, Header};
+use crate::ast::{File, Header, ItemKind};
 use crate::diag::{Diagnostic, Error, SourceMap, Span};
 use crate::formula::{Lit, VarOrigin, F};
 use crate::ground::{Dim, GroundOptions, NameRef, Program, VarIndexKind};
@@ -48,6 +48,22 @@ impl Model {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Whether an instance may supply this external fact.
+    pub fn accepts_fact(&self, name: &str) -> bool {
+        self.file
+            .items
+            .iter()
+            .any(|item| matches!(&item.kind, ItemKind::Fact {name:n,derived:None,..} if n==name))
+    }
+
+    /// Whether an instance may supply values for this external domain.
+    pub fn accepts_domain(&self, name: &str) -> bool {
+        self.file
+            .items
+            .iter()
+            .any(|item| matches!(&item.kind, ItemKind::Domain {name:n,value:None,..} if n==name))
     }
 
     /// Grounds against an instance built in Rust.

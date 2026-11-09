@@ -36,6 +36,60 @@ const MAX_INPUTS: usize = 6;
 /// The torch lower-bound search tracks sets of classes as `u64` masks.
 const MAX_BOUND_CLASSES: usize = 64;
 
+#[cfg(test)]
+mod vocabulary_tests {
+    use super::*;
+    use crate::graph::logic::LogicGraph;
+    #[test]
+    fn restricted_vocabulary_remaps_complements_and_preserves_sources() {
+        for expression in ["~(a|b|c)", "~(a|b|c|d|e|f)"] {
+            let graph = LogicGraph::from_assignments([("out".into(), expression.into())])
+                .unwrap()
+                .prepare_place()
+                .unwrap();
+            let netlist = NorNetlist::from_logic_graph(&graph).unwrap();
+            let target = net_function(&netlist.net_values(), netlist.outputs[0].1);
+            let full = u64::MAX >> (64 - (1usize << netlist.case_bits()));
+            let mut config = ExactPlacerConfig::new(DimSize(3, 4, 3));
+            config.signal_functions = Some([target, !target & full].into_iter().collect());
+            let prepared = Prepared::new(&netlist, &config).unwrap();
+            assert_eq!(prepared.classes[0].function, 0);
+            assert!(prepared.classes.len() < vocabulary(&netlist).len());
+            assert_eq!(prepared.present_classes.len(), netlist.input_names().len());
+            let index = prepared
+                .classes
+                .iter()
+                .position(|c| c.function == target)
+                .unwrap();
+            let complement = prepared.classes[index].complement.unwrap();
+            assert_eq!(prepared.classes[complement].function, !target & full);
+            assert_eq!(prepared.classes[complement].complement, Some(index));
+            let values = netlist.net_values();
+            let auxiliary = net_function(&values, netlist.input_net("a").unwrap())
+                | net_function(&values, netlist.input_net("b").unwrap());
+            assert!(!vocabulary(&netlist).iter().any(|c| c.function == auxiliary));
+            config.extra_signal_functions.insert(auxiliary);
+            config
+                .signal_functions
+                .as_mut()
+                .unwrap()
+                .extend([auxiliary, !auxiliary & full]);
+            let extended = Prepared::new(&netlist, &config).unwrap();
+            let index = extended
+                .classes
+                .iter()
+                .position(|c| c.function == auxiliary)
+                .unwrap();
+            assert_eq!(
+                extended.classes[extended.classes[index].complement.unwrap()].function,
+                !auxiliary & full
+            );
+            config.signal_functions = Some(Default::default());
+            assert!(Prepared::new(&netlist, &config).is_err());
+        }
+    }
+}
+
 pub(super) fn model() -> &'static Model {
     static MODEL: OnceLock<Model> = OnceLock::new();
     MODEL.get_or_init(|| {
@@ -164,7 +218,37 @@ impl Prepared {
             netlist.state.is_empty() || config.carry.is_none(),
             "a carry tile cannot hold state"
         );
-        let classes = vocabulary(netlist);
+        let mut classes = vocabulary(netlist);
+        let full = u64::MAX >> (64 - (1usize << netlist.case_bits()));
+        for &function in &config.extra_signal_functions {
+            ensure!(
+                function & !full == 0,
+                "extra signal exceeds the input truth table"
+            );
+            for function in [function, !function & full] {
+                if function != 0
+                    && function != full
+                    && !classes.iter().any(|c| c.function == function)
+                {
+                    classes.push(SignalClass {
+                        name: format!("aux_{function:x}"),
+                        function,
+                        complement: None,
+                        input: None,
+                        stored: None,
+                    });
+                }
+            }
+        }
+        if let Some(functions) = &config.signal_functions {
+            classes.retain(|class| {
+                class.function == 0 || class.input.is_some() || functions.contains(&class.function)
+            });
+        }
+        for index in 0..classes.len() {
+            let complement = !classes[index].function & full;
+            classes[index].complement = classes.iter().position(|c| c.function == complement);
+        }
         let class_names = unique_names(classes.iter().map(|class| class.name.as_str()));
         let values = netlist.net_values();
         let cuts = netlist
@@ -327,7 +411,7 @@ impl Prepared {
                 .iter()
                 .position(|class| class.function == function)
             else {
-                bail!("output `{name}` is constant; the exact placer needs a driven signal");
+                bail!("output `{name}` has no signal class (constant or excluded by signal_functions)");
             };
             let cells = match positions {
                 Some(positions) => positions
@@ -409,6 +493,30 @@ impl Prepared {
                 self.observations.iter().map(|o| IValue::sym(&o.symbol)),
             )
             .domain("Tick", (0..=config.stage_levels).map(IValue::from));
+        // CaseRank is indexed through a dense integer domain rather than all
+        // grid cells. Hard Air has no power; certified cells reset rank to zero.
+        // Soft Air must remain eligible when proof-core assumptions are dropped.
+        let case_ranks_enabled = matches!(
+            config.model_params.get("case_rank_levels"),
+            Some(IValue::Int(levels)) if *levels > 0
+        );
+        let ranked_cells = (0..geometry.len())
+            .filter(|&cell| {
+                let position = geometry.position(cell);
+                case_ranks_enabled
+                    && !config.given_signals.contains_key(&position)
+                    && !(config.fixed_cells.get(&position) == Some(&CellKind::Air)
+                        && !config.soft_fixed_cells.contains(&position))
+            })
+            .collect::<Vec<_>>();
+        instance.domain("RankedCell", (0..ranked_cells.len()).map(IValue::from));
+        instance.fact("rank_cell");
+        for (index, &cell) in ranked_cells.iter().enumerate() {
+            instance.row(
+                "rank_cell",
+                vec![cell_value(geometry, cell), IValue::from(index)],
+            );
+        }
         let mirrors = mirror_tuples(config);
         let orders = mirrors.iter().map(|&(_, i, _, _)| i + 1).max().unwrap_or(0);
         instance
@@ -737,7 +845,7 @@ impl Prepared {
                     .map(|name| {
                         program
                             .option_lit("Sig", here, "Carry", &[IValue::sym(name)])
-                            .expect("every class is a signal option")
+                            .unwrap_or(-1)
                     })
                     .collect(),
             );
@@ -934,8 +1042,22 @@ fn ground(
         }
         None => model(),
     };
+    // Older standalone models do not declare the opt-in case-rank mapping.
+    // Keep their instance and CNF unchanged unless they accept that feature.
+    let compatible = if !model.accepts_fact("rank_cell") || !model.accepts_domain("RankedCell") {
+        let mut copy = instance.clone();
+        if !model.accepts_fact("rank_cell") {
+            copy.facts.remove("rank_cell");
+        }
+        if !model.accepts_domain("RankedCell") {
+            copy.domains.remove("RankedCell");
+        }
+        Some(copy)
+    } else {
+        None
+    };
     model
-        .ground(instance, options)
+        .ground(compatible.as_ref().unwrap_or(instance), options)
         .map_err(|error| eyre!("grounding {} failed:\n{error}", model.name()))
 }
 
