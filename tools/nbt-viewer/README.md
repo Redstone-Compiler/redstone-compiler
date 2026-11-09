@@ -24,6 +24,22 @@ Build the optional Rust simulator WASM package:
 npm.cmd run build:wasm
 ```
 
+Rebuild WASM after changing the Rust simulator, then build the viewer:
+
+```sh
+npm run build:wasm  # cargo build --release for wasm32-unknown-unknown + wasm-bindgen
+npm run build
+```
+
+`prepare:examples` (also run by `dev` and `build`) regenerates the example
+manifest from the top level of `test/` and curated fixtures in
+`test/alu_display/nbt/`. Place an optional matching `.outputs.json` beside each
+NBT to expose output probes. Duplicate filenames across these directories are
+rejected. Do not add entries only to the generated public manifest: rebuilding
+will replace them. The curated ALU/display fixtures include the verified digit
+7-segment decoder and 2-bit/8-bit adders; their Rust simulator fixes require a
+fresh WASM build, not only a Vite refresh.
+
 Start the development server:
 
 ```powershell

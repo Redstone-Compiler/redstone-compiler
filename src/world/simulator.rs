@@ -1217,6 +1217,13 @@ impl Simulator {
         let started = self.profile.as_ref().map(|_| Instant::now());
         let mut relaxation_passes = 0;
         let mut targets_evaluated = 0;
+        // Relaxation passes are numerical iterations, not physical ticks.
+        // Notify consumers only after the dust network reaches its fixed point.
+        let before = self
+            .redstone_positions
+            .iter()
+            .map(|&pos| (pos, self.world[pos]))
+            .collect::<Vec<_>>();
         let mut any_changed = false;
         let mut changed = true;
         while changed {
@@ -1240,42 +1247,68 @@ impl Simulator {
                     } else {
                         self.redstone_input_strength(pos)
                     };
-                    (next_strength != strength).then_some((pos, strength, next_strength, block))
+                    (next_strength != strength).then_some((pos, next_strength))
                 })
                 .collect::<Vec<_>>();
 
-            for (pos, previous_strength, next_strength, block) in next_strengths {
+            for (pos, next_strength) in next_strengths {
                 let BlockKind::Redstone { strength, .. } = &mut self.world[pos].kind else {
                     continue;
                 };
                 *strength = next_strength;
-                if previous_strength > 0 && next_strength == 0 {
-                    let BlockKind::Redstone { state, .. } = block.kind else {
-                        unreachable!()
-                    };
-                    for target in self.redstone_propagate_targets(pos, state) {
-                        if !self.world.size.bound_on(target) {
-                            continue;
-                        }
-                        let event_type = if self.world[target].kind.is_redstone() {
-                            EventType::RedstoneOff
-                        } else {
-                            self.redstone_output_event_type(target, false)
-                        };
-                        self.schedule_event(
-                            0,
-                            Event {
-                                id: None,
-                                from_id: None,
-                                event_type,
-                                target_position: target,
-                                direction: target.diff(pos),
-                            },
-                        );
-                    }
-                }
                 changed = true;
                 any_changed = true;
+            }
+        }
+
+        for (pos, before_block) in before {
+            let BlockKind::Redstone {
+                strength: before_strength,
+                state,
+                ..
+            } = before_block.kind
+            else {
+                continue;
+            };
+            let BlockKind::Redstone {
+                strength: after_strength,
+                ..
+            } = self.world[pos].kind
+            else {
+                continue;
+            };
+            let is_on = after_strength > 0;
+            if (before_strength > 0) == is_on {
+                continue;
+            }
+            for target in self.redstone_propagate_targets(pos, state) {
+                if !self.world.size.bound_on(target) {
+                    continue;
+                }
+                let event_type = if self.world[target].kind.is_redstone() {
+                    if is_on {
+                        if after_strength <= 1 {
+                            continue;
+                        }
+                        EventType::RedstoneOn {
+                            strength: after_strength - 1,
+                        }
+                    } else {
+                        EventType::RedstoneOff
+                    }
+                } else {
+                    self.redstone_output_event_type(target, is_on)
+                };
+                self.schedule_event(
+                    0,
+                    Event {
+                        id: None,
+                        from_id: None,
+                        event_type,
+                        target_position: target,
+                        direction: target.diff(pos),
+                    },
+                );
             }
         }
 
@@ -1331,6 +1364,8 @@ impl Simulator {
                 let (next_on_count, next_on_base_count) = self.cobble_power_counts(pos);
                 (next_on_count != on_count || next_on_base_count != on_base_count).then_some((
                     pos,
+                    on_count,
+                    on_base_count,
                     next_on_count,
                     next_on_base_count,
                 ))
@@ -1338,11 +1373,49 @@ impl Simulator {
             .collect::<Vec<_>>();
 
         let changed = !updates.is_empty();
-        for (pos, next_on_count, next_on_base_count) in updates {
+        for (pos, before_count, before_base_count, next_on_count, next_on_base_count) in updates {
             self.world[pos].kind = BlockKind::Cobble {
                 on_count: next_on_count,
                 on_base_count: next_on_base_count,
             };
+            // Counts are reconstructed from settled physical sources. Notify
+            // consumers when this correction changes their logical power,
+            // just as the ordinary cobble event path does.
+            for target in pos.forwards() {
+                if !self.world.size.bound_on(target) {
+                    continue;
+                }
+                let kind = self.world[target].kind;
+                let event_type = if kind.is_redstone() {
+                    if (before_base_count > 0) == (next_on_base_count > 0) {
+                        continue;
+                    }
+                    if next_on_base_count > 0 {
+                        EventType::HardOn
+                    } else {
+                        EventType::HardOff
+                    }
+                } else {
+                    if kind.is_cobble() || (before_count > 0) == (next_on_count > 0) {
+                        continue;
+                    }
+                    if next_on_count > 0 {
+                        EventType::SoftOn
+                    } else {
+                        EventType::SoftOff
+                    }
+                };
+                self.schedule_event(
+                    0,
+                    Event {
+                        id: None,
+                        from_id: None,
+                        event_type,
+                        target_position: target,
+                        direction: target.diff(pos),
+                    },
+                );
+            }
         }
         if let (Some(profile), Some(started)) = (&mut self.profile, started) {
             profile.cobble_normalization_time += started.elapsed();
@@ -1353,8 +1426,11 @@ impl Simulator {
     }
 
     fn cobble_power_counts(&self, target: Position) -> (usize, usize) {
-        let mut sources = 0;
-        let mut hard_sources = 0;
+        // External boundary drives have no neighbouring physical block. Keep
+        // their self-key when recomputing power from cached physical inputs.
+        let external = usize::from(self.hard_power_sources.contains(&(target, target)));
+        let mut sources = external;
+        let mut hard_sources = external;
         for input in &self.cobble_power_inputs[target.index(&self.world.size).0] {
             let active = match self.world[input.source].kind {
                 BlockKind::Torch { is_on }
@@ -1373,6 +1449,9 @@ impl Simulator {
     }
 
     fn cobble_disables_attached_torch(&self, target: Position) -> bool {
+        if self.hard_power_sources.contains(&(target, target)) {
+            return true;
+        }
         self.cobble_power_inputs[target.index(&self.world.size).0]
             .iter()
             .any(|input| {
@@ -2422,6 +2501,164 @@ mod test {
             aggregate.torch_reevaluation_calls,
             aggregate.torches_evaluated,
         );
+        Ok(())
+    }
+
+    #[test]
+    fn normalized_cobble_release_notifies_both_downstream_repeaters() -> eyre::Result<()> {
+        use crate::transform::place_and_route::placed_node::PlacedNode;
+        let support = Position(2, 2, 1);
+        let consumers = [
+            (Position(3, 2, 1), Direction::West),
+            (Position(2, 3, 1), Direction::South),
+        ];
+        let mut world = World3D::new(DimSize(6, 6, 3));
+        world[support] = PlacedNode::new_cobble(support).block;
+        for (p, direction) in consumers {
+            world[p.down().unwrap()] = PlacedNode::new_cobble(p.down().unwrap()).block;
+            world[p] = PlacedNode::new_repeater(p, direction).block;
+        }
+        let mut sim = Simulator::from(&World::from(&world))?;
+        sim.drive_inputs_with_limits(vec![(support, true)], 256, 50_000)?;
+        for (p, _) in consumers {
+            assert!(sim.world()[p].kind.is_powered());
+        }
+        // Reproduce the stale extra soft count after the final real source
+        // goes away. Count normalization must send the missing falling edge.
+        sim.world[support].kind = BlockKind::Cobble {
+            on_count: 2,
+            on_base_count: 1,
+        };
+        sim.drive_inputs_with_limits(vec![(support, false)], 256, 50_000)?;
+        assert!(!sim.world()[support].kind.is_powered());
+        for (p, _) in consumers {
+            assert!(
+                !sim.world()[p].kind.is_powered(),
+                "repeater retained power after normalized block release"
+            );
+        }
+        sim.drive_inputs_with_limits(vec![(support, true)], 256, 50_000)?;
+        for (p, _) in consumers {
+            assert!(sim.world()[p].kind.is_powered());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn normalized_dust_recovery_notifies_downstream_repeater() -> eyre::Result<()> {
+        use crate::transform::place_and_route::placed_node::PlacedNode;
+        let mut world = World3D::new(DimSize(7, 3, 3));
+        for x in 1..=5 {
+            let p = Position(x, 1, 1);
+            world[p.down().unwrap()] = PlacedNode::new_cobble(p.down().unwrap()).block;
+            world[p] = if x == 4 {
+                PlacedNode::new_repeater(p, Direction::West).block
+            } else {
+                PlacedNode::new_redstone(p).block
+            };
+        }
+        world.initialize_redstone_states();
+        let left = Position(1, 1, 1);
+        let right = Position(3, 1, 1);
+        let repeater = Position(4, 1, 1);
+        let output = Position(5, 1, 1);
+        let mut sim = Simulator::from(&World::from(&world))?;
+        // Represent the transient after an OFF wave cleared downstream dust,
+        // while an independent source still powers the first dust. No queued
+        // ON event remains: normalization itself must notify the repeater.
+        if let BlockKind::Redstone {
+            on_count, strength, ..
+        } = &mut sim.world[left].kind
+        {
+            *on_count = 1;
+            *strength = 15;
+        }
+        sim.redstone_power_sources.insert((left, left));
+        // A separate transient starts and finishes powered at the repeater
+        // input, but crosses zero during numerical relaxation. That is not
+        // a physical falling edge and must not enqueue a repeater OFF.
+        let mut transient = sim.clone();
+        if let BlockKind::Redstone { strength, .. } = &mut transient.world[right].kind {
+            *strength = 1;
+        }
+        transient.queue.clear();
+        transient.normalize_redstone_strengths();
+        assert!(transient.world[right].kind.is_powered());
+        assert!(
+            !transient
+                .queue
+                .iter()
+                .flatten()
+                .any(|event| event.target_position == repeater
+                    && matches!(event.event_type, EventType::SoftOff)),
+            "an internal relaxation dip emitted a physical OFF event"
+        );
+        sim.normalize_redstone_strengths();
+        sim.run_with_max_cycles(256)?;
+        assert!(sim.world()[right].kind.is_powered());
+        assert!(
+            sim.world()[repeater].kind.is_powered(),
+            "normalization recovered dust without notifying repeater"
+        );
+        assert!(sim.world()[output].kind.is_powered());
+        sim.drive_inputs_with_limits(vec![(left, true), (right, true)], 256, 50_000)?;
+        assert!(sim.world()[repeater].kind.is_powered());
+        // Removing the right direct source temporarily clears its dust chain.
+        // The left source remains on, so normalization restores that chain.
+        sim.drive_inputs_with_limits(vec![(right, false)], 256, 50_000)?;
+        assert!(sim.world()[right].kind.is_powered());
+        assert!(
+            sim.world()[repeater].kind.is_powered(),
+            "powered input recovered but repeater remained off"
+        );
+        assert!(sim.world()[output].kind.is_powered());
+        sim.drive_inputs_with_limits(vec![(left, false)], 256, 50_000)?;
+        assert!(!sim.world()[right].kind.is_powered());
+        assert!(!sim.world()[repeater].kind.is_powered());
+        assert!(!sim.world()[output].kind.is_powered());
+        Ok(())
+    }
+
+    #[test]
+    fn externally_driven_cobble_survives_normalization_and_controls_torch() -> eyre::Result<()> {
+        let support = Position(1, 1, 1);
+        let torch = Position(1, 1, 2);
+        let world = World {
+            size: DimSize(3, 3, 4),
+            blocks: vec![
+                (
+                    support,
+                    Block {
+                        kind: BlockKind::Cobble {
+                            on_count: 0,
+                            on_base_count: 0,
+                        },
+                        direction: Direction::None,
+                    },
+                ),
+                (
+                    torch,
+                    Block {
+                        kind: BlockKind::Torch { is_on: true },
+                        direction: Direction::Bottom,
+                    },
+                ),
+            ],
+        };
+        let mut sim = Simulator::from(&world)?;
+        for powered in [true, true, false, false, true, false] {
+            sim.advance_idle_cycles(MANUAL_INPUT_IDLE_CYCLES)?;
+            sim.drive_inputs_with_limits(vec![(support, powered)], 256, 50_000)?;
+            assert_eq!(
+                sim.world()[support].kind,
+                BlockKind::Cobble {
+                    on_count: usize::from(powered),
+                    on_base_count: usize::from(powered)
+                }
+            );
+            assert_eq!(sim.world()[torch].kind.is_powered(), !powered);
+            assert!(!sim.is_torch_burned_out(torch));
+        }
         Ok(())
     }
 

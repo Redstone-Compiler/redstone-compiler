@@ -391,6 +391,9 @@ pub struct ConstructionConfig {
     /// Search and verification constants for every step.
     pub tuning: ExactTuning,
     pub gate_order: GateOrder,
+    /// Solve this many consecutive construction steps jointly before
+    /// committing a seam. One retains the original gate-at-a-time path.
+    pub gate_batch: usize,
     /// Outputs without a face policy stop crossing seams once no later gate
     /// reads them; they only need to stay observable somewhere in the box.
     /// Off, every output is carried to the last slice.
@@ -400,11 +403,40 @@ pub struct ConstructionConfig {
     /// whole layout built so far; those variables were over 90% of a late
     /// step's encoding. The simulator still checks the whole layout.
     pub given_frozen_signals: bool,
+    /// Restrict each window to functions of already available/current nets,
+    /// their complements, and signals present in the previous layout. This
+    /// deliberately narrows synthesis; it is not solution-preserving pruning.
+    pub step_vocabulary: bool,
+    /// Permit intermediate ORs of each current gate's fan-in on wires, not
+    /// only the complete NOR function. Bounded to fan-in <= 8.
+    pub partial_or_vocabulary: bool,
+    /// Continuing nets must be observed on a torch or outward repeater,
+    /// rather than an arbitrary powered cell at the seam. Chained ORs keep
+    /// their required solid support and are exempt.
+    pub driving_seams: bool,
+    /// Carry one representative per Boolean function/complement pair. The
+    /// next window may regenerate the other polarity with a torch. Finished
+    /// output observations and chained-OR support contracts remain intact.
+    pub compress_complements: bool,
+    /// Extend existing outward repeater ports at the same X/Z coordinate:
+    /// a strongly powered block provides a tap, then repeaters carry forward.
+    /// Requires zero overlap; other cells and new logic remain SAT choices.
+    pub scaffold_seams: bool,
+    /// Spaced, reusable port grid (0 keeps free seam sites). Primary inputs
+    /// retain fixed slots; new nets use a nearby unused slot. With scaffolds,
+    /// this leaves room to tap each rail instead of packing inaccessible ports.
+    pub seam_pitch: usize,
+    pub seam_primary_stride: usize,
+    /// Restricted NOR-template initial solution, followed by exact compaction.
+    pub gate_scaffold: bool,
     /// After each step, spend up to this long minimizing the layout's block
     /// count (the model's cost) with the same frozen cells, so dead wires do
     /// not pile up. `None` keeps the first layout found. Five seconds halved
     /// the full adder's constructed blocks (about 290 to 127-164).
     pub step_optimize: Option<Duration>,
+    /// Delete redundant blocks in the accepted window before relocation
+    /// optimization. Uses a fixed-layout SAT optimization with pinned ports.
+    pub step_delete: Option<Duration>,
     /// Model params for every step (see `ExactPlacerConfig::model_params`).
     pub model_params: BTreeMap<String, rsdsl::IValue>,
     /// Diagnostic only: see `ExactPlacerConfig::no_fold`.
@@ -418,6 +450,11 @@ pub struct ConstructionConfig {
     /// Write the layout after every step of the successful attempt to this
     /// directory, for watching construction in the viewer (`progress.rs`).
     pub progress: Option<std::path::PathBuf>,
+    /// Save the latest accepted prefix, including when a later step fails.
+    pub checkpoint: Option<std::path::PathBuf>,
+    /// Resume a matching netlist/order from an accepted prefix. Backtracking
+    /// does not cross the loaded prefix; every subsequent step is verified.
+    pub resume: Option<std::path::PathBuf>,
     /// After each step, ask for its nets sooner (`ExactPlacerConfig::timing`):
     /// each observed net at most its lower bound (the latest of its inputs'
     /// arrivals, plus a tick unless it is an OR a block can carry) plus a
@@ -451,14 +488,26 @@ impl Default for ConstructionConfig {
             max_refinements: 8,
             tuning: ExactTuning::default(),
             gate_order: GateOrder::SmallestConeFirst,
+            gate_batch: 1,
             early_outputs: true,
             given_frozen_signals: true,
+            step_vocabulary: false,
+            partial_or_vocabulary: false,
+            driving_seams: false,
+            compress_complements: false,
+            scaffold_seams: false,
+            seam_pitch: 0,
+            seam_primary_stride: 1,
+            gate_scaffold: false,
             step_optimize: Some(Duration::from_secs(5)),
+            step_delete: None,
             model_params: BTreeMap::new(),
             no_fold: false,
             carry: None,
             carry_step_time_limit: None,
             progress: None,
+            checkpoint: None,
+            resume: None,
             step_timing: None,
         }
     }
@@ -516,6 +565,156 @@ struct StepState {
     /// The support block of each chained OR net placed (`chained_ors`).
     supports: BTreeMap<NetId, Position>,
     result: Option<(DimSize, ExactPlacement)>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ConstructionCheckpoint {
+    netlist: String,
+    outputs: Vec<(String, NetId)>,
+    order: Vec<Vec<NetId>>,
+    step: usize,
+    rcell: String,
+    signals: Vec<([usize; 3], u64)>,
+    available: BTreeSet<NetId>,
+    supports: Vec<(NetId, [usize; 3])>,
+}
+
+impl ConstructionCheckpoint {
+    fn save(
+        placer: &ExactLocalPlacer,
+        order: &[Vec<NetId>],
+        step: usize,
+        state: &StepState,
+        path: &std::path::Path,
+    ) -> eyre::Result<()> {
+        let (_, placement) = state
+            .result
+            .as_ref()
+            .expect("accepted step has a placement");
+        let checkpoint = Self {
+            netlist: placer.netlist.to_text(),
+            outputs: placer.netlist.outputs.clone(),
+            order: order.to_vec(),
+            step,
+            rcell: placement.rcell.to_string(),
+            signals: state
+                .signals
+                .iter()
+                .map(|(p, &f)| ([p.0, p.1, p.2], f))
+                .collect(),
+            available: state.available.clone(),
+            supports: state
+                .supports
+                .iter()
+                .map(|(&n, p)| (n, [p.0, p.1, p.2]))
+                .collect(),
+        };
+        let temporary = path.with_extension("json.tmp");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&temporary, serde_json::to_vec_pretty(&checkpoint)?)?;
+        std::fs::rename(temporary, path)?;
+        Ok(())
+    }
+
+    fn load(
+        placer: &ExactLocalPlacer,
+        order: &[Vec<NetId>],
+        config: &ConstructionConfig,
+        path: &std::path::Path,
+    ) -> eyre::Result<(usize, StepState)> {
+        let checkpoint: Self = serde_json::from_slice(&std::fs::read(path)?)?;
+        eyre::ensure!(
+            checkpoint.netlist == placer.netlist.to_text()
+                && checkpoint.outputs == placer.netlist.outputs
+                && checkpoint.order == order,
+            "checkpoint netlist/order mismatch"
+        );
+        eyre::ensure!(
+            checkpoint.step > 0 && checkpoint.step < order.len(),
+            "checkpoint must be a partial construction"
+        );
+        let document: crate::physical_cell::PhysicalCellDocument = checkpoint.rcell.parse()?;
+        let layout = ExactLayout::from_rcell(&document)?;
+        eyre::ensure!(
+            config.carry.is_none(),
+            "resuming carry tiles is not supported"
+        );
+        for (name, policy) in &config.input_policies {
+            if *policy == InputPolicy::MinYFace {
+                eyre::ensure!(
+                    layout.inputs.iter().any(|(n, p, _)| n == name && p.1 == 0),
+                    "checkpoint does not satisfy input face policy for {name}"
+                );
+            }
+        }
+        eyre::ensure!(
+            layout.dim.0 <= config.width && layout.dim.2 <= config.height,
+            "checkpoint cross-section cannot shrink"
+        );
+        let mut expected = order[..checkpoint.step]
+            .iter()
+            .flatten()
+            .copied()
+            .chain(order[..checkpoint.step].iter().flatten().flat_map(|&net| {
+                placer.netlist.nets[net]
+                    .gate_inputs
+                    .iter()
+                    .copied()
+                    .filter(|&n| matches!(placer.netlist.nets[n].driver, NetDriver::Input(_)))
+            }))
+            .collect::<BTreeSet<_>>();
+        for (name, _, _) in &layout.inputs {
+            expected.insert(
+                placer
+                    .netlist
+                    .input_net(name)
+                    .ok_or_else(|| eyre::eyre!("checkpoint contains unknown input {name}"))?,
+            );
+        }
+        eyre::ensure!(
+            expected == checkpoint.available,
+            "checkpoint available nets mismatch"
+        );
+        let signals = checkpoint
+            .signals
+            .into_iter()
+            .map(|([x, y, z], f)| (Position(x, y, z), f))
+            .collect::<BTreeMap<_, _>>();
+        eyre::ensure!(
+            signals.len() == layout.cells.len()
+                && signals.keys().all(|p| layout.cells.contains_key(p)),
+            "checkpoint signal cells mismatch"
+        );
+        let supports = checkpoint
+            .supports
+            .into_iter()
+            .map(|(n, [x, y, z])| (n, Position(x, y, z)))
+            .collect::<BTreeMap<_, _>>();
+        eyre::ensure!(
+            supports.iter().all(|(&n, p)| n < placer.netlist.nets.len()
+                && layout.cells.get(p) == Some(&CellKind::Solid)),
+            "checkpoint support mismatch"
+        );
+        Ok((
+            checkpoint.step,
+            StepState {
+                label: "resumed prefix".into(),
+                length: layout.dim.1,
+                cells: layout.cells,
+                signals,
+                placed_inputs: layout
+                    .inputs
+                    .into_iter()
+                    .map(|(n, p, d)| (n, (p, d)))
+                    .collect(),
+                available: checkpoint.available,
+                supports,
+                result: None,
+            },
+        ))
+    }
 }
 
 /// Bounds every output of `exact` by its delay in `placement`, with `Stage`
@@ -579,7 +778,16 @@ impl ExactLocalPlacer {
     ) -> eyre::Result<(ExactLayout, ExactPlacement, ConstructionReport)> {
         let started = Instant::now();
         let netlist = &self.netlist;
+        eyre::ensure!(config.gate_batch > 0, "gate batch must be positive");
+        eyre::ensure!(
+            config.carry.is_none() || config.gate_batch == 1,
+            "batched carry-tile construction is not supported"
+        );
         let order = construction_steps(netlist, config.gate_order, config.carry.as_ref());
+        let order = order
+            .chunks(config.gate_batch)
+            .map(|steps| steps.iter().flatten().copied().collect::<Vec<_>>())
+            .collect::<Vec<_>>();
         if order.is_empty() {
             bail!("netlist has no gates to construct");
         }
@@ -598,6 +806,14 @@ impl ExactLocalPlacer {
         let mut blocked = vec![Vec::new(); order.len()];
         let mut windows = vec![Vec::new(); order.len()];
         let mut step = 0;
+        if let Some(path) = &config.resume {
+            let (loaded_step, state) = ConstructionCheckpoint::load(self, &order, config, path)?;
+            step = loaded_step;
+            states.resize(step + 1, state.clone());
+            states[step] = state;
+            tracing::info!(step, path = %path.display(), "construction resumes accepted prefix");
+        }
+        let first_step = step;
         while step < order.len() {
             if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                 bail!(
@@ -615,6 +831,9 @@ impl ExactLocalPlacer {
                 deadline,
             )? {
                 Some((state, window_cells, entry)) => {
+                    if let Some(path) = &config.checkpoint {
+                        ConstructionCheckpoint::save(self, &order, step + 1, &state, path)?;
+                    }
                     report.steps.push(entry);
                     states.truncate(step + 1);
                     states.push(state);
@@ -622,7 +841,7 @@ impl ExactLocalPlacer {
                     step += 1;
                 }
                 None => {
-                    if step == 0 || report.backtracks >= config.max_backtracks {
+                    if step == first_step || report.backtracks >= config.max_backtracks {
                         bail!(
                             "construction could not place gate {} within {} slices",
                             self.step_name(&order[step]),
@@ -966,6 +1185,26 @@ impl ExactLocalPlacer {
                 }
             }
         }
+        // With polarity-compressed frontiers a non-output inversion adds no
+        // information: its input's representative can regenerate either
+        // polarity in a later exact window. Avoid a whole transport window.
+        // Leave backtracking's window history unchanged unless it is off.
+        if config.compress_complements
+            && config.max_backtracks == 0
+            && !is_last
+            && gates.len() == 1
+            && needed_inputs.is_empty()
+            && state.result.is_some()
+            && netlist.nets[gates[0]].driver == NetDriver::Gate
+            && netlist.nets[gates[0]].gate_inputs.len() == 1
+            && !netlist.outputs.iter().any(|(_, net)| *net == gates[0])
+        {
+            let mut next = state.clone();
+            next.label = format!("{gate_name} virtual polarity");
+            next.available.extend(gates.iter().copied());
+            tracing::info!(gate = gate_name, "construction keeps a virtual polarity");
+            return Ok(Some((next, Vec::new(), (gate_name, 0, 0.0))));
+        }
         let length = state.length;
         // A NOR built in stages (`chained_ors`): the step that adds a signal
         // to a chain keeps its support block fixed and the block's slice
@@ -1039,6 +1278,56 @@ impl ExactLocalPlacer {
             exact.tuning = config.tuning.clone();
             exact.model_params = config.model_params.clone();
             exact.blocked = blocked.to_vec();
+            if config.partial_or_vocabulary {
+                let values = netlist.net_values();
+                exact
+                    .extra_signal_functions
+                    .extend(state.signals.values().copied());
+                for &gate in gates {
+                    let inputs = &netlist.nets[gate].gate_inputs;
+                    eyre::ensure!(
+                        inputs.len() <= 8,
+                        "partial OR vocabulary supports fan-in <= 8"
+                    );
+                    let functions = inputs
+                        .iter()
+                        .map(|&net| {
+                            values[net]
+                                .iter()
+                                .enumerate()
+                                .fold(0u64, |mask, (i, &on)| mask | (u64::from(on) << i))
+                        })
+                        .collect::<Vec<_>>();
+                    for subset in 1..(1usize << inputs.len()) {
+                        let function = functions
+                            .iter()
+                            .enumerate()
+                            .filter(|(i, _)| subset & (1 << i) != 0)
+                            .fold(0, |a, (_, f)| a | f);
+                        exact.extra_signal_functions.insert(function);
+                    }
+                }
+            }
+            if config.step_vocabulary {
+                let values = netlist.net_values();
+                let full = u64::MAX >> (64 - (1usize << netlist.case_bits()));
+                let mut functions = state.signals.values().copied().collect::<BTreeSet<_>>();
+                functions.extend(exact.extra_signal_functions.iter().copied());
+                for &net in state
+                    .available
+                    .iter()
+                    .chain(needed_inputs.iter())
+                    .chain(gates.iter())
+                {
+                    let function = values[net]
+                        .iter()
+                        .enumerate()
+                        .fold(0u64, |mask, (i, &on)| mask | (u64::from(on) << i));
+                    functions.insert(function);
+                }
+                functions.extend(functions.clone().into_iter().map(|f| !f & full));
+                exact.signal_functions = Some(functions);
+            }
             for (position, kind) in &state.cells {
                 if position.1 < frozen {
                     exact.fixed_cells.insert(*position, *kind);
@@ -1153,6 +1442,333 @@ impl ExactLocalPlacer {
                     .filter(|&net| consumers(net, step + 1))
                     .map(|net| (net, last_slice.clone()))
                     .collect::<Vec<_>>();
+                if config.compress_complements {
+                    let before = observations.len();
+                    let values = netlist.net_values();
+                    let full = u64::MAX >> (64 - (1usize << netlist.case_bits()));
+                    let function = |net: NetId| {
+                        values[net]
+                            .iter()
+                            .enumerate()
+                            .fold(0u64, |mask, (i, &on)| mask | (u64::from(on) << i))
+                    };
+                    let mut representatives = BTreeMap::<u64, (NetId, Vec<Position>)>::new();
+                    let mut supports = Vec::new();
+                    for (net, sites) in observations {
+                        if chained.contains(&net) {
+                            supports.push((net, sites));
+                            continue;
+                        }
+                        let f = function(net);
+                        let key = f.min(!f & full);
+                        let priority = |net: NetId| {
+                            (
+                                !matches!(netlist.nets[net].driver, NetDriver::Input(_)),
+                                net,
+                            )
+                        };
+                        if representatives
+                            .get(&key)
+                            .is_none_or(|(old, _)| priority(net) < priority(*old))
+                        {
+                            representatives.insert(key, (net, sites));
+                        }
+                    }
+                    for (net, _) in &supports {
+                        let f = function(*net);
+                        representatives.remove(&f.min(!f & full));
+                    }
+                    for (key, (net, _)) in &mut representatives {
+                        let priority = |candidate: NetId| {
+                            let f = function(candidate);
+                            let carried = state.cells.iter().any(|(p, kind)| {
+                                p.1 + 1 == length
+                                    && *kind == CellKind::Repeater(Direction::South)
+                                    && state.signals.get(p) == Some(&f)
+                            });
+                            (
+                                !matches!(netlist.nets[candidate].driver, NetDriver::Input(_)),
+                                !carried,
+                                candidate,
+                            )
+                        };
+                        if let Some(representative) = placed
+                            .iter()
+                            .copied()
+                            .filter(|&candidate| {
+                                let f = function(candidate);
+                                f.min(!f & full) == *key
+                            })
+                            .min_by_key(|&candidate| priority(candidate))
+                        {
+                            *net = representative;
+                        }
+                    }
+                    observations = representatives.into_values().chain(supports).collect();
+                    tracing::info!(
+                        gate = gate_name,
+                        before,
+                        after = observations.len(),
+                        "construction frontier compressed"
+                    );
+                }
+                if config.driving_seams {
+                    for (net, _) in &observations {
+                        if !chained.contains(net) {
+                            exact
+                                .driving_outputs
+                                .insert(netlist.nets[*net].name.clone());
+                        }
+                    }
+                }
+                if config.scaffold_seams {
+                    eyre::ensure!(
+                        overlap == 0 && window >= 2,
+                        "scaffolded seams need zero overlap and window >= 2"
+                    );
+                    let values = netlist.net_values();
+                    if config.seam_pitch > 0 {
+                        let pitch = config.seam_pitch;
+                        eyre::ensure!(
+                            pitch >= 3 || (config.gate_scaffold && pitch == 2),
+                            "seam pitch must leave tap clearance"
+                        );
+                        let slots = (1..dim.2.saturating_sub(1))
+                            .step_by(pitch)
+                            .flat_map(|z| {
+                                (1..dim.0.saturating_sub(1))
+                                    .step_by(pitch)
+                                    .map(move |x| Position(x, dim.1 - 1, z))
+                            })
+                            .filter(|p| !config.gate_scaffold || p.2 == 1)
+                            .collect::<Vec<_>>();
+                        let input_names = netlist.input_names();
+                        let input_slots = (0..input_names.len())
+                            .map(|i| {
+                                slots
+                                    .get(i * config.seam_primary_stride)
+                                    .copied()
+                                    .ok_or_else(|| eyre::eyre!("not enough primary slots"))
+                            })
+                            .collect::<eyre::Result<Vec<_>>>()?;
+                        eyre::ensure!(
+                            slots.len() >= observations.len().max(input_names.len()),
+                            "not enough spaced seam slots"
+                        );
+                        let function = |net: NetId| {
+                            values[net]
+                                .iter()
+                                .enumerate()
+                                .fold(0u64, |mask, (i, &on)| mask | (u64::from(on) << i))
+                        };
+                        let mut used = BTreeSet::new();
+                        used.extend(input_slots.iter().copied());
+                        let mut assigned = BTreeMap::<u64, Position>::new();
+                        for (net, sites) in &mut observations {
+                            if let NetDriver::Input(name) = &netlist.nets[*net].driver {
+                                let slot = input_slots
+                                    [input_names.iter().position(|n| n == name).unwrap()];
+                                *sites = vec![slot];
+                                used.insert(slot);
+                                assigned.insert(function(*net), slot);
+                            }
+                        }
+                        // Reserve every surviving old rail before allocating
+                        // new results; net order must not evict a live port.
+                        for (net, sites) in &mut observations {
+                            if matches!(netlist.nets[*net].driver, NetDriver::Input(_)) {
+                                continue;
+                            }
+                            let f = function(*net);
+                            if let Some(slot) = state.cells.iter().find_map(|(p, kind)| {
+                                let slot = Position(p.0, dim.1 - 1, p.2);
+                                (p.1 + 1 == length
+                                    && *kind == CellKind::Repeater(Direction::South)
+                                    && state.signals.get(p) == Some(&f)
+                                    && slots.contains(&slot)
+                                    && !used.contains(&slot))
+                                .then_some(slot)
+                            }) {
+                                *sites = vec![slot];
+                                used.insert(slot);
+                                assigned.insert(f, slot);
+                            }
+                        }
+                        for (net, sites) in &mut observations {
+                            if matches!(netlist.nets[*net].driver, NetDriver::Input(_)) {
+                                continue;
+                            }
+                            let f = function(*net);
+                            if let Some(slot) = assigned.get(&f) {
+                                *sites = vec![*slot];
+                                continue;
+                            }
+                            let old = state.cells.iter().find_map(|(p, kind)| {
+                                (p.1 + 1 == length
+                                    && *kind == CellKind::Repeater(Direction::South)
+                                    && state.signals.get(p) == Some(&f))
+                                .then_some(Position(p.0, dim.1 - 1, p.2))
+                            });
+                            let parents = netlist.nets[*net]
+                                .gate_inputs
+                                .iter()
+                                .filter_map(|parent| {
+                                    let f = function(*parent);
+                                    let full = u64::MAX >> (64 - (1usize << netlist.case_bits()));
+                                    assigned
+                                        .get(&f)
+                                        .or_else(|| assigned.get(&(!f & full)))
+                                        .copied()
+                                })
+                                .collect::<Vec<_>>();
+                            let slot = old
+                                .filter(|p| slots.contains(p) && !used.contains(p))
+                                .or_else(|| {
+                                    slots
+                                        .iter()
+                                        .filter(|p| !used.contains(p))
+                                        .min_by_key(|p| {
+                                            parents
+                                                .iter()
+                                                .map(|q| p.0.abs_diff(q.0) + p.2.abs_diff(q.2))
+                                                .sum::<usize>()
+                                        })
+                                        .copied()
+                                })
+                                .ok_or_else(|| eyre::eyre!("spaced port allocation failed"))?;
+                            *sites = vec![slot];
+                            used.insert(slot);
+                            assigned.insert(f, slot);
+                        }
+                        // The complete seam is an interface, not spare logic space.
+                        for x in 0..dim.0 {
+                            for z in 0..dim.2 {
+                                exact
+                                    .fixed_cells
+                                    .insert(Position(x, dim.1 - 1, z), CellKind::Air);
+                            }
+                        }
+                        for (_, sites) in &observations {
+                            let p = sites[0];
+                            exact
+                                .fixed_cells
+                                .insert(p, CellKind::Repeater(Direction::South));
+                            exact
+                                .fixed_cells
+                                .insert(Position(p.0, p.1, p.2 - 1), CellKind::Solid);
+                        }
+                        for &input in &needed_inputs {
+                            let name = &netlist.nets[input].name;
+                            let slot =
+                                input_slots[input_names.iter().position(|n| n == name).unwrap()];
+                            let p = Position(
+                                slot.0,
+                                if config.gate_scaffold && length > 0 {
+                                    length - 1
+                                } else {
+                                    length
+                                },
+                                slot.2,
+                            );
+                            eyre::ensure!(
+                                config.input_policies.get(name) != Some(&InputPolicy::MinYFace)
+                                    || length == 0,
+                                "face input must enter at the first seam"
+                            );
+                            exact
+                                .input_sites
+                                .insert(name.clone(), vec![(p, Direction::North)]);
+                            if config.gate_scaffold {
+                                exact
+                                    .fixed_cells
+                                    .insert(p, CellKind::Switch(Direction::North));
+                                exact.given_signals.remove(&p);
+                                let tap_y = p.1 + 1;
+                                exact
+                                    .fixed_cells
+                                    .insert(Position(p.0, tap_y, p.2), CellKind::Solid);
+                                for y in tap_y + 1..dim.1 {
+                                    exact.fixed_cells.insert(
+                                        Position(p.0, y, p.2),
+                                        CellKind::Repeater(Direction::South),
+                                    );
+                                    exact
+                                        .fixed_cells
+                                        .insert(Position(p.0, y, p.2 - 1), CellKind::Solid);
+                                }
+                            }
+                        }
+                    }
+                    let mut scaffolded = 0;
+                    // A signal consumed by this gate may retire at this step,
+                    // so it has no outgoing observation. Still provide its
+                    // incoming diode with a solid tap in the new window.
+                    let full = u64::MAX >> (64 - (1usize << netlist.case_bits()));
+                    for &input in gates
+                        .iter()
+                        .flat_map(|&gate| &netlist.nets[gate].gate_inputs)
+                    {
+                        let f = values[input]
+                            .iter()
+                            .enumerate()
+                            .fold(0u64, |mask, (i, &on)| mask | (u64::from(on) << i));
+                        for (p, kind) in &state.cells {
+                            if p.1 + 1 == length
+                                && *kind == CellKind::Repeater(Direction::South)
+                                && state
+                                    .signals
+                                    .get(p)
+                                    .is_some_and(|old| *old == f || *old == (!f & full))
+                            {
+                                exact
+                                    .fixed_cells
+                                    .insert(Position(p.0, length, p.2), CellKind::Solid);
+                            }
+                        }
+                    }
+                    for (net, sites) in &mut observations {
+                        if chained.contains(net) {
+                            continue;
+                        }
+                        let function = values[*net]
+                            .iter()
+                            .enumerate()
+                            .fold(0u64, |mask, (i, &on)| mask | (u64::from(on) << i));
+                        let port = state.cells.iter().find_map(|(p, kind)| {
+                            (p.1 + 1 == length
+                                && *kind == CellKind::Repeater(Direction::South)
+                                && state.signals.get(p) == Some(&function))
+                            .then_some(*p)
+                        });
+                        if let Some(port) = port {
+                            scaffolded += 1;
+                            if config.seam_pitch > 0
+                                && (sites[0].0 != port.0 || sites[0].2 != port.2)
+                            {
+                                continue;
+                            }
+                            *sites = vec![Position(port.0, dim.1 - 1, port.2)];
+                            for y in length..dim.1 {
+                                let kind = if y == length {
+                                    CellKind::Solid
+                                } else {
+                                    CellKind::Repeater(Direction::South)
+                                };
+                                exact.fixed_cells.insert(Position(port.0, y, port.2), kind);
+                                if y != length {
+                                    exact
+                                        .fixed_cells
+                                        .insert(Position(port.0, y, port.2 - 1), CellKind::Solid);
+                                }
+                            }
+                        }
+                    }
+                    tracing::info!(
+                        gate = gate_name,
+                        scaffolded,
+                        "construction extends fixed repeater rails"
+                    );
+                }
                 // Finished outputs stay observable but may sit anywhere.
                 let everywhere = (0..dim.0)
                     .flat_map(|x| {
@@ -1184,8 +1800,188 @@ impl ExactLocalPlacer {
                 }
                 exact.observations = Some(observations);
             }
+            if config.gate_scaffold {
+                eyre::ensure!(
+                    config.scaffold_seams
+                        && config.seam_pitch >= 3
+                        && overlap == 0
+                        && gates.len() == 1,
+                    "NOR templates need a single gate, pitch >= 3 and zero-overlap scaffolded seams"
+                );
+                let gate = gates[0];
+                let values = netlist.net_values();
+                let full = u64::MAX >> (64 - (1usize << netlist.case_bits()));
+                let function = |net: NetId| {
+                    values[net]
+                        .iter()
+                        .enumerate()
+                        .fold(0u64, |mask, (i, &on)| mask | (u64::from(on) << i))
+                };
+                let target = function(gate);
+                let observed = exact
+                    .observations
+                    .as_ref()
+                    .is_none_or(|obs| obs.iter().any(|(net, _)| function(*net) == target));
+                let mut template = BTreeMap::new();
+                if observed {
+                    eyre::ensure!(
+                        netlist.nets[gate].driver == NetDriver::Gate,
+                        "NOR template does not support explicit OR stages"
+                    );
+                    let start_y = length + usize::from(length == 0);
+                    let mut taps = Vec::new();
+                    for &input in &netlist.nets[gate].gate_inputs {
+                        let f = function(input);
+                        let old = state.cells.iter().find_map(|(p, kind)| {
+                            if p.1 + 1 == length && *kind == CellKind::Repeater(Direction::South) {
+                                let old = *state.signals.get(p)?;
+                                if old == f || old == (!f & full) {
+                                    return Some((Position(p.0, start_y, p.2), old != f));
+                                }
+                            }
+                            None
+                        });
+                        let new = needed_inputs.iter().find_map(|&net| {
+                            let source = function(net);
+                            if source != f && source != (!f & full) {
+                                return None;
+                            }
+                            let site = exact.input_sites.get(&netlist.nets[net].name)?.first()?.0;
+                            Some((Position(site.0, start_y, site.2), source != f))
+                        });
+                        taps.push(old.or(new).ok_or_else(|| {
+                            eyre::eyre!("no template input tap for {}", netlist.nets[input].name)
+                        })?);
+                    }
+                    let out = exact
+                        .observations
+                        .as_ref()
+                        .and_then(|obs| {
+                            obs.iter().find_map(|(net, sites)| {
+                                (function(*net) == target
+                                    && sites.len() == 1
+                                    && sites[0].1 + 1 == dim.1)
+                                    .then(|| sites[0].0)
+                            })
+                        })
+                        .or_else(|| {
+                            (1..dim.0.saturating_sub(2))
+                                .step_by(config.seam_pitch)
+                                .find(|&x| {
+                                    exact
+                                        .fixed_cells
+                                        .get(&Position(x, dim.1 - 1, 1))
+                                        .is_none_or(|k| *k == CellKind::Air)
+                                })
+                        })
+                        .ok_or_else(|| eyre::eyre!("no output slot for NOR template"))?;
+                    template = super::nor_scaffold::nor_template(&taps, out, start_y, dim)?;
+                }
+                // Search deletion subsets of a generic initial geometry. This
+                // is not an unrestricted placement solve; compaction frees
+                // spatial windows after the complete baseline is verified.
+                for x in 0..dim.0 {
+                    for y in length..dim.1 {
+                        for z in 0..dim.2 {
+                            exact
+                                .fixed_cells
+                                .entry(Position(x, y, z))
+                                .or_insert(CellKind::Air);
+                        }
+                    }
+                }
+                for (p, kind) in template {
+                    if let Some(old) = exact.fixed_cells.get(&p) {
+                        if *old != CellKind::Air {
+                            eyre::ensure!(
+                                *old == kind,
+                                "template/scaffold conflict at {p:?}: {old:?} / {kind:?}"
+                            );
+                            continue;
+                        }
+                    }
+                    exact.fixed_cells.remove(&p);
+                    exact.removable_cells.insert(p, kind);
+                }
+            }
             let step_started = Instant::now();
+            if config.gate_scaffold && std::env::var_os("EXACT_TEMPLATE_DIAGNOSE").is_some() {
+                let mut kinds = vec![CellKind::Air; dim.0 * dim.1 * dim.2];
+                for (p, k) in exact.fixed_cells.iter().chain(exact.removable_cells.iter()) {
+                    kinds[(p.2 * dim.1 + p.1) * dim.0 + p.0] = *k;
+                }
+                let world = super::verify::build_world(dim, &kinds);
+                let mut sim =
+                    crate::world::simulator::Simulator::from_settled_with_limits_and_trace(
+                        &crate::world::World::from(&world),
+                        4096,
+                        2_000_000,
+                        0,
+                    )?;
+                let positions = world
+                    .iter_block()
+                    .into_iter()
+                    .map(|(p, _)| p)
+                    .collect::<Vec<_>>();
+                let names = netlist.input_names();
+                let mut actual = BTreeMap::<Position, u64>::new();
+                for case in 0..(1usize << netlist.case_bits()) {
+                    sim.advance_idle_cycles(61)?;
+                    let drive = names
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, n)| !exact.absent_inputs.contains(*n))
+                        .map(|(i, n)| (exact.input_sites[n][0].0, case & (1 << i) != 0))
+                        .collect::<Vec<_>>();
+                    sim.drive_inputs_with_limits(drive, 4096, 2_000_000)?;
+                    for p in &positions {
+                        if sim.world()[*p].kind.is_powered() {
+                            *actual.entry(*p).or_default() |= 1 << case;
+                        }
+                    }
+                }
+                let values = netlist.net_values();
+                let observations = exact.observations.clone().unwrap_or_else(|| {
+                    netlist
+                        .outputs
+                        .iter()
+                        .map(|(_, n)| (*n, positions.clone()))
+                        .collect()
+                });
+                let mismatches = observations
+                    .iter()
+                    .filter_map(|(net, sites)| {
+                        let target = values[*net]
+                            .iter()
+                            .enumerate()
+                            .fold(0u64, |m, (i, &on)| m | (u64::from(on) << i));
+                        (!sites
+                            .iter()
+                            .any(|p| actual.get(p).copied().unwrap_or(0) == target))
+                        .then(|| netlist.nets[*net].name.clone())
+                    })
+                    .collect::<Vec<_>>();
+                let frozen_mismatches = exact
+                    .given_signals
+                    .iter()
+                    .filter(|(p, f)| actual.get(p).copied().unwrap_or(0) != **f)
+                    .count();
+                for (net, sites) in &observations {
+                    if sites.len() == 1 {
+                        tracing::info!(net=netlist.nets[*net].name,site=?sites[0],actual=actual.get(&sites[0]),"template port value");
+                    }
+                }
+                tracing::info!(gate=gate_name,?mismatches,frozen_mismatches,functions=?actual.values().copied().collect::<BTreeSet<_>>(),"template direct simulation");
+            }
             let (outcome, stats) = self.place(&exact)?;
+            tracing::info!(
+                gate = gate_name,
+                encode_seconds = stats.encode_time.as_secs_f64(),
+                solve_seconds = stats.solve_time.as_secs_f64(),
+                variables = stats.variables,
+                clauses = stats.clauses,
+                "construction SAT model"
+            );
             let ExactOutcome::Placed(placement) = outcome else {
                 tracing::info!(
                     gate = gate_name,
@@ -1214,6 +2010,20 @@ impl ExactLocalPlacer {
                 continue;
             };
             let mut placement = placement;
+            if let Some(budget) = config.step_delete {
+                let mut deleting = exact.clone();
+                deleting.given_signals.clear();
+                let remaining = deadline.map(|d| d.saturating_duration_since(Instant::now()));
+                deleting.time_limit = Some(remaining.map_or(budget, |r| r.min(budget)));
+                let layout = ExactLayout::from_placement(dim, &placement);
+                if let Ok((ExactOutcome::Placed(better), _)) =
+                    self.minimize_existing(&layout, &deleting)
+                {
+                    if better.cells.len() < placement.cells.len() {
+                        placement = better;
+                    }
+                }
+            }
             if let Some(budget) = config.step_timing {
                 let lower = self.step_lower_bounds(gates, state);
                 placement =

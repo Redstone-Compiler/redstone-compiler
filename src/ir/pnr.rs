@@ -112,7 +112,30 @@ pub struct PnrSpec {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExactCandidateSpec {
+    pub optimize: bool,
+    pub search_box: [usize; 3],
+    pub time_limit_ms: u64,
+    pub max_inputs: usize,
+    pub max_logic_nodes: usize,
+}
+
+impl Default for ExactCandidateSpec {
+    fn default() -> Self {
+        Self {
+            optimize: true,
+            search_box: [3, 5, 3],
+            time_limit_ms: 5_000,
+            max_inputs: 4,
+            max_logic_nodes: 16,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CandidateSpec {
+    #[serde(default)]
+    pub exact: Option<ExactCandidateSpec>,
     pub search_box: [usize; 3],
     pub retain: usize,
     pub combinational_samples: Option<usize>,
@@ -422,8 +445,14 @@ pub struct RoutingSpec {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RouteStageSpec {
+    #[serde(default = "default_route_max_steps")]
+    pub max_route_steps: usize,
     pub strategy: RouteStrategySpec,
     pub validation: RouteValidationSpec,
+}
+
+fn default_route_max_steps() -> usize {
+    128
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -431,6 +460,9 @@ pub struct RouteStageSpec {
 pub enum RouteStrategySpec {
     BreadthFirst,
     AStar,
+    AStarBudgeted {
+        max_expansions: usize,
+    },
     DirectGreedy {
         max_steps: usize,
     },
@@ -454,6 +486,7 @@ pub enum NetOrderSpec {
     Criticality,
     HighestFanoutFirst,
     ReverseCriticality,
+    PinAccess,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

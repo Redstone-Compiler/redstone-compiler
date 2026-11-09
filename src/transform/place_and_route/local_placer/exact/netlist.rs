@@ -49,6 +49,134 @@ pub struct NorNetlist {
 }
 
 impl NorNetlist {
+    /// Inline positive ORs, including NOR-of-NOR double negations, into
+    /// consumers' fan-in sets. Remove unreachable intermediates. This trades
+    /// serial inversion stages for wider NOR gates without changing logic.
+    pub fn flatten_positive_logic(&self) -> eyre::Result<Self> {
+        ensure!(
+            self.state.is_empty(),
+            "positive-logic flattening requires combinational logic"
+        );
+        fn positive(source: &NorNetlist, id: NetId) -> Option<&[NetId]> {
+            let net = &source.nets[id];
+            if net.driver == NetDriver::Or {
+                return Some(&net.gate_inputs);
+            }
+            if net.driver == NetDriver::Gate && net.gate_inputs.len() == 1 {
+                let inner = &source.nets[net.gate_inputs[0]];
+                if inner.driver == NetDriver::Gate {
+                    return Some(&inner.gate_inputs);
+                }
+            }
+            None
+        }
+        fn expand(source: &NorNetlist, id: NetId, out: &mut BTreeSet<NetId>) {
+            if let Some(inputs) = positive(source, id) {
+                for &input in inputs {
+                    expand(source, input, out);
+                }
+            } else {
+                out.insert(id);
+            }
+        }
+        fn copy(
+            source: &NorNetlist,
+            result: &mut NorNetlist,
+            memo: &mut BTreeMap<NetId, NetId>,
+            id: NetId,
+        ) -> NetId {
+            if let Some(&new) = memo.get(&id) {
+                return new;
+            }
+            let mut net = source.nets[id].clone();
+            let inputs = if let Some(inputs) = positive(source, id) {
+                net.driver = NetDriver::Or;
+                inputs
+            } else {
+                &source.nets[id].gate_inputs
+            };
+            let mut expanded = BTreeSet::new();
+            for &input in inputs {
+                expand(source, input, &mut expanded);
+            }
+            net.gate_inputs = expanded
+                .into_iter()
+                .map(|n| copy(source, result, memo, n))
+                .collect();
+            let new = result.nets.len();
+            result.nets.push(net);
+            memo.insert(id, new);
+            new
+        }
+        let mut result = Self {
+            nets: Vec::new(),
+            outputs: Vec::new(),
+            state: Vec::new(),
+        };
+        let mut memo = BTreeMap::new();
+        // Keep the input case ordering, including unused inputs.
+        for (id, net) in self.nets.iter().enumerate() {
+            if matches!(net.driver, NetDriver::Input(_)) {
+                memo.insert(id, result.nets.len());
+                result.nets.push(net.clone());
+            }
+        }
+        for (name, net) in &self.outputs {
+            let new = copy(self, &mut result, &mut memo, *net);
+            result.outputs.push((name.clone(), new));
+        }
+        Ok(result)
+    }
+
+    /// Duplicate internal logic between output cones while retaining shared
+    /// primary inputs. Trades more gates for fewer live signals in sequential
+    /// physical construction. Sharing inside each output cone is preserved.
+    pub fn isolate_output_cones(&self) -> eyre::Result<Self> {
+        ensure!(
+            self.state.is_empty(),
+            "output-cone isolation requires combinational logic"
+        );
+        let mut result = Self {
+            nets: Vec::new(),
+            outputs: Vec::new(),
+            state: Vec::new(),
+        };
+        let mut inputs = BTreeMap::new();
+        for (id, net) in self.nets.iter().enumerate() {
+            if matches!(net.driver, NetDriver::Input(_)) {
+                inputs.insert(id, result.nets.len());
+                result.nets.push(net.clone());
+            }
+        }
+        fn copy(
+            source: &NorNetlist,
+            result: &mut NorNetlist,
+            memo: &mut BTreeMap<NetId, NetId>,
+            id: NetId,
+            cone: usize,
+        ) -> NetId {
+            if let Some(&copied) = memo.get(&id) {
+                return copied;
+            }
+            let mut net = source.nets[id].clone();
+            net.gate_inputs = net
+                .gate_inputs
+                .iter()
+                .map(|&input| copy(source, result, memo, input, cone))
+                .collect();
+            net.name = format!("{}_cone{cone}", net.name);
+            let copied = result.nets.len();
+            result.nets.push(net);
+            memo.insert(id, copied);
+            copied
+        }
+        for (cone, (name, net)) in self.outputs.iter().enumerate() {
+            let output = copy(self, &mut result, &mut inputs.clone(), *net, cone);
+            result.outputs.push((name.clone(), output));
+        }
+        Ok(result)
+    }
+
     pub fn from_logic_graph(graph: &LogicGraph) -> eyre::Result<Self> {
         let mut net_of_node = HashMap::<GraphNodeId, NetId>::new();
         let mut nets = Vec::new();

@@ -219,6 +219,7 @@ mod tests {
 
     fn candidate(name: &str, volume: usize, block_count: usize, port: Position) -> LayoutCandidate {
         LayoutCandidate {
+            exact_core: None,
             module_name: name.to_owned(),
             world: World3D::new(DimSize(1, 1, 1)),
             bbox: BoundingBox {

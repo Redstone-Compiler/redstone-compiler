@@ -1,3 +1,9 @@
+mod bit_mapping;
+
+pub(crate) fn lower_flat_logic_graph(design: &LogicalDesign) -> eyre::Result<LogicGraph> {
+    bit_mapping::lower_flat_logic_graph(design)
+}
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use eyre::{ContextCompat, WrapErr};
@@ -22,6 +28,88 @@ pub(crate) fn lower_logical_to_routable(design: &LogicalDesign) -> eyre::Result<
     design.validate()?;
     let mut routable = lower_logical_design(design)
         .wrap_err("logical IR uses a construct not yet supported by redstone-v1 mapping")?;
+    routable.debug = design.debug.clone();
+    attach_routable_debug_locations(design, &mut routable);
+    Ok(routable)
+}
+
+pub(crate) fn lower_with_bit_mapping_limits(
+    design: &LogicalDesign,
+    max_gates: usize,
+    max_inputs: usize,
+) -> eyre::Result<RoutableDesign> {
+    lower_with_balanced_bit_mapping(design, max_gates, max_inputs, false)
+}
+
+pub(crate) fn lower_with_balanced_bit_mapping(
+    design: &LogicalDesign,
+    max_gates: usize,
+    max_inputs: usize,
+    balance: bool,
+) -> eyre::Result<RoutableDesign> {
+    design.validate()?;
+    eyre::ensure!(
+        !design
+            .modules
+            .iter()
+            .any(|module| module.cells.iter().any(|cell| cell.kind.is_sequential())),
+        "bounded bit mapping only supports combinational designs"
+    );
+    let mut routable = bit_mapping::lower_with_balancing(design, max_gates, max_inputs, balance)?;
+    routable.debug = design.debug.clone();
+    attach_routable_debug_locations(design, &mut routable);
+    Ok(routable)
+}
+
+pub(crate) fn lower_with_associative_cells(
+    design: &LogicalDesign,
+    max_arity: usize,
+) -> eyre::Result<RoutableDesign> {
+    design.validate()?;
+    eyre::ensure!(
+        !design
+            .modules
+            .iter()
+            .any(|module| module.cells.iter().any(|cell| cell.kind.is_sequential())),
+        "associative cell mapping only supports combinational designs"
+    );
+    let mut routable = bit_mapping::lower_with_associative_cells(design, max_arity)?;
+    routable.debug = design.debug.clone();
+    attach_routable_debug_locations(design, &mut routable);
+    Ok(routable)
+}
+
+pub(crate) fn lower_with_expanded_associative_cells(
+    design: &LogicalDesign,
+    max_arity: usize,
+) -> eyre::Result<RoutableDesign> {
+    design.validate()?;
+    eyre::ensure!(
+        !design
+            .modules
+            .iter()
+            .any(|module| module.cells.iter().any(|cell| cell.kind.is_sequential())),
+        "associative cell mapping only supports combinational designs"
+    );
+    let mut routable = bit_mapping::lower_with_expanded_associative_cells(design, max_arity)?;
+    routable.debug = design.debug.clone();
+    attach_routable_debug_locations(design, &mut routable);
+    Ok(routable)
+}
+
+pub(crate) fn lower_with_literal_associative_cells(
+    design: &LogicalDesign,
+    max_arity: usize,
+) -> eyre::Result<RoutableDesign> {
+    design.validate()?;
+    eyre::ensure!(
+        !design
+            .modules
+            .iter()
+            .any(|module| module.cells.iter().any(|cell| cell.kind.is_sequential())),
+        "literal associative cell mapping only supports combinational designs"
+    );
+    let mut routable = bit_mapping::lower_with_literal_associative_cells(design, max_arity)?;
     routable.debug = design.debug.clone();
     attach_routable_debug_locations(design, &mut routable);
     Ok(routable)
@@ -282,6 +370,41 @@ fn lower_logical_design(design: &LogicalDesign) -> eyre::Result<RoutableDesign> 
         .copied()
         .with_context(|| format!("unknown logical top module `{}`", design.top))?;
 
+    let needs_bit_mapping = design.modules.iter().any(|module| {
+        module.nets.iter().any(|net| net.width != 1)
+            || (!module.instances.is_empty() && !module.cells.is_empty())
+            || module.instances.iter().any(|instance| {
+                design
+                    .module(&instance.module)
+                    .is_some_and(|child| !child.instances.is_empty())
+            })
+            || module.cells.iter().any(|cell| {
+                cell.inputs
+                    .iter()
+                    .any(|input| matches!(input.value, LogicalValue::Constant { .. }))
+            })
+            || module.cells.iter().any(|cell| {
+                matches!(
+                    cell.kind,
+                    LogicalCellKind::Equal
+                        | LogicalCellKind::GreaterEqual
+                        | LogicalCellKind::Sub
+                        | LogicalCellKind::Select { .. }
+                        | LogicalCellKind::Concat
+                        | LogicalCellKind::Resize { .. }
+                        | LogicalCellKind::Mux
+                        | LogicalCellKind::Add
+                )
+            })
+    });
+    if needs_bit_mapping
+        && !design
+            .modules
+            .iter()
+            .any(|module| module.cells.iter().any(|cell| cell.kind.is_sequential()))
+    {
+        return bit_mapping::lower(design);
+    }
     if top.instances.is_empty() {
         if let Some(state_design) = lower_state_design(top)? {
             return Ok(state_design);
@@ -694,7 +817,13 @@ fn emit_graph_cell(
             )),
             &["d", "enable"],
         ),
-        LogicalCellKind::Add
+        LogicalCellKind::Equal
+        | LogicalCellKind::GreaterEqual
+        | LogicalCellKind::Sub
+        | LogicalCellKind::Select { .. }
+        | LogicalCellKind::Concat
+        | LogicalCellKind::Resize { .. }
+        | LogicalCellKind::Add
         | LogicalCellKind::Inc
         | LogicalCellKind::Mux
         | LogicalCellKind::Dff { .. }

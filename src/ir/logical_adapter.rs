@@ -36,7 +36,7 @@ impl LogicalDesign {
             top: top.name.clone(),
             modules: modules
                 .iter()
-                .map(logical_module_from_verilog)
+                .map(|module| logical_module_from_verilog(module, modules))
                 .collect::<eyre::Result<Vec<_>>>()?,
             debug: Default::default(),
         };
@@ -46,6 +46,65 @@ impl LogicalDesign {
 
     pub fn lower_to_routable(&self) -> eyre::Result<RoutableDesign> {
         super::logical_lowering::lower_logical_to_routable(self)
+    }
+
+    /// Maps a combinational design into bounded, fanout-free scalar cones.
+    /// The gate budget counts bit-level Boolean operators before NOR mapping.
+    /// `max_gates=1, max_inputs=2` provides the primitive-leaf baseline.
+    pub fn lower_to_routable_with_bit_mapping_limits(
+        &self,
+        max_gates: usize,
+        max_inputs: usize,
+    ) -> eyre::Result<RoutableDesign> {
+        super::logical_lowering::lower_with_bit_mapping_limits(self, max_gates, max_inputs)
+    }
+
+    /// Experimental AND/OR reassociation before bounded primitive mapping.
+    /// Shared subexpressions are preserved; gate count and every output's
+    /// Boolean depth may not increase. This does not predict physical timing.
+    pub fn lower_to_routable_with_balanced_associative_trees(
+        &self,
+        max_gates: usize,
+        max_inputs: usize,
+    ) -> eyre::Result<RoutableDesign> {
+        super::logical_lowering::lower_with_balanced_bit_mapping(self, max_gates, max_inputs, true)
+    }
+
+    /// Experimental pure AND/OR cells with 2..=8 boundary inputs. Only
+    /// same-operation fanout-free cones merge; NOT/XOR remain primitive.
+    /// Leaf bodies keep binary NOR mapping for existing Routable consumers.
+    pub fn lower_to_routable_with_associative_cells(
+        &self,
+        max_arity: usize,
+    ) -> eyre::Result<RoutableDesign> {
+        super::logical_lowering::lower_with_associative_cells(self, max_arity)
+    }
+
+    /// Experimental recipe-oriented mapping. Shared AND/OR prefixes may be
+    /// duplicated within bounded same-operation cells only when this reduces
+    /// physical instance count; otherwise the shared-cell mapping is returned.
+    pub fn lower_to_routable_with_expanded_associative_cells(
+        &self,
+        max_arity: usize,
+    ) -> eyre::Result<RoutableDesign> {
+        super::logical_lowering::lower_with_expanded_associative_cells(self, max_arity)
+    }
+
+    /// Experimental literal cube/clause cells: absorb one boundary NOT layer
+    /// into bounded AND/OR recipes, including shared literal inversions.
+    /// Select only when fewer instances than expanded positive cells result.
+    pub fn lower_to_routable_with_literal_associative_cells(
+        &self,
+        max_arity: usize,
+    ) -> eyre::Result<RoutableDesign> {
+        super::logical_lowering::lower_with_literal_associative_cells(self, max_arity)
+    }
+
+    /// Flatten a combinational design into one shared NOT/OR logic graph.
+    /// No physical partitioning, local candidates, or global routing occurs.
+    /// Sequential cells and outputs remaining constant after folding are rejected.
+    pub fn lower_flat_logic_graph(&self) -> eyre::Result<crate::graph::logic::LogicGraph> {
+        super::logical_lowering::lower_flat_logic_graph(self)
     }
 
     pub fn to_verilog_modules(&self) -> eyre::Result<Vec<VerilogModule>> {
@@ -246,18 +305,12 @@ fn is_word_char(ch: char) -> bool {
     ch == '_' || ch == '$' || ch.is_ascii_alphanumeric()
 }
 
-fn logical_module_from_verilog(module: &VerilogModule) -> eyre::Result<LogicalModule> {
+fn logical_module_from_verilog(
+    module: &VerilogModule,
+    definitions: &[VerilogModule],
+) -> eyre::Result<LogicalModule> {
     let rtl = lower_rtl_module(module)?;
     let synth = synthesize_module(&rtl)?;
-    if !module.instances.is_empty()
-        && (!rtl.continuous_assigns.is_empty() || !synth.cells.is_empty())
-    {
-        eyre::bail!(
-            "logical RCIR does not support mixing instances and local cells in module `{}`",
-            module.name
-        );
-    }
-
     let nets = rtl
         .signals
         .iter()
@@ -292,25 +345,59 @@ fn logical_module_from_verilog(module: &VerilogModule) -> eyre::Result<LogicalMo
             })
         })
         .collect::<eyre::Result<Vec<_>>>()?;
-    let instances = module
-        .instances
-        .iter()
-        .map(|instance| LogicalInstance {
+    let mut builder = LogicalModuleBuilder::new(&rtl, nets);
+    let mut instances = Vec::new();
+    for instance in &module.instances {
+        let definition = definitions
+            .iter()
+            .find(|child| child.name == instance.module_name)
+            .with_context(|| format!("unknown module `{}`", instance.module_name))?;
+        let child = lower_rtl_module(definition)?;
+        let mut bindings = Vec::new();
+        for (port, expr) in &instance.connections {
+            let target = child
+                .ports
+                .iter()
+                .find(|p| &p.name == port)
+                .with_context(|| {
+                    format!("unknown instance port `{}.{port}`", instance.instance_name)
+                })?;
+            let signal = &child.signals[target.signal.signal.0];
+            let net = match signal.kind {
+                RtlSignalKind::Input => {
+                    let elaborated = rtl.elaborate_expr(expr, signal.width)?;
+                    if let RtlExpr::Signal(reference) = elaborated {
+                        rtl.signal_name(reference)?.to_owned()
+                    } else {
+                        let net = builder.fresh_net(
+                            &format!("{}_{}", instance.instance_name, port),
+                            signal.width,
+                        );
+                        builder.emit_expr_to(&elaborated, &net, signal.width, "port_binding")?;
+                        net
+                    }
+                }
+                RtlSignalKind::Output | RtlSignalKind::RegOutput => match expr {
+                    Expr::Ident(net) => net.clone(),
+                    _ => eyre::bail!(
+                        "output port `{}.{port}` requires a named wire",
+                        instance.instance_name
+                    ),
+                },
+                _ => eyre::bail!("instance port `{port}` is not an input or output"),
+            };
+            bindings.push(LogicalBinding {
+                port: port.clone(),
+                net,
+            });
+        }
+        instances.push(LogicalInstance {
             name: instance.instance_name.clone(),
             module: instance.module_name.clone(),
-            bindings: instance
-                .connections
-                .iter()
-                .map(|(port, net)| LogicalBinding {
-                    port: port.clone(),
-                    net: net.clone(),
-                })
-                .collect(),
+            bindings,
             origin: Some(format!("verilog.instance.{}", instance.instance_name)),
-        })
-        .collect();
-
-    let mut builder = LogicalModuleBuilder::new(&rtl, nets);
+        });
+    }
     for assignment in &rtl.continuous_assigns {
         let output = rtl.signal_name(assignment.output)?.to_owned();
         let width = rtl.signal_width(assignment.output)?;
@@ -444,6 +531,61 @@ impl<'a> LogicalModuleBuilder<'a> {
                     },
                 )],
             ),
+            RtlExpr::Select { value, msb, lsb } => (
+                LogicalCellKind::Select {
+                    msb: *msb,
+                    lsb: *lsb,
+                },
+                vec![input(
+                    "value",
+                    self.emit_expr_value(value, self.rtl.expr_width(value)?, role)?,
+                )],
+            ),
+            RtlExpr::Resize { value, width } => (
+                LogicalCellKind::Resize { width: *width },
+                vec![input(
+                    "value",
+                    self.emit_expr_value(value, self.rtl.expr_width(value)?, role)?,
+                )],
+            ),
+            RtlExpr::Sub(left, right) => (
+                LogicalCellKind::Sub,
+                self.binary_inputs(left, right, expected_width, role)?,
+            ),
+            RtlExpr::GreaterEqual(left, right) => (
+                LogicalCellKind::GreaterEqual,
+                self.binary_inputs(left, right, self.rtl.expr_width(left)?, role)?,
+            ),
+            RtlExpr::Equal(left, right) => (
+                LogicalCellKind::Equal,
+                self.binary_inputs(left, right, self.rtl.expr_width(left)?, role)?,
+            ),
+            RtlExpr::Concat(values) => {
+                let (last, prefix) = values
+                    .split_last()
+                    .ok_or_else(|| eyre::eyre!("empty concatenation"))?;
+                if prefix.is_empty() {
+                    return self.emit_expr_to(last, output_net, expected_width, role);
+                }
+                let upper = if prefix.len() == 1 {
+                    prefix[0].clone()
+                } else {
+                    RtlExpr::Concat(prefix.to_vec())
+                };
+                (
+                    LogicalCellKind::Concat,
+                    vec![
+                        input(
+                            "lhs",
+                            self.emit_expr_value(&upper, self.rtl.expr_width(&upper)?, role)?,
+                        ),
+                        input(
+                            "rhs",
+                            self.emit_expr_value(last, self.rtl.expr_width(last)?, role)?,
+                        ),
+                    ],
+                )
+            }
             RtlExpr::Not(value) => (
                 LogicalCellKind::Not,
                 vec![input(
@@ -642,7 +784,6 @@ fn logical_module_to_verilog(module: &LogicalModule) -> eyre::Result<VerilogModu
             if sequential_data_nets.contains(output.as_str()) {
                 continue;
             }
-            eyre::bail!("combinational mux lowering is not implemented for redstone-v1");
         }
         assignments.push(Assignment {
             output: cell.output("result")?.clone(),
@@ -678,7 +819,7 @@ fn logical_module_to_verilog(module: &LogicalModule) -> eyre::Result<VerilogModu
                 connections: instance
                     .bindings
                     .iter()
-                    .map(|binding| (binding.port.clone(), binding.net.clone()))
+                    .map(|binding| (binding.port.clone(), Expr::Ident(binding.net.clone())))
                     .collect(),
             })
             .collect(),
@@ -695,7 +836,23 @@ fn immediate_cell_expr(cell: &LogicalCell) -> eyre::Result<Expr> {
         LogicalCellKind::Xor => binary(BinaryOp::Xor, value("lhs")?, value("rhs")?),
         LogicalCellKind::Add => binary(BinaryOp::Add, value("lhs")?, value("rhs")?),
         LogicalCellKind::Inc => binary(BinaryOp::Add, value("value")?, Expr::Number(1)),
-        LogicalCellKind::Mux => eyre::bail!("mux is not an immediate Verilog expression"),
+        LogicalCellKind::Mux => Expr::Mux {
+            select: Box::new(value("select")?),
+            when_true: Box::new(value("when_true")?),
+            when_false: Box::new(value("when_false")?),
+        },
+        LogicalCellKind::Equal => binary(BinaryOp::Equal, value("lhs")?, value("rhs")?),
+        LogicalCellKind::GreaterEqual => {
+            binary(BinaryOp::GreaterEqual, value("lhs")?, value("rhs")?)
+        }
+        LogicalCellKind::Sub => binary(BinaryOp::Sub, value("lhs")?, value("rhs")?),
+        LogicalCellKind::Select { msb, lsb } => Expr::Select {
+            value: Box::new(value("value")?),
+            msb,
+            lsb,
+        },
+        LogicalCellKind::Concat => Expr::Concat(vec![value("lhs")?, value("rhs")?]),
+        LogicalCellKind::Resize { .. } => value("value")?,
         LogicalCellKind::DLatch { .. }
         | LogicalCellKind::Dff { .. }
         | LogicalCellKind::Register { .. } => {
@@ -808,9 +965,37 @@ fn expand_value(
             expand("rhs", active)?,
         ),
         LogicalCellKind::Inc => binary(BinaryOp::Add, expand("value", active)?, Expr::Number(1)),
-        LogicalCellKind::Mux => {
-            eyre::bail!("generic mux expression cannot be represented by the current Verilog AST")
+        LogicalCellKind::Mux => Expr::Mux {
+            select: Box::new(expand("select", active)?),
+            when_true: Box::new(expand("when_true", active)?),
+            when_false: Box::new(expand("when_false", active)?),
+        },
+        LogicalCellKind::Equal => binary(
+            BinaryOp::Equal,
+            expand("lhs", active)?,
+            expand("rhs", active)?,
+        ),
+        LogicalCellKind::GreaterEqual => binary(
+            BinaryOp::GreaterEqual,
+            expand("lhs", active)?,
+            expand("rhs", active)?,
+        ),
+        LogicalCellKind::Sub => binary(
+            BinaryOp::Sub,
+            expand("lhs", active)?,
+            expand("rhs", active)?,
+        ),
+        LogicalCellKind::Select { msb, lsb } => Expr::Select {
+            value: Box::new(expand("value", active)?),
+            msb,
+            lsb,
+        },
+        LogicalCellKind::Concat => {
+            Expr::Concat(vec![expand("lhs", active)?, expand("rhs", active)?])
         }
+        // Keep the declared-width wire: expanding through it would erase
+        // truncation/extension when embedded in a wider parent expression.
+        LogicalCellKind::Resize { .. } => Expr::Ident(net.clone()),
         _ => eyre::bail!("sequential cell cannot drive a combinational expression"),
     };
     active.pop();
@@ -820,7 +1005,10 @@ fn expand_value(
 fn value_expr(value: &LogicalValue) -> Expr {
     match value {
         LogicalValue::Net { net } => Expr::Ident(net.clone()),
-        LogicalValue::Constant { value, .. } => Expr::Number(*value as usize),
+        LogicalValue::Constant { value, width } => Expr::SizedNumber {
+            value: *value,
+            width: *width,
+        },
     }
 }
 

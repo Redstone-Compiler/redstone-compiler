@@ -85,6 +85,12 @@ pub enum LogicalCellKind {
     Add,
     Inc,
     Mux,
+    Equal,
+    GreaterEqual,
+    Sub,
+    Select { msb: usize, lsb: usize },
+    Concat,
+    Resize { width: usize },
     DLatch { width: usize },
     Dff { edge: ClockEdge },
     Register { width: usize, edge: ClockEdge },
@@ -400,9 +406,30 @@ impl LogicalCell {
             LogicalCellKind::And
             | LogicalCellKind::Or
             | LogicalCellKind::Xor
-            | LogicalCellKind::Add => {
+            | LogicalCellKind::Add
+            | LogicalCellKind::Sub => {
                 ensure_data_width(self.input_value("lhs")?, output_width, nets)?;
                 ensure_data_width(self.input_value("rhs")?, output_width, nets)?;
+            }
+            LogicalCellKind::Equal | LogicalCellKind::GreaterEqual => {
+                ensure_declared_width(1, output_width, &self.name)?;
+                let width = value_width(self.input_value("lhs")?, nets)?;
+                ensure_exact_width(self.input_value("rhs")?, width, nets, "comparison operand")?;
+            }
+            LogicalCellKind::Select { msb, lsb } => {
+                let width = value_width(self.input_value("value")?, nets)?;
+                if lsb > msb || *msb >= width {
+                    eyre::bail!("invalid logical select {msb}:{lsb} for width {width}");
+                }
+                ensure_declared_width(msb - lsb + 1, output_width, &self.name)?;
+            }
+            LogicalCellKind::Concat => {
+                let width = value_width(self.input_value("lhs")?, nets)?
+                    + value_width(self.input_value("rhs")?, nets)?;
+                ensure_declared_width(width, output_width, &self.name)?;
+            }
+            LogicalCellKind::Resize { width } => {
+                ensure_declared_width(*width, output_width, &self.name)?
             }
             LogicalCellKind::Mux => {
                 ensure_exact_width(self.input_value("select")?, 1, nets, "mux select")?;
@@ -463,8 +490,17 @@ impl LogicalCellKind {
 
     fn pin_names(&self) -> (&'static [&'static str], &'static [&'static str]) {
         match self {
-            Self::Buffer | Self::Not => (&["value"], &["result"]),
-            Self::And | Self::Or | Self::Xor | Self::Add => (&["lhs", "rhs"], &["result"]),
+            Self::Buffer | Self::Not | Self::Select { .. } | Self::Resize { .. } => {
+                (&["value"], &["result"])
+            }
+            Self::And
+            | Self::Or
+            | Self::Xor
+            | Self::Add
+            | Self::Equal
+            | Self::GreaterEqual
+            | Self::Sub
+            | Self::Concat => (&["lhs", "rhs"], &["result"]),
             Self::Inc => (&["value"], &["result"]),
             Self::Mux => (&["select", "when_true", "when_false"], &["result"]),
             Self::DLatch { .. } => (&["d", "enable"], &["q"]),

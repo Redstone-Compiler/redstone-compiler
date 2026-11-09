@@ -1454,6 +1454,7 @@ fn compose_candidate(
             {
                 routing_attempts += 1;
                 let routing = GlobalRoutingConfig {
+                    max_route_steps: 128,
                     strategy,
                     // Cluster boundary nets can be logically correlated after
                     // cut refinement (for example x and OR(x, cin)). Validating
@@ -2620,6 +2621,7 @@ mod tests {
 
     fn named_candidate(name: &str) -> LayoutCandidate {
         LayoutCandidate {
+            exact_core: None,
             module_name: name.to_owned(),
             world: World3D::new(DimSize(1, 1, 1)),
             bbox: BoundingBox {

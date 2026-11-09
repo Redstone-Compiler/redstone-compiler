@@ -14,6 +14,9 @@ enum Attach { Floor, East, West, North, South }
 enum Source { FromDust, FromTorch, FromRepeater, FromSolid, FromSwitch }
 enum Sink { DustSink, RepeaterSink, SolidSink }
 
+domain RankedCell: int; // dense indices of cells needing per-case ranks
+fact rank_cell(Cell, RankedCell);
+
 domain Case: int;      // input cases; bit i of a case is input i
 domain Class;          // signal vocabulary, one class per Boolean function
 domain Output;
@@ -39,6 +42,10 @@ fact given(c: Cell) := any(given_sig(c, k) for k: Class);
 // Fixed or given cells whose units are not folded, so a refutation that needs
 // them names them (`ExactLocalPlacer::proof_core`).
 fact soft(Cell);
+// Only hard-fixed Air is statically absent. Soft proof-core cells remain live.
+fact known_air(c: Cell) := fixed(c, Air) and not soft(c);
+fact known_signal(c: Cell) := given(c) and not soft(c);
+fact hard_fixed(c: Cell) := not soft(c) and any(fixed(c, m) for m: Kind);
 
 // Tiling along X with a ripple carry (`CarryTiling` in mod.rs; see the
 // tiling rules below). Ghost cells stand for the previous tile.
@@ -78,6 +85,11 @@ fact outward_ok(c: Cell) :=
     or any(fixed(c, m) and m is Repeater(_) for m: Kind);
 
 param rank_levels: int = 24;
+// Opt-in: justify merged dust power independently in each input case.
+// Zero preserves the original single-function wire/rank model.
+param case_rank_levels: int = 0;
+// Optional output interface: driving observations must use outward repeaters.
+param repeater_driving_outputs: bool = false;
 param stage_levels: int = 24;
 param max_blocks: int? = none;
 param max_repeaters: int? = none;      // e.g. 0 forbids repeaters
@@ -123,26 +135,31 @@ fn perp(d: Dir4) -> set<Dir4> = match d {
 
 @prefer(Air) @outside(Air) @display("{c} {member}")
 choice Kind[c: Cell] {
-    Air,
-    Solid,
-    Dust if has(step(c, Down)),
-    Torch(a: Attach) if has(step(c, dir(a))),
-    Repeater(d: Dir4) if has(step(c, Down)) and has(step(c, d))
+    Air if not hard_fixed(c) or fixed(c, Air),
+    Solid if not hard_fixed(c) or fixed(c, Solid),
+    Dust if (not hard_fixed(c) or fixed(c, Dust)) and has(step(c, Down)),
+    Torch(a: Attach) if (not hard_fixed(c) or fixed(c, Torch(a))) and has(step(c, dir(a))),
+    Repeater(d: Dir4) if (not hard_fixed(c) or fixed(c, Repeater(d)))
+                         and has(step(c, Down)) and has(step(c, d))
                          and (has(step(c, opposite(d))) or outward_ok(c)),
-    Switch(a: Attach, k: Class) if switch_site(c, a, k),
+    Switch(a: Attach, k: Class) if (not hard_fixed(c) or fixed(c, Switch(a, k)))
+                                  and switch_site(c, a, k),
 }
 
 @prefer(Empty) @display("{c} 신호={member}")
 choice Sig[c: Cell] {
-    Empty,
-    Carry(k: Class),
+    Empty if not known_signal(c) or known_air(c),
+    Carry(k: Class) if not known_air(c) and (not known_signal(c) or given_sig(c, k)),
 }
 
 @display("{c} 경우{k}에 켜짐")
-def Powered[k: Case, c: Cell] := any(Sig[c] is Carry(j) for j: Class where on(j, k));
+def Powered[k: Case, c: Cell] := not known_air(c) and any(Sig[c] is Carry(j) for j: Class where on(j, k));
 
 @display("{c} 꺼짐 신호")
-def Unpowered[c: Cell] := any(Sig[c] is Carry(u) for u: Class where unpowered(u));
+def Unpowered[c: Cell] := not known_air(c) and any(Sig[c] is Carry(u) for u: Class where unpowered(u));
+// Only neighboring feed pairs query this predicate. Exporting it would
+// eagerly materialize every pair of cells (quadratic space and time).
+@internal
 def Cut[s: Cell, t: Cell] :=
     Kind[t] is Dust | Repeater(_) and any(Sig[s] is Carry(n) and Sig[t] is Carry(m) for (n, m) in cut);
 
@@ -187,6 +204,9 @@ var Contrib over Feeds;
 
 @encoding(order) @display("{c} 순위")
 int Rank[c: Cell] in 0..=rank_levels;
+
+@encoding(order) @display("경우 {k}, 순위 셀 {i} 전원 순위")
+int CaseRank[k: Case, i: RankedCell] in 0..=case_rank_levels;
 
 @encoding(order) @display("{c} 단계")
 int Stage[c: Cell] in 0..=stage_levels;
@@ -283,7 +303,7 @@ rule "토치는 반드시 꺼짐이 아닌 신호를 실음" {
 // ===== power relations =======================================================
 
 rule "전원 관계: 가루 ↔ 옆 가루 / 계단 가루" {
-    forall c: Cell, d: Dir4 {
+    forall c: Cell, d: Dir4 where not known_air(c) {
         Feeds(c, step(c, d), FromDust, DustSink) |= Kind[c] is Dust and Kind[step(c, d)] is Dust;
         let up = step(step(c, d), Up);
         let stair = Kind[c] is Dust and Kind[up] is Dust and not Kind[step(c, Up)] is Solid;
@@ -293,7 +313,7 @@ rule "전원 관계: 가루 ↔ 옆 가루 / 계단 가루" {
 }
 
 rule "전원 관계: 가루 → 받침·가리키는 블록(약전원), 뒤에서 읽는 리피터" {
-    forall c: Cell {
+    forall c: Cell where not known_air(c) {
         Feeds(c, step(c, Down), FromDust, SolidSink) |= Kind[c] is Dust;
         forall d: Dir4 {
             Feeds(c, step(c, d), FromDust, SolidSink) |= Points[c, d] and Kind[step(c, d)] is Solid;
@@ -304,7 +324,7 @@ rule "전원 관계: 가루 → 받침·가리키는 블록(약전원), 뒤에�
 }
 
 rule "전원 관계: 토치 → 주변 가루·리피터, 위 블록(강전원)" {
-    forall c: Cell, d: Dir6 {
+    forall c: Cell, d: Dir6 where not known_air(c) {
         if d == Up {
             Feeds(c, step(c, d), FromTorch, SolidSink)
                 |= Kind[c] is Torch(_) and Kind[step(c, d)] is Solid;
@@ -320,7 +340,7 @@ rule "전원 관계: 토치 → 주변 가루·리피터, 위 블록(강전원)"
 }
 
 rule "전원 관계: 리피터 → 앞쪽 블록/가루/같은 방향 리피터" {
-    forall c: Cell, d: Dir4 {
+    forall c: Cell, d: Dir4 where not known_air(c) {
         let out = step(c, opposite(d));
         Feeds(c, out, FromRepeater, SolidSink) |= Kind[c] is Repeater(d) and Kind[out] is Solid;
         Feeds(c, out, FromRepeater, DustSink) |= Kind[c] is Repeater(d) and Kind[out] is Dust;
@@ -329,13 +349,13 @@ rule "전원 관계: 리피터 → 앞쪽 블록/가루/같은 방향 리피터"
 }
 
 rule "리피터가 다른 리피터 옆구리를 치면 잠김 → 금지" {
-    forall c: Cell, d: Dir4, p in perp(d) {
+    forall c: Cell, d: Dir4, p in perp(d) where not known_air(c) {
         require not (Kind[c] is Repeater(d) and Kind[step(c, opposite(d))] is Repeater(p));
     }
 }
 
 rule "전원 관계: 블록 → 읽는 리피터; 강전원 블록 → 주변 가루" {
-    forall c: Cell {
+    forall c: Cell where not known_air(c) {
         forall d: Dir4 {
             Feeds(c, step(c, d), FromSolid, RepeaterSink)
                 |= Kind[c] is Solid and Kind[step(c, d)] is Repeater(opposite(d));
@@ -347,7 +367,7 @@ rule "전원 관계: 블록 → 읽는 리피터; 강전원 블록 → 주변 �
 }
 
 rule "전원 관계: 스위치 → 붙은 블록(강전원), 주변 가루·리피터" {
-    forall (c, a, k) in switch_site {
+    forall (c, a, k) in switch_site where not known_air(c) {
         let sw = Kind[c] is Switch(a, k);
         Feeds(c, step(c, dir(a)), FromSwitch, SolidSink) |= sw;
         forall d: Dir6 where d != dir(a) {
@@ -361,7 +381,7 @@ rule "전원 관계: 스위치 → 붙은 블록(강전원), 주변 가루·리�
 }
 
 rule "스위치 옆 블록의 약전원은 토치는 무시하고 리피터는 받음 → 그런 배치 금지" {
-    forall (c, a) in switch_attach, d: Dir6 where d != dir(a) {
+    forall (c, a) in switch_attach, d: Dir6 where d != dir(a) and not known_air(c) {
         let t = step(c, d);
         forall b: Attach {
             require not (Kind[c] is Switch(a, _) and Kind[step(t, opposite(dir(b)))] is Torch(b));
@@ -385,7 +405,7 @@ rule "건전성: 원천이 켜지면 받는 쪽도 켜짐 (가루·리피터는 
         forall k: Case {
             let source = if strong { Strong[k, s] } else { Powered[k, s] };
             require feeds and source and not open -> Powered[k, t];
-            if to != SolidSink {
+            if to == RepeaterSink or (to == DustSink and case_rank_levels == 0) {
                 require feeds and Powered[k, t] and not open -> source;
             }
         }
@@ -403,7 +423,7 @@ rule "정당화: 기여 관계, 순위·단계 순서" {
                 require used and not Cut[s, t] -> Stage[s] < Stage[t];
             }
         } else {
-            if rank_levels > 0 {
+            if rank_levels > 0 and case_rank_levels == 0 {
                 require used -> Rank[s] < Rank[t];
             }
             if stage_levels > 0 {
@@ -418,13 +438,39 @@ rule "정당화: 기여 관계, 순위·단계 순서" {
 
 @guarded(per = c)
 rule "켜진 것은 켜진 원천이 있어야 함" {
-    forall c: Cell where not given(c) {
+    forall c: Cell where not given(c) and not known_air(c) {
         require Kind[c] is Dust | Repeater(_) and not Unpowered[c]
             -> any(Contrib(s, t, f, to) for (s, t, f, to) in Feeds where t == c and to != SolidSink);
         forall k: Case {
-            require Powered[k, c] and Kind[c] is Solid
-                -> any(Contrib(s, t, f, to) and Powered[k, s]
-                       for (s, t, f, to) in Feeds where t == c and to == SolidSink);
+            if case_rank_levels > 0 {
+                // Each powered case needs its own acyclic path to a real source.
+                // A strongly powered solid may feed dust only in its strong cases.
+                require Powered[k, c] and Kind[c] is Solid | Dust
+                    -> any(any(Contrib(s, t, f, to)
+                               and (if f == FromSolid and to == DustSink { Strong[k, s] } else { Powered[k, s] })
+                               and (if given(s) {
+                                    CaseRank[k, ci] > 0
+                               } else {
+                                    any(CaseRank[k, si] < CaseRank[k, ci]
+                                        for (source_cell, si) in rank_cell where source_cell == s)
+                               })
+                               for (s, t, f, to) in Feeds
+                               where t == c and (to == SolidSink or to == DustSink))
+                           for (target_cell, ci) in rank_cell where target_cell == c);
+            } else {
+                require Powered[k, c] and Kind[c] is Solid
+                    -> any(Contrib(s, t, f, to) and Powered[k, s]
+                           for (s, t, f, to) in Feeds where t == c and to == SolidSink);
+            }
+        }
+    }
+}
+
+rule "경우별 전원 순위: 원천과 인증된 고정 셀에서 다시 시작" {
+    if case_rank_levels > 0 {
+        forall k: Case, (c, ci) in rank_cell {
+            require Kind[c] is Air | Torch(_) | Repeater(_) | Switch(_, _)
+                -> CaseRank[k, ci] == 0;
         }
     }
 }
@@ -447,9 +493,15 @@ rule "대칭 제거: 가루·리피터는 기여 원천을 하나만 고름" {
     // Coverage needs one contributor; more only add order constraints, so
     // a layout justified by several is also justified by one of them.
     if symmetry_breaking {
-        forall c: Cell {
-            require at_most_one(Contrib(s, t, f, to)
-                                for (s, t, f, to) in Feeds where t == c and to != SolidSink);
+        forall c: Cell where not known_air(c) {
+            if case_rank_levels == 0 {
+                require at_most_one(Contrib(s, t, f, to)
+                                    for (s, t, f, to) in Feeds where t == c and to != SolidSink);
+            } else {
+                require Kind[c] is Repeater(_)
+                    -> at_most_one(Contrib(s, t, f, to)
+                                   for (s, t, f, to) in Feeds where t == c and to != SolidSink);
+            }
         }
     }
 }
@@ -479,7 +531,7 @@ rule "대칭 제거: 받는 기여가 없으면 순위·단계는 0 (토치 단�
     // Lowering such a cell to 0 keeps every order constraint satisfied; this
     // also fixes the otherwise free integers of air cells.
     if symmetry_breaking {
-        forall c: Cell {
+        forall c: Cell where not known_air(c) {
             let fed = any(Contrib(s, t, f, to) for (s, t, f, to) in Feeds where t == c);
             if rank_levels > 0 {
                 require Rank[c] >= 1 -> fed;
@@ -487,6 +539,17 @@ rule "대칭 제거: 받는 기여가 없으면 순위·단계는 0 (토치 단�
             if stage_levels > 0 {
                 require Stage[c] >= 1 -> fed or Kind[c] is Torch(_);
             }
+        }
+    }
+}
+
+// Hard Air cannot receive power. Preserve the original fed=false normalization
+// without scanning every Feeds tuple for every fixed-empty cell.
+rule "대칭 제거: 고정 공기의 순위·단계는 0" {
+    if symmetry_breaking {
+        forall c: Cell where known_air(c) {
+            require Rank[c] == 0;
+            require Stage[c] == 0;
         }
     }
 }
@@ -499,6 +562,14 @@ rule "대칭 제거: 전원 시작점의 순위는 0 (공기·스위치는 단�
         forall c: Cell {
             require Kind[c] is Air | Switch(_,_) | Torch(_) | Repeater(_) -> Rank[c] == 0;
             require Kind[c] is Air | Switch(_,_) -> Stage[c] == 0;
+        }
+    }
+    // Certified frozen cells have no incoming justification inequalities.
+    // Lowering their stage keeps every outgoing inequality satisfied; actual
+    // arrival times are retained when timing is enabled.
+    if canonical_source_ranks and not timing {
+        forall c: Cell where given(c) {
+            require Stage[c] == 0;
         }
     }
 }
@@ -518,7 +589,7 @@ rule "구조적 하한: 토치 수와 그 받침 블록 수" {
 
 rule "쓸모: 토치·리피터·가루는 무언가에 기여하거나 출력으로 관측됨" {
     if require_useful {
-        forall c: Cell where not given(c) {
+        forall c: Cell where not given(c) and not known_air(c) {
             require Kind[c] is Dust | Repeater(_) | Torch(_)
                 -> any(Contrib(s, t, f, to) for (s, t, f, to) in Feeds where s == c)
                    or any(Observe[o, c] for o: Output where output_site(o, c));
@@ -530,7 +601,7 @@ rule "쓸모: 토치·리피터·가루는 무언가에 기여하거나 출력�
 
 @display("출력 {o}을 {c}에서 관측")
 def Observe[o: Output, c: Cell] :=
-    output_site(o, c)
+    not known_air(c) and output_site(o, c)
     and (if driving(o) {
             Kind[c] is Torch(_)
             or any(Kind[c] is Repeater(d) for d: Dir4 where not has(step(c, opposite(d))))
@@ -544,6 +615,14 @@ def Observe[o: Output, c: Cell] :=
 rule "출력: 허용된 위치에서 관측" {
     forall o: Output {
         require any(Observe[o, c] for c: Cell where output_site(o, c));
+    }
+}
+
+rule "출력 계약: 구동 출력을 바깥 방향 리피터로 한정" {
+    if repeater_driving_outputs {
+        forall o: Output, c: Cell where driving(o) and output_site(o, c) {
+            require Observe[o, c] -> Kind[c] is Repeater(_);
+        }
     }
 }
 
@@ -643,7 +722,7 @@ rule "타이밍: 모든 전원 관계가 도착 시각 순서를 지킴" {
                 require Feeds(s, t, f, to) -> Stage[s] <= Stage[t];
             }
         }
-        forall c: Cell, a: Attach where given(c) {
+        forall c: Cell, a: Attach where given(c) and not known_air(c) {
             require Kind[c] is Torch(a) -> Stage[step(c, dir(a))] < Stage[c];
         }
     }
@@ -651,7 +730,7 @@ rule "타이밍: 모든 전원 관계가 도착 시각 순서를 지킴" {
 
 rule "타이밍: 출력은 정해진 틱 안에 도착" {
     if timing {
-        forall (o, d) in output_delay, c: Cell where output_site(o, c) {
+        forall (o, d) in output_delay, c: Cell where output_site(o, c) and not known_air(c) {
             require Observe[o, c] -> Stage[c] <= d;
         }
     }

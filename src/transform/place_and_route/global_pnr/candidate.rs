@@ -31,11 +31,26 @@ use crate::world::simulator::Simulator;
 use crate::world::{World, World3D};
 
 mod clustering;
+mod exact;
+mod exact_adapter;
+mod exact_validation;
+mod io_diodes;
 #[cfg(test)]
 mod local_diagnostic;
+pub mod nary;
+pub use crate::ir::ExactCandidateSpec as ExactCandidateConfig;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UnitCandidateConfig {
+    /// Bounded SAT synthesis competes with existing verified recipes; disabled by default.
+    pub exact: Option<ExactCandidateConfig>,
+    /// Use verified truth-recognized recipes for 2..8-input single-minterm/maxterm cells.
+    pub verified_nary_cells: bool,
+    /// Stagger verified recipe inputs to expose separate approach corridors.
+    pub nary_stagger_inputs: bool,
+    /// Reserve isolated input and output drivers inside nonsequential external candidates.
+    /// Opt-in until broader composed-circuit measurements are available.
+    pub reserve_combinational_io_diodes: bool,
     pub dim: DimSize,
     pub local_config: LocalPlacerConfig,
     pub input_constraints: LocalPlacerInputConstraints,
@@ -155,6 +170,10 @@ impl DerefMut for CandidatePolicySet {
 impl Default for UnitCandidateConfig {
     fn default() -> Self {
         Self {
+            exact: None,
+            verified_nary_cells: false,
+            nary_stagger_inputs: false,
+            reserve_combinational_io_diodes: false,
             dim: DimSize(16, 16, 6),
             local_config: LocalPlacerConfig::default(),
             input_constraints: LocalPlacerInputConstraints::default(),
@@ -221,6 +240,42 @@ fn generate_routable_module_candidates(
             )
         })
         .collect();
+    let mut exact_candidates = exact::generate(&module.name, &graph, &ports, config, input_mode)?;
+    if config.verified_nary_cells
+        && config.max_candidates > 0
+        && input_mode == CandidateInputMode::ExternalPorts
+        && config.input_constraints == LocalPlacerInputConstraints::default()
+        && (2..=8).contains(
+            &ports
+                .iter()
+                .filter(|p| p.direction == PhysicalPortDirection::Input)
+                .count(),
+        )
+    {
+        if let Some(mut candidate) = nary::build_verified_candidate_with_stagger(
+            &LogicGraph {
+                graph: graph.clone(),
+            },
+            &module.name,
+            config.nary_stagger_inputs,
+        )? {
+            if candidate_ports_cover_module_ports(&ports, &candidate.ports)
+                && candidate_satisfies_local_cell_contract(
+                    &mut candidate,
+                    &config.local_cell_contract,
+                )
+            {
+                tracing::info!(module=%module.name, blocks=candidate.cost.block_count, "using verified semantic n-ary cell");
+                exact_candidates.push(candidate);
+                exact_candidates.sort_by_key(|c| (c.cost.block_count, c.cost.bbox_volume));
+                exact_candidates.truncate(config.max_candidates);
+                return Ok(exact_candidates);
+            }
+        }
+    }
+    if !exact_candidates.is_empty() {
+        return Ok(exact_candidates);
+    }
     let clustered = clustering::try_generate_clustered_candidates(
         &module.name,
         &graph,
@@ -476,6 +531,16 @@ fn generate_unit_candidates(
             }
             let mut candidate =
                 LayoutCandidate::from_world(module_name.to_owned(), world, physical_ports)?;
+            if config.reserve_combinational_io_diodes
+                && !contains_sequential
+                && input_mode == CandidateInputMode::ExternalPorts
+            {
+                let Some(reserved) = io_diodes::reserve(candidate)? else {
+                    port_rejections += 1;
+                    continue;
+                };
+                candidate = reserved;
+            }
             // The check above drove the local placer's input switches.
             // `candidate_layout` then replaces them with exposed ports, and a
             // switch site can become dust that a neighbouring strongly powered
@@ -1408,6 +1473,10 @@ fn downstream_consumer_count(world: &World3D, source: Position) -> usize {
 
 pub fn d_latch_child_candidate_config(local_config: LocalPlacerConfig) -> UnitCandidateConfig {
     UnitCandidateConfig {
+        exact: None,
+        verified_nary_cells: false,
+        nary_stagger_inputs: false,
+        reserve_combinational_io_diodes: false,
         dim: DimSize(14, 10, 6),
         local_config,
         input_constraints: LocalPlacerInputConstraints::new()
@@ -1426,6 +1495,180 @@ pub fn d_latch_child_candidate_config(local_config: LocalPlacerConfig) -> UnitCa
 mod tests {
     use super::*;
     use crate::world::block::{BlockKind, Direction};
+
+    #[test]
+    fn primitive_external_candidates_preserve_truth_tables() -> eyre::Result<()> {
+        for (expression, reserve) in ["~a", "a&b", "a|b"]
+            .into_iter()
+            .flat_map(|expression| [false, true].map(|reserve| (expression, reserve)))
+        {
+            let graph = LogicGraph::from_stmt(expression, "y")?.prepare_place()?;
+            let mut ports = graph
+                .truth_table()?
+                .input_names
+                .iter()
+                .map(|name| CandidatePort::new(name, name, PhysicalPortDirection::Input))
+                .collect::<Vec<_>>();
+            ports.push(CandidatePort::new("y", "y", PhysicalPortDirection::Output));
+            let config = UnitCandidateConfig {
+                reserve_combinational_io_diodes: reserve,
+                dim: DimSize(8, 8, 4),
+                max_candidates: 1,
+                local_config: LocalPlacerConfig {
+                    input_candidate_limit: Some(16),
+                    step_sampling_policy: SamplingPolicy::Take(64),
+                    max_not_route_step: 4,
+                    max_route_step: 4,
+                    not_route_step_sampling_policy: SamplingPolicy::Take(32),
+                    route_step_sampling_policy: SamplingPolicy::Take(32),
+                    ..Default::default()
+                },
+                adaptive_search: LocalAdaptiveSearchConfig {
+                    max_retries: 0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let candidates = generate_unit_candidates(
+                "primitive",
+                graph.graph.clone(),
+                ports,
+                &config,
+                None,
+                CandidateInputMode::ExternalPorts,
+            )?;
+            assert!(
+                !candidates.is_empty(),
+                "no external candidate for {expression}, reserved={reserve}"
+            );
+            for candidate in candidates {
+                assert!(
+                    clustering::candidate_matches_truth_table_with_switch_inputs(
+                        &graph.graph,
+                        &candidate
+                    )
+                );
+                if reserve {
+                    let truth = graph.truth_table()?;
+                    let inputs = truth
+                        .input_names
+                        .iter()
+                        .map(|name| {
+                            candidate
+                                .ports
+                                .iter()
+                                .find(|port| port.name == *name)
+                                .unwrap()
+                        })
+                        .collect::<Vec<_>>();
+                    assert!(inputs
+                        .iter()
+                        .all(|port| port.connection == PortConnection::Direct
+                            && candidate.world[port.position].kind.is_redstone()));
+                    let output = candidate
+                        .ports
+                        .iter()
+                        .find(|port| port.name == "y")
+                        .unwrap()
+                        .primary_route_position();
+                    assert_eq!(
+                        candidate
+                            .ports
+                            .iter()
+                            .find(|p| p.name == "y")
+                            .unwrap()
+                            .connection,
+                        PortConnection::RestoredDirect
+                    );
+                    assert!(candidate.world[output].kind.is_redstone());
+                    let output_repeaters = candidate
+                        .world
+                        .iter_block()
+                        .into_iter()
+                        .filter(|(p, b)| {
+                            b.kind.is_repeater()
+                                && detailed_router::target_powers_position(
+                                    &candidate.world,
+                                    *p,
+                                    output,
+                                )
+                        })
+                        .map(|(p, _)| p)
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        output_repeaters.len(),
+                        1,
+                        "reserved output must have one isolation repeater"
+                    );
+                    // Externally powering the public output may not feed back
+                    // into any input or change the output repeater itself.
+                    let mut backfeed = Simulator::from_settled_with_limits_and_trace(
+                        &World::from(&candidate.world),
+                        256,
+                        50_000,
+                        0,
+                    )?;
+                    backfeed.drive_inputs_with_limits(
+                        inputs.iter().map(|p| (p.position, false)).collect(),
+                        256,
+                        50_000,
+                    )?;
+                    let upstream = backfeed.world()[output_repeaters[0]].kind.is_powered();
+                    backfeed.drive_inputs_with_limits(vec![(output, true)], 256, 50_000)?;
+                    assert_eq!(
+                        backfeed.world()[output_repeaters[0]].kind.is_powered(),
+                        upstream
+                    );
+                    assert!(inputs
+                        .iter()
+                        .all(|p| !backfeed.world()[p.position].kind.is_powered()));
+                    let cases = 1usize << inputs.len();
+                    for from in 0..cases {
+                        for to in 0..cases {
+                            let mut sim = Simulator::from_settled_with_limits_and_trace(
+                                &World::from(&candidate.world),
+                                256,
+                                50_000,
+                                0,
+                            )?;
+                            for mask in [from, to] {
+                                sim.advance_idle_cycles(
+                                    crate::world::simulator::MANUAL_INPUT_IDLE_CYCLES,
+                                )?;
+                                sim.drive_inputs_with_limits(
+                                    inputs
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(bit, port)| (port.position, mask & (1 << bit) != 0))
+                                        .collect(),
+                                    256,
+                                    50_000,
+                                )?;
+                                for (bit, port) in inputs.iter().enumerate() {
+                                    assert_eq!(
+                                        sim.world()[port.position].kind.is_powered(),
+                                        mask & (1 << bit) != 0,
+                                        "input backfeed: {expression}, mask={mask}, bit={bit}"
+                                    );
+                                }
+                                assert_eq!(
+                                    sim.world()[output].kind.is_powered(),
+                                    truth.output_tables["y"][mask],
+                                    "{expression}: {from}->{to}, mask={mask}"
+                                );
+                                assert!(sim
+                                    .world()
+                                    .iter_block()
+                                    .iter()
+                                    .all(|(p, _)| !sim.is_torch_burned_out(*p)));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 
     fn contract_test_candidate(port_position: Position) -> LayoutCandidate {
         let mut world = World3D::new(DimSize(6, 6, 4));

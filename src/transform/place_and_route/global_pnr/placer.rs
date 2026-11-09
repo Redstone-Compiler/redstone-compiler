@@ -291,6 +291,15 @@ fn placement_candidates_with_connectivity(
                 ..*config
             };
             if heuristics.contains(&PlacementHeuristic::Shelf) {
+                // Keep adjacent nodes close across row boundaries as well.
+                // A typewriter wrap otherwise sends a chain across the full
+                // shelf width even when the next cell is on the next row.
+                for order in [&original_order, &net_order] {
+                    let mut snake =
+                        place_candidates_on_shelves_in_order(candidates, order, &config);
+                    snake_shelf_rows(&mut snake);
+                    push_unique_placement(&mut placements, snake);
+                }
                 push_unique_placement(
                     &mut placements,
                     place_candidates_on_shelves_in_order(candidates, &original_order, &config),
@@ -338,6 +347,27 @@ fn placement_candidates_with_connectivity(
     placements
 }
 
+fn snake_shelf_rows(placed: &mut [PlacedModule]) {
+    let mut rows = std::collections::BTreeMap::<usize, Vec<usize>>::new();
+    for (index, item) in placed.iter().enumerate() {
+        rows.entry(item.origin.1).or_default().push(index);
+    }
+    for (row, indices) in rows.values().enumerate() {
+        if row % 2 == 0 {
+            continue;
+        }
+        let min = indices.iter().map(|&i| placed[i].origin.0).min().unwrap();
+        let max = indices
+            .iter()
+            .map(|&i| placed[i].origin.0 + placed[i].bbox.width())
+            .max()
+            .unwrap();
+        for &i in indices {
+            placed[i].origin.0 = min + max - placed[i].origin.0 - placed[i].bbox.width();
+        }
+    }
+}
+
 pub fn placement_candidates_resolved(
     topology: &ResolvedPnrTopology,
     intent: Option<&ResolvedPhysicalIntent>,
@@ -349,6 +379,11 @@ pub fn placement_candidates_resolved(
     let connectivity = PlacementConnectivity::from_resolved(topology)?;
     let mut placements =
         placement_candidates_with_connectivity(&connectivity, candidates, config, heuristics);
+    // A diode adapter beside a floor-level port needs a support block below
+    // it. Reserve that layer before applying explicit physical constraints.
+    for placed in &mut placements {
+        reserve_port_support_layer(candidates, placed);
+    }
     let context = PlacementHeuristicContext {
         topology,
         candidates,
@@ -402,6 +437,21 @@ pub fn placement_candidates_resolved(
     });
     constrained.truncate(config.max_attempts.max(1));
     Ok(constrained)
+}
+
+fn reserve_port_support_layer(candidates: &[LayoutCandidate], placed: &mut [PlacedModule]) {
+    let floor_port = placed.iter().any(|item| {
+        let candidate = &candidates[item.candidate_index];
+        candidate.ports.iter().any(|port| {
+            (port.requires_input_diode() || port.requires_output_diode())
+                && item.origin.2 + port.position.2 - candidate.bbox.min.2 == 0
+        })
+    });
+    if floor_port {
+        for item in placed {
+            item.origin.2 += 1;
+        }
+    }
 }
 
 fn apply_placement_intent(
@@ -1506,8 +1556,51 @@ mod tests {
     use crate::world::position::DimSize;
     use crate::world::World3D;
 
+    #[test]
+    fn snake_shelves_reduce_chain_wrap_distance_without_overlapping_cells() {
+        let candidates = (0..4)
+            .map(|i| test_candidate(&format!("g{i}"), &[]))
+            .collect::<Vec<_>>();
+        let mut placed = place_candidates_on_shelves_in_order(
+            &candidates,
+            &[0, 1, 2, 3],
+            &GlobalPlacementConfig {
+                shelf_width: 20,
+                ..Default::default()
+            },
+        );
+        let before = placed[1].origin.manhattan_distance(&placed[2].origin);
+        let original = placed.clone();
+        snake_shelf_rows(&mut placed);
+        assert!(placed[1].origin.manhattan_distance(&placed[2].origin) < before);
+        validate_no_placement_overlap(&placed).unwrap();
+        snake_shelf_rows(&mut placed);
+        assert_eq!(
+            placed.iter().map(|p| p.origin).collect::<Vec<_>>(),
+            original.iter().map(|p| p.origin).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn diode_ports_reserve_support_below_floor_without_changing_relative_placement() {
+        let mut candidate = test_candidate("gate", &[("a", Position(0, 0, 0))]);
+        candidate.ports[0].direction = PhysicalPortDirection::Input;
+        candidate.ports[0].connection = PortConnection::InputDiode;
+        let mut placed = vec![PlacedModule {
+            module_name: "gate".into(),
+            candidate_index: 0,
+            origin: Position(4, 4, 0),
+            bbox: candidate.bbox,
+        }];
+        reserve_port_support_layer(&[candidate.clone()], &mut placed);
+        assert_eq!(placed[0].origin, Position(4, 4, 1));
+        reserve_port_support_layer(&[candidate], &mut placed);
+        assert_eq!(placed[0].origin, Position(4, 4, 1));
+    }
+
     fn test_candidate(module_name: &str, ports: &[(&str, Position)]) -> LayoutCandidate {
         LayoutCandidate {
+            exact_core: None,
             module_name: module_name.to_owned(),
             world: World3D::new(DimSize(1, 1, 1)),
             bbox: BoundingBox {

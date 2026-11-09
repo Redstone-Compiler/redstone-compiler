@@ -275,7 +275,12 @@ fn debug_parity_hash(value: &impl std::fmt::Debug) -> String {
 }
 
 fn candidate_parity_hash(candidate: &LayoutCandidate) -> String {
-    let mut blocks = candidate.world.iter_block();
+    // Hash the persisted representation. NBT preserves physical block states,
+    // but not simulator-only counters or repeater lock-source bookkeeping.
+    // Applying the real roundtrip also canonicalizes dust shapes exactly as
+    // cache loading does; geometric/port/reservation validation remains intact.
+    let persisted_world = World3D::from(&candidate.world.to_nbt().to_world());
+    let mut blocks = persisted_world.iter_block();
     blocks.sort_by_key(|(position, _)| *position);
     let mut ports = candidate.ports.clone();
     ports.sort_by(|left, right| {
@@ -569,6 +574,25 @@ fn global_pnr_config_snapshot(config: &GlobalPnrConfig) -> Value {
             "show_progress": config.show_progress,
             "verifier_enabled": config.verifier.is_some(),
             "persistent_cache_enabled": config.candidate_cache_dir.is_some(),
+            // Experimental runtime policy is deliberately outside the RCIR grammar.
+            "verified_nary_cells": {
+                "default": config.candidate.default.verified_nary_cells,
+                "definition_overrides": config.candidate.definition_overrides.iter()
+                    .map(|(name, policy)| (name.clone(), policy.verified_nary_cells))
+                    .collect::<std::collections::BTreeMap<_, _>>(),
+            },
+            "nary_stagger_inputs": {
+                "default": config.candidate.default.nary_stagger_inputs,
+                "definition_overrides": config.candidate.definition_overrides.iter()
+                    .map(|(name, policy)| (name.clone(), policy.nary_stagger_inputs))
+                    .collect::<std::collections::BTreeMap<_, _>>(),
+            },
+            "reserve_combinational_io_diodes": {
+                "default": config.candidate.default.reserve_combinational_io_diodes,
+                "definition_overrides": config.candidate.definition_overrides.iter()
+                    .map(|(name, policy)| (name.clone(), policy.reserve_combinational_io_diodes))
+                    .collect::<std::collections::BTreeMap<_, _>>(),
+            },
             "experimental_hooks": config.heuristic_hooks.names(),
         }
     })
@@ -1174,6 +1198,14 @@ fn route_first_successful_placement(
                             semantic_feedback_nets: decision.semantic_feedback_nets.clone(),
                         });
                     }
+                    save_route_prefix_diagnostics(
+                        topology,
+                        attempt_serial,
+                        candidates,
+                        placed,
+                        &failure.routed_nets,
+                        &failure.error.to_string(),
+                    );
                     save_failed_route_base_world(topology, attempt_serial, candidates, placed);
                     progress.detail(format!(
                         "placement attempt {attempt_serial} failed: {}",
@@ -1381,6 +1413,72 @@ fn save_failed_verifier_world(
         })
         .collect::<String>();
     let _ = std::fs::write(routes_path, routes);
+}
+
+fn save_route_prefix_diagnostics(
+    topology: &ResolvedPnrTopology,
+    attempt: usize,
+    candidates: &[LayoutCandidate],
+    placed: &[PlacedModule],
+    routes: &[RoutedNet],
+    error: &str,
+) {
+    let Some(directory) = std::env::var_os("PNR_ROUTE_DUMP_DIR") else {
+        return;
+    };
+    let directory = std::path::PathBuf::from(directory);
+    if std::fs::create_dir_all(&directory).is_err() {
+        return;
+    }
+    for (label, prefix) in [("base", &[][..]), ("partial", routes)] {
+        let Ok(world) = placed_world_from_routing(topology, candidates, placed, prefix) else {
+            continue;
+        };
+        world
+            .world
+            .to_nbt()
+            .save(directory.join(format!("attempt-{attempt}-{label}.nbt")));
+        let blocks = world
+            .world
+            .iter_block()
+            .into_iter()
+            .map(|(position, block)| format!("{position:?} {block:?}\n"))
+            .collect::<String>();
+        let _ = std::fs::write(
+            directory.join(format!("attempt-{attempt}-{label}.txt")),
+            blocks,
+        );
+    }
+    let mut ports = String::new();
+    for module in placed {
+        let Some(candidate) = candidates.get(module.candidate_index) else {
+            continue;
+        };
+        for port in &candidate.ports {
+            let position = crate::world::position::Position(
+                module.origin.0 + port.position.0 - candidate.bbox.min.0,
+                module.origin.1 + port.position.1 - candidate.bbox.min.1,
+                module.origin.2 + port.position.2 - candidate.bbox.min.2,
+            );
+            ports.push_str(&format!(
+                "{}.{} {:?} {:?} {:?}\n",
+                module.module_name, port.name, port.direction, position, port.connection
+            ));
+        }
+    }
+    let _ = std::fs::write(
+        directory.join(format!("attempt-{attempt}-ports.txt")),
+        ports,
+    );
+    let routes = routes.iter().enumerate().map(|(index,route)| format!("route={index} source={:?} sink={:?} source_label={:?} sink_label={:?} blocks={:?}\n",route.source,route.sink,route.source_label,route.sink_label,route.blocks)).collect::<String>();
+    let _ = std::fs::write(
+        directory.join(format!("attempt-{attempt}-routes.txt")),
+        routes,
+    );
+    let _ = std::fs::write(
+        directory.join(format!("attempt-{attempt}-failure.txt")),
+        error,
+    );
 }
 
 fn save_failed_route_base_world(
@@ -2136,6 +2234,7 @@ mod tests {
                 ..Default::default()
             },
             routing_probe: Some(GlobalRoutingConfig {
+                max_route_steps: 128,
                 strategy: crate::transform::place_and_route::global_pnr::router::GlobalRoutingStrategy::DirectGreedy {
                     max_steps: 128,
                 },
@@ -2144,6 +2243,7 @@ mod tests {
                 defer_feedback_cycles: false,
             }),
             routing: GlobalRoutingConfig {
+                max_route_steps: 128,
                 strategy: crate::transform::place_and_route::global_pnr::router::GlobalRoutingStrategy::GreedyBeam {
                     beam_width: 128,
                     max_expansions: 4_096,
@@ -2154,6 +2254,7 @@ mod tests {
                 defer_feedback_cycles: false,
             },
             routing_refinement: Some(GlobalRoutingConfig {
+                max_route_steps: 128,
                 strategy: crate::transform::place_and_route::global_pnr::router::GlobalRoutingStrategy::GreedyBeam {
                     beam_width: 128,
                     max_expansions: 4_096,
@@ -2284,6 +2385,7 @@ mod tests {
                 ..Default::default()
             },
             routing_probe: Some(GlobalRoutingConfig {
+                max_route_steps: 128,
                 strategy: crate::transform::place_and_route::global_pnr::router::GlobalRoutingStrategy::DirectGreedy {
                     max_steps: 128,
                 },
@@ -2292,6 +2394,7 @@ mod tests {
                 defer_feedback_cycles: false,
             }),
             routing: GlobalRoutingConfig {
+                max_route_steps: 128,
                 strategy: crate::transform::place_and_route::global_pnr::router::GlobalRoutingStrategy::GreedyBeam {
                     beam_width: 128,
                     max_expansions: 4_096,
@@ -2302,6 +2405,7 @@ mod tests {
                 defer_feedback_cycles: false,
             },
             routing_refinement: Some(GlobalRoutingConfig {
+                max_route_steps: 128,
                 strategy: crate::transform::place_and_route::global_pnr::router::GlobalRoutingStrategy::GreedyBeam {
                     beam_width: 128,
                     max_expansions: 4_096,

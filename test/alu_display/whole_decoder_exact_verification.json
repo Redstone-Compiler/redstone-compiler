@@ -1,0 +1,49 @@
+{
+  "blocks": 4132,
+  "dim": [
+    33,
+    220,
+    7
+  ],
+  "nbt_roundtrip": true,
+  "ordered_transitions": 256,
+  "static_cases": 16,
+  "status": "verified",
+  "transition_drives": 512,
+  "mode": "bounded_nor_template_exact_construction",
+  "source": "bcd_digit_to_7seg.v (blank=0)",
+  "nor_gates": 24,
+  "construct_ms": 185937,
+  "seed": 1,
+  "workers": 4,
+  "minecraft_size": [
+    220,
+    7,
+    33
+  ],
+  "nbt_sha256": "27a14e26953d131ffada6011fcb2513f71b4408b077edbea3e5a5eab09d74305",
+  "nbt": "alu-display-decoder-whole-exact.nbt",
+  "global_pnr": false,
+  "unrestricted_monolithic_solved": false,
+  "note": "Generic NOR template deletion subsets provide the initial solution; this is not a global optimum or an unrestricted simultaneous placement solve.",
+  "validation": {
+    "core_release_passed": 456,
+    "core_failed": 0,
+    "core_ignored": 56,
+    "rsdsl_release_passed": 9,
+    "wasm_native_release_passed": 3,
+    "workspace_all_targets_release_check": true
+  },
+  "compaction": {
+    "global_delete_blocks": 4132,
+    "global_delete_wall_ms": 231310,
+    "window_candidate_blocks": 4594,
+    "window_candidate_dim": [
+      33,
+      218,
+      7
+    ],
+    "window_wall_ms": 79247,
+    "selected": "constructed baseline; fewer blocks"
+  }
+}

@@ -54,12 +54,23 @@ fn collect_assignments(
             .connections
             .iter()
             .map(|(port, signal)| {
-                (
+                let signal = match signal {
+                    Expr::Ident(name) => name.clone(),
+                    Expr::Select { value, msb, lsb }
+                        if msb == lsb && matches!(value.as_ref(), Expr::Ident(_)) =>
+                    {
+                        signal.to_logic_stmt()
+                    }
+                    _ => eyre::bail!(
+                        "expression instance bindings require typed logical IR lowering"
+                    ),
+                };
+                Ok((
                     port.clone(),
-                    rewrite_signal(signal, instance_prefix, substitutions),
-                )
+                    rewrite_signal(&signal, instance_prefix, substitutions),
+                ))
             })
-            .collect::<HashMap<_, _>>();
+            .collect::<eyre::Result<HashMap<_, _>>>()?;
         assignments.extend(collect_assignments(
             context,
             child,
@@ -85,6 +96,27 @@ fn rewrite_expr(
     match expr {
         Expr::Ident(name) => Expr::Ident(rewrite_signal(name, instance_prefix, substitutions)),
         Expr::Number(value) => Expr::Number(*value),
+        Expr::SizedNumber { .. } => expr.clone(),
+        Expr::Select { value, msb, lsb } => Expr::Select {
+            value: Box::new(rewrite_expr(value, instance_prefix, substitutions)),
+            msb: *msb,
+            lsb: *lsb,
+        },
+        Expr::Concat(parts) => Expr::Concat(
+            parts
+                .iter()
+                .map(|p| rewrite_expr(p, instance_prefix, substitutions))
+                .collect(),
+        ),
+        Expr::Mux {
+            select,
+            when_true,
+            when_false,
+        } => Expr::Mux {
+            select: Box::new(rewrite_expr(select, instance_prefix, substitutions)),
+            when_true: Box::new(rewrite_expr(when_true, instance_prefix, substitutions)),
+            when_false: Box::new(rewrite_expr(when_false, instance_prefix, substitutions)),
+        },
         Expr::Not(expr) => Expr::Not(Box::new(rewrite_expr(expr, instance_prefix, substitutions))),
         Expr::Binary { op, left, right } => Expr::Binary {
             op: *op,

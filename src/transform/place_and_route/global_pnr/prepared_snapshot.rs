@@ -21,7 +21,7 @@ use crate::transform::place_and_route::global_pnr::{
 use crate::world::position::Position;
 use crate::world::World3D;
 
-const CANDIDATE_LIBRARY_FORMAT: &str = "redstone-compiler.candidate-library.v1";
+const CANDIDATE_LIBRARY_FORMAT: &str = "redstone-compiler.candidate-library.v2";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct CandidateLibraryManifest {
@@ -54,6 +54,8 @@ struct InstanceBindingManifest {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct CandidateMetadata {
+    #[serde(default)]
+    exact_core: Option<super::ir::ExactCandidateProvenance>,
     format: String,
     id: String,
     module_name: String,
@@ -120,6 +122,7 @@ pub(super) fn emit_candidate_library(prepared: &PreparedPnrDesign) -> eyre::Resu
             emit_json(
                 &metadata,
                 CandidateMetadata {
+                    exact_core: candidate.exact_core.clone(),
                     format: "redstone-compiler.candidate.v1".to_owned(),
                     id: id.clone(),
                     module_name: candidate.module_name.clone(),
@@ -256,11 +259,13 @@ pub fn load_prepared_pnr_snapshot(
                 })
                 .collect();
             let mut candidate = LayoutCandidate::from_world(metadata.module_name, world, ports)?;
+            candidate.exact_core = metadata.exact_core;
             candidate.blocked_cells = metadata
                 .blocked_cells
                 .into_iter()
                 .map(array_position)
                 .collect::<HashSet<_>>();
+            candidate.include_reserved_cells_in_bounds();
             let actual_id = candidate_parity_hash(&candidate);
             if actual_id != entry.id {
                 eyre::bail!(
@@ -440,8 +445,153 @@ mod tests {
     use super::*;
 
     #[test]
+    fn prepared_snapshot_roundtrip_preserves_reserved_air_and_bbox() -> eyre::Result<()> {
+        use crate::graph::logic::LogicGraph;
+        use crate::ir::{graph_from_routable_leaf, LogicalDesign};
+        let mut design = LogicalDesign::from_verilog_source(
+            "module top(a,b,y); input a,b; output y; assign y=a&b; endmodule",
+        )?
+        .lower_to_routable_with_associative_cells(8)?;
+        let module = design
+            .modules
+            .iter()
+            .find(|m| matches!(m.body, RoutableModuleBody::Leaf { .. }) && m.ports.len() == 3)
+            .unwrap()
+            .clone();
+        design.top = module.name.clone();
+        design.modules = vec![module.clone()];
+        let candidate = super::super::candidate::nary::build_verified_candidate(
+            &LogicGraph {
+                graph: graph_from_routable_leaf(&module)?,
+            },
+            &module.name,
+        )?
+        .unwrap();
+        let document =
+            super::super::routable_document_from_config(&design, &GlobalPnrConfig::default())?;
+        let config = PnrPrepareConfig::from(&GlobalPnrConfig::default());
+        let topology = ResolvedPnrTopology::from_routable(&design)?;
+        let id = candidate_parity_hash(&candidate);
+        let metadata = CandidateMetadata {
+            exact_core: Some(super::super::ir::ExactCandidateProvenance {
+                search_box: [3, 5, 3],
+                core_bbox: [2, 3, 2],
+                core_blocks: 5,
+                core_logic_blocks: 3,
+                elapsed_ms: 862,
+                optimal: true,
+            }),
+            format: "redstone-compiler.candidate.v1".into(),
+            id: id.clone(),
+            module_name: module.name.clone(),
+            bbox: CandidateBoundingBox {
+                min: position_array(candidate.bbox.min),
+                max: position_array(candidate.bbox.max),
+                size: [
+                    candidate.bbox.width(),
+                    candidate.bbox.depth(),
+                    candidate.bbox.height(),
+                ],
+            },
+            cost: candidate.cost.clone(),
+            ports: candidate
+                .ports
+                .iter()
+                .map(|p| PhysicalPortDto {
+                    name: p.name.clone(),
+                    direction: p.direction.clone(),
+                    position: position_array(p.position),
+                    route_position: p.route_position.map(position_array),
+                    access_points: p
+                        .access_points
+                        .iter()
+                        .copied()
+                        .map(position_array)
+                        .collect(),
+                    connection: p.connection,
+                })
+                .collect(),
+            blocked_cells: candidate
+                .blocked_cells
+                .iter()
+                .copied()
+                .map(position_array)
+                .collect(),
+        };
+        let manifest = CandidateLibraryManifest {
+            format: CANDIDATE_LIBRARY_FORMAT.into(),
+            prepare_config_fingerprint: prepare_config_fingerprint(&config, &topology),
+            summary: PnrPreparationSummary {
+                module: module.name.clone(),
+                instances: 0,
+                unique_candidate_sets: 1,
+                reused_candidate_sets: 0,
+                candidates: 1,
+                candidate_references: 1,
+                elapsed_ms: 0,
+            },
+            candidate_sets: vec![CandidateSetManifest {
+                index: 0,
+                candidates: vec![CandidateManifestEntry {
+                    id,
+                    nbt: "candidates/cell.nbt".into(),
+                    metadata: "candidates/cell.json".into(),
+                }],
+            }],
+            instance_bindings: vec![],
+        };
+        let root = std::env::temp_dir().join(format!(
+            "redstone-headroom-snapshot-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("ir"))?;
+        std::fs::create_dir_all(root.join("candidates"))?;
+        std::fs::write(root.join("ir/routable.rcir"), document.to_string())?;
+        std::fs::write(
+            root.join("candidates/index.json"),
+            serde_json::to_vec(&manifest)?,
+        )?;
+        std::fs::write(
+            root.join("candidates/cell.json"),
+            serde_json::to_vec(&metadata)?,
+        )?;
+        std::fs::write(
+            root.join("candidates/cell.nbt"),
+            fastnbt::to_bytes(&candidate.world.to_nbt())?,
+        )?;
+        let loaded = load_prepared_pnr_snapshot(&root, &config)?;
+        let PreparedPnrBody::Leaf { candidates } = loaded.body else {
+            panic!("expected leaf");
+        };
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].blocked_cells, candidate.blocked_cells);
+        assert_eq!(candidates[0].exact_core, metadata.exact_core);
+        assert!(candidates[0]
+            .ports
+            .iter()
+            .filter(|p| p.direction == super::super::ir::PhysicalPortDirection::Output)
+            .all(|p| p.connection == super::super::ir::PortConnection::RestoredDirect));
+        assert_eq!(candidates[0].cost, candidate.cost);
+        assert_eq!(candidates[0].bbox.max, candidate.bbox.max);
+        assert_eq!(
+            candidate_parity_hash(&candidates[0]),
+            candidate_parity_hash(&candidate)
+        );
+        assert!(candidates[0]
+            .blocked_cells
+            .iter()
+            .all(|p| candidates[0].world[*p].kind.is_air()));
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
     fn candidate_metadata_serializes_bbox_and_quality_metrics() {
         let metadata = CandidateMetadata {
+            exact_core: None,
             format: "redstone-compiler.candidate.v1".to_owned(),
             id: "candidate".to_owned(),
             module_name: "adder".to_owned(),

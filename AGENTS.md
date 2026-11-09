@@ -2,6 +2,11 @@
 
 ## Documentation
 
+- 8-bit ALU and binary/BCD/7-segment compiler roadmap, module contracts, verification, and parallel ownership: `docs/alu_display_compiler_plan.md`
+- ALU/display implementation, physical-port regressions and row-COW profiling: `docs/alu_display_compiler_progress.md`
+- SAT Exact candidates in Global PnR, verified external interfaces, provenance and controlled whole-decoder compaction measurements: `docs/exact_global_candidates.md`
+- One monolithic Exact model for the full four-input/seven-output decoder, flattened RTL graph, bounded attempts and UNKNOWN interpretation: `docs/whole_decoder_exact.md`
+- Whole-decoder window construction/compaction runner, live-frontier measurements, interface contracts and failed construction checkpoints: `docs/whole_decoder_construct.md`
 - Verilog RTL interface design notes: `docs/verilog_rtl_interface_design.md`
 - RCIR language and lowering design: `docs/intermediate_representation_design.md`
 - Physical design intent and local-cell recipes: `docs/physical_design_intent.md`

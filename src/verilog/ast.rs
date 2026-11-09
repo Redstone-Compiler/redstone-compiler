@@ -39,7 +39,7 @@ pub struct Assignment {
 pub struct Instance {
     pub module_name: String,
     pub instance_name: String,
-    pub connections: Vec<(String, String)>,
+    pub connections: Vec<(String, Expr)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,6 +70,21 @@ pub enum AlwaysStmt {
 pub enum Expr {
     Ident(String),
     Number(usize),
+    SizedNumber {
+        value: u128,
+        width: usize,
+    },
+    Select {
+        value: Box<Expr>,
+        msb: usize,
+        lsb: usize,
+    },
+    Concat(Vec<Expr>),
+    Mux {
+        select: Box<Expr>,
+        when_true: Box<Expr>,
+        when_false: Box<Expr>,
+    },
     Not(Box<Expr>),
     Binary {
         op: BinaryOp,
@@ -81,6 +96,9 @@ pub enum Expr {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryOp {
     Add,
+    Equal,
+    GreaterEqual,
+    Sub,
     And,
     Xor,
     Or,
@@ -91,10 +109,36 @@ impl Expr {
         match self {
             Expr::Ident(name) => name.clone(),
             Expr::Number(value) => value.to_string(),
+            Expr::SizedNumber { value, width } => format!("{width}'h{value:x}"),
+            Expr::Select { value, msb, lsb } if msb == lsb => {
+                format!("{}_{msb}", value.to_logic_stmt())
+            }
+            Expr::Select { value, msb, lsb } => format!("{}[{msb}:{lsb}]", value.to_logic_stmt()),
+            Expr::Concat(parts) => format!(
+                "{{{}}}",
+                parts
+                    .iter()
+                    .map(Expr::to_logic_stmt)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            Expr::Mux {
+                select,
+                when_true,
+                when_false,
+            } => format!(
+                "({}?{}:{})",
+                select.to_logic_stmt(),
+                when_true.to_logic_stmt(),
+                when_false.to_logic_stmt()
+            ),
             Expr::Not(expr) => format!("~({})", expr.to_logic_stmt()),
             Expr::Binary { op, left, right } => {
                 let op = match op {
                     BinaryOp::Add => "+",
+                    BinaryOp::Equal => "==",
+                    BinaryOp::GreaterEqual => ">=",
+                    BinaryOp::Sub => "-",
                     BinaryOp::And => "&",
                     BinaryOp::Xor => "^",
                     BinaryOp::Or => "|",

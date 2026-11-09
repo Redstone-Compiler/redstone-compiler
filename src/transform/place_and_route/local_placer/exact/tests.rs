@@ -55,6 +55,101 @@ fn expect_placed(placer: &ExactLocalPlacer, config: &ExactPlacerConfig) -> Exact
 }
 
 #[test]
+fn case_ranks_admit_dust_or_with_opposite_power_paths() -> eyre::Result<()> {
+    // Both switch supports are weakly powered by the OR dust, while each
+    // supplies strong power only for its own input. The justification path
+    // therefore runs in opposite directions for input cases 01 and 10.
+    let placer = ExactLocalPlacer::from_netlist(NorNetlist::from_text("out=OR(a,b)")?);
+    let dim = DimSize(5, 3, 2);
+    let mut config = ExactPlacerConfig::new(dim)
+        .with_input_site("a", Position(0, 1, 1), Direction::East)
+        .with_input_site("b", Position(4, 1, 1), Direction::West)
+        .with_output_sites("out", [Position(2, 1, 1)]);
+    for x in 0..5 {
+        for y in 0..3 {
+            for z in 0..2 {
+                config.fixed_cells.insert(Position(x, y, z), CellKind::Air);
+            }
+        }
+    }
+    for (position, kind) in [
+        (Position(0, 1, 1), CellKind::Switch(Direction::East)),
+        (Position(1, 1, 1), CellKind::Solid),
+        (Position(2, 1, 1), CellKind::Dust),
+        (Position(2, 1, 0), CellKind::Solid),
+        (Position(3, 1, 1), CellKind::Solid),
+        (Position(4, 1, 1), CellKind::Switch(Direction::West)),
+    ] {
+        config.fixed_cells.insert(position, kind);
+    }
+    config.time_limit = Some(Duration::from_secs(10));
+    assert!(matches!(placer.place(&config)?.0, ExactOutcome::Infeasible));
+    config
+        .model_params
+        .insert("case_rank_levels".into(), rsdsl::IValue::Int(8));
+    config
+        .model_params
+        .insert("symmetry_breaking".into(), rsdsl::IValue::Bool(true));
+    let (outcome, stats) = placer.place(&config)?;
+    assert!(
+        matches!(outcome, ExactOutcome::Placed(_)),
+        "{outcome:?} {stats:?}"
+    );
+    assert_eq!(stats.refinements, 0);
+    Ok(())
+}
+
+#[test]
+fn nor_scaffold_is_verified_for_both_input_polarities() -> eyre::Result<()> {
+    for inverted in [false, true] {
+        let netlist = NorNetlist::from_text(if inverted {
+            "na=NOR(a); out=NOR(na,b)"
+        } else {
+            "out=NOR(a,b)"
+        })?;
+        let placer = ExactLocalPlacer::from_netlist(netlist);
+        let dim = DimSize(12, 11, 7);
+        let mut config = ExactPlacerConfig::new(dim)
+            .with_input_site("a", Position(1, 0, 1), Direction::North)
+            .with_input_site("b", Position(7, 0, 1), Direction::North)
+            .with_output_sites("out", [Position(5, 10, 1)]);
+        for x in 0..dim.0 {
+            for y in 0..dim.1 {
+                for z in 0..dim.2 {
+                    config.fixed_cells.insert(Position(x, y, z), CellKind::Air);
+                }
+            }
+        }
+        let template = super::nor_scaffold::nor_template(
+            &[(Position(1, 1, 1), inverted), (Position(7, 1, 1), false)],
+            5,
+            1,
+            dim,
+        )?;
+        config.fixed_cells.extend(template);
+        config
+            .fixed_cells
+            .insert(Position(1, 0, 1), CellKind::Switch(Direction::North));
+        config
+            .fixed_cells
+            .insert(Position(7, 0, 1), CellKind::Switch(Direction::North));
+        config.driving_outputs.insert("out".into());
+        config
+            .model_params
+            .insert("case_rank_levels".into(), rsdsl::IValue::Int(8));
+        config.stage_levels = 48;
+        config.time_limit = Some(Duration::from_secs(20));
+        let (outcome, stats) = placer.place(&config)?;
+        assert!(
+            matches!(outcome, ExactOutcome::Placed(_)),
+            "inverted={inverted} {outcome:?} {stats:?}"
+        );
+        assert_eq!(stats.refinements, 0);
+    }
+    Ok(())
+}
+
+#[test]
 fn nor_netlist_folds_or_nodes_into_gate_inputs() {
     let netlist = NorNetlist::from_logic_graph(&full_adder_graph("nor10")).unwrap();
     assert_eq!(netlist.input_names(), ["a", "b", "cin"]);
@@ -69,6 +164,47 @@ fn nor_netlist_folds_or_nodes_into_gate_inputs() {
         assert_eq!(values[outputs["s"]][case], ones % 2 == 1);
         assert_eq!(values[outputs["cout"]][case], ones >= 2);
     }
+}
+
+#[test]
+fn isolated_output_cones_preserve_truth_and_only_share_inputs() {
+    let source =
+        NorNetlist::from_logic_graph(&graph(&[("shared", "~(a|b)"), ("out", "~(shared|c)")]))
+            .unwrap();
+    let isolated = source.isolate_output_cones().unwrap();
+    assert_eq!(source.input_names(), isolated.input_names());
+    let before = source.net_values();
+    let after = isolated.net_values();
+    for ((name, old), (new_name, new)) in source.outputs.iter().zip(&isolated.outputs) {
+        assert_eq!(name, new_name);
+        assert_eq!(before[*old], after[*new]);
+    }
+    let cone = |root: NetId| {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut stack = vec![root];
+        while let Some(net) = stack.pop() {
+            if seen.insert(net) {
+                stack.extend(isolated.nets[net].gate_inputs.iter().copied());
+            }
+        }
+        seen
+    };
+    let cones = isolated
+        .outputs
+        .iter()
+        .map(|(_, root)| cone(*root))
+        .collect::<Vec<_>>();
+    for (i, left) in cones.iter().enumerate() {
+        for right in &cones[i + 1..] {
+            assert!(left
+                .intersection(right)
+                .all(|&net| matches!(isolated.nets[net].driver, NetDriver::Input(_))));
+        }
+    }
+    assert!(isolated.gates().count() > source.gates().count());
+    let mut sequential = source;
+    sequential.state.push(sequential.outputs[0].1);
+    assert!(sequential.isolate_output_cones().is_err());
 }
 
 /// The raw expression, the prepared graph, and the NOR netlist must compute
@@ -176,6 +312,8 @@ fn exact_placer_builds_a_verified_nor_gate() {
     let build = reparsed.build().unwrap();
     let verification = reparsed.verify(&build).unwrap();
     assert!(verification.failures.is_empty(), "{document}");
+    config.no_fold = true;
+    expect_placed(&placer, &config);
 }
 
 #[test]

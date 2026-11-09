@@ -18,6 +18,8 @@ pub enum PhysicalPortDirection {
 #[serde(rename_all = "snake_case")]
 pub enum PortConnection {
     Direct,
+    /// Verified output dust has strength 15 whenever this output is active.
+    RestoredDirect,
     InputDiode,
     OutputDiode,
 }
@@ -65,8 +67,22 @@ pub struct LayoutCandidateCost {
     pub port_access_points: usize,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExactCandidateProvenance {
+    pub search_box: [usize; 3],
+    pub core_bbox: [usize; 3],
+    /// Physical occupied blocks, including local input switches.
+    pub core_blocks: usize,
+    /// SAT objective count, excluding local input switches.
+    #[serde(default)]
+    pub core_logic_blocks: usize,
+    pub elapsed_ms: u64,
+    pub optimal: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct LayoutCandidate {
+    pub exact_core: Option<ExactCandidateProvenance>,
     pub module_name: String,
     pub world: World3D,
     pub bbox: BoundingBox,
@@ -77,6 +93,21 @@ pub struct LayoutCandidate {
 }
 
 impl LayoutCandidate {
+    /// Air reservations are part of the placed package, not physical blocks.
+    pub(crate) fn include_reserved_cells_in_bounds(&mut self) {
+        for position in &self.blocked_cells {
+            self.bbox.min.0 = self.bbox.min.0.min(position.0);
+            self.bbox.min.1 = self.bbox.min.1.min(position.1);
+            self.bbox.min.2 = self.bbox.min.2.min(position.2);
+            self.bbox.max.0 = self.bbox.max.0.max(position.0);
+            self.bbox.max.1 = self.bbox.max.1.max(position.1);
+            self.bbox.max.2 = self.bbox.max.2.max(position.2);
+        }
+        self.cost.bbox_volume = self.bbox.volume();
+        self.cost.bbox_footprint = self.bbox.width() * self.bbox.depth();
+        self.cost.bbox_height = self.bbox.height();
+    }
+
     pub fn from_world(
         module_name: String,
         world: World3D,
@@ -100,6 +131,7 @@ impl LayoutCandidate {
         };
 
         Ok(Self {
+            exact_core: None,
             module_name,
             world,
             bbox,

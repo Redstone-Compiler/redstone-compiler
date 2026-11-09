@@ -25,6 +25,7 @@ mod encode;
 mod frat;
 mod layout;
 mod netlist;
+mod nor_scaffold;
 mod progress;
 #[cfg(test)]
 mod search_benchmark;
@@ -89,6 +90,13 @@ pub struct ExactPlacerConfig {
     /// justification (rank, stage, contributing source) in this solve; the
     /// simulator still checks the whole layout (rsdsl model only).
     pub given_signals: BTreeMap<Position, u64>,
+    /// Optional restricted signal vocabulary. Zero and primary input classes
+    /// remain available. This is a synthesis restriction, not a complete
+    /// pruning rule; UNSAT is relative to these functions when supplied.
+    pub signal_functions: Option<std::collections::BTreeSet<u64>>,
+    /// Additional Boolean functions allowed on physical wires/supports.
+    /// They enlarge the synthesis vocabulary; all simulator checks remain.
+    pub extra_signal_functions: std::collections::BTreeSet<u64>,
     /// Partial layouts to exclude: at least one listed cell must differ.
     pub blocked: Vec<Vec<(Position, CellKind)>>,
     /// Upper bound on a power chain between two torch stages (local rank).
@@ -240,6 +248,8 @@ impl ExactPlacerConfig {
             fixed_cells: BTreeMap::new(),
             removable_cells: BTreeMap::new(),
             given_signals: BTreeMap::new(),
+            signal_functions: None,
+            extra_signal_functions: Default::default(),
             blocked: Vec::new(),
             rank_levels: 24,
             stage_levels: 24,

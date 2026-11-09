@@ -33,6 +33,54 @@
   },
   {
     "kind": "nbt",
+    "name": "alu-display-adder2-verified-73x10x9.nbt",
+    "file": "alu-display-adder2-verified-73x10x9.nbt",
+    "path": "examples/alu-display-adder2-verified-73x10x9.nbt",
+    "size": 2601,
+    "outputsPath": "examples/alu-display-adder2-verified-73x10x9.outputs.json"
+  },
+  {
+    "kind": "nbt",
+    "name": "alu-display-adder8-verified.nbt",
+    "file": "alu-display-adder8-verified.nbt",
+    "path": "examples/alu-display-adder8-verified.nbt",
+    "size": 11857,
+    "outputsPath": "examples/alu-display-adder8-verified.outputs.json"
+  },
+  {
+    "kind": "nbt",
+    "name": "alu-display-decoder-digit-verified.nbt",
+    "file": "alu-display-decoder-digit-verified.nbt",
+    "path": "examples/alu-display-decoder-digit-verified.nbt",
+    "size": 17926,
+    "outputsPath": "examples/alu-display-decoder-digit-verified.outputs.json"
+  },
+  {
+    "kind": "nbt",
+    "name": "alu-display-decoder-exact-verified.nbt",
+    "file": "alu-display-decoder-exact-verified.nbt",
+    "path": "examples/alu-display-decoder-exact-verified.nbt",
+    "size": 15031,
+    "outputsPath": "examples/alu-display-decoder-exact-verified.outputs.json"
+  },
+  {
+    "kind": "nbt",
+    "name": "alu-display-decoder-layered-verified.nbt",
+    "file": "alu-display-decoder-layered-verified.nbt",
+    "path": "examples/alu-display-decoder-layered-verified.nbt",
+    "size": 17673,
+    "outputsPath": "examples/alu-display-decoder-layered-verified.outputs.json"
+  },
+  {
+    "kind": "nbt",
+    "name": "alu-display-decoder-whole-exact.nbt",
+    "file": "alu-display-decoder-whole-exact.nbt",
+    "path": "examples/alu-display-decoder-whole-exact.nbt",
+    "size": 13303,
+    "outputsPath": "examples/alu-display-decoder-whole-exact.outputs.json"
+  },
+  {
+    "kind": "nbt",
     "name": "alu-export.nbt",
     "file": "alu-export.nbt",
     "path": "examples/alu-export.nbt",
@@ -158,6 +206,38 @@
     "path": "examples/dff-exact-2x6x4.nbt",
     "size": 445,
     "outputsPath": "examples/dff-exact-2x6x4.outputs.json"
+  },
+  {
+    "kind": "nbt",
+    "name": "dff-global-2x7x4.nbt",
+    "file": "dff-global-2x7x4.nbt",
+    "path": "examples/dff-global-2x7x4.nbt",
+    "size": 536,
+    "outputsPath": "examples/dff-global-2x7x4.outputs.json"
+  },
+  {
+    "kind": "nbt",
+    "name": "dff-global-43blocks.nbt",
+    "file": "dff-global-43blocks.nbt",
+    "path": "examples/dff-global-43blocks.nbt",
+    "size": 507,
+    "outputsPath": "examples/dff-global-43blocks.outputs.json"
+  },
+  {
+    "kind": "nbt",
+    "name": "dff-global-44blocks.nbt",
+    "file": "dff-global-44blocks.nbt",
+    "path": "examples/dff-global-44blocks.nbt",
+    "size": 510,
+    "outputsPath": "examples/dff-global-44blocks.outputs.json"
+  },
+  {
+    "kind": "nbt",
+    "name": "dff-global-optimized.nbt",
+    "file": "dff-global-optimized.nbt",
+    "path": "examples/dff-global-optimized.nbt",
+    "size": 500,
+    "outputsPath": "examples/dff-global-optimized.outputs.json"
   },
   {
     "kind": "nbt",
@@ -405,37 +485,5 @@
     "file": "xor.nbt",
     "path": "examples/xor.nbt",
     "size": 581
-  },
-  {
-    "kind": "nbt",
-    "name": "dff-global-2x7x4.nbt",
-    "file": "dff-global-2x7x4.nbt",
-    "path": "examples/dff-global-2x7x4.nbt",
-    "size": 536,
-    "outputsPath": "examples/dff-global-2x7x4.outputs.json"
-  },
-  {
-    "kind": "nbt",
-    "name": "dff-global-44blocks.nbt",
-    "file": "dff-global-44blocks.nbt",
-    "path": "examples/dff-global-44blocks.nbt",
-    "size": 510,
-    "outputsPath": "examples/dff-global-44blocks.outputs.json"
-  },
-  {
-    "kind": "nbt",
-    "name": "dff-global-43blocks.nbt",
-    "file": "dff-global-43blocks.nbt",
-    "path": "examples/dff-global-43blocks.nbt",
-    "size": 507,
-    "outputsPath": "examples/dff-global-43blocks.outputs.json"
-  },
-  {
-    "kind": "nbt",
-    "name": "dff-global-optimized.nbt",
-    "file": "dff-global-optimized.nbt",
-    "path": "examples/dff-global-optimized.nbt",
-    "size": 500,
-    "outputsPath": "examples/dff-global-optimized.outputs.json"
   }
 ]
