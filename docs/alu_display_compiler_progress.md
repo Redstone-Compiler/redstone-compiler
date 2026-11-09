@@ -79,3 +79,9 @@ Exact 물리 후보의 내부 Cobble/dust 전력 count는 NBT에 저장되지 �
 Verilog를20개 셀로 나누지 않는 `lower_flat_logic_graph()`와 `whole_decoder_exact` 실험을 추가했다. 입력4개·출력7개·NOR28개를 하나의 SAT 모델로 넣고 독립 mask16개를 먼저 확인한다. 자유핀3개 박스/단일worker30초,5×10×5/4worker60초,입력면고정·출력면제한/4worker60초까지 다섯 시도는 모두 UNKNOWN이었다. encoding은0.2~0.5초였고 simulator refinement는0회여서 최초 SAT witness 탐색이 병목이었다. 성공 NBT가 없으며, 불가능 증명으로 해석하지 않는다. [조건·측정·재현 명령](whole_decoder_exact.md)에 별도로 기록했다.
 
 이후8×12×6/4worker/120초 확대 실험도 UNKNOWN이었다(encoding1.279초, solve120.621초,390,656변수/2,925,936절). 박스 확대만으로 최초 해를 얻지는 못했으며 성공 NBT는 여전히 없다.
+
+## 전체 decoder 구성 후 압축 경로
+
+기존 Exact `construct → compact`를 호출하는 별도 runner를 추가했다. 정형 셀/Global PnR 없이 같은 전체 논리를 사용하며, 초기 회로를 NBT 전이 검증한 다음 압축하도록 했다.4×높이6은2/28단계, 기본형2×높이10+단계별최소화는6/28단계,2입력OR체인+2×높이24는1/45단계에서 창별 탐색 시간 초과로 중단됐다. 완성 초기 NBT가 없어 compact는 실행하지 않았다. [실험 기록](whole_decoder_construct.md)에 prefix 크기와 완성 회로를 구분했다.
+
+추가 내장 재시작1회 시험은 총232.462초였다. 첫 시도6단계 뒤 막혔던 g103을 두 번째 시도에서 넘어7/28단계까지 진행했지만, seg_4에서 시도별120초 예산이 끝났다. 두 번째 시도의 창6은 실행하지 않았으며 완성 NBT/compact 결과는 여전히 없다. 바깥은 이전 배치를 대부분 고정하는 휴리스틱 순차 구성이고 각 창은 SAT이므로, 재시작에 의한 국소 선택 복구와 전체 최적성은 구분한다.

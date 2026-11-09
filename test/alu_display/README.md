@@ -27,6 +27,8 @@ PNR_ASTAR_EXPANSIONS=20000 PNR_MAX_STEPS=256 \
 
 ## Unsigned 가산기 물리 실험
 
+기존 Exact의 단계별 `construct → compact`를 같은 전체 논리에 적용하는 예제는 `whole_decoder_construct`다. 초기 세 실험과 내장 재시작 시험은 구성 단계에서 중단돼 완성 NBT/압축 결과가 없다. 재시작 후 최대7/28단계까지 진행했다. [설정과 실패 단계](../../docs/whole_decoder_construct.md)를 확인한다.
+
 20개 물리 셀로 나누지 않고 decoder 전체를 하나의 SAT 모델에 넣는 실험은 `whole_decoder_exact` 예제와 [전체 Exact 실험 기록](../../docs/whole_decoder_exact.md)을 참고한다. 기존4,187블록 fixture와 다른 경로이며, 초기 자유 배치 실험은 모두 시간 제한 내 UNKNOWN이었다.
 
 Exact SAT 셀 후보와 자유3D를 함께 사용하는 decoder는4,187블록,36×64×56이며 모든256개 전이를 통과했다. 같은 자유3D에서 recipe만 쓰는 대조군은4,312블록이다. 재현 명령, cold 시간과 메모리 상태를 정규화하는 cache 계약은 [Exact 전역 후보 실험](../../docs/exact_global_candidates.md)에 있다.
