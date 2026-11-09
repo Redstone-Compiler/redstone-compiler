@@ -3259,7 +3259,7 @@ window.addEventListener('keydown', event => {
 
 async function exampleList(): Promise<ExampleFile[]> {
   if (!exampleCache) {
-    const response = await fetch(resolveAssetPath('examples/manifest.json'));
+    const response = await fetch(resolveAssetPath('examples/manifest.json'), { cache: 'no-store' });
     if (!response.ok) throw new Error(`Failed to load examples: ${response.status}`);
     exampleCache = (await response.json()) as ExampleFile[];
   }
