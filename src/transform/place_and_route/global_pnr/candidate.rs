@@ -1828,4 +1828,44 @@ mod tests {
         assert!(world[Position(0, 8, 3)].kind.is_redstone());
         assert!(!matches);
     }
+
+    /// The 2-bit counter's next-state cell for bit 1. Its input switches face
+    /// blocks that carry NOT gates, so its ports are those blocks. The check
+    /// after the switch rewrite drives them as external terminals; when the
+    /// simulator dropped that drive on settling, it rejected every candidate
+    /// of this cell (32 of 32).
+    #[test]
+    fn counter_next_state_cell_keeps_candidates_after_its_switches_become_ports() {
+        let source = "module counter(clk, q); input clk; output reg [1:0] q; always @(posedge clk) begin q <= q + 1; end endmodule";
+        let design = crate::ir::LogicalDesign::from_verilog_source(source)
+            .and_then(|design| design.lower_to_routable())
+            .expect("counter");
+        let module = design.module("q_1_next").expect("q_1_next");
+        let local_config = LocalPlacerConfig {
+            random_seed: 6,
+            greedy_input_generation: true,
+            step_sampling_policy: SamplingPolicy::Random(32),
+            placement_sampling_policy:
+                crate::transform::place_and_route::local_placer::PlacementSamplingPolicy::StepPolicy,
+            not_route_strategy:
+                crate::transform::place_and_route::local_placer::NotRouteStrategy::DirectAndRedstone,
+            max_not_route_step: 4,
+            not_route_step_sampling_policy: SamplingPolicy::Random(32),
+            max_route_step: 4,
+            route_step_sampling_policy: SamplingPolicy::Random(32),
+            ..Default::default()
+        };
+        let config = UnitCandidateConfig {
+            max_candidates: 2,
+            clustering: ClusteringSpec {
+                enabled: false,
+                ..Default::default()
+            },
+            ..d_latch_child_candidate_config(local_config)
+        };
+        let candidates =
+            generate_routable_module_candidates_with_progress_label(module, &config, None)
+                .expect("candidates");
+        assert!(!candidates.is_empty());
+    }
 }
