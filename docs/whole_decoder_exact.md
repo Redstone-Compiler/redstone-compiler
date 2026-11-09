@@ -44,4 +44,8 @@ WHOLE_WORKERS=4 WHOLE_PIN_CONTRACT=faces \
 
 최종 `5×10×5`/4-worker/60초 `faces` 실험도 UNKNOWN이었다. 변수122,273개·절894,912개, encoding425ms·solve60.028초·wall60.457초, refinement0회/last rejection 없음이다. 자유 핀보다 변수·절은 줄었지만 최초 witness를 얻지는 못했다. 다섯 실험 모두 성공 NBT가 없다.
 
+## 더 큰 박스
+
+추가 요청으로 자유 핀 박스를 `8×12×6`(576칸)으로 확대하고4-worker/SAT120초/외부wall180초로 한 번 더 실행했다. seed·논리·출력 구동·rank/stage 조건은 유지했다. 결과는 변수390,656개·절2,925,936개, encoding1.279초·solve120.621초·wall121.918초의 UNKNOWN이었다. refinement0회/last rejection 없음이며 새 NBT는 없다. 공간이 부족하다는 증명도, 더 큰 박스에 해가 없다는 증명도 아니다. 현재까지 총6회 모두 최초 SAT witness를 얻지 못했다.
+
 기존4,187블록 결과는 개별 Exact 후보와 Global PnR로 만든 별도 체크포인트이며, 이 전체 모델에서 찾은 결과가 아니다.

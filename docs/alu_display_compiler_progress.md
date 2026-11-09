@@ -77,3 +77,5 @@ Exact 물리 후보의 내부 Cobble/dust 전력 count는 NBT에 저장되지 �
 ## 디코더 전체 monolithic Exact
 
 Verilog를20개 셀로 나누지 않는 `lower_flat_logic_graph()`와 `whole_decoder_exact` 실험을 추가했다. 입력4개·출력7개·NOR28개를 하나의 SAT 모델로 넣고 독립 mask16개를 먼저 확인한다. 자유핀3개 박스/단일worker30초,5×10×5/4worker60초,입력면고정·출력면제한/4worker60초까지 다섯 시도는 모두 UNKNOWN이었다. encoding은0.2~0.5초였고 simulator refinement는0회여서 최초 SAT witness 탐색이 병목이었다. 성공 NBT가 없으며, 불가능 증명으로 해석하지 않는다. [조건·측정·재현 명령](whole_decoder_exact.md)에 별도로 기록했다.
+
+이후8×12×6/4worker/120초 확대 실험도 UNKNOWN이었다(encoding1.279초, solve120.621초,390,656변수/2,925,936절). 박스 확대만으로 최초 해를 얻지는 못했으며 성공 NBT는 여전히 없다.
